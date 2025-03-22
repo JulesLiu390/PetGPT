@@ -26,8 +26,7 @@ This project includes a Docker Compose setup for easy development and deployment
    ```
 
 2. Access the application:
-   - Frontend: http://localhost:3000
-   - Backend: http://localhost:5000
+   - Backend: http://localhost:3001
 
 3. To stop the containers:
    ```bash

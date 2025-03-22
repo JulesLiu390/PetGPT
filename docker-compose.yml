@@ -1,15 +1,23 @@
 version: '3.8'
 
 services:
-  mongodb:
+  mongo:
     image: mongo:8
-    container_name: petgpt-mongo
-    restart: unless-stopped
+    container_name: petgpt_mongo
     ports:
-      - "27016:27016"
-    networks:
-      - petgpt-network
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
 
-networks:
-  petgpt-network:
-    driver: bridge
+  backend:
+    build: ./backend
+    container_name: petgpt_backend
+    ports:
+      - "3001:3001"
+    environment:
+      - MONGO_URI=mongodb://mongo:27017/petgpt
+    depends_on:
+      - mongo
+
+volumes:
+  mongo_data:
