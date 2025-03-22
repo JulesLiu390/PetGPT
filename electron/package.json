@@ -4,10 +4,13 @@
   "version": "0.0.0",
   "main": "main.js",
   "scripts": {
-    "dev": "cross-env NODE_ENV=development concurrently \"yarn start:electron\" \"yarn start:react\"",
+    "dev": "cross-env NODE_ENV=development concurrently \"yarn start:electron\" \"yarn start:containers\"",
     "start:react": "yarn --cwd ../frontend dev",
     "start:electron": "wait-on http://localhost:5173 && electron .",
-    "build": "yarn --cwd ../frontend build && electron-builder"
+    "start:containers": "cd .. && docker-compose up -d",
+    "stop:containers": "cd .. && docker-compose down",
+    "build": "yarn --cwd ../frontend build && electron-builder",
+    "dev:native": "cross-env NODE_ENV=development concurrently \"yarn start:electron\" \"yarn start:react\""
   },
   "dependencies": {
     "react": "^19.0.0",
@@ -18,11 +21,16 @@
     "@types/react": "^19.0.10",
     "@types/react-dom": "^19.0.4",
     "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^8.2.2",
+    "cross-env": "^7.0.3",
+    "electron": "^29.1.0",
+    "electron-builder": "^24.13.3",
     "eslint": "^9.21.0",
     "eslint-plugin-react-hooks": "^5.1.0",
     "eslint-plugin-react-refresh": "^0.4.19",
     "globals": "^15.15.0",
-    "vite": "^6.2.0"
+    "vite": "^6.2.0",
+    "wait-on": "^7.2.0"
   },
   "build": {
     "appId": "com.yourapp.desktop",

@@ -22,6 +22,11 @@ mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('Connected to MongoDB'))
   .catch(err => console.error('MongoDB connection error:', err));
 
+// Health check endpoint for container/electron integration
+app.get('/api/healthcheck', (req, res) => {
+  res.status(200).json({ status: 'ok', message: 'Backend service is running' });
+});
+
 // Routes
 app.use('/api/pets', petRoutes);
 app.use('/api/conversations', conversationRoutes);

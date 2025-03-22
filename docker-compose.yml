@@ -8,6 +8,8 @@ services:
       - "27017:27017"
     volumes:
       - mongo_data:/data/db
+    networks:
+      - petgpt_network
 
   backend:
     build: ./backend
@@ -18,6 +20,26 @@ services:
       - MONGO_URI=mongodb://mongo:27017/petgpt
     depends_on:
       - mongo
+    networks:
+      - petgpt_network
+    labels:
+      - "app.petgpt.service=backend"
+
+  frontend:
+    build: ./frontend
+    container_name: petgpt_frontend
+    ports:
+      - "5173:80" # Changed to 5173 for Electron to connect in development
+    depends_on:
+      - backend
+    networks:
+      - petgpt_network
+    labels:
+      - "app.petgpt.service=frontend"
+
+networks:
+  petgpt_network:
+    driver: bridge
 
 volumes:
   mongo_data:

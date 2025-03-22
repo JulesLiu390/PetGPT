@@ -24,7 +24,8 @@ const createMainWindow = () => {
 
 
   if (process.env.NODE_ENV === "development") {
-    mainWindow.loadURL("http://localhost:5173"); // Vite 默认端口
+    // Connect to the containerized frontend service
+    mainWindow.loadURL("http://localhost:5173"); // Now points to containerized frontend
   } else {
     mainWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
   }
