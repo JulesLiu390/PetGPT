@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:8
+    container_name: petgpt-mongo
+    restart: unless-stopped
+    ports:
+      - "27016:27016"
+    networks:
+      - petgpt-network
+
+networks:
+  petgpt-network:
+    driver: bridge
