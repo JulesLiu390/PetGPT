@@ -1,0 +1,10 @@
+@import "tailwindcss";
+
+/* 添加 Tailwind v4.0 自定义 Utility */
+@utility draggable {
+    -webkit-app-region: drag;
+  }
+  
+@utility no-drag {
+-webkit-app-region: no-drag;
+}
