@@ -1,6 +1,6 @@
 import OpenAI from "openai/index.mjs";
 const openai = new OpenAI({
-  apiKey: 
+  
 });
 
 export const callOpenAI = async (messages) => {
