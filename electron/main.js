@@ -155,10 +155,5 @@ app.on("window-all-closed", () => {
 
 // macOS 点击 Dock 图标时重新打开
 app.on("activate", () => {
-<<<<<<< HEAD
-  if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
-});
-=======
   if (BrowserWindow.getAllWindows().length === 0) createChatWindow();
 });
->>>>>>> 029c6cb2a513ae23587f2aace2ce5bbd92b38de2
