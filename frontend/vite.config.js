@@ -9,4 +9,9 @@ export default defineConfig({
   css: {
     postcss: {},
   },
+  server: {
+    hmr: {
+      overlay: true, // ✅ 确保红色报错提示会出现
+    },
+  },
 })

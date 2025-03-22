@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import Chatbox from './ChatboxMain'
+import ChatboxBody from './ChatboxBody'
 
 function App() {
   return (
     <div className='h-screen rounded-3xl bg-[rgba(245,245,255,0.99)]'>
-      <Chatbox className='z-10'></Chatbox>
+      <ChatboxBody className='z-10'></ChatboxBody>
     </div>
   )
 }
