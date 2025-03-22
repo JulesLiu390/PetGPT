@@ -2,6 +2,7 @@ const { app, BrowserWindow, globalShortcut } = require("electron");
 const { screen } = require('electron');
 const path = require("path");
 const { ipcMain } = require("electron");
+const isDev = !app.isPackaged;
 
 let sharedState = {
   characterMood: 'normal'
@@ -14,12 +15,6 @@ ipcMain.on('drag-window', (event, { deltaX, deltaY, mood }) => {
     win.setPosition(x + deltaX, y + deltaY);
   }
 
-  // sharedState.characterMood = mood;
-  // console.log('主进程更新 characterMood:', mood);
-  // 向所有窗口广播最新状态
-  // BrowserWindow.getAllWindows().forEach(win => {
-  //   win.webContents.send('character-mood-updated', mood);
-  // });
 });
 
 
@@ -35,6 +30,14 @@ ipcMain.on("show-chat-window", () => {
   }
 });
 
+ipcMain.on("change-chat-window", () => {
+  if (chatWindow.isVisible()) {
+    chatWindow.hide();
+  } else {
+    chatWindow.show();
+  }
+});
+
 let chatWindow;
 let secondWindow;
 
@@ -45,8 +48,8 @@ const createChatWindow = () => {
   chatWindow = new BrowserWindow({
     width: 400,
     height: 350,
-    x: secondWindow.getBounds().x - 420,
-    y: secondWindow.getBounds().y - 350 + secondWindow.getBounds().height,
+    x: secondWindow.getBounds().x - 520,
+    y: secondWindow.getBounds().y - 550 + secondWindow.getBounds().height,
     frame: false,
     transparent: true,
     roundedCorners: true,
@@ -56,17 +59,18 @@ const createChatWindow = () => {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "Preload.js"),
     },
   });
 
   chatWindow.setAlwaysOnTop(true, "screen-saver");
 
-  if (process.env.NODE_ENV === "development") {
-    chatWindow.loadURL("http://localhost:5173");
-  } else {
+  // if (isDev) {
+  //   chatWindow.loadURL("http://localhost:5173");
+  // } else {
+    // win.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
     chatWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
-  }
+  // }
 
   chatWindow.on("closed", () => {
     chatWindow = null;
@@ -74,14 +78,20 @@ const createChatWindow = () => {
 
   // ✅ 主窗口移动时更新第二窗口位置
 
+// chatWindow.webContents.openDevTools(); // 加这一句看看报什么错
+
+// chatWindow.webContents.on("did-fail-load", (e, errorCode, errorDesc, validatedURL) => {
+//   console.error('💥 页面加载失败:', errorCode, errorDesc, validatedURL);
+// });
+
 };
 
 const createSecondWindow = () => {
   secondWindow = new BrowserWindow({
     width: 200,
-    height: 200,
+    height: 300,
     x: 800,
-    y: screenHeight - 150,
+    y: screenHeight - 350,
     frame: false,
     transparent: true,
     resizable: false,
@@ -90,17 +100,21 @@ const createSecondWindow = () => {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      preload: path.join(__dirname, "preload.js"),
+      preload: path.join(__dirname, "Preload.js"),
     },
   });
 
-  if (process.env.NODE_ENV === "development") {
-    secondWindow.loadURL("http://localhost:5173/character");
-    // chatWindow.loadURL("http://localhost:5173/");
-  } else {
-    secondWindow.loadFile(path.join(__dirname, "../frontend/dist/second.html"));
-    // chatWindow.loadFile(path.join(__dirname, "../frontend/dist/chat.html"));
-  }
+  // if (isDev) {
+  //   secondWindow.loadURL("http://localhost:5173/character");
+  //   // chatWindow.loadURL("http://localhost:5173/");
+  // } else {
+    // secondWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
+    secondWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), {
+      hash: '#/character'
+    });
+  //   console.log('!!')
+  //   // chatWindow.loadFile(path.join(__dirname, "../frontend/dist/chat.html"));
+  // }
 
   
 
@@ -134,6 +148,8 @@ secondWindow.on('move', () => {
   chatWindow.setBounds({
     x: secondBounds.x - offsetX,
     y: secondBounds.y - chatBounds.height  + secondBounds.height,
+    width: 400,
+    height: 350,
   });
 });
 

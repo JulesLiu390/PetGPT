@@ -1,0 +1,39 @@
+{
+  "name": "jules-character",
+  "version": "1.0.0",
+  "main": "electron/main.js",
+  "scripts": {
+    "unpacked": "yarn build && electron-builder --win --x64 --dir",
+    "dev": "concurrently \"yarn frontend:dev\" \"yarn electron:dev\"",
+    "frontend:dev": "cd frontend && yarn dev",
+    "electron:dev": "wait-on http://localhost:5173 && electron .",
+    "build": "cd frontend && yarn build",
+    "dist": "yarn build && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "concurrently": "^8.2.0",
+    "wait-on": "^7.0.1"
+  },
+"build": {
+  "appId": "com.julesliu.chat",
+  "files": [
+    "electron/**/*",
+    "frontend/dist/**/*"
+  ],
+  "directories": {
+    "output": "release"
+  },
+  "extraMetadata": {
+    "main": "electron/main.js"
+  },
+  "mac": {
+    "target": "dmg"
+  },
+  "win": {
+    "target": "nsis"
+  }
+
+  }
+}

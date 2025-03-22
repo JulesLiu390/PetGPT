@@ -14,4 +14,5 @@ export default defineConfig({
       overlay: true, // ✅ 确保红色报错提示会出现
     },
   },
+  base: './', // ✅ 这个必须加！否则加载不到 js/css
 })
