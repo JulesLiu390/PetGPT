@@ -1,0 +1,1 @@
+export { default as CharacterImage } from './sample character.png';

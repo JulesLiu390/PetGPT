@@ -7,7 +7,7 @@ import { callOpenAI } from '../utlis/openai';
 
 export const ChatboxInputBox = () => {
     const inputRef = useRef(null);
-    const [{ userText, userMessages }, dispatch] = useStateValue();
+    const [{ userText, userMessages, characterMood }, dispatch] = useStateValue();
 
 
     const handleChange = (e) => {
@@ -29,9 +29,13 @@ export const ChatboxInputBox = () => {
       };
 
     const handleSend = async () => {
-        if(inputRef.current) {
+      window.electron?.sendMoodUpdate('thinking');
+
+      if(inputRef.current) {
             inputRef.current.value = "";
           }
+
+
 
         const userMessage = {
             role: "user",
@@ -58,7 +62,7 @@ export const ChatboxInputBox = () => {
         <textarea
             ref={inputRef}
             onKeyDown={handleKeyDown}
-          placeholder="Message FakeGPT"
+          placeholder="Message PetGPT"
           className="w-full bg-[rgba(220,220,230,0.9)] border-gray-300 h-24 rounded-3xl border-2 p-3 text-gray-800"
           onChange={handleChange}
         />
@@ -67,7 +71,11 @@ export const ChatboxInputBox = () => {
             disabled={!String(userText).trim()}
             className="absolute bottom-4 right-4 rounded-full"
         >
-            <FaCircleArrowUp className="w-9 h-9 text-gray-300" />
+            <FaCircleArrowUp className="w-9 h-9" 
+            style={{
+                color: !String(userText).trim() ? "#c1c1c1" : "#000000",
+            }}
+            />
         </button>
       </div>
     )

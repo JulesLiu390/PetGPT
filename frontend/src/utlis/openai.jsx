@@ -1,6 +1,7 @@
 import OpenAI from "openai/index.mjs";
 const openai = new OpenAI({
-
+  apiKey: import.meta.env.VITE_OPENAI_API,
+  dangerouslyAllowBrowser: true, 
 });
 
 export const callOpenAI = async (messages) => {
