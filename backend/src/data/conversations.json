@@ -8,5 +8,15 @@
     "_id": "1147bf6b-0fb6-4fc2-991f-6a2e426c94d3",
     "petId": "67de5579196f06c524cc4asadadf02",
     "history": []
+  },
+  {
+    "_id": "871b3510-5dc4-4e75-bde6-0232fae2e8dd",
+    "petId": "798a9640-1502-4f45-beb7-38de4ae5f420",
+    "history": [
+      "hello",
+      "Hello! How are you today?",
+      "hello",
+      "Hello! How can I assist you today?"
+    ]
   }
 ]

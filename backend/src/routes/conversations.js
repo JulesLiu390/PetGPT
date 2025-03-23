@@ -91,7 +91,7 @@ router.post('/:_id/messages', async (req, res) => {
     }
     
     const message = {
-      message: req.body.message
+      history: req.body.history
     };
     
     conversations[conversationIndex].history.push(message);
