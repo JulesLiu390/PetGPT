@@ -9,6 +9,15 @@ contextBridge.exposeInMainWorld('electron', {
 
   changeAddCharacterWindow: () => ipcRenderer.send("change-addCharacter-window"),
 
+  changeSelectCharacterWindow: () => ipcRenderer.send("change-selectCharacter-window"),
+
+
   sendMoodUpdate: (mood) => ipcRenderer.send('update-character-mood', mood),
   onMoodUpdated: (callback) => ipcRenderer.on('character-mood-updated', callback),
+
+  sendPetsUpdate: (mood) => ipcRenderer.send('update-pets', mood),
+  onPetsUpdated: (callback) => ipcRenderer.on('pets-updated', callback),
+
+
+  maxmizeChatWindow: () => ipcRenderer.send("maximize-chat-window"),
 });

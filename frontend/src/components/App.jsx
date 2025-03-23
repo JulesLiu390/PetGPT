@@ -3,6 +3,7 @@ import ChatboxBody from './ChatboxBody'
 import { HashRouter, Routes, Route } from "react-router-dom";
 import Character from './Character';
 import AddCharacterPage from './AddCharacterPage';
+import SelectCharacterPage from './SelectCharacterPage';
 
 
 
@@ -19,6 +20,7 @@ function App() {
           } />
           <Route path="/character" element={<Character />} />
           <Route path="/addCharacter" element={<AddCharacterPage />} />
+          <Route path="/selectCharacter" element={<SelectCharacterPage />} />
         </Routes>
   )
 }
