@@ -1,5 +1,6 @@
 import express from 'express';
 import GeminiService from '../LLMs/GeminiService.js';
+import ChatGPTService from '../LLMs/ChatGPTService.js';
 import DalleService from '../LLMs/ImageGenerators/DalleService.js';
 import StableDiffusionService from '../LLMs/ImageGenerators/StableDiffusionService.js';
 import { readData, writeData } from '../utils/jsonStorage.js';
@@ -13,6 +14,7 @@ const CONVERSATIONS_FILE = 'conversations.json';
 
 // Initialize services with environment variables
 const geminiService = new GeminiService();
+const chatGPTService = new ChatGPTService();
 const dalleService = new DalleService();
 const stableDiffusionService = new StableDiffusionService();
 
@@ -21,7 +23,8 @@ let servicesInitialized = false;
 const initializeServices = async () => {
   if (!servicesInitialized) {
     try {
-      await geminiService.initialize();
+    await geminiService.initialize();
+    await chatGPTService.initialize();
       await dalleService.initialize();
       await stableDiffusionService.initialize();
       servicesInitialized = true;
@@ -48,7 +51,14 @@ router.post('/text', async (req, res) => {
       return res.status(400).json({ message: 'Prompt is required' });
     }
     
-    const response = await geminiService.generateText(prompt, options);
+    // Use ChatGPT by default, fallback to Gemini if OpenAI key not set
+    let response;
+    try {
+      response = await chatGPTService.generateText(prompt, options);
+    } catch (error) {
+      console.log('Falling back to Gemini:', error.message);
+      response = await geminiService.generateText(prompt, options);
+    }
     
     res.json({
       text: response,
@@ -75,7 +85,14 @@ router.post('/chat', async (req, res) => {
       return res.status(400).json({ message: 'Valid conversation history is required' });
     }
     
-    const response = await geminiService.generateChatResponse(history, options);
+    // Use ChatGPT by default, fallback to Gemini if OpenAI key not set
+    let response;
+    try {
+      response = await chatGPTService.generateChatResponse(history, options);
+    } catch (error) {
+      console.log('Falling back to Gemini:', error.message);
+      response = await geminiService.generateChatResponse(history, options);
+    }
     
     res.json({
       text: response,
@@ -228,7 +245,14 @@ router.post('/pet/:id/chat', async (req, res) => {
     }
     
     // Generate response
-    const response = await geminiService.generateChatResponse(formattedHistory, options);
+    // Use ChatGPT by default, fallback to Gemini if OpenAI key not set
+    let response;
+    try {
+      response = await chatGPTService.generateChatResponse(formattedHistory, options);
+    } catch (error) {
+      console.log('Falling back to Gemini:', error.message);
+      response = await geminiService.generateChatResponse(formattedHistory, options);
+    }
     
     // Add AI response to conversation
     conversation.history.push({

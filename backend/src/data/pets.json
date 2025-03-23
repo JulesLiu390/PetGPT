@@ -7,5 +7,23 @@
       "description": "Friendly and playful golden retriever",
       "mood": "Happy"
     }
+  },
+  {
+    "_id": "a9317432-963c-4425-b4e8-3b008e1c315b",
+    "img_LLM": "https://oaidalleapiprodscus.blob.core.windows.net/private/org-1JRIA9PI3UX1isZOWcjXe0VB/user-FglbRCUjbOuADHDexu1654Dv/img-JtnCP7OI5C2C4G9L7PZ0HdXD.png?st=2025-03-23T04%3A27%3A28Z&se=2025-03-23T06%3A27%3A28Z&sp=r&sv=2024-08-04&sr=b&rscd=inline&rsct=image/png&skoid=d505667d-d6c1-4a0a-bac7-5c84a87759f8&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2025-03-22T21%3A01%3A38Z&ske=2025-03-23T21%3A01%3A38Z&sks=b&skv=2024-08-04&sig=7/ExYIzl9oRSRE4e8eYCL41OnOub669PyJtB4chshhE%3D",
+    "voice_LLM": "deep_male_voice_v2",
+    "personality": {
+      "description": "Friendly and playful golden retriever",
+      "mood": "Happy"
+    }
+  },
+  {
+    "_id": "53abe8b0-9a83-4bd7-8eb9-637806d90afb",
+    "img_LLM": "dall-e-3",
+    "voice_LLM": "deep_male_voice_v2",
+    "personality": {
+      "description": "Friendly and playful golden retriever",
+      "mood": "Happy"
+    }
   }
 ]
