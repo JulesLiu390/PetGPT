@@ -8,7 +8,7 @@ import { LLMService } from './llm.js';
 export class GeminiService extends LLMService {
   constructor(config = {}) {
     super(config);
-    this.modelName = config.modelName || 'gemini-pro';
+    this.modelName = config.modelName || 'gemini-2.0-flash';
     this.client = null;
     this.model = null;
   }

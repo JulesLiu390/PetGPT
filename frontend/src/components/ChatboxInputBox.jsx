@@ -2,7 +2,7 @@ import React, { useRef } from 'react'
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp } from "react-icons/fa6";
-import { callOpenAI } from '../utlis/openai';
+import { generatePetChatResponse } from '../api/api';
 
 
 export const ChatboxInputBox = () => {
@@ -42,8 +42,9 @@ export const ChatboxInputBox = () => {
             content: userText,
           };
         const newMessages = [...userMessages, userMessage];
-
-        const replyText = await callOpenAI(newMessages);
+        //TODO: 加上pet ID,先搞个临时的
+        const petID = "67df11dc2205c1138ca390b4"
+        const replyText = await generatePetChatResponse(petID, userText);
         const botReply = {
             role: "assistant",
             content: replyText,
