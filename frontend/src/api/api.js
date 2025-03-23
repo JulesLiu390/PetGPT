@@ -61,8 +61,8 @@ export const generateImageVariations = async (imageUrl, model = 'dalle', options
   return response.json();
 };
 
-export const generatePetChatResponse = async (petId, message, options = {}) => {
-  const response = await fetch(`${API_BASE_URL}/ai/pet/${petId}/chat`, {
+export const generatePetChatResponse = async (conversationId, message, options = {}) => {
+  const response = await fetch(`${API_BASE_URL}/ai/conversation/${conversationId}/chat`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
