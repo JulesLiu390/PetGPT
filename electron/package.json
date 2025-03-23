@@ -13,6 +13,7 @@
     "dev:native": "cross-env NODE_ENV=development concurrently \"yarn start:electron\" \"yarn start:react\""
   },
   "dependencies": {
+    "dotenv": "^16.4.7",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
