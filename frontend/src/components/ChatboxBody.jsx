@@ -4,6 +4,7 @@ import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../content/StateProvider';
 import { getRecentConversations, getConversation } from '../utlis/api';
+import { actionType } from '../content/reducer';
 
 export const Chatbox = () => {
   const [{ userMessages }, dispatch] = useStateValue();
@@ -22,25 +23,28 @@ export const Chatbox = () => {
     fetchConversations();
   }, []);
 
-  // 点击会话后自动加载该会话详细消息（history），同时将角色ID传递给 Electron
-  const handleItemClick = async (conv) => {
+  const fetchConversationById = async (conversationId) => {
     try {
-      const conversation = await getConversation(conv._id);
-      console.log("Loaded conversation:", conversation);
-      window.electron?.sendCharacterId(conversation.petId);
-      // 更新全局状态中的消息历史
-      dispatch({
-        type: 'SET_USER_MESSAGES',
-        userMessages: conversation.history || []
-      });
-      // 如果 conversation.petId 存在，则传给 Electron
-      if (conversation.petId) {
-        window.electron?.sendCharacterId(conversation.petId);
-      }
+      return await getConversation(conversationId);
     } catch (error) {
-      console.error("Error loading conversation:", error);
-      alert("Error loading conversation: " + error.message);
+      console.error("Error fetching conversation:", error);
+      throw error;
     }
+  };
+
+  const handleItemClick = async (conv) => {
+    const conversation = await fetchConversationById(conv._id);
+    console.log("Loaded conversation:", conversation);
+    window.electron?.sendCharacterId(conversation.petId);
+    window.electron?.sendConversationId(conv._id);
+    dispatch({
+      type: actionType.SET_MESSAGE,
+      userMessages: conversation.history
+    });
+    // dispatch({
+    //   type: actionType.,
+    //   userMessages: conversation.history
+    // });
   };
 
   return (

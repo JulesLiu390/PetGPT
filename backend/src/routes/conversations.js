@@ -111,4 +111,18 @@ router.delete('/:_id', async (req, res) => {
   }
 });
 
+// Update a conversation
+router.patch('/:_id', async (req, res) => {
+  try {
+    // req.body 中应包含需要更新的字段，比如 petId、title、history
+    const updatedConversation = await Conversation.update(req.params._id, req.body);
+    if (!updatedConversation) {
+      return res.status(404).json({ message: 'Conversation not found' });
+    }
+    res.json(updatedConversation);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 export default router;

@@ -4,6 +4,7 @@ export const actionType = {
 
     SET_USER_TEXT:"SET_USER_TEXT",
     ADD_MESSAGE: "ADD_MESSAGE",         // 添加新消息
+    SET_MESSAGE: "SET_MESSAGE",
     CLEAR_MESSAGES: "CLEAR_MESSAGES",   // 清空消息
     SET_CHARACTER_MOOD: "SET_CHARACTER_MOOD",
 }
@@ -21,6 +22,11 @@ const reducer = (state, action) => {
             return {
                 ...state,
                 userMessages: [...state.userMessages, action.message], // 👈 推入新项
+            };
+        case actionType.SET_MESSAGE:
+            return {
+                ...state,
+                userMessages: action.userMessages,
             };
 
         case actionType.CLEAR_MESSAGES:

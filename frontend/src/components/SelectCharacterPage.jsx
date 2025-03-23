@@ -42,14 +42,15 @@ const SelectCharacterPage = () => {
   // 选择按钮点击事件，alert 显示所有信息
   const handleSelect = (pet) => {
     window.electron?.sendCharacterId(pet._id);
-    alert(
-      `Selected pet: ${pet.name}\n` +
-      `Personality: ${pet.personality}\n` +
-      `Appearance: ${pet.appearance || 'N/A'}\n` +
-      `Model Name: ${pet.modelName || 'N/A'}\n` +
-      `Model Type: ${pet.modelType || 'N/A'}\n` +
-      `Model Provider: ${pet.modelProvider || 'N/A'}`
-    );
+    alert("Sucsess!")
+    // alert(
+    //   `Selected pet: ${pet.name}\n` +
+    //   `Personality: ${pet.personality}\n` +
+    //   `Appearance: ${pet.appearance || 'N/A'}\n` +
+    //   `Model Name: ${pet.modelName || 'N/A'}\n` +
+    //   `Model Type: ${pet.modelType || 'N/A'}\n` +
+    //   `Model Provider: ${pet.modelProvider || 'N/A'}`
+    // );
   };
 
   return (

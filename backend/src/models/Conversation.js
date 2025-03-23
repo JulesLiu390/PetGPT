@@ -41,23 +41,35 @@ class Conversation {
   }
 
   static async update(_id, updatedConversationData) {
+    // 读取现有的所有会话数据
     let conversations = await readData(filename);
+  
+    // 查找目标会话的索引位置
     const convIndex = conversations.findIndex(conv => conv._id === _id);
-    if (convIndex !== -1) {
-      // 如果 updatedConversationData.history 存在且是数组，就更新，否则保持原有
-      const updatedHistory = Array.isArray(updatedConversationData.history)
-        ? updatedConversationData.history
-        : conversations[convIndex].history;
-
-      conversations[convIndex] = {
-        ...conversations[convIndex],
-        ...updatedConversationData,
-        history: updatedHistory
-      };
-      await writeData(filename, conversations);
-      return conversations[convIndex];
-    }
-    return null;
+    if (convIndex === -1) return null;
+  
+    const existingConversation = conversations[convIndex];
+  
+    // 构建更新后的 history，若传入的是有效数组则使用，否则保留原来的
+    const updatedHistory = Array.isArray(updatedConversationData.history)
+      ? updatedConversationData.history
+      : existingConversation.history;
+  
+    // 合并更新后的数据，保留原有 _id 不变
+    const updatedConversation = new Conversation(
+      existingConversation._id,
+      updatedConversationData.petId || existingConversation.petId,
+      updatedConversationData.title || existingConversation.title,
+      updatedHistory
+    );
+  
+    // 替换原有的会话对象
+    conversations[convIndex] = updatedConversation;
+  
+    // 写入文件
+    await writeData(filename, conversations);
+  
+    return updatedConversation;
   }
 
   static async delete(_id) {

@@ -44,9 +44,21 @@ ipcMain.on('character-id', (event, characterId) => {
   const { BrowserWindow } = require('electron');
   BrowserWindow.getAllWindows().forEach(win => {
     // 如果你不想让发送方再收到，可以加个判断
-    if (win.webContents.id !== event.sender.id) {
+    // if (win.webContents.id !== event.sender.id) {
       win.webContents.send('character-id', characterId);
-    }
+    // }
+  });
+});
+
+ipcMain.on('conversation-id', (event, conversationId) => {
+  console.log("Main received conversation ID:", conversationId);
+  // 广播给所有窗口
+  const { BrowserWindow } = require('electron');
+  BrowserWindow.getAllWindows().forEach(win => {
+    // 如果你不想让发送方再收到，可以加个判断
+    // if (win.webContents.id !== event.sender.id) {
+      win.webContents.send('conversation-id', conversationId);
+    // }
   });
 });
 

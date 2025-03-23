@@ -15,6 +15,7 @@ export const callOpenAI = async (messages, apiKey, model) => {
     return chatCompletion.choices[0].message.content;
   } catch (error) {
     console.error("OpenAI 请求出错：", error);
+    alert(error)
     return "出错啦，请稍后再试～";
   }
 };

@@ -234,3 +234,18 @@ export const deletePet = async (petId) => {
   }
   return response.json();
 };
+
+export const updateConversation = async (conversationId, petId, title, history) => {
+  const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ petId, title, history }),
+  });
+
+  if (!response.ok) {
+    const error = await response.json();
+    throw new Error(error.message || 'Failed to update conversation');
+  }
+
+  return response.json();
+};

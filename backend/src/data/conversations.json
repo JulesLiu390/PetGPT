@@ -1,32 +1,3 @@
 [
-  {
-    "_id": "f3760895-4c3a-4185-8a6e-2710110ce6f8",
-    "petId": "8d7f61b2-048c-41ee-9219-0576920078a6",
-    "title": "hello?",
-    "history": [
-      {
-        "role": "user",
-        "content": "hello?"
-      },
-      {
-        "role": "assistant",
-        "content": "Hello! 🤪 What's up?"
-      }
-    ]
-  },
-  {
-    "_id": "2936d65c-52c2-4271-9200-da083217b7d0",
-    "petId": "d8347a32-8b62-4293-baf0-912bf482aa9a",
-    "title": "hello",
-    "history": [
-      {
-        "role": "user",
-        "content": "hello"
-      },
-      {
-        "role": "assistant",
-        "content": "Hey there! I'm so glad you reached out. It's great to meet another fellow IT graduate who loves game development. How are you doing today?"
-      }
-    ]
-  }
+
 ]

@@ -23,4 +23,8 @@ contextBridge.exposeInMainWorld('electron', {
 
   sendCharacterId: (id) => ipcRenderer.send('character-id', id),
   onCharacterId: (callback) => ipcRenderer.on('character-id', (event, id) => callback(id)),
+
+
+  sendConversationId: (id) => ipcRenderer.send('conversation-id', id),
+  onConversationId: (callback) => ipcRenderer.on('conversation-id', (event, id) => callback(id)),
 });

@@ -1,22 +1,3 @@
 [
-  {
-    "_id": "8d7f61b2-048c-41ee-9219-0576920078a6",
-    "name": "sb",
-    "personality": "大傻子",
-    "appearance": "sss",
-    "imageName": "sss",
-    "modelName": "gpt-3.5-turbo",
-    "modelApiKey": "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",
-    "modelProvider": "openai"
-  },
-  {
-    "_id": "d8347a32-8b62-4293-baf0-912bf482aa9a",
-    "name": "Bran",
-    "personality": "neu ms 信息技术毕业生， 喜欢游戏制作， 我的舍友， 健身爱好者， 共同开发了一个桌面虚拟宠物",
-    "appearance": "no",
-    "imageName": "no",
-    "modelName": "gpt-3.5-turbo",
-    "modelApiKey": "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",
-    "modelProvider": "openai"
-  }
+
 ]

@@ -13,6 +13,22 @@ const ChatboxMessageArea = () => {
     }
   }, [userMessages]);
 
+    useEffect(() => {
+      const handleConversationId = (id) => {
+        console.log("Received conversation ID from Electron:", id);
+        // alert("conid:22321321");
+      };
+  
+      if (window.electron?.onConversationId) {
+        window.electron.onConversationId(handleConversationId);
+      }
+  
+      return () => {
+        // 如果有提供移除接口，则调用：
+        // window.electron.removeCharacterId(handleCharacterId);
+      };
+    }, []);
+
   return (
     <div className="flex-1 overflow-y-auto px-4 py-2 max-h-[60vh]">
       {userMessages.map((msg, index) => {
