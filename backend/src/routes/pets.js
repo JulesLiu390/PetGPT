@@ -60,7 +60,7 @@ router.get('/:_id', async (req, res) => {
 });
 
 // Update a pet's information (excluding personality update)
-router.patch('/:_id', async (req, res) => {
+router.put('/:_id', async (req, res) => {
   try {
     const pets = await readData(PETS_FILE);
     const petIndex = pets.findIndex(p => p._id === req.params._id);

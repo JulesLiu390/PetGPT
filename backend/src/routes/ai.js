@@ -213,28 +213,17 @@ router.post('/pet/:id/chat', async (req, res) => {
 
     
     // Add user message to conversation
-    conversation.history.push({
-      message,
-      isUser: true,
-      timestamp: new Date(),
-      LLM: null
-    });
+    conversation.history.push(message);
 
     // Prepare context for the AI from pet's personality
     let petContext = '';
     if (pet.personality) {
-      if (pet.personality.description) {
-        petContext += `The pet's description: ${pet.personality.description}\n`;
-      }
-      if (pet.personality.mood) {
-        petContext += `The pet's current mood: ${pet.personality.mood}\n`;
-      }
+      petContext += `The pet's personality: ${pet.personality}\n`;
     }
-    
+
     // Format conversation history for Gemini
     const formattedHistory = conversation.history.map(msg => ({
-      message: msg.message,
-      isUser: msg.isUser
+      message: msg
     }));
     
     // Add some system context if this is a new conversation
@@ -256,12 +245,7 @@ router.post('/pet/:id/chat', async (req, res) => {
     }
     
     // Add AI response to conversation
-    conversation.history.push({
-      message: response,
-      isUser: false,
-      timestamp: new Date(),
-      LLM: 'gemini-pro'
-    });
+    conversation.history.push(response);
     
     // Save the conversation
     await writeData(CONVERSATIONS_FILE, conversations);
@@ -311,28 +295,17 @@ router.post('/pet/:petId/conversation/:conversationId/chat', async (req, res) =>
     }
     
     // Add user message to conversation
-    conversation.history.push({
-      message,
-      isUser: true,
-      timestamp: new Date(),
-      LLM: null
-    });
+    conversation.history.push(message);
     
     // Prepare context for the AI from pet's personality
     let petContext = '';
     if (pet.personality) {
-      if (pet.personality.description) {
-        petContext += `The pet's description: ${pet.personality.description}\n`;
-      }
-      if (pet.personality.mood) {
-        petContext += `The pet's current mood: ${pet.personality.mood}\n`;
-      }
+      petContext += `The pet's personality: ${pet.personality}\n`;
     }
-    
+
     // Format conversation history for Gemini
     const formattedHistory = conversation.history.map(msg => ({
-      message: msg.message,
-      isUser: msg.isUser
+      message: msg
     }));
     
     // Add some system context if this is a new conversation
@@ -354,12 +327,7 @@ router.post('/pet/:petId/conversation/:conversationId/chat', async (req, res) =>
     }
     
     // Add AI response to conversation
-    conversation.history.push({
-      message: response,
-      isUser: false,
-      timestamp: new Date(),
-      LLM: 'gemini-pro'
-    });
+    conversation.history.push(response);
     
     // Save the conversation
     await writeData(CONVERSATIONS_FILE, conversations);
@@ -415,7 +383,7 @@ router.post('/pet/:id/image', async (req, res) => {
     }
     
     // Update the pet with the new image URL
-    pet.img_LLM = result.url;
+    pet.imageName = result.url;
     await writeData(PETS_FILE, pets);
     
     res.json({

@@ -5,6 +5,16 @@ import Conversation from '../models/Conversation.js';
 const router = express.Router();
 const CONVERSATIONS_FILE = 'conversations.json';
 
+// Get all conversations
+router.get('/', async (req, res) => {
+  try {
+    const conversations = await readData(CONVERSATIONS_FILE);
+    res.json(conversations);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+});
+
 // Create a new conversation
 router.post('/', async (req, res) => {
   try {
@@ -22,8 +32,9 @@ router.post('/', async (req, res) => {
   }
 });
 
+
 // Get conversations for a specific pet
-router.get('/pet/:petId', async (req, res) => {
+router.get('/pets/:petId/conversations', async (req, res) => {
   try {
     const conversations = await readData(CONVERSATIONS_FILE);
     const petConversations = conversations.filter(c => c.petId === req.params.petId);
@@ -80,10 +91,7 @@ router.post('/:_id/messages', async (req, res) => {
     }
     
     const message = {
-      message: req.body.message,
-      isUser: req.body.isUser,
-      timestamp: new Date().toISOString(),
-      LLM: req.body.LLM || 'gemini-1.5'
+      message: req.body.message
     };
     
     conversations[conversationIndex].history.push(message);
@@ -109,5 +117,28 @@ router.delete('/:_id', async (req, res) => {
     res.status(500).json({ message: error.message });
   }
 });
+
+// Update a conversation
+router.put('/:_id', async (req, res) => {
+  try {
+    const conversations = await readData(CONVERSATIONS_FILE);
+    const conversationIndex = conversations.findIndex(c => c._id === req.params._id);
+    if (conversationIndex === -1) {
+      return res.status(404).json({ message: 'Conversation not found' });
+    }
+
+    const updatedConversation = {
+      ...conversations[conversationIndex],
+      ...req.body
+    };
+
+    conversations[conversationIndex] = updatedConversation;
+    await writeData(CONVERSATIONS_FILE, conversations);
+    res.json(updatedConversation);
+
+  } catch (error) {
+    res.status(500).json({ message: error.message});
+  }
+})
 
 export default router;
