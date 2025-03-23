@@ -3,12 +3,11 @@
   "private": true,
   "version": "0.0.0",
   "main": "main.js",
-  "scripts": {
-    "dev": "cross-env NODE_ENV=development concurrently \"yarn start:electron\" \"yarn start:react\"",
-    "start:react": "yarn --cwd ../frontend dev",
-    "start:electron": "wait-on http://localhost:5173 && electron .",
-    "build": "yarn --cwd ../frontend build && electron-builder"
-  },
+"scripts": {
+  "dev": "yarn build:frontend && electron .",
+  "build:frontend": "yarn --cwd ../frontend build",
+  "build": "yarn build:frontend && electron-builder"
+},
   "dependencies": {
     "dotenv": "^16.4.7",
     "react": "^19.0.0",

@@ -2,6 +2,7 @@ import { useState } from 'react'
 import ChatboxBody from './ChatboxBody'
 import { HashRouter, Routes, Route } from "react-router-dom";
 import Character from './Character';
+import AddCharacterPage from './AddCharacterPage';
 
 
 
@@ -17,6 +18,7 @@ function App() {
             </div>
           } />
           <Route path="/character" element={<Character />} />
+          <Route path="/addCharacter" element={<AddCharacterPage />} />
         </Routes>
   )
 }

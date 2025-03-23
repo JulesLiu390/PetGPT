@@ -40,6 +40,7 @@ ipcMain.on("change-chat-window", () => {
 
 let chatWindow;
 let secondWindow;
+let characterWindow;
 
 let screenHeight = 0;
 
@@ -65,24 +66,11 @@ const createChatWindow = () => {
 
   chatWindow.setAlwaysOnTop(true, "screen-saver");
 
-  // if (isDev) {
-  //   chatWindow.loadURL("http://localhost:5173");
-  // } else {
-    // win.loadFile(path.join(__dirname, '../frontend/dist/index.html'));
     chatWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
-  // }
-
   chatWindow.on("closed", () => {
     chatWindow = null;
   });
 
-  // ✅ 主窗口移动时更新第二窗口位置
-
-// chatWindow.webContents.openDevTools(); // 加这一句看看报什么错
-
-// chatWindow.webContents.on("did-fail-load", (e, errorCode, errorDesc, validatedURL) => {
-//   console.error('💥 页面加载失败:', errorCode, errorDesc, validatedURL);
-// });
 
 };
 
@@ -104,17 +92,38 @@ const createSecondWindow = () => {
     },
   });
 
-  // if (isDev) {
-  //   secondWindow.loadURL("http://localhost:5173/character");
-  //   // chatWindow.loadURL("http://localhost:5173/");
-  // } else {
-    // secondWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
     secondWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), {
       hash: '#/character'
     });
-  //   console.log('!!')
-  //   // chatWindow.loadFile(path.join(__dirname, "../frontend/dist/chat.html"));
-  // }
+
+  
+
+  secondWindow.on("closed", () => {
+    secondWindow = null;
+  });
+};
+
+const createAddCharacterWindow = () => {
+  characterWindow = new BrowserWindow({
+    width: 600,
+    height: 450,
+    x: 500,
+    y: screenHeight - 350,
+    frame: false,
+    transparent: true,
+    // resizable: false,
+    alwaysOnTop: true,
+    hasShadow: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "Preload.js"),
+    },
+  });
+
+    characterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), {
+      hash: '#/addCharacter'
+    });
 
   
 
@@ -128,6 +137,7 @@ app.whenReady().then(() => {
   screenHeight = primaryDisplay.workAreaSize.height;
   createSecondWindow();
   createChatWindow();
+  createAddCharacterWindow();
   
 
   // ✅ 注册全局快捷键隐藏/显示主窗口
