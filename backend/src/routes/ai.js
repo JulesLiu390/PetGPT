@@ -301,7 +301,7 @@ router.post('/pet/:petId/conversation/:conversationId/chat', async (req, res) =>
     // Validate conversation exists and belongs to pet
     const conversations = await readData(CONVERSATIONS_FILE);
     const conversation = conversations.find(c => 
-      c.id === conversationId && c.petId === petId
+      c._id === conversationId && c.petId === petId
     );
     
     if (!conversation) {
