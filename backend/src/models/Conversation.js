@@ -7,12 +7,7 @@ class Conversation {
   constructor(_id, petId, history = []) {
     this._id = _id || uuidv4();
     this.petId = petId;
-    this.history = history.map(msg => ({
-      message: msg.message,
-      isUser: msg.isUser,
-      timestamp: msg.timestamp || new Date().toISOString(),
-      LLM: msg.LLM || 'gemini-1.5'
-    }));
+    this.history = history;
   }
 
   static async findAll() {
