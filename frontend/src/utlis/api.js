@@ -1,12 +1,13 @@
 const API_BASE_URL = 'http://localhost:3001/api';
 
+// ------------------------------
 // AI Routes
+// ------------------------------
+
 export const generateText = async (prompt, options) => {
   const response = await fetch(`${API_BASE_URL}/ai/text`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, options }),
   });
   if (!response.ok) {
@@ -19,9 +20,7 @@ export const generateText = async (prompt, options) => {
 export const generateChatResponse = async (history, options) => {
   const response = await fetch(`${API_BASE_URL}/ai/chat`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ history, options }),
   });
   if (!response.ok) {
@@ -34,9 +33,7 @@ export const generateChatResponse = async (history, options) => {
 export const generateImage = async (prompt, model = 'dalle', options = {}) => {
   const response = await fetch(`${API_BASE_URL}/ai/image`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, model, options }),
   });
   if (!response.ok) {
@@ -49,9 +46,7 @@ export const generateImage = async (prompt, model = 'dalle', options = {}) => {
 export const generateImageVariations = async (imageUrl, model = 'dalle', options = {}) => {
   const response = await fetch(`${API_BASE_URL}/ai/image/variations`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ imageUrl, model, options }),
   });
   if (!response.ok) {
@@ -64,9 +59,7 @@ export const generateImageVariations = async (imageUrl, model = 'dalle', options
 export const generatePetChatResponse = async (petId, message, options = {}) => {
   const response = await fetch(`${API_BASE_URL}/ai/pet/${petId}/chat`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, options }),
   });
   if (!response.ok) {
@@ -79,9 +72,7 @@ export const generatePetChatResponse = async (petId, message, options = {}) => {
 export const generatePetImage = async (petId, prompt, model = 'dalle', options = {}) => {
   const response = await fetch(`${API_BASE_URL}/ai/pet/${petId}/image`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ prompt, model, options }),
   });
   if (!response.ok) {
@@ -91,13 +82,27 @@ export const generatePetImage = async (petId, prompt, model = 'dalle', options =
   return response.json();
 };
 
+// ------------------------------
 // Conversation Routes
-export const createConversation = async (conversationData) => {
+// ------------------------------
+
+export const createConversation = async (petId, title, history) => {
+  // 确保 petId 是字符串
+  const finalPetId = typeof petId === 'string' ? petId : '';
+  // 确保 title 是字符串
+  const finalTitle = typeof title === 'string' ? title : '';
+  // 确保 history 是数组
+  const finalHistory = Array.isArray(history) ? history : [];
+
+  const conversationData = {
+    petId: finalPetId,
+    title: title,
+    history: history
+  };
+
   const response = await fetch(`${API_BASE_URL}/conversations`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(conversationData),
   });
   if (!response.ok) {
@@ -137,9 +142,7 @@ export const getConversation = async (conversationId) => {
 export const addMessageToConversation = async (conversationId, messageData) => {
   const response = await fetch(`${API_BASE_URL}/conversations/${conversationId}/messages`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(messageData),
   });
   if (!response.ok) {
@@ -160,13 +163,14 @@ export const deleteConversation = async (conversationId) => {
   return response.json();
 };
 
+// ------------------------------
 // Pet Routes
+// ------------------------------
+
 export const createPet = async (petData) => {
   const response = await fetch(`${API_BASE_URL}/pets`, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(petData),
   });
   if (!response.ok) {
@@ -197,9 +201,7 @@ export const getPet = async (petId) => {
 export const updatePet = async (petId, petData) => {
   const response = await fetch(`${API_BASE_URL}/pets/${petId}`, {
     method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(petData),
   });
   if (!response.ok) {
@@ -212,9 +214,7 @@ export const updatePet = async (petId, petData) => {
 export const updatePetPersonality = async (petId, personalityData) => {
   const response = await fetch(`${API_BASE_URL}/pets/${petId}/personality`, {
     method: 'PATCH',
-    headers: {
-      'Content-Type': 'application/json',
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(personalityData),
   });
   if (!response.ok) {

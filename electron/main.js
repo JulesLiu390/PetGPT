@@ -38,6 +38,18 @@ ipcMain.on('update-pets', (event, data) => {
   });
 });
 
+ipcMain.on('character-id', (event, characterId) => {
+  console.log("Main received character ID:", characterId);
+  // 广播给所有窗口
+  const { BrowserWindow } = require('electron');
+  BrowserWindow.getAllWindows().forEach(win => {
+    // 如果你不想让发送方再收到，可以加个判断
+    if (win.webContents.id !== event.sender.id) {
+      win.webContents.send('character-id', characterId);
+    }
+  });
+});
+
 // 拖拽事件
 ipcMain.on('drag-window', (event, { deltaX, deltaY, mood }) => {
   const win = BrowserWindow.fromWebContents(event.sender);
@@ -229,7 +241,7 @@ const createAddCharacterWindow = () => {
   });
 
 
-  AddCharacterWindow.webContents.openDevTools();
+  // AddCharacterWindow.webContents.openDevTools();
 };
 
 // 4. selectCharacterWindow

@@ -4,15 +4,18 @@ import { v4 as uuidv4 } from 'uuid';
 const filename = 'conversations.json';
 
 class Conversation {
-  constructor(_id, petId, history = []) {
+  /**
+   * 创建一个 Conversation 实例
+   * @param {string} _id - 唯一标识，若为空则自动生成
+   * @param {string} petId - 对应宠物/角色的 ID
+   * @param {string} title - 会话标题
+   * @param {array} history - 对话历史消息数组
+   */
+  constructor(_id, petId, title, history = []) {
     this._id = _id || uuidv4();
     this.petId = petId;
-    this.history = history.map(msg => ({
-      message: msg.message,
-      isUser: msg.isUser,
-      timestamp: msg.timestamp || new Date().toISOString(),
-      LLM: msg.LLM || 'gemini-1.5'
-    }));
+    this.title = title;
+    this.history = history;
   }
 
   static async findAll() {
@@ -26,7 +29,12 @@ class Conversation {
 
   static async create(conversationData) {
     const conversations = await readData(filename);
-    const newConversation = new Conversation(null, conversationData.petId, conversationData.history);
+    const newConversation = new Conversation(
+      null,
+      conversationData.petId,
+      conversationData.title,
+      conversationData.history || []
+    );
     conversations.push(newConversation);
     await writeData(filename, conversations);
     return newConversation;
@@ -36,7 +44,16 @@ class Conversation {
     let conversations = await readData(filename);
     const convIndex = conversations.findIndex(conv => conv._id === _id);
     if (convIndex !== -1) {
-      conversations[convIndex] = { ...conversations[convIndex], ...updatedConversationData };
+      // 如果 updatedConversationData.history 存在且是数组，就更新，否则保持原有
+      const updatedHistory = Array.isArray(updatedConversationData.history)
+        ? updatedConversationData.history
+        : conversations[convIndex].history;
+
+      conversations[convIndex] = {
+        ...conversations[convIndex],
+        ...updatedConversationData,
+        history: updatedHistory
+      };
       await writeData(filename, conversations);
       return conversations[convIndex];
     }

@@ -39,10 +39,16 @@ const SelectCharacterPage = () => {
     };
   }, []);
 
-  // 选择按钮点击事件，alert 显示全部信息
+  // 选择按钮点击事件，alert 显示所有信息
   const handleSelect = (pet) => {
+    window.electron?.sendCharacterId(pet._id);
     alert(
-      `Selected pet: ${pet.name}, Personality: ${pet.personality}, Appearance: ${pet.appearance || 'N/A'}, Model Type: ${pet.modelType || 'N/A'}`
+      `Selected pet: ${pet.name}\n` +
+      `Personality: ${pet.personality}\n` +
+      `Appearance: ${pet.appearance || 'N/A'}\n` +
+      `Model Name: ${pet.modelName || 'N/A'}\n` +
+      `Model Type: ${pet.modelType || 'N/A'}\n` +
+      `Model Provider: ${pet.modelProvider || 'N/A'}`
     );
   };
 
@@ -68,7 +74,7 @@ const SelectCharacterPage = () => {
                   <div className="text-sm text-gray-500">Appearance: {pet.appearance}</div>
                 )}
                 <div className="text-sm text-gray-600">
-                  Model Type: {pet.modelType || 'N/A'}
+                  Model: {pet.modelName || 'N/A'} (Type: {pet.modelType || 'N/A'}) | Provider: {pet.modelProvider || 'N/A'}
                 </div>
               </div>
               {/* 选择按钮 */}

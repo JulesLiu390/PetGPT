@@ -3,7 +3,7 @@ import { readData, writeData } from '../utils/jsonStorage.js';
 import Conversation from '../models/Conversation.js';
 
 const router = express.Router();
-const CONVERSATIONS_FILE = 'backend/src/data/conversations.json';
+const CONVERSATIONS_FILE = '/conversations.json';
 
 // Create a new conversation
 router.post('/', async (req, res) => {
@@ -12,7 +12,8 @@ router.post('/', async (req, res) => {
     const newConversation = new Conversation(
       null,
       req.body.petId,
-      []
+      req.body.title,
+      req.body.history || []
     );
     conversations.push(newConversation);
     await writeData(CONVERSATIONS_FILE, conversations);

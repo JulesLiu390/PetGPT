@@ -4,14 +4,14 @@ import AddCharacterTitleBar from "./AddCharacterTitleBar";
 const API_BASE_URL = "http://localhost:3001/api";
 
 const AddCharacterPage = () => {
-  // 初始化角色状态，包含基本信息和模型相关字段
+  // 初始化角色状态，包含基本信息和模型相关字段（不含 modelType）
   const [character, setCharacter] = useState({
     name: "",
     personality: "",
     appearance: "",
     imageName: "",
     modelProvider: "openai", // 默认选择 OpenAI
-    modelName: "",          // 具体模型名称，如 "chatgpt3.5" 或 "gemini1.5"
+    modelName: "",           // 例如: gpt-3.5-turbo
     modelApiKey: ""
   });
 
@@ -36,10 +36,10 @@ const AddCharacterPage = () => {
         throw new Error(errorData.message || "Failed to create pet");
       }
       const newPet = await response.json();
-
-      window.electron?.sendPetsUpdate();
-      // Electron.
-      // 如果需要，提交后可清空表单：
+      // 通过 Electron 将新角色的 _id 传递给其他组件
+      window.electron?.sendCharacterId(newPet._id);
+      
+      // 清空表单
       setCharacter({
         name: "",
         personality: "",
@@ -49,11 +49,10 @@ const AddCharacterPage = () => {
         modelName: "",
         modelApiKey: ""
       });
-      alert(
-        `Selected pet: ${character.name}, Personality: ${character.personality}, Appearance: ${character.appearance || 'N/A'}`
-      )
     } catch (error) {
-      alert("Error: " + error.message);
+      console.error("Error: " + error.message);
+      // 出错时通知其他窗口角色添加失败（例如传 null）
+      window.electron?.sendCharacterId(null);
     }
   };
 
@@ -63,7 +62,6 @@ const AddCharacterPage = () => {
       <div className="w-[90%] p-2 mt-2 bg-gray-50 rounded-lg shadow">
         <h2 className="text-base font-semibold mb-2 text-center">添加角色</h2>
         <form onSubmit={handleSubmit} className="space-y-2 text-sm">
-          {/* 角色名称 */}
           <input
             name="name"
             placeholder="名称"
@@ -71,7 +69,6 @@ const AddCharacterPage = () => {
             onChange={handleChange}
             className="w-full p-1 border rounded focus:outline-none"
           />
-          {/* 人格描述 */}
           <textarea
             name="personality"
             placeholder="人格描述"
@@ -79,7 +76,6 @@ const AddCharacterPage = () => {
             onChange={handleChange}
             className="w-full p-1 border rounded resize-none h-12"
           />
-          {/* 外观描述 */}
           <textarea
             name="appearance"
             placeholder="外观描述"
@@ -87,7 +83,6 @@ const AddCharacterPage = () => {
             onChange={handleChange}
             className="w-full p-1 border rounded resize-none h-12"
           />
-          {/* 图片 URL */}
           <input
             name="imageName"
             placeholder="图片 URL"
@@ -95,7 +90,7 @@ const AddCharacterPage = () => {
             onChange={handleChange}
             className="w-full p-1 border rounded"
           />
-          {/* 模型相关字段：下拉选择模型提供商与具体模型名称 */}
+          {/* 模型相关字段 */}
           <div className="flex flex-col space-y-2">
             <div className="flex items-center space-x-4">
               {/* 模型提供商下拉 */}
@@ -125,7 +120,7 @@ const AddCharacterPage = () => {
                   type="text"
                   value={character.modelName}
                   onChange={handleChange}
-                  placeholder="例如: chatgpt3.5 或 gemini1.5"
+                  placeholder="例如: gpt-3.5-turbo"
                   className="p-1 border rounded"
                 />
               </div>

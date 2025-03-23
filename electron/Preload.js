@@ -20,4 +20,7 @@ contextBridge.exposeInMainWorld('electron', {
 
 
   maxmizeChatWindow: () => ipcRenderer.send("maximize-chat-window"),
+
+  sendCharacterId: (id) => ipcRenderer.send('character-id', id),
+  onCharacterId: (callback) => ipcRenderer.on('character-id', (event, id) => callback(id)),
 });

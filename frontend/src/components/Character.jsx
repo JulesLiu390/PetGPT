@@ -4,6 +4,27 @@ import { FaRocketchat } from "react-icons/fa";
 import { CgAdd, CgHello } from "react-icons/cg";
 import { GoMultiSelect } from "react-icons/go";
 
+
+
+import { downloadProcessedImage } from '../utlis/imageProcessor';
+
+async function testDownload() {
+  try {
+    const url = "https://so1.360tres.com/t017dbc55e2b4011938.png";
+    const fileName = "sample1.png";
+    await downloadProcessedImage(url, fileName);
+    console.log("下载成功:", fileName);
+  } catch (error) {
+    console.error("下载出错:", error);
+  }
+}
+
+// testDownload();
+
+
+
+
+
 export const Character = () => {
   // 用于接收来自主进程的心情更新
   const [characterMood, setCharacterMood] = useState("normal");
