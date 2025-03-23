@@ -1,0 +1,32 @@
+[
+  {
+    "_id": "2d2e0a7d-90a8-461d-82bf-fa7d19affe28",
+    "name": "Golden Retriever",
+    "personality": "Friendly and playful golden retriever (Mood: Happy)",
+    "appearance": "beauity",
+    "imageName": "https://oaidalleapiprodscus.blob.core.windows.net/private/org-1JRIA9PI3UX1isZOWcjXe0VB/user-FglbRCUjbOuADHDexu1654Dv/img-vWBs6BFkmgX903Q44dV6Hr7b.png?st=2025-03-23T03%3A57%3A11Z&se=2025-03-23T05%3A57%3A11Z&sp=r&sv=2024-08-04&sr=b&rscd=inline&rsct=image/png&skoid=d505667d-d6c1-4a0a-bac7-5c84a87759f8&sktid=a48cca56-e6da-484e-a814-9c849652bcb3&skt=2025-03-22T23%3A24%3A20Z&ske=2025-03-23T23%3A24%3A20Z&sks=b&skv=2024-08-04&sig=DpR41c0e%2BF4qwmli5NDNWMCq6CgGf2VTKoYYGSPSltE%3D",
+    "modelName": "OpenAI-GPT",
+    "modelApiKey": "your-api-key-here",
+    "modelProvider": "OpenAI"
+  },
+  {
+    "_id": "0ec81e5c-6bd9-4cd3-8608-198b427f6570",
+    "name": "",
+    "personality": "",
+    "appearance": "",
+    "imageName": "",
+    "modelName": "",
+    "modelApiKey": "",
+    "modelProvider": "openai"
+  },
+  {
+    "_id": "798a9640-1502-4f45-beb7-38de4ae5f420",
+    "name": "sb",
+    "personality": "sb",
+    "appearance": "sbs",
+    "imageName": "sb",
+    "modelName": "sb",
+    "modelApiKey": "sb",
+    "modelProvider": "gemini"
+  }
+]

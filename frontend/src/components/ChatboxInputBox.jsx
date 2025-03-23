@@ -56,7 +56,9 @@ export const ChatboxInputBox = () => {
             type: actionType.SET_USER_TEXT,
             userText: "", // ✅ 清空输入框内容
           });
+          window.electron?.sendMoodUpdate('normal');
       };
+      
     return (
       <div className="relative w-full">
         <textarea
