@@ -38,6 +38,14 @@ ipcMain.on("change-chat-window", () => {
   }
 });
 
+ipcMain.on("change-addCharacter-window", () => {
+  if (characterWindow.isVisible()) {
+    characterWindow.hide();
+  } else {
+    characterWindow.show();
+  }
+});
+
 let chatWindow;
 let secondWindow;
 let characterWindow;

@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { CharacterImage } from '../assets';
 import { useStateValue } from '../content/StateProvider';
 import { FaRocketchat } from "react-icons/fa";
+import { CgAdd } from "react-icons/cg";
 import {motion} from "framer-motion"
 
 
@@ -14,6 +15,10 @@ export const Character = () => {
   const [imgSrc, setImgSrc] = useState('../assets/sample-normal.png');
   const handleClick = () => {
     window.electron?.changeChatWindow();
+  }
+
+  const handleClickAddCharacter = () => {
+    window.electron?.changeAddCharacterWindow();
   }
 
   useEffect(() => {
@@ -50,8 +55,9 @@ const [isHovering, setIsHovering] = useState(false);
       onClick={handleClick}
       className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
     />
-    <FaRocketchat
+    <CgAdd
       title="发送表情"
+      onClick={handleClickAddCharacter}
       className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
     />
     <FaRocketchat

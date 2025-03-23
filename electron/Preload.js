@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('electron', {
   showChatWindow: () => ipcRenderer.send("show-chat-window"),
   changeChatWindow: () => ipcRenderer.send("change-chat-window"),
 
+  changeAddCharacterWindow: () => ipcRenderer.send("change-addCharacter-window"),
+
   sendMoodUpdate: (mood) => ipcRenderer.send('update-character-mood', mood),
   onMoodUpdated: (callback) => ipcRenderer.on('character-mood-updated', callback),
 });

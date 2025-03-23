@@ -20,7 +20,7 @@ const AddCharacterPage = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen w-full items-center bg-white">
+    <div className="flex flex-col h-screen w-full items-center bg-[rgba(255,255,255,0.8)]">
       <AddCharacterTitleBar />
       <div className="w-[90%] p-2 mt-2 bg-gray-50 rounded-lg shadow">
         <h2 className="text-base font-semibold mb-2 text-center">添加角色</h2>
