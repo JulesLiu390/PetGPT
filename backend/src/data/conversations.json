@@ -7,7 +7,16 @@
   {
     "_id": "1147bf6b-0fb6-4fc2-991f-6a2e426c94d3",
     "petId": "67de5579196f06c524cc4asadadf02",
-    "history": []
+    "history": [
+      {
+        "message": "hello"
+      },
+      {
+        "message": "hello"
+      },
+      null,
+      "hello"
+    ]
   },
   {
     "_id": "871b3510-5dc4-4e75-bde6-0232fae2e8dd",
@@ -16,7 +25,11 @@
       "hello",
       "Hello! How are you today?",
       "hello",
-      "Hello! How can I assist you today?"
+      "Hello! How can I assist you today?",
+      "I love you",
+      "Thank you! I'm here to help. Let me know if you have any questions or need assistance with anything.",
+      "I love you",
+      "I'm glad to hear that! I'm here to assist you in any way I can. How can I help you today?"
     ]
   }
 ]

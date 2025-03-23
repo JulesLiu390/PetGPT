@@ -262,44 +262,40 @@ router.post('/pet/:id/chat', async (req, res) => {
   }
 });
 
-    // New endpoint with strict conversation validation
-router.post('/pet/:petId/conversation/:conversationId/chat', async (req, res) => {
+// New endpoint with strict conversation validation
+router.post('/conversation/:conversationId/chat', async (req, res) => {
   try {
     await initializeServices();
-    
+
     const { message, options = {} } = req.body;
-    const petId = req.params.petId;
     const conversationId = req.params.conversationId;
-    
+
     if (!message) {
       return res.status(400).json({ message: 'Message is required' });
     }
-    
-    // Validate pet exists
-    const pets = await readData(PETS_FILE);
-    const pet = pets.find(p => p._id === petId);
-    if (!pet) {
-      return res.status(404).json({ message: 'Pet not found' });
-    }
-    
+
     // Validate conversation exists and belongs to pet
     const conversations = await readData(CONVERSATIONS_FILE);
-    const conversation = conversations.find(c => 
-      c._id === conversationId && c.petId === petId
+    const conversation = conversations.find(c =>
+      c._id === conversationId
     );
-    
+
     if (!conversation) {
-      return res.status(404).json({ 
-        message: 'Conversation not found for this pet' 
+      return res.status(404).json({
+        message: 'Conversation not found'
       });
     }
     
+    // Find pet to use its name and personality
+    const pets = await readData(PETS_FILE);
+    const pet = pets.find(p => p._id === conversation.petId);
+
     // Add user message to conversation
     conversation.history.push(message);
-    
+
     // Prepare context for the AI from pet's personality
     let petContext = '';
-    if (pet.personality) {
+    if (pet?.personality) {
       petContext += `The pet's personality: ${pet.personality}\n`;
     }
 
@@ -307,15 +303,15 @@ router.post('/pet/:petId/conversation/:conversationId/chat', async (req, res) =>
     const formattedHistory = conversation.history.map(msg => ({
       message: msg
     }));
-    
+
     // Add some system context if this is a new conversation
     if (formattedHistory.length <= 1) {
       formattedHistory.unshift({
-        message: `You are ${pet.name}, a virtual pet. ${petContext}Respond in character to the user.`,
+        message: `You are ${pet?.name || 'a virtual pet'}, a virtual pet. ${petContext}Respond in character to the user.`,
         isUser: false
       });
     }
-    
+
     // Generate response
     // Use ChatGPT by default, fallback to Gemini if OpenAI key not set
     let response;
@@ -325,17 +321,16 @@ router.post('/pet/:petId/conversation/:conversationId/chat', async (req, res) =>
       console.log('Falling back to Gemini:', error.message);
       response = await geminiService.generateChatResponse(formattedHistory, options);
     }
-    
+
     // Add AI response to conversation
     conversation.history.push(response);
-    
+
     // Save the conversation
     await writeData(CONVERSATIONS_FILE, conversations);
-    
+
     res.json({
       message: response,
       model: 'gemini-pro',
-      petId,
       conversationId: conversation.id
     });
   } catch (error) {

@@ -90,11 +90,7 @@ router.post('/:_id/messages', async (req, res) => {
       return res.status(404).json({ message: 'Conversation not found' });
     }
     
-    const message = {
-      history: req.body.history
-    };
-    
-    conversations[conversationIndex].history.push(message);
+    conversations[conversationIndex].history.push(req.body.message);
     await writeData(CONVERSATIONS_FILE, conversations);
     res.json(conversations[conversationIndex]);
   } catch (error) {
