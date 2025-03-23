@@ -1,25 +1,33 @@
 import express from 'express';
+import { readData, writeData } from '../utils/jsonStorage.js';
 import Conversation from '../models/Conversation.js';
 
 const router = express.Router();
+const CONVERSATIONS_FILE = 'backend/src/data/conversations.json';
 
 // Create a new conversation
 router.post('/', async (req, res) => {
   try {
-    const conversation = new Conversation(req.body);
-    await conversation.save();
-    res.status(201).json(conversation);
+    const conversations = await readData(CONVERSATIONS_FILE);
+    const newConversation = new Conversation(
+      null,
+      req.body.petId,
+      []
+    );
+    conversations.push(newConversation);
+    await writeData(CONVERSATIONS_FILE, conversations);
+    res.status(201).json(newConversation);
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(500).json({ message: error.message });
   }
 });
 
 // Get conversations for a specific pet
 router.get('/pet/:petId', async (req, res) => {
   try {
-    const conversations = await Conversation.find({ petId: req.params.petId })
-      .sort({ updatedAt: -1 });
-    res.json(conversations);
+    const conversations = await readData(CONVERSATIONS_FILE);
+    const petConversations = conversations.filter(c => c.petId === req.params.petId);
+    res.json(petConversations);
   } catch (error) {
     res.status(500).json({ message: error.message });
   }
@@ -32,26 +40,30 @@ router.get('/recent', async (req, res) => {
     const page = parseInt(req.query.page) || 1;
     const skip = (page - 1) * limit;
     
-    const conversations = await Conversation.find()
-      .sort({ 'history.timestamp': -1 })
-      .skip(skip)
-      .limit(limit);
-      
-    res.json(conversations);
-  } catch (error) {
+    let conversations = await readData(CONVERSATIONS_FILE);
+    
+    // Sort conversations by the timestamp of the last message in history
+    conversations.sort((a, b) => {
+      const lastMessageA = a.history.length > 0 ? new Date(a.history[a.history.length - 1].timestamp) : new Date(a.createdAt);
+      const lastMessageB = b.history.length > 0 ? new Date(b.history[b.history.length - 1].timestamp) : new Date(b.createdAt);
+      return lastMessageB - lastMessageA; // Sort in descending order
+    });
+
+    const paginatedConversations = conversations.slice(skip, skip + limit);
+    res.json(paginatedConversations);
+  } catch ( error) {
     res.status(500).json({ message: error.message });
   }
 });
 
 // Get a specific conversation
-router.get('/:id', async (req, res) => {
+router.get('/:_id', async (req, res) => {
   try {
-    const conversation = await Conversation.findById(req.params.id);
-    
+    const conversations = await readData(CONVERSATIONS_FILE);
+    const conversation = conversations.find(c => c._id === req.params._id);
     if (!conversation) {
       return res.status(404).json({ message: 'Conversation not found' });
     }
-    
     res.json(conversation);
   } catch (error) {
     res.status(500).json({ message: error.message });
@@ -59,35 +71,39 @@ router.get('/:id', async (req, res) => {
 });
 
 // Add message to conversation
-router.post('/:id/messages', async (req, res) => {
+router.post('/:_id/messages', async (req, res) => {
   try {
-    const conversation = await Conversation.findById(req.params.id);
-    if (!conversation) {
+    const conversations = await readData(CONVERSATIONS_FILE);
+    const conversationIndex = conversations.findIndex(c => c._id === req.params._id);
+    if (conversationIndex === -1) {
       return res.status(404).json({ message: 'Conversation not found' });
     }
     
     const message = {
-      ...req.body,
-      timestamp: new Date()
+      message: req.body.message,
+      isUser: req.body.isUser,
+      timestamp: new Date().toISOString(),
+      LLM: req.body.LLM || 'gemini-1.5'
     };
     
-    conversation.history.push(message);
-    await conversation.save();
-    res.json(conversation);
+    conversations[conversationIndex].history.push(message);
+    await writeData(CONVERSATIONS_FILE, conversations);
+    res.json(conversations[conversationIndex]);
   } catch (error) {
-    res.status(400).json({ message: error.message });
+    res.status(500).json({ message: error.message });
   }
 });
 
 // Delete a conversation
-router.delete('/:id', async (req, res) => {
+router.delete('/:_id', async (req, res) => {
   try {
-    const conversation = await Conversation.findByIdAndDelete(req.params.id);
-    
-    if (!conversation) {
+    const conversations = await readData(CONVERSATIONS_FILE);
+    const conversationIndex = conversations.findIndex(c => c._id === req.params._id);
+    if (conversationIndex === -1) {
       return res.status(404).json({ message: 'Conversation not found' });
     }
-    
+    conversations.splice(conversationIndex, 1);
+    await writeData(CONVERSATIONS_FILE, conversations);
     res.json({ message: 'Conversation deleted successfully' });
   } catch (error) {
     res.status(500).json({ message: error.message });

@@ -2,10 +2,14 @@ import express from 'express';
 import GeminiService from '../LLMs/GeminiService.js';
 import DalleService from '../LLMs/ImageGenerators/DalleService.js';
 import StableDiffusionService from '../LLMs/ImageGenerators/StableDiffusionService.js';
-import Pet from '../models/Pet.js';
+import { readData, writeData } from '../utils/jsonStorage.js';
 import Conversation from '../models/Conversation.js';
+import { v4 as uuidv4 } from 'uuid';
 
 const router = express.Router();
+const PETS_FILE = 'pets.json';
+const CONVERSATIONS_FILE = 'conversations.json';
+
 
 // Initialize services with environment variables
 const geminiService = new GeminiService();
@@ -171,19 +175,23 @@ router.post('/pet/:id/chat', async (req, res) => {
     }
     
     // Get the pet
-    const pet = await Pet.findById(petId);
+    const pets = await readData(PETS_FILE);
+    const pet = pets.find(p => p._id === petId);
     if (!pet) {
       return res.status(404).json({ message: 'Pet not found' });
     }
     
     // Get or create a conversation for this pet
-    let conversation = await Conversation.findOne({ petId }).sort({ 'history.timestamp': -1 });
+    let conversations = await readData(CONVERSATIONS_FILE);
+    let conversation = conversations.find(c => c.petId === petId);
     
     if (!conversation) {
-      conversation = new Conversation({
+      conversation = new Conversation(
+        uuidv4(),
         petId,
-        history: []
-      });
+        []
+      );
+      conversations.push(conversation);
     }
     
     // Add user message to conversation
@@ -231,12 +239,12 @@ router.post('/pet/:id/chat', async (req, res) => {
     });
     
     // Save the conversation
-    await conversation.save();
+    await writeData(CONVERSATIONS_FILE, conversations);
     
     res.json({
       message: response,
       model: 'gemini-pro',
-      conversationId: conversation._id
+      conversationId: conversation.id
     });
   } catch (error) {
     console.error('Error generating pet chat response:', error);
@@ -261,7 +269,8 @@ router.post('/pet/:id/image', async (req, res) => {
     }
     
     // Get the pet
-    const pet = await Pet.findById(petId);
+    const pets = await readData(PETS_FILE);
+    const pet = pets.find(p => p._id === petId);
     if (!pet) {
       return res.status(404).json({ message: 'Pet not found' });
     }
@@ -281,11 +290,11 @@ router.post('/pet/:id/image', async (req, res) => {
     
     // Update the pet with the new image URL
     pet.img_LLM = result.url;
-    await pet.save();
+    await writeData(PETS_FILE, pets);
     
     res.json({
       ...result,
-      petId: pet._id
+      petId: petId
     });
   } catch (error) {
     console.error('Error generating pet image:', error);

@@ -45,5 +45,5 @@ This project includes a Docker Compose setup for easy development and deployment
 
 6. Use docker shell:
     ```bash
-    docker exec -it petgpt-mongo mongosh
+    docker exec -it petgpt_mongo mongosh
     ```

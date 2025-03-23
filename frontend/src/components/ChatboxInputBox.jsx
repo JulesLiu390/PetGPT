@@ -45,6 +45,7 @@ export const ChatboxInputBox = () => {
         //TODO: 加上pet ID,先搞个临时的
         const petID = "67df11dc2205c1138ca390b4"
         const replyText = await generatePetChatResponse(petID, userText);
+        alert(replyText);
         const botReply = {
             role: "assistant",
             content: replyText,
@@ -52,7 +53,7 @@ export const ChatboxInputBox = () => {
 
         dispatch({ type: actionType.ADD_MESSAGE, message: userMessage });
         dispatch({ type: actionType.ADD_MESSAGE, message: botReply });
-        console.log(replyText);
+        
         dispatch({
             type: actionType.SET_USER_TEXT,
             userText: "", // ✅ 清空输入框内容

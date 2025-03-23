@@ -1,12 +1,10 @@
 import express from 'express';
-import mongoose from 'mongoose';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import petRoutes from './routes/pets.js';
 import conversationRoutes from './routes/conversations.js';
 import aiRoutes from './routes/ai.js';
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
@@ -16,11 +14,6 @@ const PORT = process.env.PORT || 3001;
 app.use(cors());
 app.use(express.json({ limit: '50mb' })); // Increased limit for image data
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
-
-// Database connection
-mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
 
 // Health check endpoint for container/electron integration
 app.get('/api/healthcheck', (req, res) => {
