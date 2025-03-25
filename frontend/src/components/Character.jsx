@@ -6,7 +6,6 @@ import { GoMultiSelect } from "react-icons/go";
 
 
 
-import { downloadProcessedImage } from '../utlis/imageProcessor';
 
 async function testDownload() {
   try {

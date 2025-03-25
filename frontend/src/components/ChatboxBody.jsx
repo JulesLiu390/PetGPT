@@ -21,7 +21,7 @@ export const Chatbox = () => {
       }
     };
     fetchConversations();
-  }, []);
+  }, [userMessages]);
 
   const fetchConversationById = async (conversationId) => {
     try {
@@ -37,6 +37,10 @@ export const Chatbox = () => {
     console.log("Loaded conversation:", conversation);
     window.electron?.sendCharacterId(conversation.petId);
     window.electron?.sendConversationId(conv._id);
+    dispatch({
+      type: actionType.SET_MESSAGE,
+      userMessages: []
+    });
     dispatch({
       type: actionType.SET_MESSAGE,
       userMessages: conversation.history

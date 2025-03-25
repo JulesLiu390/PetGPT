@@ -92,7 +92,7 @@ export const createConversation = async (petId, title, history) => {
   // 确保 title 是字符串
   const finalTitle = typeof title === 'string' ? title : '';
   // 确保 history 是数组
-  const finalHistory = Array.isArray(history) ? history : [];
+  const finalHistory = history;
 
   const conversationData = {
     petId: finalPetId,
@@ -230,7 +230,7 @@ export const deletePet = async (petId) => {
   });
   if (!response.ok) {
     const error = await response.json();
-    throw new Error(error.message || 'Failed to delete pet');
+    throw new Error(error.message);
   }
   return response.json();
 };

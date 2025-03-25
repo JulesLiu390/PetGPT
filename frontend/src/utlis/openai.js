@@ -17,7 +17,7 @@ export const callOpenAI = async (messages, apiKey, model) => {
 
   try {
         // 使用 response_format 指定结构化输出
-        const chatCompletion = await openai.chat.completions.parse({
+        const chatCompletion = await openai.beta.chat.completions.parse({
           model: model,
           messages: messages,
           response_format: zodResponseFormat(StructuredResponseSchema, "response"),

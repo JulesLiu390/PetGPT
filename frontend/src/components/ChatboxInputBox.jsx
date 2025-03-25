@@ -3,7 +3,7 @@ import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp } from "react-icons/fa6";
 import { callOpenAI } from '../utlis/openai';
-import { getPet, createConversation, updateConversation } from '../utlis/api';  // 确保路径正确
+import { getPet, createConversation, updateConversation, getPetConversations } from '../utlis/api';  // 确保路径正确
 
 export const ChatboxInputBox = () => {
   const inputRef = useRef(null);
@@ -15,13 +15,17 @@ export const ChatboxInputBox = () => {
   // 使用 useRef 存储对话 ID，不会引起组件重渲染
   const conversationIdRef = useRef(null);
 
-  let send_messages = [userMessages];
+  let send_messages = userMessages;
 
   // 监听来自 Electron 的角色 ID 信息，并更新本地 characterId
   useEffect(() => {
     const handleCharacterId = (id) => {
       console.log("Received character ID from Electron:", id);
       setCharacterId(id);
+      // dispatch({
+      //   type: actionType.SET_MESSAGE,
+      //   userMessages: []
+      // });
     };
     if (window.electron?.onCharacterId) {
       window.electron.onCharacterId(handleCharacterId);
@@ -51,18 +55,12 @@ export const ChatboxInputBox = () => {
         type: actionType.SET_USER_TEXT,
         userMessages: conversation.history
       });
-      // dispatch({
-      //   type: actionType.,
-      //   userMessages: conversation.history
-      // });
     };
 
   useEffect(() => {
     const handleConversationId = (id) => {
       console.log("Received conversation ID from Electron:", id);
       conversationIdRef.current = id;
-      // send_messages = userMessages;
-      // alert("conid:"+id);
     };
 
     if (window.electron?.onConversationId) {
@@ -128,42 +126,40 @@ export const ChatboxInputBox = () => {
 
     // 构造对话消息时，将 petInfo.name 替换进去
     const petName = petInfo?.name || "your pet";
+    const asistantSettings = {
+        role: "system", 
+        content: `你现在扮演的角色设定如下：\n${petInfo?.personality}\n请在回答中保持角色特点， 同时生成回复内容和情绪(mood: angry, smile, normal)。当你认为你用户的内容冒犯到你的时候，哪怕很轻微， 请愤怒！ 除非提问带有明显的正面评价， 不然不要smile而是保持normal`
+    }
+
     const userMessage = { 
       role: "user", 
-      content: `Your name is ${petName}, and your personality is ${petInfo?.personality || ""}. Talk with me as your role. Here is my text: ${userText}` 
+      content: `${userText}` 
     };
+
     const originalUserMessage = { role: "user", content: userText };
 
-
-
-    const newMessages = [...userMessages, userMessage];
+    const newMessages = [...userMessages, asistantSettings, userMessage];
 
     const replyText = await callOpenAI(newMessages, petInfo.modelApiKey, petInfo.modelName);
-    const botReply = { role: "assistant", content: replyText };
+    const botReply = { role: "assistant", content: replyText.content };
 
     dispatch({ type: actionType.ADD_MESSAGE, message: originalUserMessage });
     dispatch({ type: actionType.ADD_MESSAGE, message: botReply });
-    send_messages.push(originalUserMessage);
-    send_messages.push(botReply);
-
+    // send_messages.push(originalUserMessage);
+    // send_messages.push(botReply);
 
         // 如果对话 ID 为空，则新建会话（会话名称取 userText，petId 使用 characterId，历史消息取 userMessages）
         if (!conversationIdRef.current) {
           try {
-            // alert("Success!")
-            // alert("Creating conversation with: " + petInfo._id + ", " + userText + ", " + JSON.stringify(send_messages, null, 2));
-            const newConversation = await createConversation(petInfo._id, userText, send_messages);
+            const newConversation = await createConversation(petInfo._id, userText + " with " + petInfo.name, send_messages);
             conversationIdRef.current = newConversation._id;
-            // alert("Created new conversation: " + conversationIdRef.current);
           } catch (error) {
             // alert("Error creating conversation: " + error.message);
           }
         }
-        alert(conversationIdRef.current + " Creating conversation with: " + petInfo._id + ", " + userText + ", " + JSON.stringify(send_messages, null, 2));
-        await updateConversation(conversationIdRef.current, petInfo._id, userText, send_messages);
-        alert("Creating conversation with: " + petInfo._id + ", " + userText + ", " + JSON.stringify(send_messages, null, 2));
+        await updateConversation(conversationIdRef.current, petInfo._id, getPetConversations(conversationIdRef).title, send_messages);
     dispatch({ type: actionType.SET_USER_TEXT, userText: "" });
-    window.electron?.sendMoodUpdate('normal');
+    window.electron?.sendMoodUpdate(replyText.mood);
   };
 
   return (

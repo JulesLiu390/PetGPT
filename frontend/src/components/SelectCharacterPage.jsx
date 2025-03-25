@@ -1,10 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import SelectCharacterTitleBar from './SelectCharacterTitleBar';
-import { getPets } from '../utlis/api';
+import { getPets,deletePet } from '../utlis/api';
+import { useStateValue } from '../content/StateProvider';
 
 const SelectCharacterPage = () => {
   const [pets, setPets] = useState([]);
-
   const fetchPets = async () => {
     try {
       const data = await getPets();
@@ -17,10 +17,6 @@ const SelectCharacterPage = () => {
       alert("Error: " + error.message);
     }
   };
-
-  useEffect(() => {
-    fetchPets();
-  }, []);
 
   // 监听 pets 更新事件
   useEffect(() => {
@@ -41,17 +37,21 @@ const SelectCharacterPage = () => {
 
   // 选择按钮点击事件，alert 显示所有信息
   const handleSelect = (pet) => {
+
     window.electron?.sendCharacterId(pet._id);
-    alert("Sucsess!")
-    // alert(
-    //   `Selected pet: ${pet.name}\n` +
-    //   `Personality: ${pet.personality}\n` +
-    //   `Appearance: ${pet.appearance || 'N/A'}\n` +
-    //   `Model Name: ${pet.modelName || 'N/A'}\n` +
-    //   `Model Type: ${pet.modelType || 'N/A'}\n` +
-    //   `Model Provider: ${pet.modelProvider || 'N/A'}`
-    // );
   };
+
+  // 删除宠物函数
+  const handleDelete = async (petId) => {
+    try {
+      await deletePet(petId);
+      fetchPets(); // 删除后重新获取列表
+    } catch (error) {
+      alert("删除宠物出错: " + error.message);
+    }
+  };
+
+  fetchPets();
 
   return (
     <div className="flex flex-col h-screen w-full items-center bg-[rgba(255,255,255,0.8)]">
@@ -84,6 +84,13 @@ const SelectCharacterPage = () => {
                 className="ml-auto bg-blue-500 text-white py-1 px-2 rounded text-xs hover:bg-blue-600"
               >
                 Select
+              </button>
+                            {/* 删除按钮 */}
+                            <button
+                onClick={() => handleDelete(pet._id)}
+                className="ml-2 bg-red-500 text-white py-1 px-2 rounded text-xs hover:bg-red-600"
+              >
+                Delete
               </button>
             </div>
           ))}
