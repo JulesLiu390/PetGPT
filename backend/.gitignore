@@ -1,3 +1,0 @@
-# Ignore all JSON files in src/data
-src/data/*.json
-dist/data/*.json

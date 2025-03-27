@@ -1,27 +1,32 @@
 import React, { useState, useEffect } from 'react';
 import SelectCharacterTitleBar from './SelectCharacterTitleBar';
-import { getPets,deletePet } from '../utlis/api';
 import { useStateValue } from '../content/StateProvider';
 
 const SelectCharacterPage = () => {
   const [pets, setPets] = useState([]);
+
   const fetchPets = async () => {
     try {
-      const data = await getPets();
+      const data = await window.electron.getPets();
       if (Array.isArray(data)) {
         setPets(data);
       } else {
         console.error("getPets 返回的数据格式不正确:", data);
       }
     } catch (error) {
-      alert("Error: " + error.message);
+      alert("读取角色失败: " + error.message);
     }
   };
 
-  // 监听 pets 更新事件
+  // 初次加载
   useEffect(() => {
-    const petsUpdateHandler = (updatedData) => {
-      console.log("Received pets update:", updatedData);
+    fetchPets();
+  }, []);
+
+  // 监听 pets 更新事件（如果你实现了）
+  useEffect(() => {
+    const petsUpdateHandler = () => {
+      console.log("Received pets update");
       fetchPets();
     };
 
@@ -30,28 +35,41 @@ const SelectCharacterPage = () => {
     }
 
     return () => {
-      // 如果暴露了移除监听接口，则调用：
+      // 清除监听（可选）
       // window.electron.removePetsUpdated(petsUpdateHandler);
     };
   }, []);
 
-  // 选择按钮点击事件，alert 显示所有信息
+  // 选择按钮点击事件
   const handleSelect = (pet) => {
-
     window.electron?.sendCharacterId(pet._id);
   };
 
-  // 删除宠物函数
+  // 删除角色
   const handleDelete = async (petId) => {
     try {
-      await deletePet(petId);
-      fetchPets(); // 删除后重新获取列表
+      await window.electron.deletePet(petId);
+      fetchPets(); // 删除后刷新
     } catch (error) {
-      alert("删除宠物出错: " + error.message);
+      alert("删除角色失败: " + error.message);
     }
   };
 
-  fetchPets();
+  // 示例保存功能（可以保留）
+  const handleSave = async () => {
+    const data = {
+      name: 'Jules Liu',
+      location: 'Toronto',
+      hobby: ['coding', 'cooking', 'fashion'],
+    };
+
+    const result = await window.electron.writeJSON(data);
+    if (result.success) {
+      alert(`保存成功！文件路径：\n${result.path}`);
+    } else {
+      alert(`保存失败：${result.error}`);
+    }
+  };
 
   return (
     <div className="flex flex-col h-screen w-full items-center bg-[rgba(255,255,255,0.8)]">
@@ -61,13 +79,11 @@ const SelectCharacterPage = () => {
         <div className="grid grid-cols-1 gap-2">
           {pets.map((pet) => (
             <div key={pet._id} className="flex items-center p-2 bg-white rounded shadow">
-              {/* 角色图片 */}
               <img
                 src={pet.imageName}
                 alt={pet.name}
                 className="w-12 h-12 rounded object-cover mr-2"
               />
-              {/* 角色信息 */}
               <div>
                 <div className="text-base font-semibold">{pet.name}</div>
                 <div className="text-sm text-gray-600">Personality: {pet.personality}</div>
@@ -78,15 +94,13 @@ const SelectCharacterPage = () => {
                   Model: {pet.modelName || 'N/A'} (Type: {pet.modelType || 'N/A'}) | Provider: {pet.modelProvider || 'N/A'}
                 </div>
               </div>
-              {/* 选择按钮 */}
               <button
                 onClick={() => handleSelect(pet)}
                 className="ml-auto bg-blue-500 text-white py-1 px-2 rounded text-xs hover:bg-blue-600"
               >
                 Select
               </button>
-                            {/* 删除按钮 */}
-                            <button
+              <button
                 onClick={() => handleDelete(pet._id)}
                 className="ml-2 bg-red-500 text-white py-1 px-2 rounded text-xs hover:bg-red-600"
               >

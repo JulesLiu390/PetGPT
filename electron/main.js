@@ -1,5 +1,71 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen } = require("electron");
-const path = require("path");
+// const path = require("path");
+const path = require('path');
+const fs = require('fs');
+const Pet = require('./models/pet');
+const Conversation = require('./models/conversation.js');
+
+
+// ✅ Pet 相关
+ipcMain.handle('get-pets', async () => {
+  return await Pet.findAll();
+});
+
+ipcMain.handle('create-pet', async (event, petData) => {
+  return await Pet.create(petData);
+});
+
+ipcMain.handle('update-pet', async (event, { id, updatedData }) => {
+  return await Pet.update(id, updatedData);
+});
+
+ipcMain.handle('delete-pet', async (event, id) => {
+  return await Pet.delete(id);
+});
+
+ipcMain.handle('get-pet-by-id', async (event, id) => {
+  try {
+    const pet = await Pet.findById(id);
+    return pet;
+  } catch (error) {
+    console.error("Failed to get pet by id:", error);
+    throw error;
+  }
+});
+
+// ✅ Conversation 相关
+ipcMain.handle('get-conversations', async () => {
+  return await Conversation.findAll();
+});
+
+ipcMain.handle('create-conversation', async (event, convData) => {
+  return await Conversation.create(convData);
+});
+
+ipcMain.handle('update-conversation', async (event, { id, updatedData }) => {
+  return await Conversation.update(id, updatedData);
+});
+
+ipcMain.handle('delete-conversation', async (event, id) => {
+  return await Conversation.delete(id);
+});
+
+ipcMain.handle('get-conversation-by-id', async (event, id) => {
+  return await Conversation.findById(id);
+});
+
+// 可选：前端通知主进程设置当前选择
+ipcMain.on('send-character-id', (event, id) => {
+  console.log("Main received character ID:", id);
+  BrowserWindow.getAllWindows().forEach(win => {
+    win.webContents.send('character-id', id); // ✅ 发给所有窗口
+  });
+});
+
+ipcMain.on('send-conversation-id', (event, id) => {
+  console.log('[主进程] 当前会话 ID:', id);
+});
+
 const isDev = !app.isPackaged;
 
 let chatWindow;

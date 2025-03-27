@@ -1,45 +1,36 @@
 import React, { useState } from "react";
 import AddCharacterTitleBar from "./AddCharacterTitleBar";
 
-const API_BASE_URL = "http://localhost:3001/api";
-
 const AddCharacterPage = () => {
-  // Initialize character state with basic info and model-related fields (excluding modelType)
   const [character, setCharacter] = useState({
     name: "",
     personality: "",
     appearance: "",
     imageName: "",
-    modelProvider: "openai", // Default to OpenAI
-    modelName: "",           // e.g., gpt-3.5-turbo
+    modelProvider: "openai",
+    modelName: "",
     modelApiKey: ""
   });
 
-  // Unified input handler
   const handleChange = (e) => {
     setCharacter({ ...character, [e.target.name]: e.target.value });
   };
 
-  // Submit form and call backend API to add character
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      const response = await fetch(`${API_BASE_URL}/pets`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(character)
-      });
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || "Failed to create pet");
+      // 调用 Electron 提供的 createPet 方法
+      const newPet = await window.electron?.createPet(character);
+
+      if (!newPet || !newPet._id) {
+        throw new Error("创建失败或未返回 ID");
       }
-      const newPet = await response.json();
-      // Pass new character _id to other components via Electron
+
+      // 通知主进程：新角色 ID
       window.electron?.sendCharacterId(newPet._id);
-      
-      // Clear form
+      window.electron?.sendPetsUpdate(newPet);
+
+      // 清空表单
       setCharacter({
         name: "",
         personality: "",
@@ -50,8 +41,7 @@ const AddCharacterPage = () => {
         modelApiKey: ""
       });
     } catch (error) {
-      console.error("Error: " + error.message);
-      // Notify other windows of failure (e.g., pass null)
+      console.error("Error creating pet:", error.message);
       window.electron?.sendCharacterId(null);
     }
   };
@@ -93,7 +83,6 @@ const AddCharacterPage = () => {
           {/* Model-related fields */}
           <div className="flex flex-col space-y-2">
             <div className="flex items-center space-x-4">
-              {/* Model provider dropdown */}
               <div className="flex items-center">
                 <label htmlFor="modelProvider" className="text-gray-700 mr-2">
                   Model Provider:
@@ -109,7 +98,6 @@ const AddCharacterPage = () => {
                   <option value="gemini">Gemini</option>
                 </select>
               </div>
-              {/* Specific model name */}
               <div className="flex items-center">
                 <label htmlFor="modelName" className="text-gray-700 mr-2">
                   Model Name:
@@ -125,7 +113,6 @@ const AddCharacterPage = () => {
                 />
               </div>
             </div>
-            {/* Model API Key */}
             <input
               name="modelApiKey"
               placeholder="Model API Key"

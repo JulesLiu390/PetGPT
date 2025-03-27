@@ -1,39 +1,44 @@
 {
-  "name": "jules-character",
-  "version": "1.0.0",
+  "name": "petgpt",
+  "version": "0.1.0",
   "main": "electron/main.js",
   "scripts": {
-    "unpacked": "yarn build && electron-builder --win --x64 --dir",
-    "dev": "concurrently \"yarn frontend:dev\" \"yarn electron:dev\"",
+    "unpacked": "yarn build && electron-builder --win --ia32 --x64 --dir",
+    "dev": "concurrently \"yarn frontend:dev\" \"yarn electron:dev\" \"yarn backend:dev\"",
     "frontend:dev": "cd frontend && yarn dev",
     "electron:dev": "wait-on http://localhost:5173 && electron .",
-    "build": "cd frontend && yarn build",
-    "dist": "yarn build && electron-builder"
+    "backend:dev": "cd backend && yarn dev",
+    "build": "yarn build:frontend",
+    "build:frontend": "cd frontend && yarn build",
+    "dist": "yarn build && electron-builder",
+    "dist:win": "yarn build && electron-builder --win --ia32 --x64"
   },
   "devDependencies": {
+    "concurrently": "^8.2.0",
     "electron": "^28.0.0",
     "electron-builder": "^24.9.1",
-    "concurrently": "^8.2.0",
     "wait-on": "^7.0.1"
   },
-"build": {
-  "appId": "com.julesliu.chat",
-  "files": [
-    "electron/**/*",
-    "frontend/dist/**/*"
-  ],
-  "directories": {
-    "output": "release"
+  "build": {
+    "appId": "com.julesliu.chat",
+    "files": [
+      "electron/**/*",
+      "frontend/dist/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "extraMetadata": {
+      "main": "electron/main.js"
+    },
+    "mac": {
+      "target": "dmg"
+    },
+    "win": {
+      "target": "nsis"
+    }
   },
-  "extraMetadata": {
-    "main": "electron/main.js"
-  },
-  "mac": {
-    "target": "dmg"
-  },
-  "win": {
-    "target": "nsis"
-  }
-
+  "dependencies": {
+    "uuid": "^11.1.0"
   }
 }

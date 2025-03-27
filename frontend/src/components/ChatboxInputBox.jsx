@@ -3,7 +3,7 @@ import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp } from "react-icons/fa6";
 import { callOpenAI } from '../utlis/openai';
-import { getPet, createConversation, updateConversation, getPetConversations } from '../utlis/api';  // 确保路径正确
+// import { getPet, createConversation, updateConversation, getPetConversations } from '../utlis/api';  // 确保路径正确
 
 export const ChatboxInputBox = () => {
   const inputRef = useRef(null);
@@ -17,25 +17,39 @@ export const ChatboxInputBox = () => {
 
   let send_messages = userMessages;
 
-  // 监听来自 Electron 的角色 ID 信息，并更新本地 characterId
   useEffect(() => {
     const handleCharacterId = (id) => {
-      console.log("Received character ID from Electron:", id);
+      console.log("📩 Received character ID:", id);
       setCharacterId(id);
-      // dispatch({
-      //   type: actionType.SET_MESSAGE,
-      //   userMessages: []
-      // });
+      // alert(id);
     };
-    if (window.electron?.onCharacterId) {
-      window.electron.onCharacterId(handleCharacterId);
-    }
-
-    return () => {
-      // 如果有提供移除接口，则调用：
-      // window.electron.removeCharacterId(handleCharacterId);
-    };
+    window.electron?.onCharacterId(handleCharacterId);
   }, []);
+
+  // 监听来自 Electron 的角色 ID 信息，并更新本地 characterId
+// ✅ 当 characterId 更新后，异步获取 pet 信息，并将所需字段存入 petInfo 状态
+useEffect(() => {
+  if (!characterId) return;
+
+  const fetchPetInfo = async () => {
+    try {
+      const pet = await window.electron.getPet(characterId); // ✅ 替换为 Electron IPC 调用
+      if (pet) {
+        const { _id, name, modelName, personality, modelApiKey, modelProvider } = pet;
+        const info = { _id, name, modelName, personality, modelApiKey, modelProvider };
+        setPetInfo(info);
+        // alert(JSON.stringify(info, null, 2));
+        console.log("Fetched pet info:", info);
+      }
+      
+    } catch (error) {
+      alert("fails")
+      console.error("Error fetching pet info:", error);
+    }
+  };
+
+  fetchPetInfo();
+}, [characterId]);
 
     const fetchConversationById = async (conversationId) => {
       try {
@@ -74,26 +88,26 @@ export const ChatboxInputBox = () => {
   }, []);
 
   // 当 characterId 更新后，异步获取 pet 信息，并将所需字段存入 petInfo 状态
-  useEffect(() => {
-    if (characterId) {
-      const fetchPetInfo = async () => {
-        try {
-          const pet = await getPet(characterId);
-          // alert(characterId)
-          if (pet) {
-            // 提取 pet 的 name 以及其它需要的字段
-            const { _id, name, modelName, personality, modelApiKey, modelProvider } = pet;
-            const info = {_id, name, modelName, personality, modelApiKey, modelProvider };
-            setPetInfo(info);
-            console.log("Fetched pet info:", info);
-          }
-        } catch (error) {
-          console.error("Error fetching pet info:", error);
-        }
-      };
-      fetchPetInfo();
-    }
-  }, [characterId]);
+  // useEffect(() => {
+  //   if (characterId) {
+  //     const fetchPetInfo = async () => {
+  //       try {
+  //         const pet = await getPet(characterId);
+  //         // alert(characterId)
+  //         if (pet) {
+  //           // 提取 pet 的 name 以及其它需要的字段
+  //           const { _id, name, modelName, personality, modelApiKey, modelProvider } = pet;
+  //           const info = {_id, name, modelName, personality, modelApiKey, modelProvider };
+  //           setPetInfo(info);
+  //           console.log("Fetched pet info:", info);
+  //         }
+  //       } catch (error) {
+  //         console.error("Error fetching pet info:", error);
+  //       }
+  //     };
+  //     fetchPetInfo();
+  //   }
+  // }, [characterId]);
 
   const handleChange = (e) => {
     dispatch({
@@ -151,13 +165,23 @@ export const ChatboxInputBox = () => {
         // 如果对话 ID 为空，则新建会话（会话名称取 userText，petId 使用 characterId，历史消息取 userMessages）
         if (!conversationIdRef.current) {
           try {
-            const newConversation = await createConversation(petInfo._id, userText + " with " + petInfo.name, send_messages);
+            // const newConversation = await createConversation(petInfo._id, userText + " with " + petInfo.name, send_messages);
+            const newConversation = await window.electron.createConversation({
+              petId: petInfo._id,
+              title: `${userText} with ${petInfo.name}`,
+              history: send_messages
+            });
+            
             conversationIdRef.current = newConversation._id;
           } catch (error) {
             // alert("Error creating conversation: " + error.message);
           }
         }
-        await updateConversation(conversationIdRef.current, petInfo._id, getPetConversations(conversationIdRef).title, send_messages);
+        await window.electron.updateConversation(conversationIdRef.current, {
+          petId: petInfo._id,
+          title: `${userText} with ${petInfo.name}`,
+          history: send_messages
+        });
     dispatch({ type: actionType.SET_USER_TEXT, userText: "" });
     window.electron?.sendMoodUpdate(replyText.mood);
   };

@@ -3,18 +3,17 @@ import ChatboxTitleBar from './ChatboxTitleBar';
 import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../content/StateProvider';
-import { getRecentConversations, getConversation } from '../utlis/api';
 import { actionType } from '../content/reducer';
 
 export const Chatbox = () => {
   const [{ userMessages }, dispatch] = useStateValue();
   const [conversations, setConversations] = useState([]);
 
-  // 加载最近会话列表
+  // 加载最近会话列表（来自 Electron）
   useEffect(() => {
     const fetchConversations = async () => {
       try {
-        const data = await getRecentConversations();
+        const data = await window.electron.getConversations();
         setConversations(data);
       } catch (error) {
         console.error("Error fetching conversations:", error);
@@ -25,7 +24,7 @@ export const Chatbox = () => {
 
   const fetchConversationById = async (conversationId) => {
     try {
-      return await getConversation(conversationId);
+      return await window.electron.getConversationById(conversationId);
     } catch (error) {
       console.error("Error fetching conversation:", error);
       throw error;
@@ -45,10 +44,6 @@ export const Chatbox = () => {
       type: actionType.SET_MESSAGE,
       userMessages: conversation.history
     });
-    // dispatch({
-    //   type: actionType.,
-    //   userMessages: conversation.history
-    // });
   };
 
   return (

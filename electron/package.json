@@ -3,15 +3,16 @@
   "private": true,
   "version": "0.0.0",
   "main": "main.js",
-"scripts": {
-  "dev": "yarn build:frontend && electron .",
-  "build:frontend": "yarn --cwd ../frontend build",
-  "build": "yarn build:frontend && electron-builder"
-},
+  "scripts": {
+    "dev": "yarn build:frontend && electron .",
+    "build:frontend": "yarn --cwd ../frontend build",
+    "build": "yarn build:frontend && electron-builder"
+  },
   "dependencies": {
     "dotenv": "^16.4.7",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "uuid": "^11.1.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.21.0",
@@ -21,6 +22,7 @@
     "concurrently": "^9.1.2",
     "cross-env": "^7.0.3",
     "electron": "^35.0.3",
+    "electron-builder": "^25.1.8",
     "eslint": "^9.21.0",
     "eslint-plugin-react-hooks": "^5.1.0",
     "eslint-plugin-react-refresh": "^0.4.19",
@@ -36,7 +38,10 @@
     },
     "files": [
       "main.js",
-      "preload.js"
+      "Preload.js",
+      "models/**/*",
+      "data/**/*",
+      "utils/**/*"
     ],
     "win": {
       "target": "nsis"
