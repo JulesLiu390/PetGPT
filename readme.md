@@ -13,8 +13,8 @@ Beyond casual interaction, PetGPT offers:
 
 ## 🗂️ Table of Contents
 
-- [🖼️ Screenshots](#screenshots)  
-- [🧭 User Interface Guide](#user-interface-guide)  
+- [🖼️ Screenshots](#-screenshots)  
+- [🧭 User Interface Guide](#-user-interface-guide)  
 - [🧑‍💻 Development Guide](#-development-guide)  
 - [🧰 Tech Stack](#-tech-stack)  
 
