@@ -151,7 +151,7 @@ export const Character = () => {
       />
 
       {/* 底部可拖拽区域 */}
-      <div className="w-[120px] h-[8px] rounded-full bg-gray-400 opacity-70 shadow-sm draggable" />
+      <div className="mt-3 w-[120px] h-[8px] rounded-full bg-gray-400 opacity-70 shadow-sm draggable" />
     </div>
   );
 };

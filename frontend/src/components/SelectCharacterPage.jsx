@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import SelectCharacterTitleBar from './SelectCharacterTitleBar';
 
-// CustomImage 组件，根据传入的 imageName 决定如何加载图片
 const CustomImage = ({ imageName }) => {
   const [imgSrc, setImgSrc] = useState("");
 
@@ -9,11 +8,9 @@ const CustomImage = ({ imageName }) => {
     const loadImage = async () => {
       try {
         if (imageName === "default") {
-          // 如果 imageName 为 "default"，动态导入默认图片（放在 src/assets 中）
           const module = await import(`../assets/default-normal.png`);
           setImgSrc(module.default);
         } else {
-          // 如果为自定义图片，则调用 electron 接口读取对应 Base64 数据
           const base64Image = await window.electron.readPetImage(`${imageName}-normal.png`);
           setImgSrc(base64Image);
         }
@@ -25,6 +22,30 @@ const CustomImage = ({ imageName }) => {
   }, [imageName]);
 
   return <img src={imgSrc} alt="Character" className="w-12 h-12 rounded object-cover mr-2" />;
+};
+
+const TruncatedText = ({ label, text }) => {
+  const [expanded, setExpanded] = useState(false);
+
+  if (!text) return null;
+
+  const isLong = text.length > 200;
+  const displayText = expanded || !isLong ? text : text.slice(0, 300) + '...';
+
+  return (
+    <div className="text-sm text-gray-600">
+      <span className="font-medium">{label}: </span>
+      {displayText}
+      {isLong && (
+        <button
+          onClick={() => setExpanded(!expanded)}
+          className="ml-1 text-blue-500 hover:underline"
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </div>
+  );
 };
 
 const SelectCharacterPage = () => {
@@ -43,12 +64,10 @@ const SelectCharacterPage = () => {
     }
   };
 
-  // 初次加载角色
   useEffect(() => {
     fetchPets();
   }, []);
 
-  // 监听 pets 更新事件（如果实现了）
   useEffect(() => {
     const petsUpdateHandler = () => {
       console.log("Received pets update");
@@ -59,21 +78,18 @@ const SelectCharacterPage = () => {
       window.electron.onPetsUpdated(petsUpdateHandler);
     }
     return () => {
-      // 可选：清除监听
       // window.electron.removePetsUpdated(petsUpdateHandler);
     };
   }, []);
 
-  // 选择角色
   const handleSelect = (pet) => {
     window.electron?.sendCharacterId(pet._id);
   };
 
-  // 删除角色
   const handleDelete = async (petId) => {
     try {
       await window.electron.deletePet(petId);
-      fetchPets(); // 删除后刷新角色列表
+      fetchPets();
     } catch (error) {
       alert("删除角色失败: " + error.message);
     }
@@ -86,17 +102,14 @@ const SelectCharacterPage = () => {
         <h2 className="text-sm font-semibold mb-2 text-center">Select a Character</h2>
         <div className="grid grid-cols-1 gap-2">
           {pets.map((pet) => (
-            <div key={pet._id} className="flex items-center p-2 bg-white rounded shadow">
-              {/* 使用 CustomImage 根据 pet.imageName 加载图片 */}
+            <div key={pet._id} className="flex items-start p-2 bg-white rounded shadow">
               <CustomImage imageName={pet.imageName} />
-              <div>
+              <div className="flex-1">
                 <div className="text-base font-semibold">{pet.name}</div>
-                <div className="text-sm text-gray-600">Personality: {pet.personality}</div>
-                {pet.appearance && (
-                  <div className="text-sm text-gray-500">Appearance: {pet.appearance}</div>
-                )}
+                <TruncatedText label="Personality" text={pet.personality} />
+                <TruncatedText label="Appearance" text={pet.appearance} />
                 <div className="text-sm text-gray-600">
-                  Model: {pet.modelName || 'N/A'} (Type: {pet.modelType || 'N/A'}) | Provider: {pet.modelProvider || 'N/A'}
+                  <span className="font-medium">Model:</span> {pet.modelName || 'N/A'} (Type: {pet.modelType || 'N/A'}) | Provider: {pet.modelProvider || 'N/A'}
                 </div>
               </div>
               <button
