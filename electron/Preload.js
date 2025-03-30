@@ -57,4 +57,11 @@ contextBridge.exposeInMainWorld('electron', {
 
   sendConversationId: (id) => ipcRenderer.send('conversation-id', id),
   onConversationId: (callback) => ipcRenderer.on('conversation-id', (event, id) => callback(id)),
+
+
+
+  processImage: (base64Image, baseFilename) => ipcRenderer.invoke('process-image', base64Image),
+  onProcessImageResult: (callback) => ipcRenderer.on('process-image-result', (event, filePaths) => callback(filePaths)),
+
+  readPetImage: (fileName) => ipcRenderer.invoke('read-pet-image', fileName)
 });

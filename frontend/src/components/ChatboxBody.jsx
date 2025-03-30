@@ -9,7 +9,6 @@ export const Chatbox = () => {
   const [{ userMessages }, dispatch] = useStateValue();
   const [conversations, setConversations] = useState([]);
 
-  // 加载最近会话列表（来自 Electron）
   useEffect(() => {
     const fetchConversations = async () => {
       try {
@@ -33,17 +32,31 @@ export const Chatbox = () => {
 
   const handleItemClick = async (conv) => {
     const conversation = await fetchConversationById(conv._id);
-    console.log("Loaded conversation:", conversation);
     window.electron?.sendCharacterId(conversation.petId);
     window.electron?.sendConversationId(conv._id);
     dispatch({
       type: actionType.SET_MESSAGE,
-      userMessages: []
-    });
-    dispatch({
-      type: actionType.SET_MESSAGE,
       userMessages: conversation.history
     });
+  };
+
+  const handleDelete = async (conversationId) => {
+    const confirmDelete = window.confirm("Are you sure you want to delete this conversation?");
+    if (!confirmDelete) return;
+
+    try {
+      await window.electron.deleteConversation(conversationId);
+      setConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
+      
+      dispatch({
+        type: actionType.SET_MESSAGE,
+        userMessages: []
+      });
+
+    } catch (error) {
+      console.error("Error deleting conversation:", error);
+      alert("Failed to delete conversation.");
+    }
   };
 
   return (
@@ -54,10 +67,20 @@ export const Chatbox = () => {
           {conversations.map((conv) => (
             <li
               key={conv._id}
-              onClick={() => handleItemClick(conv)}
-              className="hover:bg-gray-200 p-1 rounded cursor-pointer"
+              className="flex justify-between items-center hover:bg-gray-200 p-1 rounded cursor-pointer"
             >
-              {conv.title}
+              <span onClick={() => handleItemClick(conv)} className="flex-grow">
+                {conv.title}
+              </span>
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleDelete(conv._id);
+                }}
+                className="text-xs text-red-500 hover:text-red-700 ml-2"
+              >
+                Delete
+              </button>
             </li>
           ))}
         </ul>

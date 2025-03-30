@@ -5,7 +5,7 @@ const { v4: uuidv4 } = require('uuid');
 
 // 保存路径：Documents/pets.json
 const filename = 'pets.json';
-const filePath = path.join(app.getPath('documents'), filename);
+const filePath = path.join(app.getPath('documents') + '/PetGPT_Data', filename);
 
 // 读取 JSON 数据
 async function readData() {
@@ -26,15 +26,28 @@ async function writeData(data) {
 }
 
 class Pet {
-  constructor(_id, name, personality, appearance, imageName, modelName, modelApiKey, modelProvider) {
+  constructor(
+    _id,
+    name,
+    personality,
+    appearance,
+    imageName,
+    modelProvider,
+    modelName,
+    modelApiKey,
+    modelUrl,
+    isAgent
+  ) {
     this._id = _id || uuidv4();
     this.name = name || '';
     this.personality = personality || '';
     this.appearance = appearance || '';
     this.imageName = imageName || '';
+    this.modelProvider = modelProvider || '';
     this.modelName = modelName || '';
     this.modelApiKey = modelApiKey || '';
-    this.modelProvider = modelProvider || '';
+    this.modelUrl = modelUrl || 'default';
+    this.isAgent = typeof isAgent === 'boolean' ? isAgent : false;
   }
 
   static async findAll() {
@@ -54,9 +67,11 @@ class Pet {
       petData.personality,
       petData.appearance,
       petData.imageName,
+      petData.modelProvider,
       petData.modelName,
       petData.modelApiKey,
-      petData.modelProvider
+      petData.modelUrl,
+      petData.isAgent
     );
     pets.push(newPet);
     await writeData(pets);
@@ -68,6 +83,7 @@ class Pet {
     const index = pets.findIndex(p => p._id === _id);
     if (index === -1) return null;
 
+    // 如果 personality 是对象，则取其 description 属性
     if (updatedPetData.personality && typeof updatedPetData.personality === 'object') {
       updatedPetData.personality = updatedPetData.personality.description || '';
     }

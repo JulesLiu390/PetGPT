@@ -1,6 +1,6 @@
 {
   "name": "petgpt",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "main": "electron/main.js",
   "scripts": {
     "unpacked": "yarn build && electron-builder --win --ia32 --x64 --dir",
@@ -11,7 +11,7 @@
     "build": "yarn build:frontend",
     "build:frontend": "cd frontend && yarn build",
     "dist": "yarn build && electron-builder",
-    "dist:win": "yarn build && electron-builder --win --ia32 --x64"
+    "dist:win64": "yarn build && yarn electron-builder --win --x64"
   },
   "devDependencies": {
     "concurrently": "^8.2.0",
@@ -25,12 +25,14 @@
       "electron/**/*",
       "frontend/dist/**/*"
     ],
+    "asar": true,
     "directories": {
       "output": "release"
     },
     "extraMetadata": {
       "main": "electron/main.js"
     },
+    "icon": "electron/assets/icon.png",
     "mac": {
       "target": "dmg"
     },
@@ -39,6 +41,7 @@
     }
   },
   "dependencies": {
+    "canvas": "^3.1.0",
     "uuid": "^11.1.0"
   }
 }

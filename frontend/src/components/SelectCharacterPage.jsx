@@ -1,6 +1,31 @@
 import React, { useState, useEffect } from 'react';
 import SelectCharacterTitleBar from './SelectCharacterTitleBar';
-import { useStateValue } from '../content/StateProvider';
+
+// CustomImage 组件，根据传入的 imageName 决定如何加载图片
+const CustomImage = ({ imageName }) => {
+  const [imgSrc, setImgSrc] = useState("");
+
+  useEffect(() => {
+    const loadImage = async () => {
+      try {
+        if (imageName === "default") {
+          // 如果 imageName 为 "default"，动态导入默认图片（放在 src/assets 中）
+          const module = await import(`../assets/default-normal.png`);
+          setImgSrc(module.default);
+        } else {
+          // 如果为自定义图片，则调用 electron 接口读取对应 Base64 数据
+          const base64Image = await window.electron.readPetImage(`${imageName}-normal.png`);
+          setImgSrc(base64Image);
+        }
+      } catch (error) {
+        console.error("Error loading image:", error);
+      }
+    };
+    loadImage();
+  }, [imageName]);
+
+  return <img src={imgSrc} alt="Character" className="w-12 h-12 rounded object-cover mr-2" />;
+};
 
 const SelectCharacterPage = () => {
   const [pets, setPets] = useState([]);
@@ -18,12 +43,12 @@ const SelectCharacterPage = () => {
     }
   };
 
-  // 初次加载
+  // 初次加载角色
   useEffect(() => {
     fetchPets();
   }, []);
 
-  // 监听 pets 更新事件（如果你实现了）
+  // 监听 pets 更新事件（如果实现了）
   useEffect(() => {
     const petsUpdateHandler = () => {
       console.log("Received pets update");
@@ -33,14 +58,13 @@ const SelectCharacterPage = () => {
     if (window.electron?.onPetsUpdated) {
       window.electron.onPetsUpdated(petsUpdateHandler);
     }
-
     return () => {
-      // 清除监听（可选）
+      // 可选：清除监听
       // window.electron.removePetsUpdated(petsUpdateHandler);
     };
   }, []);
 
-  // 选择按钮点击事件
+  // 选择角色
   const handleSelect = (pet) => {
     window.electron?.sendCharacterId(pet._id);
   };
@@ -49,25 +73,9 @@ const SelectCharacterPage = () => {
   const handleDelete = async (petId) => {
     try {
       await window.electron.deletePet(petId);
-      fetchPets(); // 删除后刷新
+      fetchPets(); // 删除后刷新角色列表
     } catch (error) {
       alert("删除角色失败: " + error.message);
-    }
-  };
-
-  // 示例保存功能（可以保留）
-  const handleSave = async () => {
-    const data = {
-      name: 'Jules Liu',
-      location: 'Toronto',
-      hobby: ['coding', 'cooking', 'fashion'],
-    };
-
-    const result = await window.electron.writeJSON(data);
-    if (result.success) {
-      alert(`保存成功！文件路径：\n${result.path}`);
-    } else {
-      alert(`保存失败：${result.error}`);
     }
   };
 
@@ -79,11 +87,8 @@ const SelectCharacterPage = () => {
         <div className="grid grid-cols-1 gap-2">
           {pets.map((pet) => (
             <div key={pet._id} className="flex items-center p-2 bg-white rounded shadow">
-              <img
-                src={pet.imageName}
-                alt={pet.name}
-                className="w-12 h-12 rounded object-cover mr-2"
-              />
+              {/* 使用 CustomImage 根据 pet.imageName 加载图片 */}
+              <CustomImage imageName={pet.imageName} />
               <div>
                 <div className="text-base font-semibold">{pet.name}</div>
                 <div className="text-sm text-gray-600">Personality: {pet.personality}</div>

@@ -31,6 +31,7 @@ export const Character = () => {
   const [imgSrc, setImgSrc] = useState(null);
   // 控制是否显示顶部按钮
   const [isShowOptions, setIsShowOptions] = useState(false);
+  const [imageName, setImageName] = useState("default");
 
   // 注册监听主进程发来的 'character-mood-updated' 消息
   useEffect(() => {
@@ -46,26 +47,50 @@ export const Character = () => {
     };
   }, []);
 
+  // 监听角色 ID
+  useEffect(() => {
+    const handleCharacterId = (id) => {
+      console.log("📩 Received character ID:", id);
+      const fetchCharacterImageName = async () => {
+        const pet = await window.electron.getPet(id);
+        setImageName(pet.imageName);        
+      }
+      fetchCharacterImageName();
+    };
+    window.electron?.onCharacterId(handleCharacterId);
+  }, []);
+
   // 根据 characterMood 动态加载对应图片
   useEffect(() => {
     const loadImage = async () => {
       try {
         // 动态导入，类似 ../assets/sample-happy.png
-        const module = await import(`../assets/sample-${characterMood}.png`);
-        setImgSrc(module.default);
+        if(imageName == 'default') {
+          const base64Image = await import(`../assets/default-${characterMood}.png`);
+          setImgSrc(base64Image.default);
+        } else {
+          const base64Image = await window.electron.readPetImage(`${imageName}-${characterMood}.png`);
+          setImgSrc(base64Image);
+        }
+        
       } catch (err) {
         console.error(`Failed to load image for mood: ${characterMood}`, err);
         // 如果失败，回退到 normal
         try {
-          const fallbackModule = await import(`../assets/sample-normal.png`);
-          setImgSrc(fallbackModule.default);
+          if(imageName == 'default') {
+            const base64Image = await import(`../assets/default-normal.png`);
+            setImgSrc(base64Image.default);
+          } else {
+            const base64Image = await window.electron.readPetImage(`${imageName}-normal.png`);
+            setImgSrc(base64Image);
+          }
         } catch (fallbackErr) {
           console.error('Failed to load fallback image:', fallbackErr);
         }
       }
     };
     loadImage();
-  }, [characterMood]);
+  }, [characterMood, imageName]);
 
   // 各种点击事件
   const handleClick = () => {
@@ -88,29 +113,29 @@ export const Character = () => {
       <div className="h-[50px] w-full">
         {isShowOptions && (
           <motion.div
-            className="flex justify-evenly items-center gap-2 py-2"
+            className="flex justify-evenly items-center gap-2 py-2 bg-black/30 rounded-lg p-2"
             initial={{ opacity: 0, y: -10 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: -10 }}
             transition={{ duration: 0.3 }}
           >
             <FaRocketchat
-              title="打开聊天窗口"
+              title="Chat Window"
               onClick={handleClick}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <CgAdd
-              title="发送表情"
+              title="Add new Chatbot"
               onClick={handleClickAddCharacter}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <GoMultiSelect
-              title="查看历史消息"
+              title="Chatbot Library"
               onClick={handleClickSelectCharacter}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <CgHello
-              title="设置机器人语气"
+              title="to be continue..."
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
           </motion.div>
@@ -121,7 +146,7 @@ export const Character = () => {
       <img
         src={imgSrc || ""}
         draggable="false"
-        alt="character"
+        alt=" "
         className="w-[200px] h-[200px] pointer-events-none"
       />
 

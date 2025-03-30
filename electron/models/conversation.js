@@ -3,18 +3,38 @@ const path = require('path');
 const { app } = require('electron');
 const { v4: uuidv4 } = require('uuid');
 
+// 定义数据存储文件夹：用户 Documents 下的 PetGPT_Data 文件夹
+const dataFolderPath = path.join(app.getPath('documents'), 'PetGPT_Data');
+
+// 检查数据存储文件夹是否存在，不存在则创建
+async function ensureDataFolderExists() {
+  try {
+    await fs.access(dataFolderPath);
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      await fs.mkdir(dataFolderPath, { recursive: true });
+      console.log('文件夹已创建：', dataFolderPath);
+    } else {
+      throw error;
+    }
+  }
+}
+
 const filename = 'conversations.json';
-// 保存路径：用户的 Documents 文件夹
-const filePath = path.join(app.getPath('documents'), filename);
+// 拼接最终的文件路径
+const filePath = path.join(dataFolderPath, filename);
 
 /**
  * 读取 JSON 数据
  */
 async function readData() {
+  // 确保数据文件夹存在
+  await ensureDataFolderExists();
   try {
     const content = await fs.readFile(filePath, 'utf-8');
     return JSON.parse(content);
   } catch (err) {
+    // 如果文件不存在，则返回空数组
     if (err.code === 'ENOENT') {
       return [];
     } else {
@@ -27,6 +47,8 @@ async function readData() {
  * 写入 JSON 数据
  */
 async function writeData(data) {
+  // 确保数据文件夹存在
+  await ensureDataFolderExists();
   await fs.writeFile(filePath, JSON.stringify(data, null, 2), 'utf-8');
 }
 

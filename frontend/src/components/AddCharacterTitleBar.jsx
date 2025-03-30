@@ -18,17 +18,12 @@ export const AddCharacterTitleBar = () => {
   };
 
   return (
-    <div className="draggable w-full h-16 flex justify-between items-center p-3 bg-gray-100">
-      <div className="flex-col items-center">
-        <MdCancel 
-          className="no-drag hover:text-gray-800 text-gray-400 cursor-pointer"
-          onClick={handleClose}
-        />
-        <span className="ml-4 text-lg font-semibold text-gray-800">
-          Add Character
-        </span>
-      </div>
-
+    <div
+    className='draggable w-full h-16 flex justify-start p-3'
+    >
+      <MdCancel className='no-drag hover:text-gray-800 text-gray-400 cursor-pointer'
+      onClick={handleClose}
+      ></MdCancel>
     </div>
   );
 };
