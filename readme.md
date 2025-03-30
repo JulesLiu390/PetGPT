@@ -1,13 +1,281 @@
-# PetGPT
+# 🐾 PetGPT
 
-## Introduction
+## ✨ Introduction
 
-PetGPT is a versatile, large-model-powered desktop pet application designed to bring AI companionship right to your desktop. It seamlessly integrates with various AI models (including those from OpenAI and Gemini), supports third-party endpoints, and is set to expand its capabilities with models like Claude and local models via Ollama. Beyond casual interaction, PetGPT offers customizable character appearances and dynamic facial expressions that reflect its conversations.
+PetGPT is a versatile, large-model-powered desktop pet application designed to bring AI companionship right to your desktop. It seamlessly integrates with various AI models (including 🤖 OpenAI and 🔮 Gemini), supports third-party endpoints, and is set to expand its capabilities with models like 🧠 Claude and local models via 🧱 Ollama. 
 
-## Screenshot
-![Chat with a Virtual Desktop Pet](https://i.imgur.com/P1UCquU.png)
-![Add Chatbot Interface](https://i.imgur.com/FYTFtqw.png)
-![Full Screen Interface with Chats History](https://i.imgur.com/JasHJSX.png)
+Beyond casual interaction, PetGPT offers:
+- 🎨 Customizable character appearances  
+- 😊 Dynamic facial expressions that reflect the tone of conversations  
+- 🧩 Agent mode support for task-based AI companions  
 
-## User Guide
-![img](https://i.imgur.com/nmWsdaA.png)
+---
+
+## 🗂️ Table of Contents
+
+- [🖼️ Screenshots](#screenshots)  
+- [🧭 User Interface Guide](#user-interface-guide)  
+- [🧑‍💻 Development Guide](#-development-guide)  
+- [🧰 Tech Stack](#-tech-stack)  
+
+---
+
+## 🖼️ Screenshots
+
+Here’s a glimpse of PetGPT in action:
+
+![Chat with a Virtual Desktop Pet](https://i.imgur.com/P1UCquU.png)  
+*Interacting with your AI pet in real time*
+
+![Add Chatbot Interface](https://i.imgur.com/FYTFtqw.png)  
+*Create and customize new AI characters*
+
+![Full Screen Interface with Chats History](https://i.imgur.com/JasHJSX.png)  
+*Full-screen view with history panel*
+
+---
+
+## 🧭 User Interface Guide
+
+In the top-center toolbar, you will find three main buttons that help you control and manage your PetGPT experience:
+
+![Toolbar Buttons](https://i.imgur.com/nmWsdaA.png)
+
+1. 💬 **Conversation Button**  
+   Toggle the chat window to start or continue conversations with your selected character.
+
+2. ➕ **Add Chatbot Button**  
+   Open the character creation panel where you can design a new AI companion, customize their appearance, and set up their personality.
+
+3. 📋 **Select Chatbot Button**  
+   Choose from your existing characters to switch personalities, models, or tasks quickly.
+
+---
+
+### 🪄 Show/Hide Shortcut
+
+You can **show or hide PetGPT at any time** using the following keyboard shortcut:
+
+⇧ Shift + Space
+
+## 🧙‍♀️ Creating and Using a New Character
+
+PetGPT allows you to create fully customizable characters powered by different AI models. Here's how to create and interact with your own unique chatbot companion.
+
+---
+
+### 1. Add a New Character
+
+Click the ➕ **Add Chatbot** button from the top toolbar.
+
+![Add Character Screen](https://i.imgur.com/aGyQh6f.png)
+
+Fill in the fields:
+
+- **Name**: Set a unique name for your character (e.g., `JulesLiu`).
+- **Personality Description**: Describe your character in second-person to shape their tone and behavior.
+- **Character Image**: Click `Choose Character Image` to upload a custom avatar and click `Process Image` to process it into proprite mode. Or you can use default Character Image(Makise Kurisu).
+#### 🖼️ Character Image Format
+
+To enable expressive reactions during conversation, your image should follow this format:
+
+- **Dimensions**: `1024 x 1024` pixels
+- **Layout**: A 2x2 grid with **four facial expressions** arranged:
+  
+  | Expression | Position        |
+  |------------|-----------------|
+  | Neutral    | Top-left        |
+  | Happy      | Top-right       |
+  | Thinking   | Bottom-left     |
+  | Angry      | Bottom-right    |
+
+Example:
+
+![Expression Guide](https://i.imgur.com/LYliuT7.png)
+- **Model Info**: Choose the model provider (`OpenAI`, `Gemini`, etc.), model name (`gpt-4o`), and optionally set a custom API endpoint.
+- Use the green **Test API Key & Model** button to validate your setup.
+
+When you're done, click `Save` to add your character to the list.
+
+---
+
+### 2. Select a Character
+
+Click the 📋 **Select Chatbot** button from the top toolbar to view all your saved characters.
+
+![Character Selection](https://i.imgur.com/OKuJFUz.png)
+
+You can:
+
+- Click **Select** to activate a character.
+- Click **Delete** to remove a character.
+- View a summary of each character’s personality and model settings.
+
+---
+
+### 3. Start Chatting!
+
+Once selected, your character will appear in the chat window. Type a message to start the conversation!
+
+![Chat With JulesLiu](https://i.imgur.com/DaPml4U.png)
+
+Characters will respond in their own style, complete with facial expressions and moods based on their personality and tone.
+
+---
+
+### ✨ Tip: Show/Hide PetGPT Anytime
+
+Use the following shortcut to quickly toggle the PetGPT interface:
+
+⇧ Shift + Space
+
+### 4. Fullscreen Mode & Conversation History
+
+Click the ⬜ **Expand** button at the top of the chat window to enter fullscreen mode.
+
+![Fullscreen Mode](https://i.imgur.com/JasHJSX.png)
+
+In fullscreen mode, you gain access to:
+
+- 🕰️ **Conversation History**: All your past interactions are neatly listed on the left side, labeled by their latest message or topic. This allows you to quickly revisit earlier discussions.
+- 📂 **Multi-Chat Management**: Easily switch between chats with different characters.
+- 📌 **Persistent Memory**: Each conversation retains its own context, so your character remembers what’s been said in that specific session.
+
+This makes PetGPT ideal for both quick one-off chats and long-running dialogues.
+
+## 🧑‍💻 Development Guide
+
+This section explains how to set up the development environment, run the app in development mode, and build it for production.
+
+---
+
+### 📁 Project Structure
+
+The project has two main directories in the root:
+
+```
+.
+├── electron     # Electron main process (desktop wrapper & backend)
+├── frontend     # React-based frontend interface
+```
+
+Detailed structure:
+
+```
+electron/
+├── assets/         # Character images, models, and static assets
+├── dist/           # Compiled Electron build output
+├── models/         # Model configuration and local model data
+├── node_modules/
+├── main.js         # Electron entry point
+├── preload.js      # Context bridge for frontend-electron communication
+├── package.json
+├── yarn.lock
+
+frontend/
+├── dist/           # Compiled frontend output (used by Electron)
+├── public/         # Public static files
+├── src/
+│   ├── assets/     # Static images, styles
+│   ├── components/ # React components
+│   ├── content/    # Page-level content or views
+│   └── utils/      # Utility functions
+├── node_modules/
+├── package.json
+└── yarn.lock
+```
+
+---
+
+### 📦 Install Dependencies
+
+Install dependencies in the following order:
+
+```bash
+# 1. Root dependencies
+yarn install
+
+# 2. Electron dependencies
+cd electron
+yarn install
+
+# 3. Frontend dependencies
+cd ../frontend
+yarn install
+```
+
+---
+
+### 🧪 Start in Development Mode
+
+To run the application locally:
+
+```bash
+cd electron
+yarn dev
+```
+
+This starts the Electron shell and loads the frontend from the `frontend/dist` directory.
+
+> ⚠️ Make sure the frontend has been built at least once before running.
+
+---
+
+### 🏗️ Build for Production
+
+From the root directory, build and package the app with:
+
+```bash
+yarn build     # Builds the frontend (React)
+yarn dist      # Builds the Electron app for macOS (default)
+```
+
+#### 🪟 Windows Build
+
+To build a Windows 64-bit executable:
+
+```bash
+yarn dist:win64
+```
+
+> 💡 Requires Windows or proper cross-platform setup with `wine` on macOS/Linux.
+
+---
+
+## 🧰 Tech Stack
+
+PetGPT is built using a modern full-stack architecture that combines Electron and React, with powerful build tools and styling utilities to support a responsive and interactive AI experience.
+
+### 🖥️ Desktop Shell: Electron
+
+- [`electron`](https://www.electronjs.org/): Used as the cross-platform desktop app shell.
+- [`electron-builder`](https://www.electron.build/): For packaging and building native installers for macOS and Windows.
+- Custom `Preload.js` script to securely expose limited APIs to the frontend.
+
+### 🌐 Frontend: React + Vite
+
+- [`react`](https://react.dev/): UI rendering framework.
+- [`vite`](https://vitejs.dev/): Fast frontend tooling and build system.
+- [`react-router-dom`](https://reactrouter.com/): Client-side routing.
+- [`react-markdown`](https://github.com/remarkjs/react-markdown) + [`remark-gfm`](https://github.com/remarkjs/remark-gfm): For rendering chat messages with Markdown and GitHub-flavored markdown support.
+- [`highlight.js`](https://highlightjs.org/): Code block syntax highlighting.
+- [`zod`](https://zod.dev/): Schema validation.
+- [`openai`](https://www.npmjs.com/package/openai): OpenAI API client for interacting with GPT models.
+
+### 🎨 Styling
+
+- [`tailwindcss`](https://tailwindcss.com/): Utility-first CSS framework.
+- [`@tailwindcss/vite`](https://tailwindcss.com/docs/guides/vite): Tailwind integration with Vite.
+- [`motion`](https://motion.dev/): Animation library used for chat transitions and UI interactions.
+
+### 📦 Tooling & Dev Utilities
+
+- [`dotenv`](https://www.npmjs.com/package/dotenv): Environment variable management.
+- [`eslint`](https://eslint.org/): Linting for consistent code quality.
+- [`concurrently`](https://www.npmjs.com/package/concurrently): For running multiple processes in parallel.
+- [`wait-on`](https://www.npmjs.com/package/wait-on): For syncing frontend/backend build steps.
+- [`canvas`](https://www.npmjs.com/package/canvas): Image rendering and manipulation.
+
+---
+
+> 🧠 Note: The project is modular and can support additional AI providers (e.g. Gemini, Claude, Ollama) via configurable model backends.
