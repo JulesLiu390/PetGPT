@@ -2,7 +2,7 @@ import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp } from "react-icons/fa6";
-import { callOpenAI, callGemini } from '../utlis/openai';
+import { callOpenAILib } from '../utlis/openai';
 
 export const ChatboxInputBox = () => {
   const inputRef = useRef(null);
@@ -127,19 +127,19 @@ export const ChatboxInputBox = () => {
       if (petInfo.isAgent) {
         systemContent += "请在回答中保持角色特点，生成回复内容。";
       } else {
-        systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)。当你认为用户的内容冒犯到你时，请愤怒！除非提问带有明显的正面评价，否则保持normal。";
+        systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
+        // systemContent += "请在回答中保持角色特点，生成回复内容。";
       }
       const systemPrompt = { role: "system", content: systemContent };
       fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
     } else {
       fullMessages = [...userMessages, { role: "user", content: userText }];
     }
-    let reply = null;
-    if(petInfo.modelProvider == 'openai') {
-      reply = await callOpenAI(fullMessages, petInfo.modelApiKey, petInfo.modelName, petInfo.modelUrl);
-    } else {
-      reply = await callGemini(fullMessages, petInfo.modelApiKey, petInfo.modelName);
-    }
+    // let reply = null;
+    const reply = await callOpenAILib(
+      fullMessages, 
+      petInfo.modelProvider, 
+      petInfo.modelApiKey, petInfo.modelName, petInfo.modelUrl);
     const botReply = { role: "assistant", content: reply.content };
   
     dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });

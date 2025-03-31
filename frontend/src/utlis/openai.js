@@ -8,12 +8,19 @@ const StructuredResponseSchema = z.object({
 });
 
 // 定义不支持结构化输出的模型列表
-const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo"];
+const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
 
-export const callOpenAI = async (messages, apiKey, model, baseURL) => {
+
+
+export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
+
   if(baseURL == "default") {
-    baseURL = "https://api.openai.com/v1"
+    if(provider == "openai") {
+      baseURL = "https://api.openai.com/v1";
+    } else {
+      baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
+    }
   } else {
     baseURL += '/v1'
   }
@@ -46,41 +53,5 @@ export const callOpenAI = async (messages, apiKey, model, baseURL) => {
   } catch (error) {
     console.error("OpenAI 请求出错：", error);
     return error;
-  }
-};
-
-export const callGemini = async (messages, apiKey, model) => {
-  // Gemini API 的兼容性端点
-  const geminiBaseURL = "https://generativelanguage.googleapis.com/v1beta/openai";
-
-  const openai = new OpenAI({
-      apiKey: apiKey,
-      baseURL: geminiBaseURL,
-      dangerouslyAllowBrowser: true,
-  });
-
-  try {
-    if (notSupportedModels.includes(model)) {
-      // 模型不支持结构化输出，采用普通调用并人工构造 JSON 回复，情绪默认 normal
-      const chatCompletion = await openai.chat.completions.create({
-        model: model,
-        messages: messages,
-      });
-      return {
-        content: chatCompletion.choices[0].message.content,
-        mood: "normal",
-      };
-    } else {
-      // 支持结构化输出
-      const chatCompletion = await openai.beta.chat.completions.parse({
-        model: model,
-        messages: messages,
-        response_format: zodResponseFormat(StructuredResponseSchema, "response"),
-      });
-      return chatCompletion.choices[0].message.parsed;
-    }
-  } catch (error) {
-      console.error("Gemini 请求出错：", error);
-      return error;
   }
 };

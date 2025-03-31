@@ -1,6 +1,7 @@
 {
   "name": "petgpt",
   "version": "0.1.2",
+  "license": "MIT",
   "main": "electron/main.js",
   "scripts": {
     "unpacked": "yarn build && electron-builder --win --ia32 --x64 --dir",
@@ -11,7 +12,8 @@
     "build": "yarn build:frontend",
     "build:frontend": "cd frontend && yarn build",
     "dist": "yarn build && electron-builder",
-    "dist:win64": "yarn build && yarn electron-builder --win --x64"
+    "dist:win64": "yarn build && electron-builder --win --x64",
+    "dist:arch": "yarn build && electron-builder --linux pacman --x64"
   },
   "devDependencies": {
     "concurrently": "^8.2.0",
@@ -38,10 +40,19 @@
     },
     "win": {
       "target": "nsis"
+    },
+    "linux": {
+      "target": "pacman",           
+      "category": "Utility"
     }
   },
   "dependencies": {
     "canvas": "^3.1.0",
     "uuid": "^11.1.0"
-  }
+  },
+  "author": {
+  "name": "Jules Liu",
+  "email": "liunxryojeen@gmail.com"
+},
+"description": "A cute Electron pet chat app with GPT inside."
 }

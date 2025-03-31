@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import AddCharacterTitleBar from "./AddCharacterTitleBar";
-import { callOpenAI, callGemini } from "../utlis/openai"; // ✅ Import OpenAI utility
+import { callOpenAILib} from "../utlis/openai"; // ✅ Import OpenAI utility
 import defaultNormal from '../assets/default-normal.png';
 
 
@@ -125,20 +125,21 @@ const AddCharacterPage = () => {
       messages.push({ role: "user", content: "Who are you?" });
       let result = null;
 
-      if(character.modelProvider=='openai') {
-        result = await callOpenAI(
+      // if(character.modelProvider=='openai') {
+        result = await callOpenAILib(
           messages,
+          character.modelProvider,
           character.modelApiKey,
           character.modelName,
           character.modelUrl
         );
-      } else {
-        result = await callGemini(
-          messages,
-          character.modelApiKey,
-          character.modelName,
-        );
-      }
+      // } else {
+      //   result = await callGemini(
+      //     messages,
+      //     character.modelApiKey,
+      //     character.modelName,
+      //   );
+      // }
       
       if (!result || typeof result !== "object" || typeof result.content === "undefined") {
         setTestResult(`Failed: ${JSON.stringify(result)}`);
