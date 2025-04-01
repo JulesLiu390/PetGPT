@@ -1,8 +1,7 @@
 import React, { useState } from "react";
 import AddCharacterTitleBar from "./AddCharacterTitleBar";
-import { callOpenAILib} from "../utlis/openai"; // ✅ Import OpenAI utility
+import { callOpenAILib } from "../utlis/openai"; // ✅ Import OpenAI utility
 import defaultNormal from '../assets/default-normal.png';
-
 
 const AddCharacterPage = () => {
   const [character, setCharacter] = useState({
@@ -125,21 +124,13 @@ const AddCharacterPage = () => {
       messages.push({ role: "user", content: "Who are you?" });
       let result = null;
 
-      // if(character.modelProvider=='openai') {
-        result = await callOpenAILib(
-          messages,
-          character.modelProvider,
-          character.modelApiKey,
-          character.modelName,
-          character.modelUrl
-        );
-      // } else {
-      //   result = await callGemini(
-      //     messages,
-      //     character.modelApiKey,
-      //     character.modelName,
-      //   );
-      // }
+      result = await callOpenAILib(
+        messages,
+        character.modelProvider,
+        character.modelApiKey,
+        character.modelName,
+        character.modelUrl
+      );
       
       if (!result || typeof result !== "object" || typeof result.content === "undefined") {
         setTestResult(`Failed: ${JSON.stringify(result)}`);
@@ -165,10 +156,7 @@ const AddCharacterPage = () => {
       <div className="sticky top-0 z-10">
         <AddCharacterTitleBar />
       </div>
-      <div className="text-center">
-        <span>Add Character</span>
-      </div>
-      <div className="w-[90%] p-2 mx-auto bg-gray-50 rounded-lg shadow">
+      <div className="w-[90%] p-2 mt-5 mx-auto bg-gray-50 rounded-lg shadow">
         <form onSubmit={handleSubmit} className="space-y-2 text-sm">
           <input
             name="name"
@@ -221,14 +209,14 @@ const AddCharacterPage = () => {
             <button
               type="button"
               onClick={() => document.getElementById("fileInput").click()}
-              className="mt-2 bg-blue-500 text-white py-1 px-3 rounded"
+              className="mt-2 bg-gradient-to-r from-blue-500 to-blue-700 text-white py-2 px-4 rounded shadow hover:from-blue-600 hover:to-blue-800 transition-colors duration-300"
             >
               Choose Character Image
             </button>
             <button
               type="button"
               onClick={handleProcessImage}
-              className="mt-2 ml-2 bg-indigo-500 text-white py-1 px-3 rounded"
+              className="mt-2 ml-2 bg-gradient-to-r from-indigo-500 to-indigo-700 text-white py-2 px-4 rounded shadow hover:from-indigo-600 hover:to-indigo-800 transition-colors duration-300"
             >
               Process Image
             </button>
@@ -238,9 +226,9 @@ const AddCharacterPage = () => {
           <div className="mt-2">
             <p className="text-sm">Character Image:</p>
             {processedImagePaths.length > 0 ? (
-              <img src={processedImagePaths[0]} alt="Processed Character" className="w-40" />
+              <img src={processedImagePaths[0]} alt="Processed Character" draggable="false" className="w-40" />
             ) : (
-              <img src={defaultNormal} alt="Default Character" className="w-40 h-40 border" />
+              <img src={defaultNormal} alt="Default Character" draggable="false" className="w-40 h-40 border" />
             )}
           </div>
 
@@ -274,14 +262,22 @@ const AddCharacterPage = () => {
                   Model Provider:
                 </label>
                 <select
-                  id="modelProvider"
                   name="modelProvider"
                   value={character.modelProvider}
-                  onChange={handleChange}
+                  onChange={(e) => {
+                    const newProvider = e.target.value;
+                    setCharacter((prev) => ({
+                      ...prev,
+                      modelProvider: newProvider,
+                      modelUrl: newProvider === "others" ? "" : "default"
+                    }));
+                  }}
                   className="p-1 border rounded"
                 >
                   <option value="openai">OpenAI</option>
                   <option value="gemini">Gemini</option>
+                  <option value="anthropic">Anthropic</option>
+                  <option value="others">Others</option>
                 </select>
               </div>
               <div className="flex items-center">
@@ -299,6 +295,7 @@ const AddCharacterPage = () => {
                 />
               </div>
             </div>
+            <label className="text-gray-700">If you want to use local ollama model, please select others.</label>
 
             <input
               name="modelApiKey"
@@ -311,15 +308,8 @@ const AddCharacterPage = () => {
             {/* Model URL 选择 */}
             <div className="flex items-center space-x-4">
               <label className="text-gray-700">Model URL:</label>
-              <select
-                value={modelUrlType}
-                onChange={handleModelUrlTypeChange}
-                className="p-1 border rounded"
-              >
-                <option value="default">Default</option>
-                <option value="custom">Custom</option>
-              </select>
-              {modelUrlType === "custom" && (
+              {character.modelProvider === "others" ? (
+                // 如果模型是 others，直接显示自定义 URL 输入框
                 <input
                   name="modelUrl"
                   placeholder="https://your-model-api.com"
@@ -327,6 +317,26 @@ const AddCharacterPage = () => {
                   onChange={handleChange}
                   className="flex-1 p-1 border rounded"
                 />
+              ) : (
+                <>
+                  <select
+                    value={modelUrlType}
+                    onChange={handleModelUrlTypeChange}
+                    className="p-1 border rounded"
+                  >
+                    <option value="default">Default</option>
+                    <option value="custom">Custom</option>
+                  </select>
+                  {modelUrlType === "custom" && (
+                    <input
+                      name="modelUrl"
+                      placeholder="https://your-model-api.com"
+                      value={character.modelUrl}
+                      onChange={handleChange}
+                      className="flex-1 p-1 border rounded"
+                    />
+                  )}
+                </>
               )}
             </div>
 

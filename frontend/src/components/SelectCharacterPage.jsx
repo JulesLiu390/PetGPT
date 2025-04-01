@@ -84,6 +84,7 @@ const SelectCharacterPage = () => {
 
   const handleSelect = (pet) => {
     window.electron?.sendCharacterId(pet._id);
+    alert("Character Selected")
   };
 
   const handleDelete = async (petId) => {

@@ -63,5 +63,7 @@ contextBridge.exposeInMainWorld('electron', {
   processImage: (base64Image, baseFilename) => ipcRenderer.invoke('process-image', base64Image),
   onProcessImageResult: (callback) => ipcRenderer.on('process-image-result', (event, filePaths) => callback(filePaths)),
 
-  readPetImage: (fileName) => ipcRenderer.invoke('read-pet-image', fileName)
+  readPetImage: (fileName) => ipcRenderer.invoke('read-pet-image', fileName),
+  changeSettingsWindow: () => ipcRenderer.send("change-settings-window")
+
 });

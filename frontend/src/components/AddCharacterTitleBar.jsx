@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { MdCancel } from 'react-icons/md';
 
+
 export const AddCharacterTitleBar = () => {
   const [apiSelection, setApiSelection] = useState('openai');
   const [modelName, setModelName] = useState('');
@@ -19,11 +20,14 @@ export const AddCharacterTitleBar = () => {
 
   return (
     <div
-    className='draggable w-full h-16 flex justify-start p-3'
+    className='draggable w-full h-12 flex justify-start p-3 bg-[rgba(255,255,255,0.8)]'
     >
       <MdCancel className='no-drag hover:text-gray-800 text-gray-400 cursor-pointer'
       onClick={handleClose}
       ></MdCancel>
+            <div className='h-full w-full flex items-center justify-center'>
+      <h2 className='select-none'>ADD CHARACTER</h2>
+      </div>
     </div>
   );
 };

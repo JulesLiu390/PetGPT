@@ -3,6 +3,8 @@ import { motion } from 'framer-motion';
 import { FaRocketchat } from "react-icons/fa";
 import { CgAdd, CgHello } from "react-icons/cg";
 import { GoMultiSelect } from "react-icons/go";
+import { IoIosSettings } from "react-icons/io";
+
 
 
 
@@ -102,6 +104,9 @@ export const Character = () => {
   const handleClickSelectCharacter = () => {
     window.electron?.changeSelectCharacterWindow();
   };
+  const handleClickSettings = () => {
+    window.electron?.changeSettingsWindow();
+  }
 
   return (
     <div
@@ -134,8 +139,9 @@ export const Character = () => {
               onClick={handleClickSelectCharacter}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
-            <CgHello
+            <IoIosSettings
               title="to be continue..."
+              onClick={handleClickSettings}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
           </motion.div>

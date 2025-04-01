@@ -4,6 +4,7 @@ import { HashRouter, Routes, Route } from "react-router-dom";
 import Character from './Character';
 import AddCharacterPage from './AddCharacterPage';
 import SelectCharacterPage from './SelectCharacterPage';
+import SettingsPage from './SettingsPage';
 
 
 
@@ -21,6 +22,7 @@ function App() {
           <Route path="/character" element={<Character />} />
           <Route path="/addCharacter" element={<AddCharacterPage />} />
           <Route path="/selectCharacter" element={<SelectCharacterPage />} />
+          <Route path="/settings" element={<SettingsPage />} />
         </Routes>
   )
 }

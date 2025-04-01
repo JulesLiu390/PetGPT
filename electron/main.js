@@ -3,148 +3,97 @@ const path = require('path');
 const fs = require('fs');
 const Pet = require('./models/pet');
 const Conversation = require('./models/conversation.js');
-
-
-// IPC 处理：读取文档目录下 PetGPT_Data/Images 中的图片
-ipcMain.handle('read-pet-image', async (event, fileName) => {
-  try {
-    // 获取用户文档目录
-    const documentsPath = app.getPath('documents');
-    const imagePath = path.join(documentsPath, 'PetGPT_Data', 'Images', fileName);
-
-    if (!fs.existsSync(imagePath)) {
-      throw new Error(`File does not exist: ${imagePath}`);
-    }
-    // 读取图片为 Buffer
-    const buffer = fs.readFileSync(imagePath);
-    // 转换为 Base64，并加上 MIME 前缀（此处假设图片为 PNG）
-    const base64Image = `data:image/png;base64,${buffer.toString('base64')}`;
-    return base64Image;
-  } catch (err) {
-    console.error('读取图片错误:', err);
-    throw err;
-  }
-});
-
-
 const { sliceImageToFiles } = require('./models/image_processor.js');
-
-// 监听渲染进程的处理请求
-ipcMain.handle('process-image', async (event, base64Image) => {
-  try {
-    const result = await sliceImageToFiles(base64Image);
-    // result 形如 { uuid: 'xxx-xxx', paths: ['/path/to/uuid-normal.png', ...] }
-    return result;
-  } catch (err) {
-    console.error('图片处理出错:', err);
-    throw err;
-  }
-});
-
-// ✅ Pet 相关
-ipcMain.handle('get-pets', async () => {
-  return await Pet.findAll();
-});
-
-ipcMain.handle('create-pet', async (event, petData) => {
-  return await Pet.create(petData);
-});
-
-ipcMain.handle('update-pet', async (event, { id, updatedData }) => {
-  return await Pet.update(id, updatedData);
-});
-
-ipcMain.handle('delete-pet', async (event, id) => {
-  return await Pet.delete(id);
-});
-
-ipcMain.handle('get-pet-by-id', async (event, id) => {
-  try {
-    const pet = await Pet.findById(id);
-    return pet;
-  } catch (error) {
-    console.error("Failed to get pet by id:", error);
-    throw error;
-  }
-});
-
-// ✅ Conversation 相关
-ipcMain.handle('get-conversations', async () => {
-  return await Conversation.findAll();
-});
-
-ipcMain.handle('create-conversation', async (event, convData) => {
-  return await Conversation.create(convData);
-});
-
-ipcMain.handle('update-conversation', async (event, { id, updatedData }) => {
-  return await Conversation.update(id, updatedData);
-});
-
-ipcMain.handle('delete-conversation', async (event, id) => {
-  return await Conversation.delete(id);
-});
-
-ipcMain.handle('get-conversation-by-id', async (event, id) => {
-  return await Conversation.findById(id);
-});
-
-// 可选：前端通知主进程设置当前选择
-ipcMain.on('send-character-id', (event, id) => {
-  console.log("Main received character ID:", id);
-  BrowserWindow.getAllWindows().forEach(win => {
-    win.webContents.send('character-id', id); // ✅ 发给所有窗口
-  });
-});
-
-ipcMain.on('send-conversation-id', (event, id) => {
-  console.log('[主进程] 当前会话 ID:', id);
-});
-
-const isDev = !app.isPackaged;
 
 let chatWindow;
 let characterWindow;
 let AddCharacterWindow;
 let selectCharacterWindow;
-
+let settingsWindow;
 let screenHeight = 0;
 
 let sharedState = {
   characterMood: 'neutral'
 };
 
+// ============ IPC handlers ============ //
+
+// 读取图片
+ipcMain.handle('read-pet-image', async (event, fileName) => {
+  try {
+    const documentsPath = app.getPath('documents');
+    const imagePath = path.join(documentsPath, 'PetGPT_Data', 'Images', fileName);
+    if (!fs.existsSync(imagePath)) throw new Error(`File does not exist: ${imagePath}`);
+    const buffer = fs.readFileSync(imagePath);
+    return `data:image/png;base64,${buffer.toString('base64')}`;
+  } catch (err) {
+    console.error('读取图片错误:', err);
+    throw err;
+  }
+});
+
+// 处理图片
+ipcMain.handle('process-image', async (event, base64Image) => {
+  try {
+    return await sliceImageToFiles(base64Image);
+  } catch (err) {
+    console.error('图片处理出错:', err);
+    throw err;
+  }
+});
+
+// Pet 相关
+ipcMain.handle('get-pets', async () => await Pet.findAll());
+ipcMain.handle('create-pet', async (event, data) => await Pet.create(data));
+ipcMain.handle('update-pet', async (event, { id, updatedData }) => await Pet.update(id, updatedData));
+ipcMain.handle('delete-pet', async (event, id) => await Pet.delete(id));
+ipcMain.handle('get-pet-by-id', async (event, id) => {
+  try {
+    return await Pet.findById(id);
+  } catch (err) {
+    console.error("Failed to get pet by id:", err);
+    throw err;
+  }
+});
+
+// Conversation 相关
+ipcMain.handle('get-conversations', async () => await Conversation.findAll());
+ipcMain.handle('create-conversation', async (event, data) => await Conversation.create(data));
+ipcMain.handle('update-conversation', async (event, { id, updatedData }) => await Conversation.update(id, updatedData));
+ipcMain.handle('delete-conversation', async (event, id) => await Conversation.delete(id));
+ipcMain.handle('get-conversation-by-id', async (event, id) => await Conversation.findById(id));
+
+// IPC 通信
+ipcMain.on('send-character-id', (event, id) => {
+  console.log("Main received character ID:", id);
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('character-id', id));
+});
+
+ipcMain.on('send-conversation-id', (event, id) => {
+  console.log('[主进程] 当前会话 ID:', id);
+});
+
+// Mood 更新
 ipcMain.on('update-character-mood', (event, mood) => {
-  console.log("Received mood update from renderer:", mood);
+  console.log("Received mood update:", mood);
   sharedState.characterMood = mood;
-  BrowserWindow.getAllWindows().forEach(win => {
-    win.webContents.send('character-mood-updated', mood);
-  });
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('character-mood-updated', mood));
 });
 
-ipcMain.on('update-pets', (event, data) => {
-  console.log("Received pets update request from renderer.");
-  BrowserWindow.getAllWindows().forEach(win => {
-    win.webContents.send('pets-updated', "pets updated");
-  });
+ipcMain.on('update-pets', () => {
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('pets-updated', "pets updated"));
 });
 
-ipcMain.on('character-id', (event, characterId) => {
-  console.log("Main received character ID:", characterId);
-  BrowserWindow.getAllWindows().forEach(win => {
-    win.webContents.send('character-id', characterId);
-  });
+ipcMain.on('character-id', (event, id) => {
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('character-id', id));
 });
 
-ipcMain.on('conversation-id', (event, conversationId) => {
-  console.log("Main received conversation ID:", conversationId);
-  BrowserWindow.getAllWindows().forEach(win => {
-    win.webContents.send('conversation-id', conversationId);
-  });
+ipcMain.on('conversation-id', (event, id) => {
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('conversation-id', id));
 });
 
-// 拖拽事件
-ipcMain.on('drag-window', (event, { deltaX, deltaY, mood }) => {
+// 拖拽移动窗口
+ipcMain.on('drag-window', (event, { deltaX, deltaY }) => {
   const win = BrowserWindow.fromWebContents(event.sender);
   if (win) {
     const [x, y] = win.getPosition();
@@ -152,20 +101,9 @@ ipcMain.on('drag-window', (event, { deltaX, deltaY, mood }) => {
   }
 });
 
-// 关闭/隐藏 chat 窗口
-ipcMain.on("hide-chat-window", () => {
-  if (chatWindow) {
-    chatWindow.unmaximize();
-    chatWindow.hide();
-  }
-});
-
-// 其他 show/hide 事件
-ipcMain.on("show-chat-window", () => {
-  if (chatWindow) {
-    chatWindow.show();
-  }
-});
+// 窗口显示/隐藏控制
+ipcMain.on("hide-chat-window", () => chatWindow?.hide());
+ipcMain.on("show-chat-window", () => chatWindow?.show());
 
 ipcMain.on("change-chat-window", () => {
   if (!chatWindow) return;
@@ -180,19 +118,11 @@ ipcMain.on("change-chat-window", () => {
 
 ipcMain.on("change-addCharacter-window", () => {
   if (!AddCharacterWindow || !characterWindow) return;
-
   if (AddCharacterWindow.isVisible()) {
     AddCharacterWindow.hide();
   } else {
-    const charBounds = characterWindow.getBounds();
-    const newX = charBounds.x; 
-    const newY = charBounds.y - 450; // 450 对应 AddCharacterWindow 的高度
-    AddCharacterWindow.setBounds({
-      x: newX,
-      y: newY,
-      width: 600,
-      height: 450
-    });
+    const { x, y } = characterWindow.getBounds();
+    AddCharacterWindow.setBounds({ x, y: y - 450, width: 600, height: 450 });
     AddCharacterWindow.show();
     AddCharacterWindow.focus();
   }
@@ -200,46 +130,49 @@ ipcMain.on("change-addCharacter-window", () => {
 
 ipcMain.on("change-selectCharacter-window", () => {
   if (!selectCharacterWindow || !characterWindow) return;
-
   if (selectCharacterWindow.isVisible()) {
     selectCharacterWindow.hide();
   } else {
-    const charBounds = characterWindow.getBounds();
-    const newX = charBounds.x;
-    const newY = charBounds.y - 400; // 假设 selectCharacterWindow 高度为 400
-    selectCharacterWindow.setBounds({
-      x: newX,
-      y: newY,
-      width: 500,
-      height: 400
-    });
+    const { x, y } = characterWindow.getBounds();
+    selectCharacterWindow.setBounds({ x, y: y - 400, width: 500, height: 400 });
     selectCharacterWindow.show();
     selectCharacterWindow.focus();
   }
 });
 
-// 最大化/恢复 chatWindow
+// ✅ 新增：切换 SettingsWindow
+ipcMain.on("change-settings-window", () => {
+  if (!settingsWindow || !characterWindow) return;
+  if (settingsWindow.isVisible()) {
+    settingsWindow.hide();
+  } else {
+    // const { x, y } = characterWindow.getBounds();
+    settingsWindow.setBounds({ x:0, y:0, width: 600, height: 600 });
+    settingsWindow.show();
+    settingsWindow.focus();
+  }
+});
+
+// 最大化 chat 窗口
 ipcMain.on("maximize-chat-window", () => {
-  if (chatWindow) {
-    if (chatWindow.isMaximized()) {
-      chatWindow.unmaximize();
-      chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
-    } else {
-      chatWindow.maximize();
-      chatWindow.setVisibleOnAllWorkspaces(false);
-    }
+  if (!chatWindow) return;
+  if (chatWindow.isMaximized()) {
+    chatWindow.unmaximize();
+    chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+  } else {
+    chatWindow.maximize();
+    chatWindow.setVisibleOnAllWorkspaces(false);
   }
 });
 
 // ============ 创建窗口函数们 ============ //
-
-// 1. characterWindow
 const createcharacterWindow = () => {
+  const { width, height } = screen.getPrimaryDisplay().workAreaSize;
   characterWindow = new BrowserWindow({
     width: 200,
     height: 300,
-    x: 800,
-    y: screenHeight - 350,
+    x: width - 220,  // 500 是窗口宽度
+    y: height - 310, // 400 是窗口高度
     frame: false,
     transparent: true,
     resizable: false,
@@ -252,28 +185,16 @@ const createcharacterWindow = () => {
     },
   });
 
-  characterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), {
-    hash: '#/character'
-  });
-
-  // 设置窗口在所有桌面显示（包括全屏模式下）
+  characterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/character' });
   characterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-  characterWindow.on("closed", () => {
-    characterWindow = null;
-  });
+  characterWindow.on("closed", () => { characterWindow = null; });
 };
 
-// 2. chatWindow
 const createChatWindow = () => {
-  if (!characterWindow) {
-    console.error("characterWindow is not created yet.");
-    return;
-  }
+  if (!characterWindow) return;
   const charBounds = characterWindow.getBounds();
-
   chatWindow = new BrowserWindow({
-    x: charBounds.x - 400 + 20,
+    x: charBounds.x - 400 - 20,
     y: charBounds.y - 350 + charBounds.height,
     width: 400,
     height: 350,
@@ -283,6 +204,7 @@ const createChatWindow = () => {
     hasShadow: true,
     vibrancy: "ultra-dark",
     visualEffectState: "active",
+    show: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -291,16 +213,11 @@ const createChatWindow = () => {
   });
 
   chatWindow.setAlwaysOnTop(true, 'floating');
-  // 设置窗口在所有桌面显示（包括全屏模式下）
   chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
-
   chatWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
-  chatWindow.on("closed", () => {
-    chatWindow = null;
-  });
+  chatWindow.on("closed", () => { chatWindow = null; });
 };
 
-// 3. AddCharacterWindow
 const createAddCharacterWindow = () => {
   AddCharacterWindow = new BrowserWindow({
     width: 600,
@@ -319,26 +236,16 @@ const createAddCharacterWindow = () => {
     },
   });
 
-  AddCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), {
-    hash: '#/addCharacter'
-  });
-
-  // 设置窗口在所有桌面显示（包括全屏模式下）
+  AddCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/addCharacter' });
   AddCharacterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-  AddCharacterWindow.on("closed", () => {
-    AddCharacterWindow = null;
-  });
+  AddCharacterWindow.on("closed", () => { AddCharacterWindow = null; });
 };
 
-// 4. selectCharacterWindow
 const createSelectCharacterWindow = () => {
   selectCharacterWindow = new BrowserWindow({
-    show: false,
-    x: 0,
-    y: 0,
     width: 500,
     height: 400,
+    show: false,
     frame: false,
     transparent: true,
     roundedCorners: true,
@@ -351,69 +258,78 @@ const createSelectCharacterWindow = () => {
     },
   });
 
-  selectCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), {
-    hash: '#/selectCharacter'
-  });
-
-  // 设置窗口在所有桌面显示（包括全屏模式下）
+  selectCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/selectCharacter' });
   selectCharacterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
-
-  selectCharacterWindow.on("closed", () => {
-    selectCharacterWindow = null;
-  });
+  selectCharacterWindow.on("closed", () => { selectCharacterWindow = null; });
 };
 
-// ============ app lifecycle ============ //
+// ✅ 新增：SettingsWindow
+const createSettingsWindow = () => {
+  settingsWindow = new BrowserWindow({
+    width: 600,
+    height: 800,
+    show: false,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    hasShadow: true,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "Preload.js"),
+    },
+  });
+
+  settingsWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/settings' });
+  settingsWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  settingsWindow.on("closed", () => { settingsWindow = null; });
+};
+
+// ============ App lifecycle ============ //
 app.whenReady().then(() => {
-  // app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'));
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'));
   }
   const primaryDisplay = screen.getPrimaryDisplay();
   screenHeight = primaryDisplay.workAreaSize.height;
 
-  // 先创建 characterWindow，再创建其他窗口
   createcharacterWindow();
   createChatWindow();
   createAddCharacterWindow();
   createSelectCharacterWindow();
-  
-  // 注册全局快捷键隐藏/显示 character & chat
-  globalShortcut.register("Shift+Space", () => {
+  createSettingsWindow();
+
+  globalShortcut.register("Shift+Control+Space", () => {
     if (characterWindow) {
-      characterWindow.isVisible() ? characterWindow.hide() : characterWindow.show();
-      characterWindow.isVisible() ? chatWindow.show() : chatWindow.hide();
+      const visible = characterWindow.isVisible();
+      visible ? characterWindow.hide() : characterWindow.show();
+      visible ? chatWindow.hide() : chatWindow.hide();
     }
   });
 
-  // 当 characterWindow 移动时，更新 chatWindow 位置
+  globalShortcut.register("Shift+Space", () => {
+    if (characterWindow) {
+      const visible = chatWindow.isVisible();
+      visible ? characterWindow.show():characterWindow.show();
+      visible ? chatWindow.hide() : chatWindow.show();
+    }
+  });
+
   characterWindow.on('move', () => {
     if (!chatWindow || !characterWindow) return;
-    const secondBounds = characterWindow.getBounds();
+    const charBounds = characterWindow.getBounds();
     const chatBounds = chatWindow.getBounds();
-    const offsetX = chatBounds.width + 20;
     chatWindow.setBounds({
-      x: secondBounds.x - offsetX,
-      y: secondBounds.y - chatBounds.height + secondBounds.height,
-      width: 400,
-      height: 350,
+      x: charBounds.x - chatWindow.getBounds().width - 20,
+      y: charBounds.y - chatWindow.getBounds().height + charBounds.height,
+      width: chatBounds.width,
+      height: chatBounds.height,
     });
   });
 });
 
-// 关闭时解除快捷键注册
-app.on("will-quit", () => {
-  globalShortcut.unregisterAll();
-});
-
-// 仅 Windows 关闭窗口时退出
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") {
-    app.quit();
-  }
-});
-
-// macOS 点击 Dock 图标时重新打开
+app.on("will-quit", () => globalShortcut.unregisterAll());
+app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createChatWindow();
 });

@@ -2,9 +2,13 @@ import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp } from "react-icons/fa6";
-import { callOpenAILib } from '../utlis/openai';
+import { callOpenAILib, longTimeMemory } from '../utlis/openai';
+import { BsFillRecordCircleFill } from "react-icons/bs";
 
 export const ChatboxInputBox = () => {
+  const [isGenerating, setIsGenerating] = useState(false)
+
+
   const inputRef = useRef(null);
   const [{ userText, userMessages }, dispatch] = useStateValue();
 
@@ -110,6 +114,7 @@ export const ChatboxInputBox = () => {
       alert("Please select a character first!");
       return;
     }
+    setIsGenerating(true);
     if (!userText.trim()) return;
   
     window.electron?.sendMoodUpdate('thinking');
@@ -136,10 +141,20 @@ export const ChatboxInputBox = () => {
       fullMessages = [...userMessages, { role: "user", content: userText }];
     }
     // let reply = null;
-    const reply = await callOpenAILib(
-      fullMessages, 
-      petInfo.modelProvider, 
-      petInfo.modelApiKey, petInfo.modelName, petInfo.modelUrl);
+    
+
+    // const [reply, important_index] = await Promise.all([
+      const reply = await callOpenAILib(
+        fullMessages, 
+        petInfo.modelProvider, 
+        petInfo.modelApiKey, petInfo.modelName, petInfo.modelUrl);
+      // const important_index = await longTimeMemory(
+      //   userText, 
+      //   petInfo.modelProvider, 
+      //   petInfo.modelApiKey, petInfo.modelName, petInfo.modelUrl);
+    // ]);
+    // alert(JSON.stringify(important_index, null, 2));
+    // const reply = 
     const botReply = { role: "assistant", content: reply.content };
   
     dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
@@ -166,6 +181,7 @@ export const ChatboxInputBox = () => {
   
     dispatch({ type: actionType.SET_USER_TEXT, userText: "" });
     window.electron?.sendMoodUpdate(reply.mood);
+    setIsGenerating(false);
   };
 
   return (
@@ -181,13 +197,21 @@ export const ChatboxInputBox = () => {
       />
       <button
         onClick={handleSend}
-        disabled={!String(userText).trim()}
+        disabled={!String(userText).trim() || isGenerating}
         className="absolute bottom-4 right-4 rounded-full"
       >
+        {!isGenerating ? (
         <FaCircleArrowUp
+        className="w-9 h-9"
+        style={{ color: !String(userText).trim() ? "#c1c1c1" : "#000000" }}
+      />
+        ) : (
+          <BsFillRecordCircleFill
           className="w-9 h-9"
-          style={{ color: !String(userText).trim() ? "#c1c1c1" : "#000000" }}
+          style={{ color: "#000000" }}
         />
+        )}
+
       </button>
     </div>
   );
