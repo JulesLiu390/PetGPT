@@ -1,28 +1,14 @@
-import OpenAI from 'openai';
-import {callOpenAILib} from "./openai.js"
+import { callCommand } from "./openai.js";
 
-// 定义一个测试函数
-const testCallOpenAILib = async () => {
-    // 构造对话消息
-    const messages = [
-      { role: 'system', content: 'You are a helpful assistant.' },
-      { role: 'user', content: '你好，测试一下qwen2.5:1.5b是否兼容OpenAI库' }
-    ];
-  
-    // 使用你在配置中的参数
-    const provider = 'openai';
-    const apiKey = 'ollama';
-    const model = 'qwen2.5:1.5b';
-    const baseURL = 'http://localhost:11434'; // 注意：函数内部会自动添加 '/v1'
-  
-    try {
-      const result = await callOpenAILib(messages, provider, apiKey, model, baseURL);
-      console.log('测试返回结果：', result);
-    } catch (error) {
-      console.error('调用 callOpenAILib 出错：', error);
-    }
-  };
-  
-  // 执行测试函数
-  testCallOpenAILib();
+(async () => {
+  const messages = [
+    { role: "user", content: "写一个计算1000以内素数的python程序" }
+  ];
+  const provider = "openai";
+  const apiKey = "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";
+  const model = "gpt-4o";
+  const baseURL = "default";
 
+  const result = await callCommand(messages, provider, apiKey, model, baseURL);
+  console.log(result);
+})();

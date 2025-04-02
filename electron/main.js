@@ -5,6 +5,8 @@ const Pet = require('./models/pet');
 const Conversation = require('./models/conversation.js');
 const { sliceImageToFiles } = require('./models/image_processor.js');
 
+require('./ipcMainHandler');
+
 let chatWindow;
 let characterWindow;
 let AddCharacterWindow;
@@ -159,9 +161,20 @@ ipcMain.on("maximize-chat-window", () => {
   if (chatWindow.isMaximized()) {
     chatWindow.unmaximize();
     chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+    // chatWindow.setAlwaysOnTop(true, 'floating');
+    if (!chatWindow || !characterWindow) return;
+    const charBounds = characterWindow.getBounds();
+    chatWindow.setBounds({
+      x: charBounds.x - 400 - 20,
+      y: charBounds.y - 350 + charBounds.height,
+      width: 400,
+      height: 350,
+    });
   } else {
     chatWindow.maximize();
     chatWindow.setVisibleOnAllWorkspaces(false);
+    // chatWindow.setAlwaysOnTop(false);
+    
   }
 });
 

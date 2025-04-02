@@ -4,6 +4,7 @@ import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
+import { MdDelete } from 'react-icons/md';
 
 export const Chatbox = () => {
   const [{ userMessages }, dispatch] = useStateValue();
@@ -77,9 +78,9 @@ export const Chatbox = () => {
                   e.stopPropagation();
                   handleDelete(conv._id);
                 }}
-                className="text-xs text-red-500 hover:text-red-700 ml-2"
+                className="ml-2 flex items-center justify-center bg-gray-300 text-white py-1 px-2 rounded text-xs hover:bg-gray-400 transition-colors duration-200"
               >
-                Delete
+                <MdDelete className="mr-1" />
               </button>
             </li>
           ))}

@@ -27,6 +27,7 @@ async function testDownload() {
 
 
 export const Character = () => {
+  // window.electron?.testOpen("open -a Calculator");
   // 用于接收来自主进程的心情更新
   const [characterMood, setCharacterMood] = useState("normal");
   // 当前展示的图片路径
