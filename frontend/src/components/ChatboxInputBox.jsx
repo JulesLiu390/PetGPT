@@ -169,90 +169,56 @@ export const ChatboxInputBox = () => {
         petInfo.modelName,
         petInfo.modelUrl
       )
-      const commands = reply.excution;
+const commands = reply.excution || '';  // 你的多行命令
 
-      const escapeShellCommand = (cmd) => {
-        if (typeof cmd !== 'string') {
-          throw new Error('Command must be a string');
-        }
-      
-        let cleanedCmd = cmd
-          .replace(/^```(bash|shell)\n/, '')
-          .replace(/\n```$/, '');
-      
-        // 按行分割命令
-        const lines = cleanedCmd.split('\n');
-        let inHeredoc = false;
-        let heredocStartLine = -1;
-        let heredocEndLine = -1;
-      
-        // 找到 <<EOF 和对应的 EOF
-        for (let i = 0; i < lines.length; i++) {
-          if (lines[i].includes('<<EOF')) {
-            heredocStartLine = i;
-            inHeredoc = true;
-          } else if (inHeredoc && lines[i].trim() === 'EOF') {
-            heredocEndLine = i;
-            inHeredoc = false;
-            break;
-          }
-        }
-      
-        if (heredocStartLine === -1 || heredocEndLine === -1) {
-          // 如果没有 heredoc，直接转义整个命令
-          return cleanedCmd
-            .replace(/\\/g, '\\\\')
-            .replace(/"/g, '\\"')
-            .replace(/'/g, '\\\'')
-            .replace(/`/g, '\\`')
-            .replace(/\$/g, '\\$');
-        }
-      
-        // 分割命令为三部分：heredoc 前、heredoc 内容、heredoc 后
-        const beforeHeredocLines = lines.slice(0, heredocStartLine + 1); // 包括 <<EOF 行
-        const heredocContentLines = lines.slice(heredocStartLine + 1, heredocEndLine); // heredoc 内容（不包括 EOF 行）
-        const afterHeredocLines = lines.slice(heredocEndLine + 1); // heredoc 后的内容（不包括 EOF 行）
-      
-        // 转义 heredoc 前后的部分
-        const escapePart = (part) =>
-          part
-            .replace(/\\/g, '\\\\')
-            .replace(/"/g, '\\"')
-            .replace(/'/g, '\\\'')
-            .replace(/`/g, '\\`')
-            .replace(/\$/g, '\\$');
-      
-        // 重新构造命令
-        const beforeHeredoc = beforeHeredocLines.join('\n');
-        const heredocContent = heredocContentLines.join('\n');
-        const afterHeredoc = afterHeredocLines.join('\n');
-      
-        // 拼接命令，确保 heredoc 内容不被转义，heredoc 前后部分被转义
-        let result = escapePart(beforeHeredoc);
-        if (heredocContent) {
-          result += '\n' + heredocContent;
-        }
-        result += '\nEOF'; // 强行加入 EOF 标记
-        if (afterHeredoc) {
-          result += '\n' + escapePart(afterHeredoc);
-        }
-      
-        return result;
-      };      
+// 转义要传给 Terminal 的 Shell 命令（在 do script "..." 里）:
+function escapeShellCommand(cmd) {
+  // 移除多余的 Markdown 代码块标记
+  let cleaned = cmd
+    .replace(/^```(bash|shell)\n/, '')
+    .replace(/\n```$/, '');
 
-      const doScriptCmd = [
-        'tell application "Terminal"',
-        'if (count of windows) = 0 then',
-        `    do script "${escapeShellCommand(commands)}"`,
-        'else',
-        `    do script "${escapeShellCommand(commands)}" in front window`,
-        'end if',
-        'end tell'
-      ].join('\n');
-      
-      const osascriptCmd = `osascript -e '${doScriptCmd}'`;      
-      
-      window.electron?.testOpen(osascriptCmd);
+  // 将反斜杠、双引号、单引号、反引号和美元符号转义，
+  // 以便安全地放进 "..." 中
+  cleaned = cleaned
+    .replace(/\\/g, '\\\\')    // 反斜杠 -> 双反斜杠
+    .replace(/"/g, '\\"')       // 双引号 -> \"
+    .replace(/'/g, "'\\''")      // 单引号 -> \'
+    .replace(/`/g, '\\`')       // 反引号 -> \\\`
+    .replace(/\$/g, '\\$');     // 美元符号 -> \$
+
+  return cleaned;
+}
+
+// 转义 AppleScript 的外层字符串（在 osascript -e '...' 里）:
+function escapeForAppleScript(str) {
+  // AppleScript 整体是用单引号括起来的，所以要转义内部的单引号
+  return str.replace(/'/g, "\\'");
+}
+
+
+// 1) 先转义传给 Terminal 的命令
+const shellCmdEscaped = escapeShellCommand(commands);
+
+// 2) 写出完整的 AppleScript，注意内部使用双引号包裹 Shell 命令
+const appleScriptCode = `
+tell application "Terminal"
+  if (count of windows) = 0 then
+    do script "${shellCmdEscaped}"
+  else
+    do script "${shellCmdEscaped}" in front window
+  end if
+end tell
+`;
+
+// 3) 再对 AppleScript 自身做转义（防止内部单引号破坏外层引号）
+const appleScriptEscaped = escapeForAppleScript(appleScriptCode);
+
+// 4) 拼出最终要传给 Electron 执行的命令
+const osascriptCmd = `osascript -e '${appleScriptEscaped}'`;
+
+window.electron?.testOpen(osascriptCmd);
+
     } else {
       reply = await callOpenAILib(
         fullMessages,

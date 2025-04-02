@@ -105,8 +105,8 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
     });
     return {
       excution: chatCompletion.choices[0].message.content,
-      // content: chatCompletion.choices[0].message.content,
-      content: explainCode.choices[0].message.content,
+      content: chatCompletion.choices[0].message.content,
+      // content: explainCode.choices[0].message.content,
       mood:"normal"
     }
   } catch (error) {
