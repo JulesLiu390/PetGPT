@@ -83,12 +83,14 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
       model: model,
       messages: [
         { role: 'system', content: `你是终端命令专家。只输出可直接复制粘贴到macOS终端执行的一条或多条命令，不含任何前缀、后缀或说明。不要使用代码块，不要使用任何标记，不要添加任何解释。如果涉及到编写代码文件请使用heredoc；不要输出任何自然语言内容。
+
           要求写文件时候的样例（不要用在执行程序上了）：
           cat <<EOF
           多行文本内容
           可以包含变量、命令替换等
           EOF
-          (编写完文件之后再运行其他命令， 不要弄混了， 谢谢)
+          不要忘记EOF！！！
+          (编写完文件之后再运行其他命令(比如运行编写好的程序，打开文件这类)， 不要弄混了， 谢谢)
           `   },
         ...messages
       ],
@@ -103,6 +105,7 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
     });
     return {
       excution: chatCompletion.choices[0].message.content,
+      // content: chatCompletion.choices[0].message.content,
       content: explainCode.choices[0].message.content,
       mood:"normal"
     }

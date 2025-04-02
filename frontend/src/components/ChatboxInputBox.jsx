@@ -171,21 +171,35 @@ export const ChatboxInputBox = () => {
       )
       const commands = reply.excution;
 
-      
       const escapeShellCommand = (cmd) => {
         if (typeof cmd !== 'string') {
           throw new Error('Command must be a string');
         }
       
-        // 移除 Markdown 代码块标记（如果存在）
         let cleanedCmd = cmd
           .replace(/^```(bash|shell)\n/, '')
           .replace(/\n```$/, '');
       
-        // 分割命令，识别 heredoc 部分
-        const heredocStart = cleanedCmd.indexOf('<<EOF');
-        if (heredocStart === -1) {
-          // 没有 heredoc，直接转义整个命令
+        // 按行分割命令
+        const lines = cleanedCmd.split('\n');
+        let inHeredoc = false;
+        let heredocStartLine = -1;
+        let heredocEndLine = -1;
+      
+        // 找到 <<EOF 和对应的 EOF
+        for (let i = 0; i < lines.length; i++) {
+          if (lines[i].includes('<<EOF')) {
+            heredocStartLine = i;
+            inHeredoc = true;
+          } else if (inHeredoc && lines[i].trim() === 'EOF') {
+            heredocEndLine = i;
+            inHeredoc = false;
+            break;
+          }
+        }
+      
+        if (heredocStartLine === -1 || heredocEndLine === -1) {
+          // 如果没有 heredoc，直接转义整个命令
           return cleanedCmd
             .replace(/\\/g, '\\\\')
             .replace(/"/g, '\\"')
@@ -194,17 +208,12 @@ export const ChatboxInputBox = () => {
             .replace(/\$/g, '\\$');
         }
       
-        // 分割 heredoc 的命令部分和内容部分
-        const heredocEnd = cleanedCmd.indexOf('\nEOF\n');
-        if (heredocEnd === -1) {
-          throw new Error('Invalid heredoc syntax: missing EOF');
-        }
+        // 分割命令为三部分：heredoc 前、heredoc 内容、heredoc 后
+        const beforeHeredocLines = lines.slice(0, heredocStartLine + 1); // 包括 <<EOF 行
+        const heredocContentLines = lines.slice(heredocStartLine + 1, heredocEndLine); // heredoc 内容（不包括 EOF 行）
+        const afterHeredocLines = lines.slice(heredocEndLine + 1); // heredoc 后的内容（不包括 EOF 行）
       
-        const beforeHeredoc = cleanedCmd.substring(0, heredocStart + 5); // 包括 <<EOF
-        const heredocContent = cleanedCmd.substring(heredocStart + 5, heredocEnd); // heredoc 内容
-        const afterHeredoc = cleanedCmd.substring(heredocEnd + 5); // 包括 EOF 后的部分
-      
-        // 转义命令部分（before 和 after），但不转义 heredoc 内容
+        // 转义 heredoc 前后的部分
         const escapePart = (part) =>
           part
             .replace(/\\/g, '\\\\')
@@ -213,9 +222,24 @@ export const ChatboxInputBox = () => {
             .replace(/`/g, '\\`')
             .replace(/\$/g, '\\$');
       
-        return escapePart(beforeHeredoc) + heredocContent + escapePart(afterHeredoc);
-      };
+        // 重新构造命令
+        const beforeHeredoc = beforeHeredocLines.join('\n');
+        const heredocContent = heredocContentLines.join('\n');
+        const afterHeredoc = afterHeredocLines.join('\n');
       
+        // 拼接命令，确保 heredoc 内容不被转义，heredoc 前后部分被转义
+        let result = escapePart(beforeHeredoc);
+        if (heredocContent) {
+          result += '\n' + heredocContent;
+        }
+        result += '\nEOF'; // 强行加入 EOF 标记
+        if (afterHeredoc) {
+          result += '\n' + escapePart(afterHeredoc);
+        }
+      
+        return result;
+      };      
+
       const doScriptCmd = [
         'tell application "Terminal"',
         'if (count of windows) = 0 then',
