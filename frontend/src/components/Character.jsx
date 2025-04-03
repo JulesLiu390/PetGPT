@@ -36,6 +36,34 @@ export const Character = () => {
   const [isShowOptions, setIsShowOptions] = useState(false);
   const [imageName, setImageName] = useState("default");
 
+  // 启动时加载默认角色的图片
+  useEffect(() => {
+    const loadDefaultCharacter = async () => {
+      try {
+        const settings = await window.electron.getSettings();
+        if (settings && settings.defaultRoleId) {
+          console.log("📚 Loading default character image from settings:", settings.defaultRoleId);
+          
+          try {
+            const pet = await window.electron.getPet(settings.defaultRoleId);
+            if (pet && pet.imageName) {
+              setImageName(pet.imageName);
+              console.log("Using default character image:", pet.imageName);
+            }
+          } catch (petError) {
+            console.error("Error loading default pet details:", petError);
+            // 继续使用默认图片
+          }
+        }
+      } catch (error) {
+        console.error("Error loading default character image from settings:", error);
+        // 如果加载失败，默认值 "default" 会被使用
+      }
+    };
+    
+    loadDefaultCharacter();
+  }, []); // 只在组件加载时执行一次
+
   // 注册监听主进程发来的 'character-mood-updated' 消息
   useEffect(() => {
     const moodUpdateHandler = (event, updatedMood) => {
@@ -154,11 +182,18 @@ export const Character = () => {
         src={imgSrc || ""}
         draggable="false"
         alt=" "
-        className="w-[200px] h-[200px] pointer-events-none"
+        className="w-[200px] h-[200px] pointer-events-none
+            will-change-transform
+    transform
+    translate-z-0
+    bg-transparent
+    transition-none
+    select-none
+        "
       />
 
       {/* 底部可拖拽区域 */}
-      <div className="mt-3 w-[120px] h-[8px] rounded-full bg-gray-400 opacity-70 shadow-sm draggable" />
+      <div className="mt-3 w-[120px] h-[12px] rounded-full bg-gray-400 opacity-70 shadow-sm draggable" />
     </div>
   );
 };

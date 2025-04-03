@@ -1,159 +1,159 @@
-import React, { useState } from "react";
-import AddCharacterTitleBar from "./AddCharacterTitleBar";
-import { callOpenAILib } from "../utlis/openai";
+import React, { useState, useEffect } from "react";
 import SettingsTitleBar from "./SettingsTitleBar";
+import SettingsHotkeyInput from "./SettingsHotkeyInput";
 
-const AddCharacterPage = () => {
-  const [character, setCharacter] = useState({
-    modelProvider: "openai",
-    modelName: "",
-    modelApiKey: "",
-    modelUrl: "default"
-  });
-  const [modelUrlType, setModelUrlType] = useState("default");
-  const [testing, setTesting] = useState(false);
-  const [testResult, setTestResult] = useState(null);
+// 设置页面组件
+const SettingsPage = () => {
+  const [settings, setSettings] = useState(null);
+  const [pets, setPets] = useState([]);
 
-  const handleChange = (e) => {
-    setCharacter({ ...character, [e.target.name]: e.target.value });
-  };
-
-  const handleModelUrlTypeChange = (e) => {
-    const type = e.target.value;
-    setModelUrlType(type);
-    setCharacter({
-      ...character,
-      modelUrl: type === "default" ? "default" : ""
-    });
-  };
-
-  const handleTestAPI = async () => {
-    setTesting(true);
-    setTestResult(null);
-
+  // 获取宠物列表
+  const fetchPets = async () => {
     try {
-      const messages = [
-        { role: "system", content: "System prompt for test" },
-        { role: "user", content: "Hello, who are you?" }
-      ];
-
-      const result = await callOpenAILib(
-        messages,
-        character.modelProvider,
-        character.modelApiKey,
-        character.modelName,
-        character.modelUrl
-      );
-
-      if (!result || typeof result !== "object" || typeof result.content === "undefined") {
-        setTestResult(`Failed: ${JSON.stringify(result)}`);
+      const data = await window.electron.getPets();
+      if (Array.isArray(data)) {
+        setPets(data);
       } else {
-        setTestResult(`Test Success! Response: ${result.content}`);
+        console.error("Invalid data format returned from getPets:", data);
       }
     } catch (error) {
-      setTestResult(`❌ Test failed: ${error.message}`);
-    } finally {
-      setTesting(false);
+      alert("Failed to load characters: " + error.message);
     }
   };
 
-  const handleSubmit = (e) => {
+  // 获取设置
+  const fetchSettings = async () => {
+    try {
+      const data = await window.electron.getSettings();
+      setSettings(data);
+    } catch (error) {
+      console.error("Failed to get settings:", error);
+    }
+  };
+
+  useEffect(() => {
+    fetchPets();
+    fetchSettings();
+  }, []);
+
+  // 加载中显示
+  if (!settings) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        Loading...
+      </div>
+    );
+  }
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setSettings((prev) => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (e) => {
     e.preventDefault();
-    // 这里示例仅使用 alert，实际可替换为保存逻辑
-    alert(`Saving Model: [${character.modelProvider}] ${character.modelName}`);
+    try {
+      const newSettings = await window.electron.updateSettings(settings);
+      setSettings(newSettings);
+      alert("Settings saved successfully!");
+    } catch (error) {
+      alert("Failed to save settings: " + error.message);
+    }
+  };
+
+  // 宠物显示文本
+  const getDisplayText = (pet) => {
+    return pet.modelName ? `${pet.name} (${pet.modelName})` : pet.name;
   };
 
   return (
     <div className="min-h-screen bg-[rgba(255,255,255,0.8)]">
-      {/* 固定标题栏 */}
+      {/* 标题栏 */}
       <div className="sticky top-0 z-10">
         <SettingsTitleBar />
       </div>
       <div className="w-[90%] p-4 mx-auto bg-gray-50 rounded-lg shadow">
         <form onSubmit={handleSubmit} className="space-y-4 text-sm">
-          {/* API Provider */}
+          {/* 默认模型选择 */}
           <div>
-            <label className="block text-gray-700 mb-1">API Provider</label>
+            <label className="block text-gray-700 mb-1">
+              Default Chatbot
+            </label>
             <select
-              name="modelProvider"
-              value={character.modelProvider}
+              name="defaultRoleId"
+              value={settings.defaultRoleId || ""}
               onChange={handleChange}
               className="w-full p-2 border rounded"
             >
-              <option value="openai">OpenAI</option>
-              <option value="gemini">Gemini</option>
-              <option value="custom">Custom</option>
+              <option value="">Select Default Model</option>
+              {pets.map((pet) => (
+                <option key={pet._id} value={pet._id}>
+                  {getDisplayText(pet)}
+                </option>
+              ))}
             </select>
           </div>
-          {/* Model Name */}
+          {/* 功能模型选择 */}
           <div>
-            <label className="block text-gray-700 mb-1">Model Name</label>
-            <input
-              name="modelName"
-              type="text"
-              value={character.modelName}
-              onChange={handleChange}
-              placeholder="e.g. gpt-3.5-turbo"
-              className="w-full p-2 border rounded"
-            />
-          </div>
-          {/* Model API Key */}
-          <div>
-            <label className="block text-gray-700 mb-1">Model API Key</label>
-            <input
-              name="modelApiKey"
-              type="text"
-              value={character.modelApiKey}
-              onChange={handleChange}
-              placeholder="Enter your API Key"
-              className="w-full p-2 border rounded"
-            />
-          </div>
-          {/* Model URL 选择 */}
-          <div className="flex items-center space-x-2">
-            <label className="text-gray-700">Model URL:</label>
+            <label className="block text-gray-700 mb-1">
+              Function Model (Recommended: mini)
+            </label>
             <select
-              value={modelUrlType}
-              onChange={handleModelUrlTypeChange}
-              className="p-2 border rounded"
+              name="defaultModelId"
+              value={settings.defaultModelId || ""}
+              onChange={handleChange}
+              className="w-full p-2 border rounded"
             >
-              <option value="default">Default</option>
-              <option value="custom">Custom</option>
+              <option value="">Select Function Model</option>
+              {pets.map((pet) => (
+                <option key={pet._id} value={pet._id}>
+                  {getDisplayText(pet)}
+                </option>
+              ))}
             </select>
-            {modelUrlType === "custom" && (
-              <input
-                name="modelUrl"
-                type="text"
-                value={character.modelUrl}
-                onChange={handleChange}
-                placeholder="https://your-model-api.com"
-                className="flex-1 p-2 border rounded"
-              />
-            )}
           </div>
-          {/* 测试按钮 */}
+          {/* 窗口大小 */}
           <div>
-            <button
-              type="button"
-              onClick={handleTestAPI}
-              disabled={testing}
-              className="w-full bg-green-500 text-white py-2 rounded hover:bg-green-600"
+            <label className="block text-gray-700 mb-1">Window Size</label>
+            <select
+              name="windowSize"
+              value={settings.windowSize || "medium"}
+              onChange={handleChange}
+              className="w-full p-2 border rounded"
             >
-              {testing ? "Testing..." : "Test API Key & Model"}
-            </button>
+              <option value="large">Large</option>
+              <option value="medium">Medium</option>
+              <option value="small">Small</option>
+            </select>
           </div>
-          {/* 显示测试结果 */}
-          {testResult && (
-            <div className="mt-2 text-xs text-gray-800 bg-white border border-gray-200 rounded p-2">
-              {testResult}
-            </div>
-          )}
+          {/* 程序热键设置 */}
+          <div>
+            <label className="block text-gray-700 mb-1">
+              Program Hotkey
+            </label>
+            <SettingsHotkeyInput
+              name="programHotkey"
+              value={settings.programHotkey || ""}
+              onChange={handleChange}
+            />
+          </div>
+          {/* 对话热键设置 */}
+          <div>
+            <label className="block text-gray-700 mb-1">
+              Dialog Hotkey
+            </label>
+            <SettingsHotkeyInput
+              name="dialogHotkey"
+              value={settings.dialogHotkey || ""}
+              onChange={handleChange}
+            />
+          </div>
           {/* 保存按钮 */}
           <button
             type="submit"
             className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
           >
-            Save
+            Save Settings
           </button>
         </form>
       </div>
@@ -161,4 +161,4 @@ const AddCharacterPage = () => {
   );
 };
 
-export default AddCharacterPage;
+export default SettingsPage;

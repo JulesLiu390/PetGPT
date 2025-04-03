@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen } = require("electron");
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu } = require("electron");
 const path = require('path');
 const fs = require('fs');
 const Pet = require('./models/pet');
@@ -190,7 +190,7 @@ const createcharacterWindow = () => {
     transparent: true,
     resizable: false,
     alwaysOnTop: true,
-    hasShadow: true,
+    hasShadow: false,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -312,6 +312,11 @@ app.whenReady().then(() => {
   createSelectCharacterWindow();
   createSettingsWindow();
 
+  // chatWindow.setTitle("PetGPT Child - Chat");
+chatWindow.setSkipTaskbar(true);
+
+  // chatWindow.setSkipTaskbar(true);
+
   globalShortcut.register("Shift+Control+Space", () => {
     if (characterWindow) {
       const visible = characterWindow.isVisible();
@@ -320,7 +325,7 @@ app.whenReady().then(() => {
     }
   });
 
-  globalShortcut.register("Shift+Space", () => {
+  globalShortcut.register("Shift+space", () => {
     if (characterWindow) {
       const visible = chatWindow.isVisible();
       visible ? characterWindow.show():characterWindow.show();

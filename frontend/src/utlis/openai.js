@@ -125,6 +125,8 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
 const LongTermMemoryResponseSchema = z.object({
   isImportant: z.boolean(),
   score: z.number(), // ⚠️ 移除 .min(0).max(1)
+  key: z.string(),
+  value: z.string(),
 });
 
 export const longTimeMemory = async (message, provider, apiKey, model, baseURL) => {
@@ -144,7 +146,7 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
 
   const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
 
-  const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n“${message}”\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx }`;
+  const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n“${message}”\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx, "key":"名字（sample）", "value":"Jules(sample)" }`;
 
   try {
     if (notSupportedModels.includes(model)) {
@@ -152,9 +154,10 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
       const chatCompletion = await openai.chat.completions.create({
         model: model,
         messages: [
-          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的长期重要信息。" },
+          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息），或者用户想让你（记住）的事情。" },
           { role: "user", content: prompt },
         ],
+        temperature: 0.1
       });
 
       const raw = chatCompletion.choices[0].message.content ?? "";
@@ -169,9 +172,10 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
       const chatCompletion = await openai.beta.chat.completions.parse({
         model: model,
         messages: [
-          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的长期重要信息。" },
+          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息），或者用户想让你长期（记住）的事情，如果只是短期要求则不记住。只有陈述句值得记住" },
           { role: "user", content: prompt },
         ],
+        temperature: 0.1,
         response_format: zodResponseFormat(LongTermMemoryResponseSchema, "response"),
       });
 
@@ -180,5 +184,51 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
   } catch (error) {
     console.error("OpenAI 请求出错：", error);
     return error;
+  }
+};
+
+
+export const processMemory = async (configStr, provider, apiKey, model, baseURL) => {
+  if (baseURL === "default") {
+    baseURL = provider === "openai"
+      ? "https://api.openai.com/v1"
+      : "https://generativelanguage.googleapis.com/v1beta/openai";
+  } else {
+    baseURL += "/v1";
+  }
+  
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: baseURL,
+    dangerouslyAllowBrowser: true,
+  });
+  
+  // 解析配置
+  let config;
+  try {
+    config = JSON.parse(configStr);
+  } catch (e) {
+    console.error("解析配置数据出错：", e);
+    return { error: "配置数据格式错误" };
+  }
+  
+  const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
+  const prompt = `分析这个用户配置并生成关于用户的记忆：\n\n${JSON.stringify(config, null, 2)}\n\n返回一段描述用户偏好和设置的文本。`;
+  
+  try {
+    // 所有模型使用同一种方式调用
+    const chatCompletion = await openai.chat.completions.create({
+      model: model,
+      messages: [
+        { role: "system", content: "你是一个用户记忆生成助手，根据用户的配置信息生成对用户的理解和记忆。对于用户，你应当使用第三人称单数，（他｜她）是XXX，（他｜她）的爱好是XXX，（他｜她）和你之间的关系是XXX" },
+        { role: "user", content: prompt },
+      ],
+      temperature: 0.1
+    });
+    
+    return chatCompletion.choices[0].message.content ?? "";
+  } catch (error) {
+    console.error("OpenAI 请求出错：", error);
+    return `处理记忆时出错: ${error.message}`;
   }
 };

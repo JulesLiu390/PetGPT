@@ -3,7 +3,7 @@ import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp, FaGlobe } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { callOpenAILib, callCommand } from '../utlis/openai';
+import { callOpenAILib, callCommand, longTimeMemory, processMemory } from '../utlis/openai';
 
 export const ChatboxInputBox = () => {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -21,6 +21,39 @@ export const ChatboxInputBox = () => {
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
   const conversationIdRef = useRef(null);
+  const [userMemory, setUserMemory] = useState(null)
+
+  // 启动时加载默认角色ID
+  useEffect(() => {
+    const loadDefaultCharacter = async () => {
+      try {
+        const settings = await window.electron.getSettings();
+        if (settings && settings.defaultRoleId) {
+          console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
+          
+          // 验证ID是否有效（是否能找到对应的pet数据）
+          try {
+            const pet = await window.electron.getPet(settings.defaultRoleId);
+            if (pet) {
+              setCharacterId(settings.defaultRoleId);
+              console.log("Default character ID validated successfully");
+            } else {
+              console.log("Default character ID not found in database, using null");
+              setCharacterId(null);
+            }
+          } catch (petError) {
+            console.error("Error finding pet with default ID:", petError);
+            setCharacterId(null);
+          }
+        }
+      } catch (error) {
+        console.error("Error loading default character ID from settings:", error);
+        setCharacterId(null);
+      }
+    };
+    
+    loadDefaultCharacter();
+  }, []); // 只在组件加载时执行一次
 
   // 监听角色 ID
   useEffect(() => {
@@ -41,6 +74,26 @@ export const ChatboxInputBox = () => {
         if (pet) {
           const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
           setPetInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+          try {
+            const memoryJson = await window.electron.getPetUserMemory(characterId);
+            const memory = JSON.stringify(memoryJson);
+            const getUserMemory = await processMemory(
+              memory,
+              modelProvider, // 直接使用从pet获取的值
+              modelApiKey,
+              modelName,
+              modelUrl
+            );
+            setUserMemory(getUserMemory);
+            // alert(getUserMemory);
+          } catch (memoryError) {
+            console.error("加载用户记忆失败:", memoryError);
+          }
+        } else {
+          // 如果找不到对应的宠物数据，将characterId设为null
+          console.error("Pet not found for ID:", characterId);
+          setCharacterId(null);
+          return;
         }
 
         if (conversationIdRef.current) {
@@ -54,7 +107,9 @@ export const ChatboxInputBox = () => {
         }
       } catch (error) {
         console.error("Error fetching pet info:", error);
-        alert("Failed to load character info");
+        // 出错时将characterId设为null
+        setCharacterId(null);
+        // alert("Failed to load character info");
       }
     };
 
@@ -113,15 +168,6 @@ export const ChatboxInputBox = () => {
   // 发送消息
   const handleSend = async () => {
 
-    // const commands = "";
-    // // 使用 JSON.stringify 将 pythonCmd 自动用双引号包裹
-    // const doScriptCmd = `tell application "Terminal" to do script ${JSON.stringify(commands)}`;
-    // // 同样，使用 JSON.stringify 包裹整个 AppleScript 命令，构造最终命令
-    // const osascriptCmd = `osascript -e ${JSON.stringify(doScriptCmd)}`;
-    //     window.electron?.testOpen(osascriptCmd);
-
-
-
     if (!characterId) {
       alert("Please select a character first!");
       return;
@@ -145,12 +191,36 @@ export const ChatboxInputBox = () => {
     if(agentActive) {
       fullMessages = [...userMessages, { role: "user", content: userText }];
     } else {
+      
+      
       if (!isDefaultPersonality) {
-        let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
+        const index = await longTimeMemory(userText, 
+          petInfo.modelProvider,
+          petInfo.modelApiKey,
+          petInfo.modelName,
+          petInfo.modelUrl
+        )
+        if(index.isImportant == true) {
+          await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
+          const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+          const memory = JSON.stringify(memoryJson);
+          const getUserMemory = await processMemory(
+            memory,
+            petInfo.modelProvider,
+            petInfo.modelApiKey,
+            petInfo.modelName,
+            petInfo.modelUrl
+          );
+          await setUserMemory(getUserMemory);
+          // alert(getUserMemory);
+        }
+
+        let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n 
+        关于用户的信息设定如下:\n${userMemory}\n`;
         if (petInfo.isAgent) {
-          systemContent += "请在回答中保持角色特点，生成回复内容。";
+          systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
         } else {
-          systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
+          systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
         }
         const systemPrompt = { role: "system", content: systemContent };
         fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
@@ -171,43 +241,41 @@ export const ChatboxInputBox = () => {
       )
       const commands = reply.excution || '';  // 你的多行命令
 
-// 转义要传给 Terminal 的 Shell 命令（在 do script "..." 里）:
-// 转义要传给 Terminal 的 Shell 命令
-function escapeShellCommand(cmd) {
-  // 移除多余的 Markdown 代码块标记
-  let cleaned = cmd
-    .replace(/^```(?:bash|shell)\n/, '')
-    .replace(/\n```$/, '');
+      // 转义要传给 Terminal 的 Shell 命令（在 do script "..." 里）:
+      function escapeShellCommand(cmd) {
+        // 移除多余的 Markdown 代码块标记
+        let cleaned = cmd
+          .replace(/^```(?:bash|shell)\n/, '')
+          .replace(/\n```$/, '');
 
-  // 仅转义反斜杠、双引号和反引号，不对美元符号进行转义
-  cleaned = cleaned
-    .replace(/\\/g, '\\\\')    // 反斜杠 -> 双反斜杠
-    .replace(/"/g, '\\"')       // 双引号 -> \"
-    .replace(/`/g, '\\`');      // 反引号 -> \\\`
-  
-  return cleaned;
-}
+        // 仅转义反斜杠、双引号和反引号，不对美元符号进行转义
+        cleaned = cleaned
+          .replace(/\\/g, '\\\\')    // 反斜杠 -> 双反斜杠
+          .replace(/"/g, '\\"')       // 双引号 -> \"
+          .replace(/`/g, '\\`');      // 反引号 -> \\\`
+        
+        return cleaned;
+      }
 
-// 转义 AppleScript 的外层字符串
-function escapeForAppleScript(str) {
-  return str.replace(/'/g, "'\\''");
-  // /'/g, "'\\''"
-}
+      // 转义 AppleScript 的外层字符串
+      function escapeForAppleScript(str) {
+        return str.replace(/'/g, "'\\''");
+        // /'/g, "'\\''"
+      }
 
-// 生成 AppleScript 命令
-const shellCmdEscaped = escapeShellCommand(commands);
-const appleScriptCode = `
-tell application "Terminal"
-  if (count of windows) = 0 then
-    do script "${shellCmdEscaped}"
-  else
-    do script "${shellCmdEscaped}" in front window
-  end if
-end tell
-`;
-const appleScriptEscaped = escapeForAppleScript(appleScriptCode);
-const osascriptCmd = `osascript -e '${appleScriptEscaped}'`;
-
+      // 生成 AppleScript 命令
+      const shellCmdEscaped = escapeShellCommand(commands);
+      const appleScriptCode = `
+      tell application "Terminal"
+        if (count of windows) = 0 then
+          do script "${shellCmdEscaped}"
+        else
+          do script "${shellCmdEscaped}" in front window
+        end if
+      end tell
+      `;
+      const appleScriptEscaped = escapeForAppleScript(appleScriptCode);
+      const osascriptCmd = `osascript -e '${appleScriptEscaped}'`;
 
       window.electron?.testOpen(osascriptCmd);
 
