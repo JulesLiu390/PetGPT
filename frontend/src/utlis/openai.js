@@ -91,6 +91,8 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
           EOF
           不要忘记EOF！！！
           (编写完文件之后再运行其他命令(比如运行编写好的程序，打开文件这类)， 不要弄混了， 谢谢)
+
+          如果让你编写word文档或者pdf， 就先用md写， 写好后用pandoc转换即可
           `   },
         ...messages
       ],
@@ -99,14 +101,18 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
     const explainCode = await openai.chat.completions.create({
       model: model,
       messages: [
-        { role: 'system', content: 'explain those macOS terminal codes shortly.' },
+        { role: 'system', content: `explain those macOS terminal codes shortly.
+          for example:
+          step 1: xxx
+          step 2: xxx
+          step 3: xxx` },
         { role: 'user', content: chatCompletion.choices[0].message.content}
       ]
     });
     return {
       excution: chatCompletion.choices[0].message.content,
-      content: chatCompletion.choices[0].message.content,
-      // content: explainCode.choices[0].message.content,
+      // content: chatCompletion.choices[0].message.content,
+      content: explainCode.choices[0].message.content,
       mood:"normal"
     }
   } catch (error) {
