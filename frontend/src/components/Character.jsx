@@ -9,23 +9,6 @@ import { IoIosSettings } from "react-icons/io";
 
 
 
-async function testDownload() {
-  try {
-    const url = "https://so1.360tres.com/t017dbc55e2b4011938.png";
-    const fileName = "sample1.png";
-    await downloadProcessedImage(url, fileName);
-    console.log("下载成功:", fileName);
-  } catch (error) {
-    console.error("下载出错:", error);
-  }
-}
-
-// testDownload();
-
-
-
-
-
 export const Character = () => {
   // window.electron?.testOpen("open -a Calculator");
   // 用于接收来自主进程的心情更新
@@ -62,6 +45,7 @@ export const Character = () => {
     };
     
     loadDefaultCharacter();
+    
   }, []); // 只在组件加载时执行一次
 
   // 注册监听主进程发来的 'character-mood-updated' 消息
@@ -137,9 +121,26 @@ export const Character = () => {
     window.electron?.changeSettingsWindow();
   }
 
+  useEffect(() => {
+    let windowSize = "medium";
+    const getWindowSize = async() => {
+      const settings = await window.electron.getSettings()
+      windowSize = settings.windowSize;
+    }
+    getWindowSize()
+    // alert(settings.windowSize)
+    window.electron.updateWindowSizePreset(windowSize)
+      .then(result => {
+        console.log("Window size preset updated:", result);
+      })
+      .catch(error => {
+        console.error("Failed to update window size preset:", error);
+      });
+  }, []);
+
   return (
     <div
-      className="select-none h-[300px] w-[200px] flex flex-col justify-center items-center"
+      className="select-none h-full w-full flex flex-col justify-center items-center"
       onMouseEnter={() => setIsShowOptions(true)}
       onMouseLeave={() => setIsShowOptions(false)}
     >
@@ -182,7 +183,7 @@ export const Character = () => {
         src={imgSrc || ""}
         draggable="false"
         alt=" "
-        className="w-[200px] h-[200px] pointer-events-none
+        className="w-full pointer-events-none
             will-change-transform
     transform
     translate-z-0

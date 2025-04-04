@@ -7,12 +7,53 @@ const { sliceImageToFiles } = require('./models/image_processor.js');
 
 require('./ipcMainHandler');
 
+// ------------------- 基础配置 ------------------- //
+
+// 定义各窗口的基准尺寸（以 medium 为标准）
+const baselineSizes = {
+  character: { width: 200, height: 300 },
+  chat: { width: 400, height: 350 },
+  addCharacter: { width: 500, height: 350 },
+  selectCharacter: { width: 500, height: 350 },
+  settings: { width: 500, height: 700 }
+};
+
+// 定义比例因子： small、medium、large
+const scaleFactors = {
+  small: 0.8,
+  medium: 1,
+  large: 1.2
+};
+
+// 根据基准尺寸和预设计算实际尺寸
+function getScaledSize(baseline, preset = 'medium') {
+  const factor = scaleFactors[preset] || 1;
+  return {
+    width: Math.round(baseline.width * factor),
+    height: Math.round(baseline.height * factor)
+  };
+}
+
+// 辅助函数：确保窗口位置在屏幕内（用于非 chatWindow 窗口）
+function clampPosition(x, y, winWidth, winHeight, screenWidth, screenHeight) {
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x + winWidth > screenWidth) x = screenWidth - winWidth;
+  if (y + winHeight > screenHeight) y = screenHeight - winHeight;
+  return { x, y };
+}
+
+// ------------------- 全局变量 ------------------- //
+
 let chatWindow;
 let characterWindow;
 let AddCharacterWindow;
 let selectCharacterWindow;
 let settingsWindow;
 let screenHeight = 0;
+
+// 全局变量统一控制所有窗口的尺寸预设（例如 'small'、'medium'、'large'）
+let currentSizePreset = 'small';
 
 let sharedState = {
   characterMood: 'neutral'
@@ -118,13 +159,17 @@ ipcMain.on("change-chat-window", () => {
   }
 });
 
+// 对于 addCharacter、selectCharacter 和 settings 窗口，仅进行显示/隐藏切换，显示时按 currentSizePreset 设置大小
 ipcMain.on("change-addCharacter-window", () => {
   if (!AddCharacterWindow || !characterWindow) return;
   if (AddCharacterWindow.isVisible()) {
     AddCharacterWindow.hide();
   } else {
     const { x, y } = characterWindow.getBounds();
-    AddCharacterWindow.setBounds({ x, y: y - 450, width: 600, height: 450 });
+    const size = getScaledSize(baselineSizes.addCharacter, currentSizePreset);
+    // 对 addCharacter 窗口的位置可采用 clamping
+    const { x: newX, y: newY } = clampPosition(x, y - size.height, size.width, size.height, screen.getPrimaryDisplay().workAreaSize.width, screenHeight);
+    AddCharacterWindow.setBounds({ x: newX, y: newY, width: size.width, height: size.height });
     AddCharacterWindow.show();
     AddCharacterWindow.focus();
   }
@@ -136,56 +181,115 @@ ipcMain.on("change-selectCharacter-window", () => {
     selectCharacterWindow.hide();
   } else {
     const { x, y } = characterWindow.getBounds();
-    selectCharacterWindow.setBounds({ x, y: y - 400, width: 500, height: 400 });
+    const size = getScaledSize(baselineSizes.selectCharacter, currentSizePreset);
+    const { x: newX, y: newY } = clampPosition(x, y - size.height, size.width, size.height, screen.getPrimaryDisplay().workAreaSize.width, screenHeight);
+    selectCharacterWindow.setBounds({ x: newX, y: newY, width: size.width, height: size.height });
     selectCharacterWindow.show();
     selectCharacterWindow.focus();
   }
 });
 
-// ✅ 新增：切换 SettingsWindow
 ipcMain.on("change-settings-window", () => {
   if (!settingsWindow || !characterWindow) return;
   if (settingsWindow.isVisible()) {
     settingsWindow.hide();
   } else {
-    // const { x, y } = characterWindow.getBounds();
-    settingsWindow.setBounds({ x:0, y:0, width: 600, height: 600 });
+    const size = getScaledSize(baselineSizes.settings, currentSizePreset);
+    // settings 固定在左上角，并且 clamped
+    const { x: newX, y: newY } = clampPosition(0, 0, size.width, size.height, screen.getPrimaryDisplay().workAreaSize.width, screen.getPrimaryDisplay().workAreaSize.height);
+    settingsWindow.setBounds({ x: newX, y: newY, width: size.width, height: size.height });
     settingsWindow.show();
     settingsWindow.focus();
   }
 });
 
-// 最大化 chat 窗口
+// 修改后的最大化/缩小 chat 窗口逻辑，恢复时使用 currentSizePreset
 ipcMain.on("maximize-chat-window", () => {
   if (!chatWindow) return;
   if (chatWindow.isMaximized()) {
     chatWindow.unmaximize();
     chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
-    // chatWindow.setAlwaysOnTop(true, 'floating');
     if (!chatWindow || !characterWindow) return;
     const charBounds = characterWindow.getBounds();
+    const newSize = getScaledSize(baselineSizes.chat, currentSizePreset);
+    // 对 chatWindow 位置不进行 clamping，只保持与 characterWindow 的相对位置
+    const newX = charBounds.x - newSize.width - 20;
+    const newY = charBounds.y - newSize.height + charBounds.height;
     chatWindow.setBounds({
-      x: charBounds.x - 400 - 20,
-      y: charBounds.y - 350 + charBounds.height,
-      width: 400,
-      height: 350,
+      x: newX,
+      y: newY,
+      width: newSize.width,
+      height: newSize.height,
     });
   } else {
     chatWindow.maximize();
     chatWindow.setVisibleOnAllWorkspaces(false);
-    // chatWindow.setAlwaysOnTop(false);
-    
   }
 });
+
+ipcMain.handle('update-window-size-preset', async (event, newPreset) => {
+  currentSizePreset = newPreset;
+  updateAllWindowsSizes(currentSizePreset);
+});
+
+// ============ 统一修改所有窗口尺寸及位置的函数 ============ //
+function updateAllWindowsSizes(preset = currentSizePreset) {
+  currentSizePreset = preset;
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+
+  // 更新 characterWindow：固定在屏幕右下角
+  if (characterWindow && !characterWindow.isDestroyed()) {
+    const newSize = getScaledSize(baselineSizes.character, currentSizePreset);
+    const newX = sw - newSize.width - 20;
+    const newY = sh - newSize.height - 10;
+    characterWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
+  }
+  // 更新 chatWindow：相对于 characterWindow，不进行 clamping
+  if (chatWindow && !chatWindow.isDestroyed() && characterWindow) {
+    const newSize = getScaledSize(baselineSizes.chat, currentSizePreset);
+    const charBounds = characterWindow.getBounds();
+    const newX = charBounds.x - newSize.width - 20;
+    const newY = charBounds.y - newSize.height + charBounds.height;
+    chatWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
+  }
+  // 更新 AddCharacterWindow：相对于 characterWindow，进行 clamping
+  if (AddCharacterWindow && !AddCharacterWindow.isDestroyed() && characterWindow) {
+    const newSize = getScaledSize(baselineSizes.addCharacter, currentSizePreset);
+    const charBounds = characterWindow.getBounds();
+    let newX = charBounds.x;
+    let newY = charBounds.y - newSize.height;
+    ({ x: newX, y: newY } = clampPosition(newX, newY, newSize.width, newSize.height, sw, sh));
+    AddCharacterWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
+  }
+  // 更新 selectCharacterWindow：相对于 characterWindow，进行 clamping
+  if (selectCharacterWindow && !selectCharacterWindow.isDestroyed() && characterWindow) {
+    const newSize = getScaledSize(baselineSizes.selectCharacter, currentSizePreset);
+    const charBounds = characterWindow.getBounds();
+    let newX = charBounds.x;
+    let newY = charBounds.y - newSize.height;
+    ({ x: newX, y: newY } = clampPosition(newX, newY, newSize.width, newSize.height, sw, sh));
+    selectCharacterWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
+  }
+  // 更新 settingsWindow：固定在左上角，进行 clamping
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    let newSize = getScaledSize(baselineSizes.settings, currentSizePreset);
+    if (newSize.width > sw) newSize.width = sw;
+    if (newSize.height > sh) newSize.height = sh;
+    settingsWindow.setBounds({ x: 0, y: 0, width: newSize.width, height: newSize.height });
+  }
+}
 
 // ============ 创建窗口函数们 ============ //
 const createcharacterWindow = () => {
   const { width, height } = screen.getPrimaryDisplay().workAreaSize;
+  const charSize = getScaledSize(baselineSizes.character, currentSizePreset);
+  const x = width - charSize.width - 20;
+  const y = height - charSize.height - 10;
   characterWindow = new BrowserWindow({
-    width: 200,
-    height: 300,
-    x: width - 220,  // 500 是窗口宽度
-    y: height - 310, // 400 是窗口高度
+    width: charSize.width,
+    height: charSize.height,
+    x,
+    y,
     frame: false,
     transparent: true,
     resizable: false,
@@ -206,11 +310,15 @@ const createcharacterWindow = () => {
 const createChatWindow = () => {
   if (!characterWindow) return;
   const charBounds = characterWindow.getBounds();
+  const chatSize = getScaledSize(baselineSizes.chat, currentSizePreset);
+  let x = charBounds.x - chatSize.width - 20;
+  let y = charBounds.y - chatSize.height + charBounds.height;
+  // 对 chatWindow 不进行 clamping
   chatWindow = new BrowserWindow({
-    x: charBounds.x - 400 - 20,
-    y: charBounds.y - 350 + charBounds.height,
-    width: 400,
-    height: 350,
+    x,
+    y,
+    width: chatSize.width,
+    height: chatSize.height,
     frame: false,
     transparent: true,
     roundedCorners: true,
@@ -232,12 +340,16 @@ const createChatWindow = () => {
 };
 
 const createAddCharacterWindow = () => {
+  const addCharSize = getScaledSize(baselineSizes.addCharacter, currentSizePreset);
+  let x = 500;
+  let y = screenHeight - addCharSize.height - 250;
+  ({ x, y } = clampPosition(x, y, addCharSize.width, addCharSize.height, screen.getPrimaryDisplay().workAreaSize.width, screenHeight));
   AddCharacterWindow = new BrowserWindow({
-    width: 600,
-    height: 450,
+    width: addCharSize.width,
+    height: addCharSize.height,
     show: false,
-    x: 500,
-    y: screenHeight - 700,
+    x,
+    y,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -255,9 +367,13 @@ const createAddCharacterWindow = () => {
 };
 
 const createSelectCharacterWindow = () => {
+  const selectCharSize = getScaledSize(baselineSizes.selectCharacter, currentSizePreset);
+  let x = 500; // 初始位置可根据需求调整
+  let y = screenHeight - selectCharSize.height - 250;
+  ({ x, y } = clampPosition(x, y, selectCharSize.width, selectCharSize.height, screen.getPrimaryDisplay().workAreaSize.width, screenHeight));
   selectCharacterWindow = new BrowserWindow({
-    width: 500,
-    height: 400,
+    width: selectCharSize.width,
+    height: selectCharSize.height,
     show: false,
     frame: false,
     transparent: true,
@@ -276,11 +392,15 @@ const createSelectCharacterWindow = () => {
   selectCharacterWindow.on("closed", () => { selectCharacterWindow = null; });
 };
 
-// ✅ 新增：SettingsWindow
 const createSettingsWindow = () => {
+  const settingsSize = getScaledSize(baselineSizes.settings, currentSizePreset);
+  let x = 0, y = 0;
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+  if (settingsSize.width > sw) settingsSize.width = sw;
+  if (settingsSize.height > sh) settingsSize.height = sh;
   settingsWindow = new BrowserWindow({
-    width: 600,
-    height: 800,
+    width: settingsSize.width,
+    height: settingsSize.height,
     show: false,
     frame: false,
     transparent: true,
@@ -312,10 +432,7 @@ app.whenReady().then(() => {
   createSelectCharacterWindow();
   createSettingsWindow();
 
-  // chatWindow.setTitle("PetGPT Child - Chat");
-chatWindow.setSkipTaskbar(true);
-
-  // chatWindow.setSkipTaskbar(true);
+  chatWindow.setSkipTaskbar(true);
 
   globalShortcut.register("Shift+Control+Space", () => {
     if (characterWindow) {
@@ -328,22 +445,28 @@ chatWindow.setSkipTaskbar(true);
   globalShortcut.register("Shift+space", () => {
     if (characterWindow) {
       const visible = chatWindow.isVisible();
-      visible ? characterWindow.show():characterWindow.show();
+      visible ? characterWindow.show() : characterWindow.show();
       visible ? chatWindow.hide() : chatWindow.show();
     }
   });
 
+  // 当 characterWindow 移动时，重新计算 chatWindow 的位置（保持相对位置，不 clamping）
   characterWindow.on('move', () => {
     if (!chatWindow || !characterWindow) return;
     const charBounds = characterWindow.getBounds();
-    const chatBounds = chatWindow.getBounds();
+    const newChatSize = getScaledSize(baselineSizes.chat, currentSizePreset);
+    const newX = charBounds.x - newChatSize.width - 20;
+    const newY = charBounds.y - newChatSize.height + charBounds.height;
     chatWindow.setBounds({
-      x: charBounds.x - chatWindow.getBounds().width - 20,
-      y: charBounds.y - chatWindow.getBounds().height + charBounds.height,
-      width: chatBounds.width,
-      height: chatBounds.height,
+      x: newX,
+      y: newY,
+      width: newChatSize.width,
+      height: newChatSize.height,
     });
   });
+  // 初始化时设置为 "large" 并更新所有窗口尺寸及位置
+  // currentSizePreset = "medium";
+  // updateAllWindowsSizes(currentSizePreset);
 });
 
 app.on("will-quit", () => globalShortcut.unregisterAll());

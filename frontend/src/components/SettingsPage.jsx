@@ -59,6 +59,8 @@ const SettingsPage = () => {
     } catch (error) {
       alert("Failed to save settings: " + error.message);
     }
+
+    window.electron.updateWindowSizePreset(settings.windowSize)
   };
 
   // 宠物显示文本
