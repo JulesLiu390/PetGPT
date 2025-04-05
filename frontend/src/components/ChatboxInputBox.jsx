@@ -15,18 +15,23 @@ export const ChatboxInputBox = () => {
   };
 
   // 修改后的：点击按钮时复制对话内容
-  const handleShare = () => {
-    const conversationText = userMessages
-      .map(msg => `${msg.role}: ${msg.content}`)
-      .join('\n');
-    navigator.clipboard.writeText(conversationText)
-      .then(() => {
-        alert("Conversation copied to clipboard");
-      })
-      .catch((err) => {
-        console.error("Failed to copy conversation: ", err);
-      });
-  };
+// 修改后的：点击按钮时复制对话内容
+const handleShare = () => {
+  const conversationText = userMessages
+    .map(msg =>
+      msg.role === "assistant" && petInfo && petInfo.name
+        ? `${petInfo.name}: ${msg.content}`
+        : `${msg.role}: ${msg.content}`
+    )
+    .join('\n');
+  navigator.clipboard.writeText(conversationText)
+    .then(() => {
+      alert("Conversation copied to clipboard");
+    })
+    .catch((err) => {
+      console.error("Failed to copy conversation: ", err);
+    });
+};
 
   const inputRef = useRef(null);
   const [{ userText, userMessages }, dispatch] = useStateValue();
