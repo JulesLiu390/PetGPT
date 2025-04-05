@@ -41,8 +41,8 @@ const TruncatedText = ({ label, text }) => {
 
   if (!text) return null;
 
-  const isLong = text.length > 200;
-  const displayText = expanded || !isLong ? text : text.slice(0, 300) + '...';
+  const isLong = text.length > 80;
+  const displayText = expanded || !isLong ? text : text.slice(0, 80) + '...';
 
   return (
     <div className="text-sm text-gray-600">

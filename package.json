@@ -1,6 +1,6 @@
 {
   "name": "petgpt",
-  "version": "0.1.2",
+  "version": "0.1.5",
   "license": "MIT",
   "main": "electron/main.js",
   "scripts": {

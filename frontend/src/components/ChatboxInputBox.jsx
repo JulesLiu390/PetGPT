@@ -1,37 +1,44 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
-import { FaCircleArrowUp, FaGlobe, FaShareNodes } from "react-icons/fa6";
+import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { callOpenAILib, callCommand, longTimeMemory, processMemory } from '../utlis/openai';
 
 export const ChatboxInputBox = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [agentActive, setAgentActive] = useState(false); // Agent 开关
+  // 新增记忆功能开关状态
+  const [memoryEnabled, setMemoryEnabled] = useState(true);
 
   const toggleAgent = () => {
     setAgentActive(prev => !prev);
     console.log(!agentActive ? "Agent 已启动" : "Agent 已关闭");
   };
 
+  // 新增记忆功能切换函数
+  const toggleMemory = () => {
+    setMemoryEnabled(prev => !prev);
+    console.log(!memoryEnabled ? "记忆功能开启" : "记忆功能关闭");
+  };
+
   // 修改后的：点击按钮时复制对话内容
-// 修改后的：点击按钮时复制对话内容
-const handleShare = () => {
-  const conversationText = userMessages
-    .map(msg =>
-      msg.role === "assistant" && petInfo && petInfo.name
-        ? `${petInfo.name}: ${msg.content}`
-        : `${msg.role}: ${msg.content}`
-    )
-    .join('\n');
-  navigator.clipboard.writeText(conversationText)
-    .then(() => {
-      alert("Conversation copied to clipboard");
-    })
-    .catch((err) => {
-      console.error("Failed to copy conversation: ", err);
-    });
-};
+  const handleShare = () => {
+    const conversationText = userMessages
+      .map(msg =>
+        msg.role === "assistant" && petInfo && petInfo.name
+          ? `${petInfo.name}: ${msg.content}`
+          : `${msg.role}: ${msg.content}`
+      )
+      .join('\n');
+    navigator.clipboard.writeText(conversationText)
+      .then(() => {
+        alert("Conversation copied to clipboard");
+      })
+      .catch((err) => {
+        console.error("Failed to copy conversation: ", err);
+      });
+  };
 
   const inputRef = useRef(null);
   const [{ userText, userMessages }, dispatch] = useStateValue();
@@ -98,7 +105,7 @@ const handleShare = () => {
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
-              modelProvider, // 直接使用从pet获取的值
+              modelProvider,
               modelApiKey,
               modelName,
               modelUrl
@@ -206,35 +213,46 @@ const handleShare = () => {
       fullMessages = [...userMessages, { role: "user", content: userText }];
     } else {
       if (!isDefaultPersonality) {
-        const index = await longTimeMemory(userText, 
-          petInfo.modelProvider,
-          petInfo.modelApiKey,
-          petInfo.modelName,
-          petInfo.modelUrl
-        )
-        if(index.isImportant == true) {
-          await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
-          const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
-          const memory = JSON.stringify(memoryJson);
-          const getUserMemory = await processMemory(
-            memory,
+        // 当记忆功能开启时，调用更新记忆的逻辑；关闭时只构造角色设定
+        if (memoryEnabled) {
+          const index = await longTimeMemory(userText, 
             petInfo.modelProvider,
             petInfo.modelApiKey,
             petInfo.modelName,
             petInfo.modelUrl
           );
-          await setUserMemory(getUserMemory);
-        }
-
-        let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n 
-        关于用户的信息设定如下:\n${userMemory}\n`;
-        if (petInfo.isAgent) {
-          systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
+          if(index.isImportant === true) {
+            await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
+            const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+            const memory = JSON.stringify(memoryJson);
+            const getUserMemory = await processMemory(
+              memory,
+              petInfo.modelProvider,
+              petInfo.modelApiKey,
+              petInfo.modelName,
+              petInfo.modelUrl
+            );
+            await setUserMemory(getUserMemory);
+          }
+          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
+          if (petInfo.isAgent) {
+            systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
+          } else {
+            systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
+          }
+          const systemPrompt = { role: "system", content: systemContent };
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
         } else {
-          systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
+          // 记忆关闭：既不调用更新记忆逻辑，也不包含用户记忆，仅保留角色设定
+          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
+          if (petInfo.isAgent) {
+            systemContent += "请在回答中保持角色特点，生成回复内容。";
+          } else {
+            systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
+          }
+          const systemPrompt = { role: "system", content: systemContent };
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
         }
-        const systemPrompt = { role: "system", content: systemContent };
-        fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
       } else {
         fullMessages = [...userMessages, { role: "user", content: userText }];
       }
@@ -249,7 +267,7 @@ const handleShare = () => {
         petInfo.modelApiKey,
         petInfo.modelName,
         petInfo.modelUrl
-      )
+      );
       const commands = reply.excution || '';  // 你的多行命令
 
       function escapeShellCommand(cmd) {
@@ -323,7 +341,7 @@ const handleShare = () => {
 
   return (
     <div className="relative w-full">
-      {/* 主容器：包含输入框和 Agent 及 Share Conversation 按钮 */}
+      {/* 主容器：包含输入框和 Agent、Memory 及 Share Conversation 按钮 */}
       <div className="bg-[rgba(220,220,230,0.9)] border-gray-300 rounded-3xl border-2 p-3 text-gray-800">
         <textarea
           ref={inputRef}
@@ -336,7 +354,7 @@ const handleShare = () => {
           onChange={handleChange}
           style={{ height: 'auto', maxHeight: '200px', overflow: 'auto' }}
         />
-        {/* 按钮区域：将 Agent 和 Share Conversation 按钮放在一起 */}
+        {/* 按钮区域：将 Agent、Memory 及 Share Conversation 按钮放在一起 */}
         <div className="flex justify-between">
           <div className="flex items-center space-x-2">
             <button
@@ -344,14 +362,25 @@ const handleShare = () => {
               className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
             >
               <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm">{agentActive ? "Agent On" : "Agent Off"}</span>
+              <span className="text-sm hidden [@media(min-width:300px)]:inline">
+                {agentActive ? "Agent" : "Agent"}
+              </span>
+            </button>
+            <button
+              onClick={toggleMemory}
+              className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
+            >
+              <FaFile className={`w-5 h-5 ${memoryEnabled ? 'text-green-500' : 'text-gray-600'}`} />
+              <span className="text-sm hidden [@media(min-width:300px)]:inline">
+                {memoryEnabled ? "Memory" : "Memory"}
+              </span>
             </button>
             <button
               onClick={handleShare}
               className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
             >
               <FaShareNodes className="w-5 h-5 text-gray-600" />
-              <span className="text-sm">Share Conversation</span>
+              <span className="text-sm hidden [@media(min-width:300px)]:inline">Share</span>
             </button>
           </div>
         </div>
