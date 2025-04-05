@@ -25,9 +25,9 @@ export const Character = () => {
       try {
         const settings = await window.electron.getSettings();
         if (settings && settings.defaultRoleId) {
-          console.log("📚 Loading default character image from settings:", settings.defaultRoleId);
           
           try {
+            window.electron.updateShortcuts(settings.programHotkey, settings.dialogHotkey)
             const pet = await window.electron.getPet(settings.defaultRoleId);
             if (pet && pet.imageName) {
               setImageName(pet.imageName);
@@ -83,6 +83,18 @@ export const Character = () => {
         if(imageName == 'default') {
           const base64Image = await import(`../assets/default-${characterMood}.png`);
           setImgSrc(base64Image.default);
+        } else if(imageName === "Opai") {
+          const module = await import(`../assets/Opai-${characterMood}.png`);
+          setImgSrc(module.default);
+        } else if(imageName === "Claudia") {
+          const module = await import(`../assets/Claudia-${characterMood}.png`);
+          setImgSrc(module.default);
+        } else if(imageName === "Grocka") {
+          const module = await import(`../assets/Grocka-${characterMood}.png`);
+          setImgSrc(module.default);
+        } else if(imageName === "Gemina") {
+          const module = await import(`../assets/Gemina-${characterMood}.png`);
+          setImgSrc(module.default);
         } else {
           const base64Image = await window.electron.readPetImage(`${imageName}-${characterMood}.png`);
           setImgSrc(base64Image);

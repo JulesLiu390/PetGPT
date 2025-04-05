@@ -2,29 +2,28 @@ import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 
+// 定义 provider 对应的 URL 字典
+const providerURLs = {
+  openai: "https://api.openai.com/v1",
+  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
+  anthropic: "https://api.anthropic.com/v1",
+  grok: "https://api.x.ai/v1"
+};
+
 const StructuredResponseSchema = z.object({
   content: z.string(),
   mood: z.enum(["angry", "normal", "smile"]),
 });
 
 // 定义不支持结构化输出的模型列表
-const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
-
-
+const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo"];
 
 export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
-
-  if(baseURL == "default") {
-    if(provider == "openai") {
-      baseURL = "https://api.openai.com/v1";
-    } else if(provider == "gemini") {
-      baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
-    } else if(provider == "anthropic") {
-      baseURL = "https://api.anthropic.com/v1"
-    }
+  if (baseURL === "default") {
+    baseURL = providerURLs[provider] || baseURL;
   } else {
-    baseURL += '/v1'
+    baseURL += '/v1';
   }
   const openai = new OpenAI({
     apiKey: apiKey,
@@ -60,17 +59,10 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
 
 export const callCommand = async (messages, provider, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
-
-  if(baseURL == "default") {
-    if(provider == "openai") {
-      baseURL = "https://api.openai.com/v1";
-    } else if(provider == "gemini") {
-      baseURL = "https://generativelanguage.googleapis.com/v1beta/openai"
-    } else if(provider == "anthropic") {
-      baseURL = "https://api.anthropic.com/v1"
-    }
+  if (baseURL === "default") {
+    baseURL = providerURLs[provider] || baseURL;
   } else {
-    baseURL += '/v1'
+    baseURL += '/v1';
   }
   const openai = new OpenAI({
     apiKey: apiKey,
@@ -82,18 +74,20 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
     const chatCompletion = await openai.chat.completions.create({
       model: model,
       messages: [
-        { role: 'system', content: `你是终端命令专家。只输出可直接复制粘贴到macOS终端执行的一条或多条命令，不含任何前缀、后缀或说明。不要使用代码块，不要使用任何标记，不要添加任何解释。如果涉及到编写代码文件请使用heredoc；不要输出任何自然语言内容。
+        {
+          role: 'system',
+          content: `你是终端命令专家。只输出可直接复制粘贴到macOS终端执行的一条或多条命令，不含任何前缀、后缀或说明。不要使用代码块，不要使用任何标记，不要添加任何解释。如果涉及到编写代码文件请使用heredoc；不要输出任何自然语言内容。
 
-          要求写文件时候的样例（不要用在执行程序上了）：
-          cat <<EOF
-          多行文本内容
-          可以包含变量、命令替换等
-          EOF
-          不要忘记EOF！！！
-          (编写完文件之后再运行其他命令(比如运行编写好的程序，打开文件这类)， 不要弄混了， 谢谢)
+要求写文件时候的样例（不要用在执行程序上了）：
+cat <<EOF
+多行文本内容
+可以包含变量、命令替换等
+EOF
+不要忘记EOF！！！
+(编写完文件之后再运行其他命令(比如运行编写好的程序，打开文件这类)， 不要弄混了， 谢谢)
 
-          如果让你编写word文档或者pdf， 就先用md写， 写好后用pandoc转换即可
-          `   },
+如果让你编写word文档或者pdf， 就先用md写， 写好后用pandoc转换即可`
+        },
         ...messages
       ],
       temperature: 0.2
@@ -101,26 +95,27 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
     const explainCode = await openai.chat.completions.create({
       model: model,
       messages: [
-        { role: 'system', content: `explain those macOS terminal codes shortly.
-          for example:
-          step 1: xxx
-          step 2: xxx
-          step 3: xxx` },
-        { role: 'user', content: chatCompletion.choices[0].message.content}
+        {
+          role: 'system',
+          content: `explain those macOS terminal codes shortly.
+for example:
+step 1: xxx
+step 2: xxx
+step 3: xxx`
+        },
+        { role: 'user', content: chatCompletion.choices[0].message.content }
       ]
     });
     return {
       excution: chatCompletion.choices[0].message.content,
-      // content: chatCompletion.choices[0].message.content,
       content: explainCode.choices[0].message.content,
-      mood:"normal"
+      mood: "normal"
     }
   } catch (error) {
     console.error("OpenAI 请求出错：", error);
     return error;
   }
 };
-
 
 const LongTermMemoryResponseSchema = z.object({
   isImportant: z.boolean(),
@@ -131,9 +126,7 @@ const LongTermMemoryResponseSchema = z.object({
 
 export const longTimeMemory = async (message, provider, apiKey, model, baseURL) => {
   if (baseURL === "default") {
-    baseURL = provider === "openai"
-      ? "https://api.openai.com/v1"
-      : "https://generativelanguage.googleapis.com/v1beta/openai";
+    baseURL = providerURLs[provider] || baseURL;
   } else {
     baseURL += "/v1";
   }
@@ -187,12 +180,9 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
   }
 };
 
-
 export const processMemory = async (configStr, provider, apiKey, model, baseURL) => {
   if (baseURL === "default") {
-    baseURL = provider === "openai"
-      ? "https://api.openai.com/v1"
-      : "https://generativelanguage.googleapis.com/v1beta/openai";
+    baseURL = providerURLs[provider] || baseURL;
   } else {
     baseURL += "/v1";
   }

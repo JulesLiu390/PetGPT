@@ -392,6 +392,32 @@ const createSelectCharacterWindow = () => {
   selectCharacterWindow.on("closed", () => { selectCharacterWindow = null; });
 };
 
+// 添加一个新的 IPC handler，用于更新快捷键
+ipcMain.handle('update-shortcuts', async (event, { shortcut1, shortcut2 }) => {
+  // 注销所有之前注册的快捷键
+  globalShortcut.unregisterAll();
+
+  // 注册第一个快捷键：例如用来切换 characterWindow 的显示状态
+  globalShortcut.register(shortcut1, () => {
+    if (characterWindow) {
+      const visible = characterWindow.isVisible();
+      visible ? characterWindow.hide() : characterWindow.show();
+      visible ? chatWindow.hide() : chatWindow.hide();
+    }
+  });
+
+  // 注册第二个快捷键：例如用来切换 chatWindow 的显示状态
+  globalShortcut.register(shortcut2, () => {
+    if (characterWindow) {
+      const visible = chatWindow.isVisible();
+      visible ? characterWindow.show() : characterWindow.show();
+      visible ? chatWindow.hide() : chatWindow.show();
+    }
+  });
+
+  return { success: true, shortcuts: { shortcut1, shortcut2 } };
+});
+
 const createSettingsWindow = () => {
   const settingsSize = getScaledSize(baselineSizes.settings, currentSizePreset);
   let x = 0, y = 0;
@@ -434,21 +460,21 @@ app.whenReady().then(() => {
 
   chatWindow.setSkipTaskbar(true);
 
-  globalShortcut.register("Shift+Control+Space", () => {
-    if (characterWindow) {
-      const visible = characterWindow.isVisible();
-      visible ? characterWindow.hide() : characterWindow.show();
-      visible ? chatWindow.hide() : chatWindow.hide();
-    }
-  });
+  // globalShortcut.register("Shift+Control+Space", () => {
+  //   if (characterWindow) {
+  //     const visible = characterWindow.isVisible();
+  //     visible ? characterWindow.hide() : characterWindow.show();
+  //     visible ? chatWindow.hide() : chatWindow.hide();
+  //   }
+  // });
 
-  globalShortcut.register("Shift+space", () => {
-    if (characterWindow) {
-      const visible = chatWindow.isVisible();
-      visible ? characterWindow.show() : characterWindow.show();
-      visible ? chatWindow.hide() : chatWindow.show();
-    }
-  });
+  // globalShortcut.register("Shift+space", () => {
+  //   if (characterWindow) {
+  //     const visible = chatWindow.isVisible();
+  //     visible ? characterWindow.show() : characterWindow.show();
+  //     visible ? chatWindow.hide() : chatWindow.show();
+  //   }
+  // });
 
   // 当 characterWindow 移动时，重新计算 chatWindow 的位置（保持相对位置，不 clamping）
   characterWindow.on('move', () => {

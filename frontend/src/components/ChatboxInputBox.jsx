@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
-import { FaCircleArrowUp, FaGlobe } from "react-icons/fa6";
+import { FaCircleArrowUp, FaGlobe, FaShareNodes } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { callOpenAILib, callCommand, longTimeMemory, processMemory } from '../utlis/openai';
 
@@ -12,6 +12,20 @@ export const ChatboxInputBox = () => {
   const toggleAgent = () => {
     setAgentActive(prev => !prev);
     console.log(!agentActive ? "Agent 已启动" : "Agent 已关闭");
+  };
+
+  // 修改后的：点击按钮时复制对话内容
+  const handleShare = () => {
+    const conversationText = userMessages
+      .map(msg => `${msg.role}: ${msg.content}`)
+      .join('\n');
+    navigator.clipboard.writeText(conversationText)
+      .then(() => {
+        alert("Conversation copied to clipboard");
+      })
+      .catch((err) => {
+        console.error("Failed to copy conversation: ", err);
+      });
   };
 
   const inputRef = useRef(null);
@@ -85,12 +99,10 @@ export const ChatboxInputBox = () => {
               modelUrl
             );
             setUserMemory(getUserMemory);
-            // alert(getUserMemory);
           } catch (memoryError) {
             console.error("加载用户记忆失败:", memoryError);
           }
         } else {
-          // 如果找不到对应的宠物数据，将characterId设为null
           console.error("Pet not found for ID:", characterId);
           setCharacterId(null);
           return;
@@ -107,9 +119,7 @@ export const ChatboxInputBox = () => {
         }
       } catch (error) {
         console.error("Error fetching pet info:", error);
-        // 出错时将characterId设为null
         setCharacterId(null);
-        // alert("Failed to load character info");
       }
     };
 
@@ -167,7 +177,6 @@ export const ChatboxInputBox = () => {
 
   // 发送消息
   const handleSend = async () => {
-
     if (!characterId) {
       alert("Please select a character first!");
       return;
@@ -179,7 +188,7 @@ export const ChatboxInputBox = () => {
 
     if (inputRef.current) {
       inputRef.current.value = "";
-      inputRef.current.style.height = 'auto'; // 重置为初始高度
+      inputRef.current.style.height = 'auto';
     }
 
     // 判断是否为默认人格
@@ -191,8 +200,6 @@ export const ChatboxInputBox = () => {
     if(agentActive) {
       fullMessages = [...userMessages, { role: "user", content: userText }];
     } else {
-      
-      
       if (!isDefaultPersonality) {
         const index = await longTimeMemory(userText, 
           petInfo.modelProvider,
@@ -212,7 +219,6 @@ export const ChatboxInputBox = () => {
             petInfo.modelUrl
           );
           await setUserMemory(getUserMemory);
-          // alert(getUserMemory);
         }
 
         let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n 
@@ -241,29 +247,21 @@ export const ChatboxInputBox = () => {
       )
       const commands = reply.excution || '';  // 你的多行命令
 
-      // 转义要传给 Terminal 的 Shell 命令（在 do script "..." 里）:
       function escapeShellCommand(cmd) {
-        // 移除多余的 Markdown 代码块标记
         let cleaned = cmd
           .replace(/^```(?:bash|shell)\n/, '')
           .replace(/\n```$/, '');
-
-        // 仅转义反斜杠、双引号和反引号，不对美元符号进行转义
         cleaned = cleaned
-          .replace(/\\/g, '\\\\')    // 反斜杠 -> 双反斜杠
-          .replace(/"/g, '\\"')       // 双引号 -> \"
-          .replace(/`/g, '\\`');      // 反引号 -> \\\`
-        
+          .replace(/\\/g, '\\\\')
+          .replace(/"/g, '\\"')
+          .replace(/`/g, '\\`');
         return cleaned;
       }
 
-      // 转义 AppleScript 的外层字符串
       function escapeForAppleScript(str) {
         return str.replace(/'/g, "'\\''");
-        // /'/g, "'\\''"
       }
 
-      // 生成 AppleScript 命令
       const shellCmdEscaped = escapeShellCommand(commands);
       const appleScriptCode = `
       tell application "Terminal"
@@ -320,7 +318,7 @@ export const ChatboxInputBox = () => {
 
   return (
     <div className="relative w-full">
-      {/* 主容器：包含输入框和 Agent 切换按钮 */}
+      {/* 主容器：包含输入框和 Agent 及 Share Conversation 按钮 */}
       <div className="bg-[rgba(220,220,230,0.9)] border-gray-300 rounded-3xl border-2 p-3 text-gray-800">
         <textarea
           ref={inputRef}
@@ -333,19 +331,28 @@ export const ChatboxInputBox = () => {
           onChange={handleChange}
           style={{ height: 'auto', maxHeight: '200px', overflow: 'auto' }}
         />
-        {/* 保留第一版的 Agent UI */}
+        {/* 按钮区域：将 Agent 和 Share Conversation 按钮放在一起 */}
         <div className="flex justify-between">
-          <button
-            onClick={toggleAgent}
-            className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
-          >
-            <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
-            <span className="text-sm">{agentActive ? "Agent On" : "Agent Off"}</span>
-          </button>
+          <div className="flex items-center space-x-2">
+            <button
+              onClick={toggleAgent}
+              className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
+            >
+              <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
+              <span className="text-sm">{agentActive ? "Agent On" : "Agent Off"}</span>
+            </button>
+            <button
+              onClick={handleShare}
+              className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
+            >
+              <FaShareNodes className="w-5 h-5 text-gray-600" />
+              <span className="text-sm">Share Conversation</span>
+            </button>
+          </div>
         </div>
       </div>
 
-      {/* 发送按钮：采用后续给出的 UI，绝对定位于右下角 */}
+      {/* 发送按钮：绝对定位于右下角 */}
       <button
         onClick={handleSend}
         disabled={!String(userText).trim() || isGenerating}

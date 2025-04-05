@@ -61,6 +61,7 @@ const SettingsPage = () => {
     }
 
     window.electron.updateWindowSizePreset(settings.windowSize)
+    window.electron.updateShortcuts(settings.programHotkey, settings.dialogHotkey)
   };
 
   // 宠物显示文本

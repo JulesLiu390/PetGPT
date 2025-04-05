@@ -48,5 +48,7 @@ contextBridge.exposeInMainWorld('electron', {
   readPetImage: (fileName) => ipcRenderer.invoke('read-pet-image', fileName),
   changeSettingsWindow: () => ipcRenderer.send("change-settings-window"),
   testOpen: (command) => ipcRenderer.send("say-hello", command),
-  updateWindowSizePreset: async (preset) => ipcRenderer.invoke('update-window-size-preset', preset)
+  updateWindowSizePreset: async (preset) => ipcRenderer.invoke('update-window-size-preset', preset),
+  updateShortcuts: (shortcut1, shortcut2) => ipcRenderer.invoke('update-shortcuts', { shortcut1, shortcut2 }),
+  
 });

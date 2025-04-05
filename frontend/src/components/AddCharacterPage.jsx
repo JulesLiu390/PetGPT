@@ -1,22 +1,30 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import AddCharacterTitleBar from "./AddCharacterTitleBar";
 import { callOpenAILib } from "../utlis/openai";
 import defaultNormal from "../assets/default-normal.png";
+import OpaiNormal from "../assets/Opai-normal.png";
+import GeminaNormal from "../assets/Gemina-normal.png";
+import GrockaNormal from "../assets/Grocka-normal.png";
+import ClaudiaNormal from "../assets/Claudia-normal.png";
+
+
+
 
 // ======= 默认图片选项 =======
 const defaultImageOptions = [
   { label: "Default", value: "default", src: defaultNormal },
+  { label: "Opai", value: "Opai", src: OpaiNormal },
+  { label: "Gemina", value: "Gemina", src: GeminaNormal },
+  { label: "Grocka", value: "Grocka", src: GrockaNormal },
+  { label: "Claudia", value: "Claudia", src: ClaudiaNormal },
   // 如有更多预设图片，可在此添加
-  { label: "Anime Girl", value: "anime-girl", src: defaultNormal },
-  // { label: "Warrior", value: "warrior", src: warriorImg },
 ];
 
-// ======= 预设角色数据（删除了外观字段），包含完整表单数据 =======
-// useDefaultPersonality 标志指示该预设角色是否应使用默认人格（即 personality 为 "default"）。
+// ======= 预设角色数据 =======
 const presetCharacterOptions = [
   {
     label: "Create Your Own Character",
-    value: "",
+    value: "own character",
     data: {
       name: "",
       personality: "",
@@ -34,8 +42,8 @@ const presetCharacterOptions = [
     value: "Opai",
     data: {
       name: "Opai",
-      personality: "You are a useful assistant", // 此处默认描述，可在下方用 useDefaultPersonality 覆盖
-      imageName: "default",
+      personality: "You are a useful assistant",
+      imageName: "Opai",
       modelProvider: "openai",
       modelName: "gpt-4o",
       modelApiKey: "",
@@ -49,10 +57,10 @@ const presetCharacterOptions = [
     value: "Gemina",
     data: {
       name: "Gemina",
-      personality: "You are a useful assistant", // 此处默认描述，可在下方用 useDefaultPersonality 覆盖
-      imageName: "default",
+      personality: "You are a useful assistant",
+      imageName: "Gemina",
       modelProvider: "gemini",
-      modelName: "gemini",
+      modelName: "gemini-2.0-flash",
       modelApiKey: "",
       modelUrl: "default",
       isAgent: true,
@@ -60,14 +68,29 @@ const presetCharacterOptions = [
     useDefaultPersonality: true,
   },
   {
-    label: "Mystical Sage",
-    value: "mystical_sage",
+    label: "Grocka (Grok pure assistant)",
+    value: "Grocka",
     data: {
-      name: "Opai",
-      personality: "You are a useful assistant", // 此处默认描述，可在下方用 useDefaultPersonality 覆盖
-      imageName: "default",
-      modelProvider: "openai",
-      modelName: "gpt-4o",
+      name: "Grocka",
+      personality: "You are a useful assistant",
+      imageName: "Grocka",
+      modelProvider: "grok",
+      modelName: "grok-2-1212",
+      modelApiKey: "",
+      modelUrl: "default",
+      isAgent: true,
+    },
+    useDefaultPersonality: true,
+  },
+  {
+    label: "Claudia (Anthropic pure assistant)",
+    value: "Claudia",
+    data: {
+      name: "Claudia",
+      personality: "You are a useful assistant",
+      imageName: "Claudia",
+      modelProvider: "anthropic",
+      modelName: "claude-3-7-sonnet-20250219",
       modelApiKey: "",
       modelUrl: "default",
       isAgent: true,
@@ -88,16 +111,40 @@ const AddCharacterPage = () => {
     isAgent: false,
   });
 
-  // 控制是否使用默认人格的勾选框（仅用于 UI 控制，提交前根据该状态覆盖 personality 字段）
   const [useDefaultPersonality, setUseDefaultPersonality] = useState(false);
   const [modelUrlType, setModelUrlType] = useState("default");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
-  // 图片文件及处理后图片路径
   const [selectedImageFile, setSelectedImageFile] = useState(null);
   const [processedImagePaths, setProcessedImagePaths] = useState([]);
-  // 记录当前选中的预设角色
   const [presetSelected, setPresetSelected] = useState("");
+
+  // 将预设选项的逻辑封装到一个函数中
+  const applyPreset = (presetValue) => {
+    const preset = presetCharacterOptions.find(opt => opt.value === presetValue);
+    if (preset && preset.data) {
+      const presetData = { ...preset.data };
+      if (preset.useDefaultPersonality) {
+        presetData.personality = "default";
+        setUseDefaultPersonality(true);
+      } else {
+        setUseDefaultPersonality(false);
+      }
+      setCharacter(presetData);
+      setPresetSelected(presetValue);
+      const foundOption = defaultImageOptions.find(opt => opt.value === presetData.imageName);
+      if (foundOption && foundOption.src) {
+        setProcessedImagePaths([foundOption.src]);
+      } else {
+        setProcessedImagePaths([]);
+      }
+    }
+  };
+
+  // 启动时自动选择 own character
+  useEffect(() => {
+    applyPreset("own character");
+  }, []);
 
   const handleChange = (e) => {
     setCharacter({ ...character, [e.target.name]: e.target.value });
@@ -109,36 +156,8 @@ const AddCharacterPage = () => {
     setCharacter({ ...character, modelUrl: type === "default" ? "default" : "" });
   };
 
-  // 当用户选择预设角色时，根据 preset.useDefaultPersonality 来更新整个表单
   const handlePresetChange = (e) => {
-    const value = e.target.value;
-    setPresetSelected(value);
-    if (value) {
-      const preset = presetCharacterOptions.find((opt) => opt.value === value);
-      if (preset && preset.data) {
-        const presetData = { ...preset.data };
-        if (preset.useDefaultPersonality) {
-          presetData.personality = "default";
-          setUseDefaultPersonality(true); // 自动勾选 Use Default Personality
-        } else {
-          setUseDefaultPersonality(false);
-        }
-        setCharacter(presetData);
-        // 同步更新图片预览
-        if (presetData.imageName !== "default") {
-          const foundOption = defaultImageOptions.find(
-            (opt) => opt.value === presetData.imageName
-          );
-          if (foundOption && foundOption.src) {
-            setProcessedImagePaths([foundOption.src]);
-          } else {
-            setProcessedImagePaths([]);
-          }
-        } else {
-          setProcessedImagePaths([]);
-        }
-      }
-    }
+    applyPreset(e.target.value);
   };
 
   const handleImageFileChange = (e) => {
@@ -160,7 +179,7 @@ const AddCharacterPage = () => {
         const result = await window.electron.processImage(base64Image);
         console.log("Processed image result:", result);
         setProcessedImagePaths(result.paths);
-        setCharacter((prev) => ({ ...prev, imageName: result.uuid }));
+        setCharacter(prev => ({ ...prev, imageName: result.uuid }));
       } catch (error) {
         console.error("Error processing image:", error);
       }
@@ -171,8 +190,10 @@ const AddCharacterPage = () => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     try {
-      // 提交前，根据 useDefaultPersonality 状态覆盖 personality 字段
-      const submitData = { ...character, personality: useDefaultPersonality ? "default" : character.personality };
+      const submitData = { 
+        ...character, 
+        personality: useDefaultPersonality ? "default" : character.personality 
+      };
       if (!selectedImageFile && submitData.imageName === "default") {
         submitData.imageName = "default";
         setProcessedImagePaths([]);
@@ -183,23 +204,12 @@ const AddCharacterPage = () => {
       }
       window.electron?.sendCharacterId(newPet._id);
       window.electron?.sendPetsUpdate(newPet);
-      // 重置表单
-      setCharacter({
-        name: "",
-        personality: "",
-        imageName: "default",
-        modelProvider: "openai",
-        modelName: "",
-        modelApiKey: "",
-        modelUrl: "default",
-        isAgent: false,
-      });
-      setPresetSelected("");
+      // 重置时也模拟选择 own character
+      applyPreset("own character");
       setModelUrlType("default");
       setTestResult(null);
       setUseDefaultPersonality(false);
       setSelectedImageFile(null);
-      setProcessedImagePaths([]);
     } catch (error) {
       console.error("Error creating pet:", error.message);
       window.electron?.sendCharacterId(null);
@@ -243,10 +253,10 @@ const AddCharacterPage = () => {
     }
   };
 
-  // 根据 imageName 获取对应图片预览
+  // 修改 getDefaultImageSrc 函数，返回 URL 字符串
   const getDefaultImageSrc = (imageNameValue) => {
     const found = defaultImageOptions.find((opt) => opt.value === imageNameValue);
-    return found ? found.src : defaultNormal;
+    return found ? found.src : "";
   };
 
   return (
@@ -287,7 +297,7 @@ const AddCharacterPage = () => {
             <textarea
               name="personality"
               placeholder="Enter personality description or function for agent"
-              value={useDefaultPersonality ? "default" : character.personality}
+              value={useDefaultPersonality ? "You are a useful assistant" : character.personality}
               onChange={handleChange}
               disabled={useDefaultPersonality}
               className={`w-full p-1 border rounded resize-none h-12 ${
@@ -305,8 +315,6 @@ const AddCharacterPage = () => {
             </label>
           </div>
 
-          {/* 删除外观字段，默认为空 */}
-
           {/* 默认角色图片选择 */}
           <div className="flex flex-col space-y-1">
             <label className="text-gray-700">Default Character Image:</label>
@@ -315,17 +323,13 @@ const AddCharacterPage = () => {
               value={character.imageName}
               onChange={(e) => {
                 const newVal = e.target.value;
-                setCharacter((prev) => ({ ...prev, imageName: newVal }));
+                setCharacter(prev => ({ ...prev, imageName: newVal }));
                 setSelectedImageFile(null);
-                if (newVal === "default") {
-                  setProcessedImagePaths([]);
+                const foundOption = defaultImageOptions.find(opt => opt.value === newVal);
+                if (foundOption && foundOption.src) {
+                  setProcessedImagePaths([foundOption.src]);
                 } else {
-                  const foundOption = defaultImageOptions.find((opt) => opt.value === newVal);
-                  if (foundOption && foundOption.src) {
-                    setProcessedImagePaths([foundOption.src]);
-                  } else {
-                    setProcessedImagePaths([]);
-                  }
+                  setProcessedImagePaths([]);
                 }
               }}
             >
@@ -375,7 +379,7 @@ const AddCharacterPage = () => {
             ) : (
               <img
                 src={getDefaultImageSrc(character.imageName)}
-                alt="Default Character"
+                alt="default"
                 draggable="false"
                 className="w-40 h-40 border"
               />
@@ -395,9 +399,7 @@ const AddCharacterPage = () => {
                 type="checkbox"
                 name="isAgent"
                 checked={character.isAgent}
-                onChange={(e) =>
-                  setCharacter({ ...character, isAgent: e.target.checked })
-                }
+                onChange={(e) => setCharacter({ ...character, isAgent: e.target.checked })}
                 className="mr-1"
               />
               Is Agent (agent has no mood in chat. If you want to use gpt-3.5 or some model that doesn't support JSON, please tick this.)
@@ -416,7 +418,7 @@ const AddCharacterPage = () => {
                   value={character.modelProvider}
                   onChange={(e) => {
                     const newProvider = e.target.value;
-                    setCharacter((prev) => ({
+                    setCharacter(prev => ({
                       ...prev,
                       modelProvider: newProvider,
                       modelUrl: newProvider === "others" ? "" : "default",
@@ -427,6 +429,7 @@ const AddCharacterPage = () => {
                   <option value="openai">OpenAI</option>
                   <option value="gemini">Gemini</option>
                   <option value="anthropic">Anthropic</option>
+                  <option value="grok">Grok</option>
                   <option value="others">Others</option>
                 </select>
               </div>
@@ -461,7 +464,7 @@ const AddCharacterPage = () => {
               {character.modelProvider === "others" ? (
                 <input
                   name="modelUrl"
-                  placeholder="https://your-model-api.com"
+                  placeholder="https://yunwu.ai"
                   value={character.modelUrl}
                   onChange={handleChange}
                   className="flex-1 p-1 border rounded"
@@ -479,7 +482,7 @@ const AddCharacterPage = () => {
                   {modelUrlType === "custom" && (
                     <input
                       name="modelUrl"
-                      placeholder="https://your-model-api.com"
+                      placeholder="https://yunwu.ai"
                       value={character.modelUrl}
                       onChange={handleChange}
                       className="flex-1 p-1 border rounded"

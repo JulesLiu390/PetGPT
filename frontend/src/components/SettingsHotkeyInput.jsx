@@ -228,9 +228,9 @@ export const SettingsHotkeyInput = ({ name, value, onChange }) => {
       {/* 当前组合显示 */}
       <div className="text-center p-2 bg-gray-100 rounded">
         {keys.length > 0 ? (
-          <span>当前组合: {keys.join("+")}</span>
+          <span>Present Shortcut: {keys.join("+")}</span>
         ) : (
-          <span className="text-gray-500">请添加按键 (请确保键盘处于英文输入状态)</span>
+          <span className="text-gray-500">Please Press key</span>
         )}
       </div>
     </div>
