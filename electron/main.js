@@ -56,7 +56,8 @@ let screenHeight = 0;
 let currentSizePreset = 'small';
 
 let sharedState = {
-  characterMood: 'neutral'
+  characterMood: 'neutral',
+  chatbodyStatus: ''
 };
 
 // ============ IPC handlers ============ //
@@ -458,7 +459,7 @@ app.whenReady().then(() => {
   createSelectCharacterWindow();
   createSettingsWindow();
 
-  chatWindow.setSkipTaskbar(true);
+  // chatWindow.setSkipTaskbar(true);
 
   // globalShortcut.register("Shift+Control+Space", () => {
   //   if (characterWindow) {

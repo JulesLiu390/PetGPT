@@ -1,7 +1,13 @@
-const { ipcMain } = require('electron');
+const { ipcMain, BrowserWindow } = require('electron');
 const { exec } = require('child_process');
 const { getSettings, updateSettings } = require('./models/settings');
 const PetUserMemory = require('./models/pet_memory');
+// const { ipcMain, BrowserWindow } = require('electron');
+
+let sharedState = {
+  characterMood: 'neutral',
+  chatbodyStatus: ''
+};
 
 // 监听来自渲染进程的 "say-hello" 消息
 ipcMain.on('say-hello', (event, command) => {
@@ -76,4 +82,11 @@ ipcMain.handle('get-pet-user-memory-value', async (event, { petId, key }) => {
     console.error('Failed to get pet user memory value:', error);
     throw error;
   }
+});
+
+// chatbody更新
+ipcMain.on('update-chatbody-status', (event, status) => {
+  console.log("Received status update:", status);
+  sharedState.chatbodyStatus = status;
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chatbody-status-updated', status));
 });

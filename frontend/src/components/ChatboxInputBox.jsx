@@ -12,6 +12,11 @@ export const ChatboxInputBox = () => {
   const [memoryEnabled, setMemoryEnabled] = useState(true);
 
   const toggleAgent = () => {
+    // alert(system)
+    if(!system.toLowerCase().includes("mac")) {
+      alert("sorry, agent function is only support MacOS now.")
+      return;
+    }
     setAgentActive(prev => !prev);
     console.log(!agentActive ? "Agent 已启动" : "Agent 已关闭");
   };
@@ -44,71 +49,71 @@ export const ChatboxInputBox = () => {
   const [{ userText, userMessages }, dispatch] = useStateValue();
   const [characterId, setCharacterId] = useState(null);
   const [petInfo, setPetInfo] = useState(null);
-  const [functionModelInfo, setFunctionModelInfo] = useState(null)
+  const [functionModelInfo, setFunctionModelInfo] = useState(null);
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
   const conversationIdRef = useRef(null);
-  const [userMemory, setUserMemory] = useState(null)
-  const [founctionModel, setFounctionModel] = useState(null)
+  const [userMemory, setUserMemory] = useState(null);
+  const [founctionModel, setFounctionModel] = useState(null);
+  const [system, setSystem] = useState(null);
 
   // 启动时加载默认角色ID
   useEffect(() => {
+    setSystem(window.navigator.platform);
     const loadDefaultCharacter = async () => {
-    const settings = await window.electron.getSettings();
-    try {
-      if (settings && settings.defaultRoleId) {
-        console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
-        
-        // 验证ID是否有效（是否能找到对应的pet数据）
-        try {
-          const pet = await window.electron.getPet(settings.defaultRoleId);
-          if (pet) {
-            setCharacterId(settings.defaultRoleId);
-            console.log("Default character ID validated successfully");
-          } else {
-            console.log("Default character ID not found in database, using null");
+      const settings = await window.electron.getSettings();
+      try {
+        if (settings && settings.defaultRoleId) {
+          console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
+          
+          // 验证ID是否有效（是否能找到对应的pet数据）
+          try {
+            const pet = await window.electron.getPet(settings.defaultRoleId);
+            if (pet) {
+              setCharacterId(settings.defaultRoleId);
+              console.log("Default character ID validated successfully");
+            } else {
+              console.log("Default character ID not found in database, using null");
+              setCharacterId(null);
+            }
+          } catch (petError) {
+            console.error("Error finding pet with default ID:", petError);
             setCharacterId(null);
           }
-        } catch (petError) {
-          console.error("Error finding pet with default ID:", petError);
-          setCharacterId(null);
         }
+      } catch (error) {
+        console.error("Error loading default character ID from settings:", error);
+        setCharacterId(null);
       }
-    } catch (error) {
-      console.error("Error loading default character ID from settings:", error);
-      setCharacterId(null);
-    }
 
-    try {
-      const settings = await window.electron.getSettings();
-      if (settings && settings.defaultModelId) {
-        console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
-        
-        // 验证ID是否有效（是否能找到对应的pet数据）
-        try {
-          const pet = await window.electron.getPet(settings.defaultModelId);
-          if (pet) {
-            setFounctionModel(settings.defaultModelId);
-            console.log("Default character ID validated successfully");
-            const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
-            setFunctionModelInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
-          } else {
-            console.log("Default character ID not found in database, using null");
+      try {
+        const settings = await window.electron.getSettings();
+        if (settings && settings.defaultModelId) {
+          console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
+          
+          // 验证ID是否有效（是否能找到对应的pet数据）
+          try {
+            const pet = await window.electron.getPet(settings.defaultModelId);
+            if (pet) {
+              setFounctionModel(settings.defaultModelId);
+              console.log("Default character ID validated successfully");
+              const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
+              setFunctionModelInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+            } else {
+              console.log("Default character ID not found in database, using null");
+              setFunctionModelInfo(null);
+            }
+          } catch (petError) {
+            console.error("Error finding pet with default ID:", petError);
             setFunctionModelInfo(null);
           }
-        } catch (petError) {
-          console.error("Error finding pet with default ID:", petError);
-          setFunctionModelInfo(null);
         }
+      } catch (error) {
+        console.error("Error loading default model ID from settings:", error);
+        setFunctionModelInfo(null);
       }
-    } catch (error) {
-      console.error("Error loading default model ID from settings:", error);
-      setFunctionModelInfo(null)
-    }
-
-
-  };
-    
+    };
+      
     loadDefaultCharacter();
   }, []); // 只在组件加载时执行一次
 
@@ -216,14 +221,29 @@ export const ChatboxInputBox = () => {
     }
   };
 
+  const [characterMood, setCharacterMood] = useState("normal");
+
   // 回车发送
   const handleKeyDown = (e) => {
     if (composingRef.current || ignoreEnterRef.current) return;
-    if (e.key === "Enter" && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey && characterMood != "thinking" && String(userText).trim()) {
       e.preventDefault();
       handleSend();
     }
   };
+
+    useEffect(() => {
+      const moodUpdateHandler = (event, updatedMood) => {
+        console.log("Received updated mood:", updatedMood);
+        setCharacterMood(updatedMood);
+      };
+      window.electron?.onMoodUpdated(moodUpdateHandler);
+  
+      // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
+      return () => {
+        // window.electron?.removeMoodUpdated(moodUpdateHandler);
+      };
+    }, []);
 
   // 发送消息
   const handleSend = async () => {
@@ -241,23 +261,18 @@ export const ChatboxInputBox = () => {
       inputRef.current.style.height = 'auto';
     }
 
-    // 判断是否为默认人格
+    let fullMessages = [];
     const isDefaultPersonality = petInfo?.personality &&
       (petInfo.personality.trim().toLowerCase() === "default model (english)" ||
        petInfo.personality.trim().toLowerCase() === "default");
 
-    let fullMessages = [];
-    if(agentActive) {
+    if (agentActive) {
+      // Agent 模式不改变原有逻辑
       fullMessages = [...userMessages, { role: "user", content: userText }];
+      dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
     } else {
       if (!isDefaultPersonality) {
-        // 当记忆功能开启时，调用更新记忆的逻辑；关闭时只构造角色设定
-        let thisModel = null;
-        if(functionModelInfo == null) {
-          thisModel = petInfo;
-        } else {
-          thisModel = functionModelInfo;
-        }
+        let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
         if (memoryEnabled) {
           const index = await longTimeMemory(userText, 
             thisModel.modelProvider,
@@ -265,20 +280,20 @@ export const ChatboxInputBox = () => {
             thisModel.modelName,
             thisModel.modelUrl
           );
-          // alert(JSON.stringify(index, 2, null))
-          if(index.isImportant === true) {
+          let getUserMemory = "";
+          if (index.isImportant === true) {
             await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
+            window.electron.updateChatbodyStatus(index.key + ":" + index.value);
             const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
-            const getUserMemory = await processMemory(
+            getUserMemory = await processMemory(
               memory,
               thisModel.modelProvider,
               thisModel.modelApiKey,
               thisModel.modelName,
               thisModel.modelUrl
             );
-            // alert(getUserMemory)
-            // await setUserMemory(getUserMemory);
+            setUserMemory(getUserMemory);
           }
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
           if (petInfo.isAgent) {
@@ -287,9 +302,9 @@ export const ChatboxInputBox = () => {
             systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
           fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
         } else {
-          // 记忆关闭：既不调用更新记忆逻辑，也不包含用户记忆，仅保留角色设定
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
           if (petInfo.isAgent) {
             systemContent += "请在回答中保持角色特点，生成回复内容。";
@@ -297,10 +312,44 @@ export const ChatboxInputBox = () => {
             systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
           fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
         }
       } else {
-        fullMessages = [...userMessages, { role: "user", content: userText }];
+        let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
+        if (memoryEnabled) {
+          const index = await longTimeMemory(userText, 
+            thisModel.modelProvider,
+            thisModel.modelApiKey,
+            thisModel.modelName,
+            thisModel.modelUrl
+          );
+          let getUserMemory = "";
+          if (index.isImportant === true) {
+            await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
+            window.electron.updateChatbodyStatus(index.key + ":" + index.value);
+            const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+            const memory = JSON.stringify(memoryJson);
+            getUserMemory = await processMemory(
+              memory,
+              thisModel.modelProvider,
+              thisModel.modelApiKey,
+              thisModel.modelName,
+              thisModel.modelUrl
+            );
+            setUserMemory(getUserMemory);
+          }
+          let systemContent = `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
+          systemContent += "You are a helpful assisatant";
+          const systemPrompt = { role: "system", content: systemContent };
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
+        } else {
+          let systemContent = `You are a helpful assisatant`;
+          const systemPrompt = { role: "system", content: systemContent };
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
+        }
       }
     }
 
@@ -358,7 +407,7 @@ export const ChatboxInputBox = () => {
 
     const botReply = { role: "assistant", content: reply.content };
 
-    dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
+    // 只在 AI 回复后插入机器人消息
     dispatch({ type: actionType.ADD_MESSAGE, message: botReply });
 
     if (!conversationIdRef.current) {
@@ -366,11 +415,11 @@ export const ChatboxInputBox = () => {
         const newConversation = await window.electron.createConversation({
           petId: petInfo._id,
           title: `${userText} with ${petInfo.name}`,
-          history: [...userMessages, { role: "user", content: userText }, botReply],
+          history: [...userMessages, { role: "system", content: fullMessages[fullMessages.length - 2].content }, { role: "user", content: userText }, botReply],
         });
         conversationIdRef.current = newConversation._id;
       } catch (error) {
-        console.error("Failed to create conversation:", error);
+        alert("Failed to create conversation:", error);
       }
     }
 
@@ -383,6 +432,8 @@ export const ChatboxInputBox = () => {
     dispatch({ type: actionType.SET_USER_TEXT, userText: "" });
     window.electron?.sendMoodUpdate(reply.mood);
     setIsGenerating(false);
+
+    window.electron.updateChatbodyStatus("");
   };
 
   return (

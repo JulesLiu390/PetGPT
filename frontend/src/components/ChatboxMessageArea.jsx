@@ -9,29 +9,17 @@ import 'highlight.js/styles/atom-one-dark.css'; // 引入暗色主题
 const CodeBlock = ({ inline, className, children, ...props }) => {
   const [copied, setCopied] = useState(false);
   const codeRef = useRef(null);
-
-  // 取出语言，如 "language-js"
   const match = /language-(\w+)/.exec(className || '');
-  // 提取语言名，比如 "js"
   const language = match && hljs.getLanguage(match[1]) ? match[1] : null;
-
-  // 将 children 转为字符串，并移除末尾换行符
   const codeString = String(children).replace(/\n$/, '');
+  const isBlockButTooShort = !inline && !codeString.includes('\n') && codeString.length < 30;
 
-  // 如果是块级代码（非 inline），但只有一行且字符数很短（阈值可自行调整），就不当作代码块处理
-  const isBlockButTooShort =
-    !inline && !codeString.includes('\n') && codeString.length < 30;
-
-  // 当组件挂载/更新后，对“真正的块级”代码执行高亮
   useEffect(() => {
     if (!inline && !isBlockButTooShort && codeRef.current) {
-      if (language) {
-        const highlighted = hljs.highlight(codeString, { language }).value;
-        codeRef.current.innerHTML = highlighted;
-      } else {
-        const highlighted = hljs.highlightAuto(codeString).value;
-        codeRef.current.innerHTML = highlighted;
-      }
+      const highlighted = language
+        ? hljs.highlight(codeString, { language }).value
+        : hljs.highlightAuto(codeString).value;
+      codeRef.current.innerHTML = highlighted;
     }
   }, [inline, language, codeString, isBlockButTooShort]);
 
@@ -41,31 +29,14 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
     setTimeout(() => setCopied(false), 2000);
   };
 
-  // 1. 如果是行内代码
-  if (inline) {
+  if (inline || isBlockButTooShort) {
     return (
-      <code
-        className="bg-gray-800 text-gray-100 rounded px-1 font-mono"
-        {...props}
-      >
+      <code className="bg-gray-800 text-gray-100 rounded px-1 font-mono" {...props}>
         {children}
       </code>
     );
   }
 
-  // 2. 如果是块级代码但太短（单行且字符数少），当成行内处理
-  if (isBlockButTooShort) {
-    return (
-      <code
-        className="bg-gray-800 text-gray-100 rounded px-1 font-mono"
-        {...props}
-      >
-        {children}
-      </code>
-    );
-  }
-
-  // 3. 否则，按块级代码高亮渲染，并带复制按钮
   return (
     <div className="relative my-2">
       <button
@@ -84,13 +55,42 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
 const ChatboxMessageArea = () => {
   const [{ userMessages }] = useStateValue();
   const messageEndRef = useRef(null);
+  const [isThinking, setIsThinking] = useState(false);
+  const [firstTime, setFirstTime] = useState(true);
+  const [Chatlength, setChatlength] = useState(0)
+
+  // ✅ 添加思考状态监听
+  useEffect(() => {
+    const handler = (event, updatedMood) => {
+      // if(updatedMood != "thinking") {
+      //   setIsThinking(false)
+      // }
+      setIsThinking(updatedMood == 'thinking');
+    };
+    window.electron?.onMoodUpdated(handler);
+  }, []);
 
   // 自动滚动到底部
   useEffect(() => {
+    if(firstTime) {
+      setIsThinking(true);
+      setFirstTime(false);
+    } 
+    // else {
+      // setIsThinking(false); // 先关闭 thinking 状态
+
+      // const timer = setTimeout(() => {
+      //   // 再开启 thinking 状态（用于显示 “Thinking…”）
+      //   setIsThinking(true);
+      // }, 50); // ⏱️ 延迟时间，确保前面的 user 消息已渲染
+  
+      // clearTimeout(timer); // 清理定时器
+    // }
     if (messageEndRef.current) {
       messageEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [userMessages]);
+    setChatlength(userMessages.length)
+  }, [userMessages, isThinking]);
 
   return (
     <div className="flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh]">
@@ -112,7 +112,6 @@ const ChatboxMessageArea = () => {
               ) : (
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  // 指定自定义代码块组件
                   components={{ code: CodeBlock }}
                   className="prose prose-xs break-words max-w-none"
                 >
@@ -123,6 +122,16 @@ const ChatboxMessageArea = () => {
           </div>
         );
       })}
+
+      {/* ✅ 额外渲染：不属于 userMessages，仅根据 isThinking */}
+      {isThinking && Chatlength == userMessages.length && (
+        <div className="flex mb-2 justify-start">
+          <div className="rounded-2xl px-4 py-2 whitespace-pre-wrap shadow-sm bg-neutral-100 text-left text-xs animate-pulse italic text-gray-500">
+            Thinking……
+          </div>
+        </div>
+      )}
+
       <div ref={messageEndRef} />
     </div>
   );

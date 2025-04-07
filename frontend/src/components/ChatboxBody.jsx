@@ -9,6 +9,8 @@ import { MdDelete } from 'react-icons/md';
 export const Chatbox = () => {
   const [{ userMessages }, dispatch] = useStateValue();
   const [conversations, setConversations] = useState([]);
+  const [isThinking, setIsThinking] = useState(false);
+  const [characterMood, setCharacterMood] = useState("")
 
   useEffect(() => {
     const fetchConversations = async () => {
@@ -21,6 +23,24 @@ export const Chatbox = () => {
     };
     fetchConversations();
   }, [userMessages]);
+
+  useEffect(() => {
+    const moodUpdateHandler = (chatbodyStatus) => {
+      setCharacterMood(chatbodyStatus);
+      // alert(string(chatbodyStatus))
+    };
+    window.electron?.onChatbodyStatusUpdated(moodUpdateHandler);
+
+    // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
+    return () => {
+      // window.electron?.removeMoodUpdated(moodUpdateHandler);
+    };
+  }, []);
+
+  useEffect(() => {
+    setIsThinking(true);
+    // alert(characterMood);
+  }, [characterMood]);
 
   const fetchConversationById = async (conversationId) => {
     try {
@@ -88,6 +108,12 @@ export const Chatbox = () => {
       </div>
       <div className="h-full w-full flex flex-col justify-between">
         <ChatboxTitleBar />
+        {characterMood != "" && (
+          <div className="text-center text-sm text-gray-600 animate-pulse">
+            Memory updating: {characterMood}
+          </div>
+        )}
+
         {userMessages.length > 0 && <ChatboxMessageArea />}
         <ChatboxInputArea className="w-full" />
       </div>

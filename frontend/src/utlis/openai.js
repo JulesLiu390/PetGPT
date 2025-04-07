@@ -23,7 +23,12 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
   if (baseURL === "default") {
     baseURL = providerURLs[provider] || baseURL;
   } else {
-    baseURL += '/v1';
+    // baseURL += '/v1';
+    if(baseURL.slice(-1) == "/") {
+      baseURL += 'v1';
+    } else {
+      baseURL += '/v1'
+    }
   }
   const openai = new OpenAI({
     apiKey: apiKey,
@@ -52,8 +57,19 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
       return chatCompletion.choices[0].message.parsed;
     }
   } catch (error) {
-    console.error("OpenAI 请求出错：", error);
-    return error;
+    const fakeChatCompletion = {
+      choices: [
+        {
+          message: {
+            parsed: {
+              content: error.message,
+              mood: "normal"
+            }
+          }
+        }
+      ]
+    };
+    return fakeChatCompletion.choices[0].message.parsed;
   }
 };
 
@@ -62,7 +78,11 @@ export const callCommand = async (messages, provider, apiKey, model, baseURL) =>
   if (baseURL === "default") {
     baseURL = providerURLs[provider] || baseURL;
   } else {
-    baseURL += '/v1';
+    if(baseURL.slice(-1) == "/") {
+      baseURL += 'v1';
+    } else {
+      baseURL += '/v1'
+    }
   }
   const openai = new OpenAI({
     apiKey: apiKey,
@@ -128,7 +148,11 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
   if (baseURL === "default") {
     baseURL = providerURLs[provider] || baseURL;
   } else {
-    baseURL += "/v1";
+    if(baseURL.slice(-1) == "/") {
+      baseURL += 'v1';
+    } else {
+      baseURL += '/v1'
+    }
   }
 
   const openai = new OpenAI({
@@ -139,7 +163,7 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
 
   const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
 
-  const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n“${message}”\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx, "key":"名字（sample）", "value":"Jules(sample)" }`;
+  const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n“${message}”\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx, "key":"Name（sample）", "value":"Jules(sample)" }`;
 
   try {
     if (notSupportedModels.includes(model)) {
@@ -147,7 +171,7 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
       const chatCompletion = await openai.chat.completions.create({
         model: model,
         messages: [
-          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息），或者用户想让你（记住）的事情。" },
+          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息（姓名、职业、学校、公司等）），或者用户想让你（记住）的事情。" },
           { role: "user", content: prompt },
         ],
         temperature: 0.1
@@ -184,7 +208,11 @@ export const processMemory = async (configStr, provider, apiKey, model, baseURL)
   if (baseURL === "default") {
     baseURL = providerURLs[provider] || baseURL;
   } else {
-    baseURL += "/v1";
+    if(baseURL.slice(-1) == "/") {
+      baseURL += 'v1';
+    } else {
+      baseURL += '/v1'
+    }
   }
   
   const openai = new OpenAI({

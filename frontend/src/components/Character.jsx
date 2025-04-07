@@ -83,16 +83,16 @@ export const Character = () => {
         if(imageName == 'default') {
           const base64Image = await import(`../assets/default-${characterMood}.png`);
           setImgSrc(base64Image.default);
-        } else if(imageName === "Opai") {
+        } else if(imageName == "Opai") {
           const module = await import(`../assets/Opai-${characterMood}.png`);
           setImgSrc(module.default);
-        } else if(imageName === "Claudia") {
+        } else if(imageName == "Claudia") {
           const module = await import(`../assets/Claudia-${characterMood}.png`);
           setImgSrc(module.default);
-        } else if(imageName === "Grocka") {
+        } else if(imageName == "Grocka") {
           const module = await import(`../assets/Grocka-${characterMood}.png`);
           setImgSrc(module.default);
-        } else if(imageName === "Gemina") {
+        } else if(imageName == "Gemina") {
           const module = await import(`../assets/Gemina-${characterMood}.png`);
           setImgSrc(module.default);
         } else {
@@ -107,6 +107,18 @@ export const Character = () => {
           if(imageName == 'default') {
             const base64Image = await import(`../assets/default-normal.png`);
             setImgSrc(base64Image.default);
+          } else if(imageName == "Opai") {
+            const module = await import(`../assets/Opai-normal.png`);
+            setImgSrc(module.default);
+          } else if(imageName == "Claudia") {
+            const module = await import(`../assets/Claudia-normal.png`);
+            setImgSrc(module.default);
+          } else if(imageName == "Grocka") {
+            const module = await import(`../assets/Grocka-normal.png`);
+            setImgSrc(module.default);
+          } else if(imageName == "Gemina") {
+            const module = await import(`../assets/Gemina-normal.png`);
+            setImgSrc(module.default);
           } else {
             const base64Image = await window.electron.readPetImage(`${imageName}-normal.png`);
             setImgSrc(base64Image);

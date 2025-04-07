@@ -51,4 +51,12 @@ contextBridge.exposeInMainWorld('electron', {
   updateWindowSizePreset: async (preset) => ipcRenderer.invoke('update-window-size-preset', preset),
   updateShortcuts: (shortcut1, shortcut2) => ipcRenderer.invoke('update-shortcuts', { shortcut1, shortcut2 }),
   
+  onChatbodyStatusUpdated: (callback) => {
+    ipcRenderer.on('chatbody-status-updated', (event, status) => {
+      callback(status);
+    });
+  },
+  updateChatbodyStatus: (status) => {
+    ipcRenderer.send('update-chatbody-status', status);
+  }
 });
