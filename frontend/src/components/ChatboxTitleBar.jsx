@@ -13,7 +13,7 @@ export const ChatboxTitleBar = () => {
 
   return (
     <div
-    className='draggable w-full h-16 gap-3 flex justify-start p-3'
+    className='draggable w-full h-8 gap-3 flex justify-start p-3'
     >
       <MdCancel className='no-drag hover:text-gray-800 text-gray-400 cursor-pointer'
       onClick={handleClose}

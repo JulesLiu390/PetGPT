@@ -138,10 +138,11 @@ export const Character = () => {
     const getWindowSize = async() => {
       const settings = await window.electron.getSettings()
       windowSize = settings.windowSize;
+      window.electron.updateWindowSizePreset(windowSize)
     }
     getWindowSize()
     // alert(settings.windowSize)
-    window.electron.updateWindowSizePreset(windowSize)
+    
       .then(result => {
         console.log("Window size preset updated:", result);
       })

@@ -44,39 +44,70 @@ export const ChatboxInputBox = () => {
   const [{ userText, userMessages }, dispatch] = useStateValue();
   const [characterId, setCharacterId] = useState(null);
   const [petInfo, setPetInfo] = useState(null);
+  const [functionModelInfo, setFunctionModelInfo] = useState(null)
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
   const conversationIdRef = useRef(null);
   const [userMemory, setUserMemory] = useState(null)
+  const [founctionModel, setFounctionModel] = useState(null)
 
   // 启动时加载默认角色ID
   useEffect(() => {
     const loadDefaultCharacter = async () => {
-      try {
-        const settings = await window.electron.getSettings();
-        if (settings && settings.defaultRoleId) {
-          console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
-          
-          // 验证ID是否有效（是否能找到对应的pet数据）
-          try {
-            const pet = await window.electron.getPet(settings.defaultRoleId);
-            if (pet) {
-              setCharacterId(settings.defaultRoleId);
-              console.log("Default character ID validated successfully");
-            } else {
-              console.log("Default character ID not found in database, using null");
-              setCharacterId(null);
-            }
-          } catch (petError) {
-            console.error("Error finding pet with default ID:", petError);
+    const settings = await window.electron.getSettings();
+    try {
+      if (settings && settings.defaultRoleId) {
+        console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
+        
+        // 验证ID是否有效（是否能找到对应的pet数据）
+        try {
+          const pet = await window.electron.getPet(settings.defaultRoleId);
+          if (pet) {
+            setCharacterId(settings.defaultRoleId);
+            console.log("Default character ID validated successfully");
+          } else {
+            console.log("Default character ID not found in database, using null");
             setCharacterId(null);
           }
+        } catch (petError) {
+          console.error("Error finding pet with default ID:", petError);
+          setCharacterId(null);
         }
-      } catch (error) {
-        console.error("Error loading default character ID from settings:", error);
-        setCharacterId(null);
       }
-    };
+    } catch (error) {
+      console.error("Error loading default character ID from settings:", error);
+      setCharacterId(null);
+    }
+
+    try {
+      const settings = await window.electron.getSettings();
+      if (settings && settings.defaultModelId) {
+        console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
+        
+        // 验证ID是否有效（是否能找到对应的pet数据）
+        try {
+          const pet = await window.electron.getPet(settings.defaultModelId);
+          if (pet) {
+            setFounctionModel(settings.defaultModelId);
+            console.log("Default character ID validated successfully");
+            const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
+            setFunctionModelInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+          } else {
+            console.log("Default character ID not found in database, using null");
+            setFunctionModelInfo(null);
+          }
+        } catch (petError) {
+          console.error("Error finding pet with default ID:", petError);
+          setFunctionModelInfo(null);
+        }
+      }
+    } catch (error) {
+      console.error("Error loading default model ID from settings:", error);
+      setFunctionModelInfo(null)
+    }
+
+
+  };
     
     loadDefaultCharacter();
   }, []); // 只在组件加载时执行一次
@@ -216,22 +247,24 @@ export const ChatboxInputBox = () => {
         // 当记忆功能开启时，调用更新记忆的逻辑；关闭时只构造角色设定
         if (memoryEnabled) {
           const index = await longTimeMemory(userText, 
-            petInfo.modelProvider,
-            petInfo.modelApiKey,
-            petInfo.modelName,
-            petInfo.modelUrl
+            functionModelInfo.modelProvider,
+            functionModelInfo.modelApiKey,
+            functionModelInfo.modelName,
+            functionModelInfo.modelUrl
           );
+          alert(JSON.stringify(index, 2, null))
           if(index.isImportant === true) {
             await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
             const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
-              petInfo.modelProvider,
-              petInfo.modelApiKey,
-              petInfo.modelName,
-              petInfo.modelUrl
+              functionModelInfo.modelProvider,
+              functionModelInfo.modelApiKey,
+              functionModelInfo.modelName,
+              functionModelInfo.modelUrl
             );
+            alert(getUserMemory)
             await setUserMemory(getUserMemory);
           }
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
@@ -362,7 +395,7 @@ export const ChatboxInputBox = () => {
               className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
             >
               <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:300px)]:inline">
+              <span className="text-sm hidden [@media(min-width:350px)]:inline">
                 {agentActive ? "Agent" : "Agent"}
               </span>
             </button>
@@ -371,7 +404,7 @@ export const ChatboxInputBox = () => {
               className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
             >
               <FaFile className={`w-5 h-5 ${memoryEnabled ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:300px)]:inline">
+              <span className="text-sm hidden [@media(min-width:350px)]:inline">
                 {memoryEnabled ? "Memory" : "Memory"}
               </span>
             </button>
@@ -380,7 +413,7 @@ export const ChatboxInputBox = () => {
               className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
             >
               <FaShareNodes className="w-5 h-5 text-gray-600" />
-              <span className="text-sm hidden [@media(min-width:300px)]:inline">Share</span>
+              <span className="text-sm hidden [@media(min-width:350px)]:inline">Share</span>
             </button>
           </div>
         </div>
