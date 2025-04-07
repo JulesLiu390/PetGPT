@@ -131,15 +131,22 @@ export const ChatboxInputBox = () => {
         if (pet) {
           const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
           setPetInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+          let thisModel = null;
+          if(functionModelInfo == null) {
+            thisModel = pet;
+          } else {
+            thisModel = functionModelInfo;
+          }
+
           try {
             const memoryJson = await window.electron.getPetUserMemory(characterId);
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
-              modelProvider,
-              modelApiKey,
-              modelName,
-              modelUrl
+              thisModel.modelProvider,
+              thisModel.modelApiKey,
+              thisModel.modelName,
+              thisModel.modelUrl
             );
             setUserMemory(getUserMemory);
           } catch (memoryError) {
@@ -245,27 +252,33 @@ export const ChatboxInputBox = () => {
     } else {
       if (!isDefaultPersonality) {
         // 当记忆功能开启时，调用更新记忆的逻辑；关闭时只构造角色设定
+        let thisModel = null;
+        if(functionModelInfo == null) {
+          thisModel = petInfo;
+        } else {
+          thisModel = functionModelInfo;
+        }
         if (memoryEnabled) {
           const index = await longTimeMemory(userText, 
-            functionModelInfo.modelProvider,
-            functionModelInfo.modelApiKey,
-            functionModelInfo.modelName,
-            functionModelInfo.modelUrl
+            thisModel.modelProvider,
+            thisModel.modelApiKey,
+            thisModel.modelName,
+            thisModel.modelUrl
           );
-          alert(JSON.stringify(index, 2, null))
+          // alert(JSON.stringify(index, 2, null))
           if(index.isImportant === true) {
             await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
             const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
-              functionModelInfo.modelProvider,
-              functionModelInfo.modelApiKey,
-              functionModelInfo.modelName,
-              functionModelInfo.modelUrl
+              thisModel.modelProvider,
+              thisModel.modelApiKey,
+              thisModel.modelName,
+              thisModel.modelUrl
             );
-            alert(getUserMemory)
-            await setUserMemory(getUserMemory);
+            // alert(getUserMemory)
+            // await setUserMemory(getUserMemory);
           }
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
           if (petInfo.isAgent) {
