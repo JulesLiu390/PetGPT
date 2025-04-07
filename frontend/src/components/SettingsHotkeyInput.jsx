@@ -207,7 +207,7 @@ export const SettingsHotkeyInput = ({ name, value, onChange }) => {
               onClick={startRecording}
               className={`px-2 py-1 border rounded ${isRecording ? 'bg-yellow-100' : 'bg-gray-100'}`}
             >
-              {isRecording ? "请按下键盘按键..." : "+ 添加按键"}
+              {isRecording ? "Please press key..." : "+ add key"}
             </button>
           )}
         </div>

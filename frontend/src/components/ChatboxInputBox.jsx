@@ -415,7 +415,7 @@ export const ChatboxInputBox = () => {
         const newConversation = await window.electron.createConversation({
           petId: petInfo._id,
           title: `${userText} with ${petInfo.name}`,
-          history: [...userMessages, { role: "system", content: fullMessages[fullMessages.length - 2].content }, { role: "user", content: userText }, botReply],
+          history: [...userMessages, { role: "user", content: userText }, botReply],
         });
         conversationIdRef.current = newConversation._id;
       } catch (error) {

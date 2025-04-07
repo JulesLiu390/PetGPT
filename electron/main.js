@@ -291,6 +291,7 @@ const createcharacterWindow = () => {
     height: charSize.height,
     x,
     y,
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
     frame: false,
     transparent: true,
     resizable: false,
@@ -320,6 +321,7 @@ const createChatWindow = () => {
     y,
     width: chatSize.width,
     height: chatSize.height,
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
     frame: false,
     transparent: true,
     roundedCorners: true,
@@ -351,6 +353,7 @@ const createAddCharacterWindow = () => {
     show: false,
     x,
     y,
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
     frame: false,
     transparent: true,
     alwaysOnTop: true,
@@ -381,6 +384,7 @@ const createSelectCharacterWindow = () => {
     roundedCorners: true,
     hasShadow: true,
     alwaysOnTop: true,
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -433,6 +437,7 @@ const createSettingsWindow = () => {
     transparent: true,
     alwaysOnTop: true,
     hasShadow: true,
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
@@ -449,6 +454,8 @@ const createSettingsWindow = () => {
 app.whenReady().then(() => {
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'));
+  } else if (process.platform === 'win32') {
+    app.setAppUserModelId("com.petgpt.app");
   }
   const primaryDisplay = screen.getPrimaryDisplay();
   screenHeight = primaryDisplay.workAreaSize.height;
