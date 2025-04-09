@@ -1,16 +1,18 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
-import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile } from "react-icons/fa6";
+import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { callOpenAILib, callCommand, longTimeMemory, processMemory } from '../utlis/openai';
-import {searchDuckDuckGo} from "../utlis/search"
+import { callOpenAILib, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../utlis/openai';
+import { searchDuckDuckGo } from "../utlis/search"
 
 export const ChatboxInputBox = () => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [agentActive, setAgentActive] = useState(false); // Agent 开关
   // 新增记忆功能开关状态
   const [memoryEnabled, setMemoryEnabled] = useState(true);
+  // 新增搜索按钮高亮状态
+  const [searchActive, setSearchActive] = useState(false);
 
   const toggleAgent = () => {
     // alert(system)
@@ -26,6 +28,12 @@ export const ChatboxInputBox = () => {
   const toggleMemory = () => {
     setMemoryEnabled(prev => !prev);
     console.log(!memoryEnabled ? "记忆功能开启" : "记忆功能关闭");
+  };
+
+  // 搜索按钮点击时仅切换高亮状态，不执行搜索逻辑
+  const toggleSearch = () => {
+    setSearchActive(prev => !prev);
+    console.log(!searchActive ? "Search highlight turned on" : "Search highlight turned off");
   };
 
   // 修改后的：点击按钮时复制对话内容
@@ -272,8 +280,24 @@ export const ChatboxInputBox = () => {
       fullMessages = [...userMessages, { role: "user", content: userText }];
       dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
     } else {
+      let searchContent = "";
+      let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
+      if(searchActive) {
+        searchContent = await refinedSearchFromPrompt(
+          userText,
+          thisModel.modelProvider,
+          thisModel.modelApiKey,
+          thisModel.modelName,
+          thisModel.modelUrl
+        )
+        searchContent = await searchDuckDuckGo(searchContent);
+        // searchContent
+        searchContent = "\n Combine the following information to answer the question, and list relevant links below (if they are related to the question, be sure to list them):\n" + searchContent + "根据问题使用恰当的语言回答（如英语、中文）";
+        // alert(searchContent)
+      }
+      
+
       if (!isDefaultPersonality) {
-        let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
         if (memoryEnabled) {
           const index = await longTimeMemory(userText, 
             thisModel.modelProvider,
@@ -296,7 +320,6 @@ export const ChatboxInputBox = () => {
             );
             setUserMemory(getUserMemory);
           }
-          alert(searchedContent);
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
           if (petInfo.isAgent) {
             systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
@@ -304,8 +327,8 @@ export const ChatboxInputBox = () => {
             systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent  }];
         } else {
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
           if (petInfo.isAgent) {
@@ -313,9 +336,13 @@ export const ChatboxInputBox = () => {
           } else {
             systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
+          // if(searchActive) {
+          //   systemContent += searchContent;
+          //   alert(systemContent)
+          // }
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent }];
         }
       } else {
         let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
@@ -343,14 +370,18 @@ export const ChatboxInputBox = () => {
           }
           let systemContent = `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
           systemContent += "You are a helpful assisatant";
+          // if(searchActive) {
+          //   systemContent += searchContent;
+          //   alert(systemContent)
+          // }
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent }];
         } else {
           let systemContent = `You are a helpful assisatant`;
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText }];
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent  }];
         }
       }
     }
@@ -453,12 +484,12 @@ export const ChatboxInputBox = () => {
           onChange={handleChange}
           style={{ height: 'auto', maxHeight: '200px', overflow: 'auto' }}
         />
-        {/* 按钮区域：将 Agent、Memory 及 Share Conversation 按钮放在一起 */}
+        {/* 按钮区域：将 Agent、Memory、Share Conversation 及 Search 按钮放在一起 */}
         <div className="flex justify-between">
           <div className="flex items-center space-x-2">
             <button
               onClick={toggleAgent}
-              className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
+              className="border-none flex items-center space-x-1 px-1 py-1 rounded-md border border-gray-300"
             >
               <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
               <span className="text-sm hidden [@media(min-width:350px)]:inline">
@@ -467,7 +498,7 @@ export const ChatboxInputBox = () => {
             </button>
             <button
               onClick={toggleMemory}
-              className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
+              className="border-none flex items-center space-x-1  py-1 rounded-md border border-gray-300"
             >
               <FaFile className={`w-5 h-5 ${memoryEnabled ? 'text-green-500' : 'text-gray-600'}`} />
               <span className="text-sm hidden [@media(min-width:350px)]:inline">
@@ -476,10 +507,17 @@ export const ChatboxInputBox = () => {
             </button>
             <button
               onClick={handleShare}
-              className="border-none flex items-center space-x-1 px-3 py-1 rounded-md border border-gray-300"
+              className="border-none flex items-center space-x-1  py-1 rounded-md border border-gray-300"
             >
               <FaShareNodes className="w-5 h-5 text-gray-600" />
               <span className="text-sm hidden [@media(min-width:350px)]:inline">Share</span>
+            </button>
+            <button
+              onClick={toggleSearch}
+              className="border-none flex items-center space-x-1  py-1 rounded-md border border-gray-300"
+            >
+              <FaMagnifyingGlass className={`w-5 h-5 ${searchActive ? 'text-green-500' : 'text-gray-600'}`} />
+              <span className="text-sm hidden [@media(min-width:350px)]:inline">Search</span>
             </button>
           </div>
         </div>

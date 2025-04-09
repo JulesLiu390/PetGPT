@@ -1,5 +1,6 @@
 import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
+import { searchDuckDuckGo } from './search';
 import { z } from "zod";
 
 // 定义 provider 对应的 URL 字典
@@ -72,6 +73,51 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
     return fakeChatCompletion.choices[0].message.parsed;
   }
 };
+
+
+
+export const refinedSearchFromPrompt = async (
+  userPrompt,
+  provider,
+  apiKey,
+  model,
+  baseURL
+) => {
+  // 步骤 1：调用 LLM 提取关键词
+  const messages = [
+    {
+      role: "system",
+      content: "你是一个关键词压缩器。用户会给出一句话，请你从中提炼出最核心的一个关键词并且改正拼写（英语），如果是非英语则返回英语，只返回关键词，不加任何解释。",
+    },
+    {
+      role: "user",
+      content: userPrompt
+    }
+  ];
+  // 直接使用传入的 apiKey 和 model 参数
+  if (baseURL === "default") {
+    baseURL = providerURLs[provider] || baseURL;
+  } else {
+    // baseURL += '/v1';
+    if(baseURL.slice(-1) == "/") {
+      baseURL += 'v1';
+    } else {
+      baseURL += '/v1'
+    }
+  }
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: baseURL,
+    dangerouslyAllowBrowser: true,
+  });
+  const chatCompletion = await openai.chat.completions.create({
+    model: model,
+    messages: messages,
+  });
+  return chatCompletion.choices[0].message.content
+};
+
+
 
 export const callCommand = async (messages, provider, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数

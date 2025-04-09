@@ -1,6 +1,7 @@
-const { contextBridge, ipcRenderer } = require("electron");
+const { contextBridge, ipcRenderer, shell } = require("electron");
 contextBridge.exposeInMainWorld('electron', {
   ping: () => 'pong',
+  openExternal: (url) => shell.openExternal(url),
   // Expose settings interfaces
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (data) => ipcRenderer.invoke('update-settings', data),

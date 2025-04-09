@@ -5,6 +5,29 @@ import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/atom-one-dark.css'; // 引入暗色主题
 
+// 自定义链接组件，自动添加 target="_blank"
+const LinkRenderer = ({ href, children, ...props }) => {
+  // 如果没有 href，则直接返回 span
+  if (!href) {
+    return <span {...props}>{children}</span>;
+  }
+  // 仅对以 http(s) 开头的外链做转换，其它保留默认
+  if (href.startsWith('http')) {
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        {...props}
+        className={`text-blue-500 hover:text-blue-600 underline ${props.className || ''}`}
+      >
+        {children}
+      </a>
+    );
+  }
+  // 如果不是以 http 开头，则直接返回默认 a 标签
+  return <a href={href} {...props}>{children}</a>;
+};
 // 自定义代码块组件，添加复制按钮并使用 Highlight.js 进行高亮
 const CodeBlock = ({ inline, className, children, ...props }) => {
   const [copied, setCopied] = useState(false);
@@ -76,16 +99,6 @@ const ChatboxMessageArea = () => {
       setIsThinking(true);
       setFirstTime(false);
     } 
-    // else {
-      // setIsThinking(false); // 先关闭 thinking 状态
-
-      // const timer = setTimeout(() => {
-      //   // 再开启 thinking 状态（用于显示 “Thinking…”）
-      //   setIsThinking(true);
-      // }, 50); // ⏱️ 延迟时间，确保前面的 user 消息已渲染
-  
-      // clearTimeout(timer); // 清理定时器
-    // }
     if (messageEndRef.current) {
       messageEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
@@ -112,7 +125,7 @@ const ChatboxMessageArea = () => {
               ) : (
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  components={{ code: CodeBlock }}
+                  components={{a: LinkRenderer, code: CodeBlock }}
                   className="prose prose-xs break-words max-w-none"
                 >
                   {msg.content}
@@ -122,6 +135,7 @@ const ChatboxMessageArea = () => {
           </div>
         );
       })}
+      
 
       {/* ✅ 额外渲染：不属于 userMessages，仅根据 isThinking */}
       {isThinking && Chatlength == userMessages.length && (
@@ -136,5 +150,6 @@ const ChatboxMessageArea = () => {
     </div>
   );
 };
+
 
 export default ChatboxMessageArea;

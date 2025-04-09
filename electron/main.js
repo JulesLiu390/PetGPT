@@ -1,4 +1,4 @@
-const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu } = require("electron");
+const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu, Tray } = require("electron");
 const path = require('path');
 const fs = require('fs');
 const Pet = require('./models/pet');
@@ -51,6 +51,7 @@ let AddCharacterWindow;
 let selectCharacterWindow;
 let settingsWindow;
 let screenHeight = 0;
+let tray = null;
 
 // 全局变量统一控制所有窗口的尺寸预设（例如 'small'、'medium'、'large'）
 let currentSizePreset = 'small';
@@ -450,8 +451,28 @@ const createSettingsWindow = () => {
   settingsWindow.on("closed", () => { settingsWindow = null; });
 };
 
+function createTrayIcon() {
+  const iconPath = path.join(__dirname, 'assets', 'icon.template.png');
+  if (!fs.existsSync(iconPath)) {
+    console.error("托盘图标文件不存在！", iconPath);
+    return;
+  }
+
+  tray = new Tray(iconPath);
+  const contextMenu = Menu.buildFromTemplate([
+    // { label: '选项1', type: 'radio' },
+    // { label: '选项2', type: 'radio' },
+    { label: 'Quit', click: () => app.quit() }
+  ]);
+
+  tray.setToolTip('这是我的应用。');
+  tray.setContextMenu(contextMenu);
+  console.log("托盘图标已创建");
+}
+
 // ============ App lifecycle ============ //
 app.whenReady().then(() => {
+  
   if (process.platform === 'darwin' && app.dock) {
     app.dock.setIcon(path.join(__dirname, 'assets', 'icon.png'));
   } else if (process.platform === 'win32') {
@@ -465,24 +486,6 @@ app.whenReady().then(() => {
   createAddCharacterWindow();
   createSelectCharacterWindow();
   createSettingsWindow();
-
-  // chatWindow.setSkipTaskbar(true);
-
-  // globalShortcut.register("Shift+Control+Space", () => {
-  //   if (characterWindow) {
-  //     const visible = characterWindow.isVisible();
-  //     visible ? characterWindow.hide() : characterWindow.show();
-  //     visible ? chatWindow.hide() : chatWindow.hide();
-  //   }
-  // });
-
-  // globalShortcut.register("Shift+space", () => {
-  //   if (characterWindow) {
-  //     const visible = chatWindow.isVisible();
-  //     visible ? characterWindow.show() : characterWindow.show();
-  //     visible ? chatWindow.hide() : chatWindow.show();
-  //   }
-  // });
 
   // 当 characterWindow 移动时，重新计算 chatWindow 的位置（保持相对位置，不 clamping）
   characterWindow.on('move', () => {
@@ -498,10 +501,13 @@ app.whenReady().then(() => {
       height: newChatSize.height,
     });
   });
-  // 初始化时设置为 "large" 并更新所有窗口尺寸及位置
-  // currentSizePreset = "medium";
-  // updateAllWindowsSizes(currentSizePreset);
+
+  createTrayIcon();
+
 });
+
+
+
 
 app.on("will-quit", () => globalShortcut.unregisterAll());
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
