@@ -4,6 +4,7 @@ import { actionType } from '../content/reducer';
 import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { callOpenAILib, callCommand, longTimeMemory, processMemory } from '../utlis/openai';
+import {searchDuckDuckGo} from "../utlis/search"
 
 export const ChatboxInputBox = () => {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -14,7 +15,7 @@ export const ChatboxInputBox = () => {
   const toggleAgent = () => {
     // alert(system)
     if(!system.toLowerCase().includes("mac")) {
-      alert("sorry, agent function is only support MacOS now.")
+      alert("sorry, agent function is only supported on MacOS now.")
       return;
     }
     setAgentActive(prev => !prev);
@@ -295,6 +296,7 @@ export const ChatboxInputBox = () => {
             );
             setUserMemory(getUserMemory);
           }
+          alert(searchedContent);
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
           if (petInfo.isAgent) {
             systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
