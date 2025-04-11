@@ -5,6 +5,32 @@ import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass } fro
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { callOpenAILib, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../utlis/openai';
 import { searchDuckDuckGo } from "../utlis/search"
+import { MdOutlineCancel } from "react-icons/md";
+
+
+
+
+// 预览粘贴图片组件（无边框，圆角矩形）
+const PastedImagePreview = ({ imageUrl, onRemove }) => {
+  if (!imageUrl) return null;
+
+  return (
+    <div className="relative inline-block rounded-md mt-2">
+      <img
+        src={imageUrl}
+        alt="Pasted"
+        className="max-w-full max-h-32 object-cover rounded-md"
+      />
+      <MdOutlineCancel className="absolute top-1 right-1 cursor-pointer z-10 text-gray-200 hover:text-white"
+      onClick={onRemove}
+      ></MdOutlineCancel>
+    </div>
+  );
+};
+
+
+
+
 
 export const ChatboxInputBox = () => {
   const [isGenerating, setIsGenerating] = useState(false);
@@ -13,6 +39,8 @@ export const ChatboxInputBox = () => {
   const [memoryEnabled, setMemoryEnabled] = useState(true);
   // 新增搜索按钮高亮状态
   const [searchActive, setSearchActive] = useState(false);
+
+  const [userImage, setUserImage] = useState(null);
 
   const toggleAgent = () => {
     // alert(system)
@@ -55,7 +83,9 @@ export const ChatboxInputBox = () => {
   };
 
   const inputRef = useRef(null);
-  const [{ userText, userMessages }, dispatch] = useStateValue();
+  const [{ userMessages }, dispatch] = useStateValue();
+  // 将 userText 从全局状态中移除，改为本地状态管理
+  const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
   const [petInfo, setPetInfo] = useState(null);
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
@@ -218,10 +248,7 @@ export const ChatboxInputBox = () => {
   }, []);
 
   const handleChange = (e) => {
-    dispatch({
-      type: actionType.SET_USER_TEXT,
-      userText: e.target.value,
-    });
+    setUserText(e.target.value);
   };
 
   // 中文/日文输入法事件
@@ -233,7 +260,7 @@ export const ChatboxInputBox = () => {
     ignoreEnterRef.current = true;
     setTimeout(() => {
       ignoreEnterRef.current = false;
-    }, 150);
+    }, 50);
   };
 
   // 自动调整 textarea 高度（最大200px）
@@ -256,18 +283,18 @@ export const ChatboxInputBox = () => {
     }
   };
 
-    useEffect(() => {
-      const moodUpdateHandler = (event, updatedMood) => {
-        console.log("Received updated mood:", updatedMood);
-        setCharacterMood(updatedMood);
-      };
-      window.electron?.onMoodUpdated(moodUpdateHandler);
-  
-      // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
-      return () => {
-        // window.electron?.removeMoodUpdated(moodUpdateHandler);
-      };
-    }, []);
+  useEffect(() => {
+    const moodUpdateHandler = (event, updatedMood) => {
+      console.log("Received updated mood:", updatedMood);
+      setCharacterMood(updatedMood);
+    };
+    window.electron?.onMoodUpdated(moodUpdateHandler);
+
+    // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
+    return () => {
+      // window.electron?.removeMoodUpdated(moodUpdateHandler);
+    };
+  }, []);
 
   // 发送消息
   const handleSend = async () => {
@@ -277,6 +304,12 @@ export const ChatboxInputBox = () => {
     }
     setIsGenerating(true);
     if (!userText.trim()) return;
+
+    let _userText = userText;
+
+    setUserText("");
+
+    
 
     window.electron?.sendMoodUpdate('thinking');
 
@@ -292,29 +325,28 @@ export const ChatboxInputBox = () => {
 
     if (agentActive) {
       // Agent 模式不改变原有逻辑
-      fullMessages = [...userMessages, { role: "user", content: userText }];
-      dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText } });
+      fullMessages = [...userMessages, { role: "user", content: _userText }];
+      dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText } });
     } else {
+
       let searchContent = "";
       let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
       if(searchActive) {
         searchContent = await refinedSearchFromPrompt(
-          userText,
+          _userText,
           thisModel.modelProvider,
           thisModel.modelApiKey,
           thisModel.modelName,
           thisModel.modelUrl
         )
         searchContent = await searchDuckDuckGo(searchContent);
-        // searchContent
         searchContent = "\n Combine the following information to answer the question, and list relevant links below (if they are related to the question, be sure to list them):\n" + searchContent + "根据问题使用恰当的语言回答（如英语、中文）";
-        // alert(searchContent)
       }
-      
+      // alert(userImage)
 
       if (!isDefaultPersonality) {
         if (memoryEnabled) {
-          const index = await longTimeMemory(userText, 
+          const index = await longTimeMemory(_userText, 
             thisModel.modelProvider,
             thisModel.modelApiKey,
             thisModel.modelName,
@@ -342,8 +374,19 @@ export const ChatboxInputBox = () => {
             systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent  }];
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          let content = _userText + searchContent;
+          if(userImage != null) {
+            content = [{ type: "text", text: _userText + searchContent },
+            {
+                type: "image_url",
+                image_url: {
+                    url: `${userImage}`,
+                },
+            },]
+            setUserImage(null);
+          }
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
         } else {
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
           if (petInfo.isAgent) {
@@ -351,18 +394,25 @@ export const ChatboxInputBox = () => {
           } else {
             systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
-          // if(searchActive) {
-          //   systemContent += searchContent;
-          //   alert(systemContent)
-          // }
           const systemPrompt = { role: "system", content: systemContent };
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent }];
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          let content = _userText + searchContent;
+          if(userImage != null) {
+            content = [{ type: "text", text: _userText + searchContent },
+            {
+                type: "image_url",
+                image_url: {
+                    url: `${userImage}`,
+                },
+            },]
+            setUserImage(null);
+          }
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
         }
       } else {
         let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
         if (memoryEnabled) {
-          const index = await longTimeMemory(userText, 
+          const index = await longTimeMemory(_userText, 
             thisModel.modelProvider,
             thisModel.modelApiKey,
             thisModel.modelName,
@@ -385,18 +435,36 @@ export const ChatboxInputBox = () => {
           }
           let systemContent = `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
           systemContent += "You are a helpful assisatant";
-          // if(searchActive) {
-          //   systemContent += searchContent;
-          //   alert(systemContent)
-          // }
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent }];
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          let content = _userText + searchContent;
+          if(userImage != null) {
+            content = [{ type: "text", text: _userText + searchContent },
+            {
+                type: "image_url",
+                image_url: {
+                    url: `${userImage}`,
+                },
+            },]
+            setUserImage(null);
+          }
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
         } else {
           let systemContent = `You are a helpful assisatant`;
           const systemPrompt = { role: "system", content: systemContent };
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: userText} });
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: userText + searchContent  }];
+          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          let content = _userText + searchContent;
+          if(userImage != null) {
+            content = [{ type: "text", text: _userText + searchContent },
+            {
+                type: "image_url",
+                image_url: {
+                    url: `${userImage}`,
+                },
+            },]
+            setUserImage(null);
+          }
+          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
         }
       }
     }
@@ -462,8 +530,8 @@ export const ChatboxInputBox = () => {
       try {
         const newConversation = await window.electron.createConversation({
           petId: petInfo._id,
-          title: `${userText} with ${petInfo.name}`,
-          history: [...userMessages, { role: "user", content: userText }, botReply],
+          title: `${_userText} with ${petInfo.name}`,
+          history: [...userMessages, { role: "user", content: _userText }, botReply],
         });
         conversationIdRef.current = newConversation._id;
       } catch (error) {
@@ -473,24 +541,52 @@ export const ChatboxInputBox = () => {
 
     await window.electron.updateConversation(conversationIdRef.current, {
       petId: petInfo._id,
-      title: `${userText} with ${petInfo.name}`,
-      history: [...userMessages, { role: "user", content: userText }, botReply],
+      title: `${_userText} with ${petInfo.name}`,
+      history: [...userMessages, { role: "user", content: _userText }, botReply],
     });
 
-    dispatch({ type: actionType.SET_USER_TEXT, userText: "" });
     window.electron?.sendMoodUpdate(reply.mood);
     setIsGenerating(false);
 
     window.electron.updateChatbodyStatus("");
   };
 
+
+// 处理粘贴事件，检测是否有图片数据
+const handlePaste = (e) => {
+  const items = e.clipboardData?.items;
+  if (items) {
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.indexOf("image") !== -1) {
+        const file = items[i].getAsFile();
+        // 使用 FileReader 将图片转换成 Base64 data URL
+        const reader = new FileReader();
+        reader.onload = (evt) => {
+          const imageUrl = evt.target.result;
+          setUserImage(imageUrl);
+        };
+        reader.readAsDataURL(file);
+        // 阻止默认粘贴行为，避免在 textarea 中出现乱码文本
+        e.preventDefault();
+        break; // 处理到图片后退出循环
+      }
+    }
+  }
+};
+
   return (
     <div className="relative w-full">
       {/* 主容器：包含输入框和 Agent、Memory 及 Share Conversation 按钮 */}
       <div className="bg-[rgba(220,220,230,0.9)] border-gray-300 rounded-3xl border-2 p-3 text-gray-800">
+      <PastedImagePreview
+        imageUrl={userImage}
+        onRemove={() => setUserImage(null)}
+      />
         <textarea
           ref={inputRef}
+          value={userText}
           onKeyDown={handleKeyDown}
+          onPaste={handlePaste}   // 添加 onPaste 事件监听
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
           onInput={autoResize}

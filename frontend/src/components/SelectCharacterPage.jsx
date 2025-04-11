@@ -112,7 +112,7 @@ const SelectCharacterPage = () => {
   return (
     <div className="flex flex-col h-screen w-full items-center bg-[rgba(255,255,255,0.8)]">
       <SelectCharacterTitleBar />
-      <div className="w-[90%] p-2 mt-2 bg-gray-50 rounded-lg shadow max-h-[400px] overflow-y-auto">
+      <div className="w-[90%] p-2 mt-2 bg-gray-50 rounded-lg shadow max-h-full overflow-y-auto">
         <h2 className="text-sm font-semibold mb-2 text-center">Select a Character</h2>
         <div className="grid grid-cols-1 gap-2">
           {pets.map((pet) => (
