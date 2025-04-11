@@ -53,6 +53,7 @@ export const Chatbox = () => {
 
   const handleItemClick = async (conv) => {
     const conversation = await fetchConversationById(conv._id);
+    window.electron?.sendMoodUpdate('normal');
     window.electron?.sendCharacterId(conversation.petId);
     window.electron?.sendConversationId(conv._id);
     dispatch({
@@ -106,7 +107,7 @@ export const Chatbox = () => {
           ))}
         </ul>
       </div>
-      <div className="h-full w-full flex flex-col justify-between">
+      <div className="h-full flex-1 flex flex-col justify-between">
         <ChatboxTitleBar />
         {characterMood != "" && (
           <div className="text-center text-sm text-gray-600 animate-pulse">

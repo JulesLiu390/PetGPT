@@ -54,7 +54,7 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
 
   if (inline || isBlockButTooShort) {
     return (
-      <code className="bg-gray-800 text-gray-100 rounded px-1 font-mono" {...props}>
+      <code className="bg-gray-800 text-gray-100 max-w-full rounded px-1 font-mono" {...props}>
         {children}
       </code>
     );
@@ -68,8 +68,8 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
       >
         {copied ? 'Copied' : 'Copy'}
       </button>
-      <pre className="rounded p-4 bg-black text-gray-100 overflow-x-auto font-mono text-sm">
-        <code ref={codeRef} {...props} />
+      <pre className="rounded p-4 bg-black text-gray-100 overflow-x-auto max-w-full font-mono text-sm whitespace-pre-wrap break-words">
+        <code ref={codeRef} className="w-full" {...props} />
       </pre>
     </div>
   );
@@ -85,9 +85,6 @@ const ChatboxMessageArea = () => {
   // ✅ 添加思考状态监听
   useEffect(() => {
     const handler = (event, updatedMood) => {
-      // if(updatedMood != "thinking") {
-      //   setIsThinking(false)
-      // }
       setIsThinking(updatedMood == 'thinking');
     };
     window.electron?.onMoodUpdated(handler);
@@ -126,7 +123,7 @@ const ChatboxMessageArea = () => {
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
                   components={{a: LinkRenderer, code: CodeBlock }}
-                  className="prose prose-xs break-words max-w-none"
+                  className="prose prose-xs break-words w-full max-w-full"
                 >
                   {msg.content}
                 </ReactMarkdown>

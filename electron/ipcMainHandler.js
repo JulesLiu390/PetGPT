@@ -90,3 +90,9 @@ ipcMain.on('update-chatbody-status', (event, status) => {
   sharedState.chatbodyStatus = status;
   BrowserWindow.getAllWindows().forEach(win => win.webContents.send('chatbody-status-updated', status));
 });
+
+// new chat更新
+ipcMain.on('new-chat', (event, chat) => {
+  console.log("created new chat:", chat);
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('new-chat-created', chat));
+});

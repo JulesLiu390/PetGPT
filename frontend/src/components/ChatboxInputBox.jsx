@@ -190,6 +190,21 @@ export const ChatboxInputBox = () => {
     fetchPetInfo();
   }, [characterId]);
 
+  useEffect(() => {
+    const handleNewChat = () => {
+      dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
+      conversationIdRef.current = null;
+    };
+
+    // 注册监听器
+    window.electron.onNewChatCreated(handleNewChat);
+
+    // 卸载时清理监听器，避免内存泄漏
+    return () => {
+      window.electron.removeListener?.('new-chat-created', handleNewChat);
+    };
+  }, []);
+
   // 接收会话 ID
   useEffect(() => {
     const handleConversationId = (id) => {

@@ -59,5 +59,8 @@ contextBridge.exposeInMainWorld('electron', {
   },
   updateChatbodyStatus: (status) => {
     ipcRenderer.send('update-chatbody-status', status);
-  }
+  },
+
+  createNewChat: (chat) => ipcRenderer.send('new-chat', chat),
+  onNewChatCreated: (callback) => ipcRenderer.on('new-chat-created', (event, chat) => callback(chat)),
 });
