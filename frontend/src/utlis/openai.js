@@ -17,7 +17,7 @@ const StructuredResponseSchema = z.object({
 });
 
 // 定义不支持结构化输出的模型列表
-const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo"];
+const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "claude-3-7-sonnet-20250219", "deepseek-r1-searching"];
 
 export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
@@ -43,6 +43,7 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
       const chatCompletion = await openai.chat.completions.create({
         model: model,
         messages: messages,
+        // stream: false  // 显式关闭流式输出
       });
       return {
         content: chatCompletion.choices[0].message.content,
@@ -54,6 +55,7 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
         model: model,
         messages: messages,
         response_format: zodResponseFormat(StructuredResponseSchema, "response"),
+        // stream: false  // 显式关闭流式输出
       });
       return chatCompletion.choices[0].message.parsed;
     }
@@ -235,7 +237,7 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
       const chatCompletion = await openai.beta.chat.completions.parse({
         model: model,
         messages: [
-          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息），或者用户想让你长期（记住）的事情，如果只是短期要求则不记住。只有陈述句值得记住" },
+          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息），或者用户想让你长期（记住）的事情，如果只是短期要求则不记住。只有陈述句并且有主语的句子值得记住" },
           { role: "user", content: prompt },
         ],
         temperature: 0.1,
@@ -290,9 +292,49 @@ export const processMemory = async (configStr, provider, apiKey, model, baseURL)
       temperature: 0.1
     });
     
-    return chatCompletion.choices[0].message.content ?? "";
+    return chatCompletion.choices[0].message.content;
   } catch (error) {
     console.error("OpenAI 请求出错：", error);
     return `处理记忆时出错: ${error.message}`;
+  }
+};
+
+export const promptSuggestion = async (messages, provider, apiKey, model, baseURL) => {
+  if (baseURL === "default") {
+    baseURL = providerURLs[provider] || baseURL;
+  } else {
+    if(baseURL.slice(-1) == "/") {
+      baseURL += 'v1';
+    } else {
+      baseURL += '/v1'
+    }
+  }
+
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: baseURL,
+    dangerouslyAllowBrowser: true,
+  });
+
+  const prompt = `User：\n“${messages.user}”\nAssistant：\n”${messages.assistant}“`;
+
+  try {
+      const chatCompletion = await openai.chat.completions.create({
+        model: model,
+        messages: [
+          { role: "system", content: "你是一个prompt生成机器人，根据用户提供的内容生成1到3个不同的启发性提示，每个提示为一句话，并用“|”符号分隔。请直接返回提示文本，不要包含其他内容或任何解释说明也不要包含双引号。回复时请根据用户输入的语言自动选择回复语言，不要固定为中文或其他特定语言。" },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.7
+      });
+
+      try {
+        return chatCompletion.choices[0].message.content
+      } catch (e) {
+        return e;
+      }
+  } catch (error) {
+    console.error("OpenAI 请求出错：", error);
+    return error;
   }
 };

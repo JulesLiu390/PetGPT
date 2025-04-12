@@ -3,10 +3,10 @@ import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { callOpenAILib, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../utlis/openai';
+import { promptSuggestion, callOpenAILib, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../utlis/openai';
 import { searchDuckDuckGo } from "../utlis/search"
 import { MdOutlineCancel } from "react-icons/md";
-
+import { SiQuicktype } from "react-icons/si";
 
 
 
@@ -41,6 +41,12 @@ export const ChatboxInputBox = () => {
   const [searchActive, setSearchActive] = useState(false);
 
   const [userImage, setUserImage] = useState(null);
+  const [stateReply, setStateReply] = useState(null);
+  const [stateThisModel, setStateThisModel] = useState(null);
+  const [stateUserText, setStateUserText] = useState(null);
+  let reply = null;
+  let thisModel = null;
+  let _userText = null;
 
   const toggleAgent = () => {
     // alert(system)
@@ -83,7 +89,7 @@ export const ChatboxInputBox = () => {
   };
 
   const inputRef = useRef(null);
-  const [{ userMessages }, dispatch] = useStateValue();
+  const [{ userMessages, suggestText }, dispatch] = useStateValue();
   // 将 userText 从全局状态中移除，改为本地状态管理
   const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
@@ -165,6 +171,27 @@ export const ChatboxInputBox = () => {
     window.electron?.onCharacterId(handleCharacterId);
   }, []);
 
+  useEffect(() => {
+    const updateSuggestion = async() => {
+      // alert(thisModel)
+      thisModel = stateThisModel;
+      _userText = stateUserText;
+      let suggestion = await promptSuggestion(
+        {user:_userText, assistant:stateReply.content},
+        thisModel.modelProvider,
+        thisModel.modelApiKey,
+        thisModel.modelName,
+        thisModel.modelUrl
+      )
+      suggestion = suggestion.split("|")
+      dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: suggestion });
+    };
+    if(stateReply != null) {
+      // alert(stateReply)
+      updateSuggestion();
+    }
+  }, [stateReply]);
+
   // 加载角色信息，并清理或保留对话历史
   useEffect(() => {
     if (!characterId) return;
@@ -175,7 +202,7 @@ export const ChatboxInputBox = () => {
         if (pet) {
           const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
           setPetInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
-          let thisModel = null;
+          thisModel = null;
           if(functionModelInfo == null) {
             thisModel = pet;
           } else {
@@ -296,6 +323,8 @@ export const ChatboxInputBox = () => {
     };
   }, []);
 
+  
+
   // 发送消息
   const handleSend = async () => {
     if (!characterId) {
@@ -305,11 +334,13 @@ export const ChatboxInputBox = () => {
     setIsGenerating(true);
     if (!userText.trim()) return;
 
-    let _userText = userText;
-
-    setUserText("");
-
     
+
+    _userText = userText;
+    
+    setUserText("");
+    dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
+
 
     window.electron?.sendMoodUpdate('thinking');
 
@@ -322,6 +353,7 @@ export const ChatboxInputBox = () => {
     const isDefaultPersonality = petInfo?.personality &&
       (petInfo.personality.trim().toLowerCase() === "default model (english)" ||
        petInfo.personality.trim().toLowerCase() === "default");
+    thisModel = petInfo;
 
     if (agentActive) {
       // Agent 模式不改变原有逻辑
@@ -330,7 +362,7 @@ export const ChatboxInputBox = () => {
     } else {
 
       let searchContent = "";
-      let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
+      thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
       if(searchActive) {
         searchContent = await refinedSearchFromPrompt(
           _userText,
@@ -410,7 +442,7 @@ export const ChatboxInputBox = () => {
           fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
         }
       } else {
-        let thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
+        thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
         if (memoryEnabled) {
           const index = await longTimeMemory(_userText, 
             thisModel.modelProvider,
@@ -469,7 +501,7 @@ export const ChatboxInputBox = () => {
       }
     }
 
-    let reply = null;
+    reply = null;
 
     if(agentActive) {
       reply = await callCommand(
@@ -549,6 +581,10 @@ export const ChatboxInputBox = () => {
     setIsGenerating(false);
 
     window.electron.updateChatbodyStatus("");
+
+    setStateReply(reply);
+    setStateThisModel(thisModel);
+    setStateUserText(_userText);
   };
 
 
@@ -574,6 +610,9 @@ const handlePaste = (e) => {
   }
 };
 
+const [showReplyOptions, setShowReplyOptions] = useState(false);
+
+
   return (
     <div className="relative w-full">
       {/* 主容器：包含输入框和 Agent、Memory 及 Share Conversation 按钮 */}
@@ -597,13 +636,14 @@ const handlePaste = (e) => {
         />
         {/* 按钮区域：将 Agent、Memory、Share Conversation 及 Search 按钮放在一起 */}
         <div className="flex justify-between">
+          
           <div className="flex items-center space-x-2">
             <button
               onClick={toggleAgent}
               className="border-none flex items-center space-x-1 px-1 py-1 rounded-md border border-gray-300"
             >
               <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:350px)]:inline">
+              <span className="text-sm hidden [@media(min-width:420px)]:inline">
                 {agentActive ? "Agent" : "Agent"}
               </span>
             </button>
@@ -612,7 +652,7 @@ const handlePaste = (e) => {
               className="border-none flex items-center space-x-1  py-1 rounded-md border border-gray-300"
             >
               <FaFile className={`w-5 h-5 ${memoryEnabled ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:350px)]:inline">
+              <span className="text-sm hidden [@media(min-width:420px)]:inline">
                 {memoryEnabled ? "Memory" : "Memory"}
               </span>
             </button>
@@ -621,18 +661,46 @@ const handlePaste = (e) => {
               className="border-none flex items-center space-x-1  py-1 rounded-md border border-gray-300"
             >
               <FaShareNodes className="w-5 h-5 text-gray-600" />
-              <span className="text-sm hidden [@media(min-width:350px)]:inline">Share</span>
+              <span className="text-sm hidden [@media(min-width:420px)]:inline">Share</span>
             </button>
             <button
               onClick={toggleSearch}
               className="border-none flex items-center space-x-1  py-1 rounded-md border border-gray-300"
             >
               <FaMagnifyingGlass className={`w-5 h-5 ${searchActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:350px)]:inline">Search</span>
+              <span className="text-sm hidden [@media(min-width:420px)]:inline">Search</span>
             </button>
           </div>
         </div>
       </div>
+      <button
+            onClick={() => {}}
+            className="absolute bottom-2 right-13 rounded-full"
+            onMouseEnter={() => setShowReplyOptions(true)}
+            onMouseLeave={() => setShowReplyOptions(false)}
+          >
+          <SiQuicktype
+            className="w-9 h-9"
+            style={{ color:(suggestText.length == 0) ? "#c1c1c1" : "#000000" }}
+          />
+      </button>
+      {showReplyOptions && suggestText.length !== 0 && (
+        <div 
+          className="absolute bottom-11 right-9 bg-white border border-gray-200 rounded-lg shadow-lg p-2"
+          onMouseEnter={() => setShowReplyOptions(true)}
+          onMouseLeave={() => setShowReplyOptions(false)}
+        >
+        <div className="font-bold mb-1 text-xs">Quick reply</div>
+        <ul>
+          {suggestText.map((item, index) => (
+            <li key={index} className="cursor-pointer hover:bg-gray-100 p-1 text-xs"
+            onClick={() => setUserText(userText + suggestText[index])}>
+              {item}
+            </li>
+          ))}
+        </ul>
+        </div>
+      )}
 
       {/* 发送按钮：绝对定位于右下角 */}
       <button

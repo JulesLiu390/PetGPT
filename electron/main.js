@@ -452,7 +452,7 @@ const createSettingsWindow = () => {
 };
 
 function createTrayIcon() {
-  const iconPath = path.join(__dirname, 'assets', 'icon.template.png');
+  const iconPath = path.join(__dirname, 'assets', 'iconT.png');
   if (!fs.existsSync(iconPath)) {
     console.error("托盘图标文件不存在！", iconPath);
     return;
@@ -468,6 +468,7 @@ function createTrayIcon() {
   tray.setToolTip('这是我的应用。');
   tray.setContextMenu(contextMenu);
   console.log("托盘图标已创建");
+  console.log("Tray icon absolute path:", iconPath);
 }
 
 // ============ App lifecycle ============ //
@@ -478,6 +479,7 @@ app.whenReady().then(() => {
   } else if (process.platform === 'win32') {
     app.setAppUserModelId("com.petgpt.app");
   }
+
   const primaryDisplay = screen.getPrimaryDisplay();
   screenHeight = primaryDisplay.workAreaSize.height;
 
@@ -501,8 +503,8 @@ app.whenReady().then(() => {
       height: newChatSize.height,
     });
   });
+  setTimeout(createTrayIcon, 300);
 
-  createTrayIcon();
 
 });
 

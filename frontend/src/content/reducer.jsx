@@ -2,7 +2,7 @@
 
 export const actionType = {
 
-    SET_USER_TEXT:"SET_USER_TEXT",
+    SET_SUGGEST_TEXT:"SET_SUGGEST_TEXT",
     ADD_MESSAGE: "ADD_MESSAGE",         // 添加新消息
     SET_MESSAGE: "SET_MESSAGE",
     CLEAR_MESSAGES: "CLEAR_MESSAGES",   // 清空消息
@@ -13,10 +13,10 @@ const reducer = (state, action) => {
     console.log(action);
 
     switch(action.type) {
-        case actionType.SET_USER_TEXT:
+        case actionType.SET_SUGGEST_TEXT:
             return {
                 ...state,
-                userText : action.userText,
+                suggestText : action.suggestText,
             };
         case actionType.ADD_MESSAGE:
             return {

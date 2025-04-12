@@ -7,7 +7,7 @@ import { actionType } from '../content/reducer';
 import { MdDelete } from 'react-icons/md';
 
 export const Chatbox = () => {
-  const [{ userMessages }, dispatch] = useStateValue();
+  const [{ userMessages, suggestText }, dispatch] = useStateValue();
   const [conversations, setConversations] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
   const [characterMood, setCharacterMood] = useState("")
@@ -23,6 +23,10 @@ export const Chatbox = () => {
     };
     fetchConversations();
   }, [userMessages]);
+
+  // useEffect(() => {
+  //   alert(suggestText)
+  // }, [suggestText]);
 
   useEffect(() => {
     const moodUpdateHandler = (chatbodyStatus) => {

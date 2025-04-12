@@ -122,8 +122,9 @@ const ChatboxMessageArea = () => {
               ) : (
                 <ReactMarkdown
                   remarkPlugins={[remarkGfm]}
-                  components={{a: LinkRenderer, code: CodeBlock }}
-                  className="prose prose-xs break-words w-full max-w-full"
+                  components={{a: LinkRenderer, code: CodeBlock,
+                  }}
+                  className="prose-xs prose-xs break-words w-full max-w-full"
                 >
                   {msg.content}
                 </ReactMarkdown>

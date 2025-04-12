@@ -1,5 +1,5 @@
 export const initialState = {
-    userText: "",
+    suggestText: [],
     characterMood: "normal",
     userMessages: [],
 }
