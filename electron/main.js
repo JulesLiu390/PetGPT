@@ -408,7 +408,7 @@ ipcMain.handle('update-shortcuts', async (event, { shortcut1, shortcut2 }) => {
     if (characterWindow) {
       const visible = characterWindow.isVisible();
       visible ? characterWindow.hide() : characterWindow.show();
-      visible ? chatWindow.hide() : chatWindow.hide();
+      // visible ? chatWindow.hide() : chatWindow.hide();
     }
   });
 
@@ -416,7 +416,7 @@ ipcMain.handle('update-shortcuts', async (event, { shortcut1, shortcut2 }) => {
   globalShortcut.register(shortcut2, () => {
     if (characterWindow) {
       const visible = chatWindow.isVisible();
-      visible ? characterWindow.show() : characterWindow.show();
+      // visible ? characterWindow.show() : characterWindow.show();
       visible ? chatWindow.hide() : chatWindow.show();
     }
   });
