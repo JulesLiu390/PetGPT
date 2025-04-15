@@ -7,12 +7,24 @@ export const actionType = {
     SET_MESSAGE: "SET_MESSAGE",
     CLEAR_MESSAGES: "CLEAR_MESSAGES",   // 清空消息
     SET_CHARACTER_MOOD: "SET_CHARACTER_MOOD",
+    ADD_STREAMING_REPLY: "ADD_STREAMING_REPLY",
+    CLEAR_STREAMING_REPLY: "CLEAR_STREAMING_REPLY",
 }
 
 const reducer = (state, action) => {
     console.log(action);
 
     switch(action.type) {
+        case actionType.ADD_STREAMING_REPLY:
+            return {
+              ...state,
+              streamingReply: (state.streamingReply || "") + action.content,
+            };
+          case actionType.CLEAR_STREAMING_REPLY:
+            return {
+              ...state,
+              streamingReply: "",
+            };
         case actionType.SET_SUGGEST_TEXT:
             return {
                 ...state,

@@ -2,6 +2,7 @@ import React from 'react'
 import { MdCancel } from "react-icons/md";
 import { LuMaximize2 } from "react-icons/lu";
 import { BsPencilSquare } from "react-icons/bs";
+import ChatboxTabBar from './ChatboxTabBar';
 
 
 export const ChatboxTitleBar = () => {

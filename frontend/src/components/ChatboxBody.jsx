@@ -5,6 +5,7 @@ import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../content/StateProvider';
 import { actionType } from '../content/reducer';
 import { MdDelete } from 'react-icons/md';
+import ChatboxTabBar from './ChatboxTabBar';
 
 export const Chatbox = () => {
   const [{ userMessages, suggestText }, dispatch] = useStateValue();
@@ -113,12 +114,15 @@ export const Chatbox = () => {
       </div>
       <div className="h-full flex-1 flex flex-col justify-between">
         <ChatboxTitleBar />
+        <ChatboxTabBar />
         {characterMood != "" && (
           <div className="text-center text-sm text-gray-600 animate-pulse">
             Memory updating: {characterMood}
           </div>
         )}
-
+        {userMessages.length === 0 &&   
+        <div className="flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh]">
+          </div>}
         {userMessages.length > 0 && <ChatboxMessageArea />}
         <ChatboxInputArea className="w-full" />
       </div>
