@@ -90,6 +90,14 @@ const ChatboxMessageArea = () => {
     window.electron?.onMoodUpdated(handler);
   }, []);
 
+  useEffect(() => {
+    const handleCharacterId = () => {
+      setIsThinking(false);
+      setFirstTime(false);
+    };
+    window.electron?.onCharacterId(handleCharacterId);
+  }, []);
+
   // 自动滚动到底部
   useEffect(() => {
     if(firstTime) {
@@ -136,7 +144,7 @@ const ChatboxMessageArea = () => {
       
 
       {/* ✅ 额外渲染：不属于 userMessages，仅根据 isThinking */}
-      {isThinking && Chatlength == userMessages.length && (
+      {isThinking && Chatlength == userMessages.length && userMessages[userMessages.length - 1].role === "user" && (
         <div className="flex mb-2 justify-start">
           <div className="rounded-2xl px-4 py-2 whitespace-pre-wrap shadow-sm bg-neutral-100 text-left text-xs animate-pulse italic text-gray-500">
             Thinking……

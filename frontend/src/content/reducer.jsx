@@ -9,12 +9,18 @@ export const actionType = {
     SET_CHARACTER_MOOD: "SET_CHARACTER_MOOD",
     ADD_STREAMING_REPLY: "ADD_STREAMING_REPLY",
     CLEAR_STREAMING_REPLY: "CLEAR_STREAMING_REPLY",
+    SET_NAVBAR_CHAT:"SET_NAVBAR_CHAT",
 }
 
 const reducer = (state, action) => {
     console.log(action);
 
     switch(action.type) {
+        case actionType.SET_NAVBAR_CHAT:
+            return {
+              ...state,
+              navBarChats: action.navBarChats,
+            };
         case actionType.ADD_STREAMING_REPLY:
             return {
               ...state,

@@ -101,6 +101,7 @@ export const ChatboxInputBox = () => {
   const [userMemory, setUserMemory] = useState(null);
   const [founctionModel, setFounctionModel] = useState(null);
   const [system, setSystem] = useState(null);
+  const [firstCharacter, setFirstCharacter] = useState(null)
 
   // 启动时加载默认角色ID
   useEffect(() => {
@@ -109,14 +110,15 @@ export const ChatboxInputBox = () => {
       const settings = await window.electron.getSettings();
       try {
         if (settings && settings.defaultRoleId) {
-          console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
+          
+          // console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
           
           // 验证ID是否有效（是否能找到对应的pet数据）
           try {
             const pet = await window.electron.getPet(settings.defaultRoleId);
             if (pet) {
-              setCharacterId(settings.defaultRoleId);
-              console.log("Default character ID validated successfully");
+              setFirstCharacter(settings.defaultRoleId);
+              // console.log("Default character ID validated successfully111ß");
             } else {
               console.log("Default character ID not found in database, using null");
               setCharacterId(null);
@@ -134,7 +136,7 @@ export const ChatboxInputBox = () => {
       try {
         const settings = await window.electron.getSettings();
         if (settings && settings.defaultModelId) {
-          console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
+          // console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
           
           // 验证ID是否有效（是否能找到对应的pet数据）
           try {
@@ -161,6 +163,17 @@ export const ChatboxInputBox = () => {
       
     loadDefaultCharacter();
   }, []); // 只在组件加载时执行一次
+
+  useEffect(() => {
+    if(firstCharacter!=null) {
+      window.electron?.sendCharacterId(firstCharacter);
+    }
+  
+    // return () => {
+    //   second
+    // }
+  }, [firstCharacter])
+  
 
   // 监听角色 ID
   useEffect(() => {
@@ -264,8 +277,22 @@ export const ChatboxInputBox = () => {
 
   // 接收会话 ID
   useEffect(() => {
-    const handleConversationId = (id) => {
+    const fetch = async (conversationId) => {
+      try {
+        const conv = await window.electron.getConversationById(conversationId);
+        setCharacterId(conv.petId)
+        // alert(conv.petID);
+      } catch (error) {
+        console.error("Error fetching conversation:", error);
+        throw error;
+      }
+    };
+
+    const handleConversationId = async(id) => {
+      await fetch(id);
       console.log("📥 Received conversation ID from Electron:", id);
+
+
       conversationIdRef.current = id;
     };
 

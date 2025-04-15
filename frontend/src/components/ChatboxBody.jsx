@@ -59,7 +59,6 @@ export const Chatbox = () => {
   const handleItemClick = async (conv) => {
     const conversation = await fetchConversationById(conv._id);
     window.electron?.sendMoodUpdate('normal');
-    window.electron?.sendCharacterId(conversation.petId);
     window.electron?.sendConversationId(conv._id);
     dispatch({
       type: actionType.SET_MESSAGE,

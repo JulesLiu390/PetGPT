@@ -75,6 +75,28 @@ export const Character = () => {
     window.electron?.onCharacterId(handleCharacterId);
   }, []);
 
+  useEffect(() => {
+    const fetch = async (conversationId) => {
+      try {
+        const conv = await window.electron.getConversationById(conversationId);
+        const pet = await window.electron.getPet(conv.petId);
+        setImageName(pet.imageName); 
+        // alert(conv.petID);
+      } catch (error) {
+        console.error("Error fetching conversation:", error);
+        throw error;
+      }
+    };
+
+    const handleConversationId = async(id) => {
+      await fetch(id);
+    };
+
+    if (window.electron?.onConversationId) {
+      window.electron.onConversationId(handleConversationId);
+    }
+  }, []);
+
   // 根据 characterMood 动态加载对应图片
   useEffect(() => {
     const loadImage = async () => {

@@ -95,7 +95,7 @@ const SelectCharacterPage = () => {
   }, []);
 
   const handleSelect = (pet) => {
-    window.electron?.sendCharacterId(pet._id);
+    window.electron?.sendCharacterId(pet._id);    
     alert("Character Selected")
     window.electron?.sendMoodUpdate('normal');
   };
