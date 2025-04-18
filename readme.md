@@ -118,9 +118,28 @@ You can:
 
 ### 3. Start Chatting!
 
-Once selected, your character will appear in the chat window. Type a message to start the conversation!
+### 3. Start Chatting!
 
-![Chat With JulesLiu](https://i.imgur.com/DaPml4U.png)
+![Chat With Chatbot](https://i.imgur.com/d5ZY2Yg.png)
+
+At the top of the chat panel you’ll see a row of tabs—one for each active character session, plus a “+” button to open a new one. Click a character’s tab to switch into **that session and load all messages saved since this window was opened** (not your entire chat history).
+
+Once a tab is selected:  
+- The main area shows the character’s avatar and the conversation you’ve had in this session.  
+- If available, quick‑reply suggestions will pop up in a “Quick reply” box just above the input field.
+
+Below the chat window is your input area and a toolbar of buttons:
+
+| Icon | Label   | Function                                                                 |
+|------|---------|--------------------------------------------------------------------------|
+| 🌐   | Agent   | Toggle **Agent mode** for system‑driven tasks or workflows               |
+| 📄   | Memory  | Open the **Memory** panel to review or edit what the assistant remembers|
+| 🔗   | Share   | Generate a shareable link to this conversation                           |
+| 🔍   | Search  | Perform a web search from inside the chat                                |
+| QT   | QT menu | Open the **Quick Tools** menu for quick reply                            |
+| ➤   | Send    | Send your message (or press Enter)                                       |
+
+Just type your message in the box at the bottom and hit Enter or click the send arrow. Your character will reply in their own style, complete with changing facial expressions and moods.  
 
 Characters will respond in their own style, complete with facial expressions and moods based on their personality and tone.
 
@@ -130,7 +149,7 @@ Characters will respond in their own style, complete with facial expressions and
 
 Use the following shortcut to quickly toggle the PetGPT interface:
 
-⇧ Shift + Space
+⇧ Shift + Space ｜ Ctrl + Shift + Space (Or you can set them in settings page)
 
 ### 4. Fullscreen Mode & Conversation History
 
