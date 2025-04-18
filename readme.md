@@ -24,13 +24,13 @@ Beyond casual interaction, PetGPT offers:
 
 Here’s a glimpse of PetGPT in action:
 
-![Chat with a Virtual Desktop Pet](https://i.imgur.com/P1UCquU.png)  
+![Chat with a Virtual Desktop Pet](https://i.imgur.com/dT7vRw7.png)  
 *Interacting with your AI pet in real time*
 
-![Add Chatbot Interface](https://i.imgur.com/FYTFtqw.png)  
+![Add Chatbot Interface](https://i.imgur.com/JsS6G0W.png)  
 *Create and customize new AI characters*
 
-![Full Screen Interface with Chats History](https://i.imgur.com/JasHJSX.png)  
+![Full Screen Interface with Chats History](https://i.imgur.com/Cc3pHik.png)  
 *Full-screen view with history panel*
 
 ---
@@ -39,7 +39,7 @@ Here’s a glimpse of PetGPT in action:
 
 In the top-center toolbar, you will find three main buttons that help you control and manage your PetGPT experience:
 
-![Toolbar Buttons](https://i.imgur.com/nmWsdaA.png)
+![Toolbar Buttons](https://i.imgur.com/nAnXSr9.png)
 
 1. 💬 **Conversation Button**  
    Toggle the chat window to start or continue conversations with your selected character.
@@ -49,6 +49,9 @@ In the top-center toolbar, you will find three main buttons that help you contro
 
 3. 📋 **Select Chatbot Button**  
    Choose from your existing characters to switch personalities, models, or tasks quickly.
+
+4. ⚙️ System Settings Button
+   Open the system settings panel to set your default AI assistant, choose a conversation model, adjust the window size, and customize shortcut keys.
 
 ---
 
