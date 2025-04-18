@@ -15,6 +15,7 @@ Beyond casual interaction, PetGPT offers:
 
 - [🖼️ Screenshots](#-screenshots)  
 - [🧭 User Interface Guide](#-user-interface-guide)  
+- [🔧 Potential Installation Issues](#-potential-installation-issues)
 - [🧑‍💻 Development Guide](#-development-guide)  
 - [🧰 Tech Stack](#-tech-stack)  
 
@@ -50,7 +51,7 @@ In the top-center toolbar, you will find three main buttons that help you contro
 3. 📋 **Select Chatbot Button**  
    Choose from your existing characters to switch personalities, models, or tasks quickly.
 
-4. ⚙️ System Settings Button
+4. ⚙️ **System Settings Button**
    Open the system settings panel to set your default AI assistant, choose a conversation model, adjust the window size, and customize shortcut keys.
 
 ---
@@ -59,7 +60,7 @@ In the top-center toolbar, you will find three main buttons that help you contro
 
 You can **show or hide PetGPT at any time** using the following keyboard shortcut:
 
-⇧ Shift + Space
+⇧ Shift + Space ｜ Ctrl + Shift + Space (Or you can set them in settings page)
 
 ## 🧙‍♀️ Creating and Using a New Character
 
@@ -71,34 +72,55 @@ PetGPT allows you to create fully customizable characters powered by different A
 
 Click the ➕ **Add Chatbot** button from the top toolbar.
 
-![Add Character Screen](https://i.imgur.com/aGyQh6f.png)
+![Add Character Screen](https://i.imgur.com/JsS6G0W.png)
 
 Fill in the fields:
 
-- **Name**: Set a unique name for your character (e.g., `JulesLiu`).
-- **Personality Description**: Describe your character in second-person to shape their tone and behavior.
-- **Character Image**: Click `Choose Character Image` to upload a custom avatar and click `Process Image` to process it into proprite mode. Or you can use default Character Image(Makise Kurisu).
+- **Name**:  
+  Set a unique name for your character (e.g., `JulesLiu`).
+
+- **Personality Description**:  
+  Describe your character in second‑person to shape their tone and behavior (e.g., “You are a witty storyteller who loves sci‑fi”).  
+  > To use the system’s default prompt, leave this blank and keep **Use Default Personality** checked.
+
+- **Character Image**:  
+  Click **Choose Character Image** to upload your avatar, then click **Process Image** to convert it into the proper chat‑UI format.
+
 #### 🖼️ Character Image Format
 
-To enable expressive reactions during conversation, your image should follow this format:
+To enable expressive reactions during conversation, your image should follow this layout:
 
-- **Dimensions**: `1024 x 1024` pixels
-- **Layout**: A 2x2 grid with **four facial expressions** arranged:
-  
-  | Expression | Position        |
-  |------------|-----------------|
-  | Neutral    | Top-left        |
-  | Happy      | Top-right       |
-  | Thinking   | Bottom-left     |
-  | Angry      | Bottom-right    |
+- **Dimensions**: `1024 × 1024` pixels  
+- **Grid**: 2 × 2, containing four facial expressions:
 
-Example:
+  | Expression | Position     |
+  |------------|--------------|
+  | Neutral    | Top‑left     |
+  | Happy      | Top‑right    |
+  | Thinking   | Bottom‑left  |
+  | Angry      | Bottom‑right |
 
-![Expression Guide](https://i.imgur.com/LYliuT7.png)
-- **Model Info**: Choose the model provider (`OpenAI`, `Gemini`, etc.), model name (`gpt-4o`), and optionally set a custom API endpoint.
-- Use the green **Test API Key & Model** button to validate your setup.
+  _Example:_  
+  ![Expression Guide](https://i.imgur.com/LYliuT7.png)
 
-When you're done, click `Save` to add your character to the list.
+- **Model Provider**:  
+  Select one of the official API providers—**OpenAI**, **Grok**, **Gemini**—or choose **Others** to use:
+  - A third‑party relay/proxy URL  
+  - A locally running Ollama model instance
+
+- **Model Name**:  
+  Enter the model ID you wish to use (e.g., `gpt-4o`, `gemini-alpha`, or your local Ollama model name).
+
+- **Model API Key**:  
+  Paste your API key here if required by the provider.
+
+- **Model URL**:  
+  - **Default**: calls the official endpoint for your selected provider  
+  - **Custom**: enter a proxy/relay URL or your Ollama host (e.g., `http://localhost:11434`)
+
+- Click the green **Test API Key & Model** button to verify connectivity.
+
+When everything passes, click **Save** to add your character to the list.
 
 ---
 
@@ -118,8 +140,6 @@ You can:
 
 ### 3. Start Chatting!
 
-### 3. Start Chatting!
-
 ![Chat With Chatbot](https://i.imgur.com/d5ZY2Yg.png)
 
 At the top of the chat panel you’ll see a row of tabs—one for each active character session, plus a “+” button to open a new one. Click a character’s tab to switch into **that session and load all messages saved since this window was opened** (not your entire chat history).
@@ -133,8 +153,8 @@ Below the chat window is your input area and a toolbar of buttons:
 | Icon | Label   | Function                                                                 |
 |------|---------|--------------------------------------------------------------------------|
 | 🌐   | Agent   | Toggle **Agent mode** for system‑driven tasks or workflows               |
-| 📄   | Memory  | Open the **Memory** panel to review or edit what the assistant remembers|
-| 🔗   | Share   | Generate a shareable link to this conversation                           |
+| 📄   | Memory  | Open the **Memory** for chat bot to read or save informations|
+| 🔗   | Share   | Generate a shareable content to this conversation                           |
 | 🔍   | Search  | Perform a web search from inside the chat                                |
 | QT   | QT menu | Open the **Quick Tools** menu for quick reply                            |
 | ➤   | Send    | Send your message (or press Enter)                                       |
@@ -155,7 +175,7 @@ Use the following shortcut to quickly toggle the PetGPT interface:
 
 Click the ⬜ **Expand** button at the top of the chat window to enter fullscreen mode.
 
-![Fullscreen Mode](https://i.imgur.com/JasHJSX.png)
+![Fullscreen Mode](https://i.imgur.com/Cc3pHik.png)
 
 In fullscreen mode, you gain access to:
 
@@ -164,6 +184,14 @@ In fullscreen mode, you gain access to:
 - 📌 **Persistent Memory**: Each conversation retains its own context, so your character remembers what’s been said in that specific session.
 
 This makes PetGPT ideal for both quick one-off chats and long-running dialogues.
+
+## 🔧 Potential Installation Issues
+
+On **macOS**, if the installation fails due to extended‐attribute or permission errors, run:
+
+```bash
+sudo xattr -cr /path/to/petgpt.app
+```
 
 ## 🧑‍💻 Development Guide
 
