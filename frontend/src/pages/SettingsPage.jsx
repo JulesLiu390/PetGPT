@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
-import SettingsTitleBar from "./SettingsTitleBar";
-import SettingsHotkeyInput from "./SettingsHotkeyInput";
+import SettingsTitleBar from "../components/Layout/SettingsTitleBar";
+import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
 
 // 设置页面组件
 const SettingsPage = () => {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import AddCharacterTitleBar from "./AddCharacterTitleBar";
-import { callOpenAILib } from "../utlis/openai";
+import { callOpenAILib } from "../utils/openai";
 import defaultNormal from "../assets/default-normal.png";
 import OpaiNormal from "../assets/Opai-normal.png";
 import GeminaNormal from "../assets/Gemina-normal.png";

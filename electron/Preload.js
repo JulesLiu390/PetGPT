@@ -25,9 +25,8 @@ contextBridge.exposeInMainWorld('electron', {
   deletePetUserMemoryKey: (petId, key) => ipcRenderer.invoke('delete-pet-user-memory-key', { petId, key }),
   getPetUserMemoryValue: (petId, key) => ipcRenderer.invoke('get-pet-user-memory-value', { petId, key }),
   // ⚡ 其他事件发送
-  sendCharacterId: (id) => ipcRenderer.send('send-character-id', id),
   // sendCharacterId: (id) => ipcRenderer.send('send-character-id', id),
-  onCharacterId: (callback) => ipcRenderer.on('character-id', (event, id) => callback(id)),
+  // onCharacterId: (callback) => ipcRenderer.on('character-id', (event, id) => callback(id)),
   sendConversationId: (id) => ipcRenderer.send('send-conversation-id', id),
   dragWindow: (deltaX, deltaY) => ipcRenderer.send('drag-window', { deltaX, deltaY }),
   hideChatWindow: () => ipcRenderer.send("hide-chat-window"),
@@ -41,7 +40,11 @@ contextBridge.exposeInMainWorld('electron', {
   onPetsUpdated: (callback) => ipcRenderer.on('pets-updated', callback),
   maxmizeChatWindow: () => ipcRenderer.send("maximize-chat-window"),
   sendCharacterId: (id) => ipcRenderer.send('character-id', id),
-  onCharacterId: (callback) => ipcRenderer.on('character-id', (event, id) => callback(id)),
+  onCharacterId: (callback) => {
+    const subscription = (event, id) => callback(id);
+    ipcRenderer.on('character-id', subscription);
+    return () => ipcRenderer.removeListener('character-id', subscription);
+  },
   sendConversationId: (id) => ipcRenderer.send('conversation-id', id),
   onConversationId: (callback) => ipcRenderer.on('conversation-id', (event, id) => callback(id)),
   processImage: (base64Image, baseFilename) => ipcRenderer.invoke('process-image', base64Image),
@@ -62,5 +65,11 @@ contextBridge.exposeInMainWorld('electron', {
   },
 
   createNewChat: (chat) => ipcRenderer.send('new-chat', chat),
-  onNewChatCreated: (callback) => ipcRenderer.on('new-chat-created', (event, chat) => callback(chat)),
+  onNewChatCreated: (callback) => {
+    const subscription = (event, chat) => callback(chat);
+    ipcRenderer.on('new-chat-created', subscription);
+    return () => ipcRenderer.removeListener('new-chat-created', subscription);
+  },
+  onWindowMaximized: (callback) => ipcRenderer.on('window-maximized', callback),
+  onWindowUnmaximized: (callback) => ipcRenderer.on('window-unmaximized', callback),
 });

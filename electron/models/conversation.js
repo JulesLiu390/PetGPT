@@ -61,7 +61,9 @@ class Conversation {
   }
 
   static async findAll() {
-    return await readData();
+    const conversations = await readData();
+    // Filter out conversations with empty history
+    return conversations.filter(c => c.history && c.history.length > 0).reverse();
   }
 
   static async findById(_id) {
@@ -95,7 +97,10 @@ class Conversation {
       Array.isArray(updatedData.history) ? updatedData.history : existing.history
     );
 
-    conversations[index] = updated;
+    // 移动到数组末尾，以便 findAll().reverse() 后显示在最前面
+    conversations.splice(index, 1);
+    conversations.push(updated);
+    
     await writeData(conversations);
     return updated;
   }

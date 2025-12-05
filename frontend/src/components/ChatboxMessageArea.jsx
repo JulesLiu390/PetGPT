@@ -1,5 +1,5 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { useStateValue } from '../content/StateProvider';
+import { useStateValue } from '../context/StateProvider';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';

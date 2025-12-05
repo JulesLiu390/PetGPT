@@ -10,12 +10,36 @@ export const actionType = {
     ADD_STREAMING_REPLY: "ADD_STREAMING_REPLY",
     CLEAR_STREAMING_REPLY: "CLEAR_STREAMING_REPLY",
     SET_NAVBAR_CHAT:"SET_NAVBAR_CHAT",
+    SET_CURRENT_CONVERSATION_ID: "SET_CURRENT_CONVERSATION_ID",
+    SWITCH_CONVERSATION: "SWITCH_CONVERSATION",
+    UPDATE_CONVERSATION_MESSAGES: "UPDATE_CONVERSATION_MESSAGES",
 }
 
 const reducer = (state, action) => {
     console.log(action);
 
     switch(action.type) {
+        case actionType.UPDATE_CONVERSATION_MESSAGES:
+            return {
+                ...state,
+                updatedConversation: {
+                    id: action.id,
+                    messages: action.messages,
+                    title: action.title, // Include title in the update
+                    timestamp: Date.now() // Ensure change detection
+                }
+            };
+        case actionType.SWITCH_CONVERSATION:
+            return {
+                ...state,
+                userMessages: action.userMessages,
+                currentConversationId: action.id,
+            };
+        case actionType.SET_CURRENT_CONVERSATION_ID:
+            return {
+                ...state,
+                currentConversationId: action.id,
+            };
         case actionType.SET_NAVBAR_CHAT:
             return {
               ...state,
@@ -24,12 +48,17 @@ const reducer = (state, action) => {
         case actionType.ADD_STREAMING_REPLY:
             return {
               ...state,
-              streamingReply: (state.streamingReply || "") + action.content,
+              streamingReplies: {
+                ...state.streamingReplies,
+                [action.id]: (state.streamingReplies[action.id] || "") + action.content
+              }
             };
           case actionType.CLEAR_STREAMING_REPLY:
+            const newStreamingReplies = { ...state.streamingReplies };
+            delete newStreamingReplies[action.id];
             return {
               ...state,
-              streamingReply: "",
+              streamingReplies: newStreamingReplies,
             };
         case actionType.SET_SUGGEST_TEXT:
             return {

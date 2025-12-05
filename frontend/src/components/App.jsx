@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import ChatboxBody from './ChatboxBody'
+import ChatboxBody from './Chat/ChatboxBody'
 import { HashRouter, Routes, Route } from "react-router-dom";
-import Character from './Character';
-import AddCharacterPage from './AddCharacterPage';
-import SelectCharacterPage from './SelectCharacterPage';
-import SettingsPage from './SettingsPage';
+import CharacterPage from '../pages/CharacterPage';
+import AddCharacterPage from '../pages/AddCharacterPage';
+import SelectCharacterPage from '../pages/SelectCharacterPage';
+import SettingsPage from '../pages/SettingsPage';
 
 
 
@@ -19,7 +19,7 @@ function App() {
             <ChatboxBody className='z-10' />
             </div>
           } />
-          <Route path="/character" element={<Character />} />
+          <Route path="/character" element={<CharacterPage />} />
           <Route path="/addCharacter" element={<AddCharacterPage />} />
           <Route path="/selectCharacter" element={<SelectCharacterPage />} />
           <Route path="/settings" element={<SettingsPage />} />

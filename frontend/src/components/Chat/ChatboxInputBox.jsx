@@ -1,10 +1,11 @@
 import React, { useRef, useState, useEffect } from 'react';
-import { useStateValue } from '../context/StateProvider';
-import { actionType } from '../context/reducer';
-import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass } from "react-icons/fa6";
+import { useStateValue } from '../../context/StateProvider';
+import { actionType } from '../../context/reducer';
+import { FaArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass, FaStop } from "react-icons/fa6";
+import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { promptSuggestion, callOpenAILib, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../utils/openai';
-import { searchDuckDuckGo } from "../utils/search"
+import { promptSuggestion, callOpenAILib, callOpenAILibStream, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../../utils/openai';
+import { searchDuckDuckGo } from "../../utils/search"
 import { MdOutlineCancel } from "react-icons/md";
 import { SiQuicktype } from "react-icons/si";
 
@@ -32,7 +33,7 @@ const PastedImagePreview = ({ imageUrl, onRemove }) => {
 
 
 
-export const ChatboxInputBox = () => {
+export const ChatboxInputBox = ({ activePetId }) => {
   const [isGenerating, setIsGenerating] = useState(false);
   const [agentActive, setAgentActive] = useState(false); // Agent 开关
   // 新增记忆功能开关状态
@@ -47,6 +48,12 @@ export const ChatboxInputBox = () => {
   let reply = null;
   let thisModel = null;
   let _userText = null;
+
+  useEffect(() => {
+    if (activePetId) {
+      setCharacterId(activePetId);
+    }
+  }, [activePetId]);
 
   const toggleAgent = () => {
     // alert(system)
@@ -98,6 +105,7 @@ export const ChatboxInputBox = () => {
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
   const conversationIdRef = useRef(null);
+  const abortControllerRef = useRef(null);
   const [userMemory, setUserMemory] = useState(null);
   const [founctionModel, setFounctionModel] = useState(null);
   const [system, setSystem] = useState(null);
@@ -189,15 +197,27 @@ export const ChatboxInputBox = () => {
       // alert(thisModel)
       thisModel = stateThisModel;
       _userText = stateUserText;
-      let suggestion = await promptSuggestion(
-        {user:_userText, assistant:stateReply.content},
-        thisModel.modelProvider,
-        thisModel.modelApiKey,
-        thisModel.modelName,
-        thisModel.modelUrl
-      )
-      suggestion = suggestion.split("|")
-      dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: suggestion });
+      
+      if (!thisModel || !stateReply) return;
+
+      try {
+        let suggestion = await promptSuggestion(
+            {user:_userText, assistant:stateReply.content},
+            thisModel.modelProvider,
+            thisModel.modelApiKey,
+            thisModel.modelName,
+            thisModel.modelUrl
+        )
+        if (suggestion && typeof suggestion === 'string') {
+            suggestion = suggestion.split("|")
+            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: suggestion });
+        } else {
+            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
+        }
+      } catch (error) {
+        console.error("Error getting suggestions:", error);
+        dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
+      }
     };
     if(stateReply != null) {
       // alert(stateReply)
@@ -242,7 +262,7 @@ export const ChatboxInputBox = () => {
           return;
         }
 
-        if (conversationIdRef.current) {
+        if (conversationIdRef.current && window.electron) {
           const currentConv = await window.electron.getConversationById(conversationIdRef.current);
           if (!currentConv || currentConv.petId !== characterId) {
             dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
@@ -267,11 +287,14 @@ export const ChatboxInputBox = () => {
     };
 
     // 注册监听器
-    window.electron.onNewChatCreated(handleNewChat);
+    let cleanup;
+    if (window.electron && window.electron.onNewChatCreated) {
+      cleanup = window.electron.onNewChatCreated(handleNewChat);
+    }
 
     // 卸载时清理监听器，避免内存泄漏
     return () => {
-      window.electron.removeListener?.('new-chat-created', handleNewChat);
+      if (cleanup) cleanup();
     };
   }, []);
 
@@ -361,7 +384,8 @@ export const ChatboxInputBox = () => {
     setIsGenerating(true);
     if (!userText.trim()) return;
 
-    
+    // 🔒 锁定当前对话 ID，防止在等待 AI 回复期间切换标签导致数据错乱
+    let sendingConversationId = conversationIdRef.current;
 
     _userText = userText;
     
@@ -385,7 +409,10 @@ export const ChatboxInputBox = () => {
     if (agentActive) {
       // Agent 模式不改变原有逻辑
       fullMessages = [...userMessages, { role: "user", content: _userText }];
-      dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText } });
+      // 仅当用户仍停留在当前对话时，才更新 UI
+      if (sendingConversationId === conversationIdRef.current) {
+        dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText } });
+      }
     } else {
 
       let searchContent = "";
@@ -433,7 +460,10 @@ export const ChatboxInputBox = () => {
             systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          // 仅当用户仍停留在当前对话时，才更新 UI
+          if (sendingConversationId === conversationIdRef.current) {
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          }
           let content = _userText + searchContent;
           if(userImage != null) {
             content = [{ type: "text", text: _userText + searchContent },
@@ -454,7 +484,10 @@ export const ChatboxInputBox = () => {
             systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          // 仅当用户仍停留在当前对话时，才更新 UI
+          if (sendingConversationId === conversationIdRef.current) {
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          }
           let content = _userText + searchContent;
           if(userImage != null) {
             content = [{ type: "text", text: _userText + searchContent },
@@ -495,7 +528,10 @@ export const ChatboxInputBox = () => {
           let systemContent = `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
           systemContent += "You are a helpful assisatant";
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          // 仅当用户仍停留在当前对话时，才更新 UI
+          if (sendingConversationId === conversationIdRef.current) {
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          }
           let content = _userText + searchContent;
           if(userImage != null) {
             content = [{ type: "text", text: _userText + searchContent },
@@ -511,7 +547,10 @@ export const ChatboxInputBox = () => {
         } else {
           let systemContent = `You are a helpful assisatant`;
           const systemPrompt = { role: "system", content: systemContent };
-          dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          // 仅当用户仍停留在当前对话时，才更新 UI
+          if (sendingConversationId === conversationIdRef.current) {
+            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
+          }
           let content = _userText + searchContent;
           if(userImage != null) {
             content = [{ type: "text", text: _userText + searchContent },
@@ -571,47 +610,98 @@ export const ChatboxInputBox = () => {
       window.electron?.testOpen(osascriptCmd);
 
     } else {
-      reply = await callOpenAILib(
+      // Create new AbortController for this request
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+
+      reply = await callOpenAILibStream(
         fullMessages,
         petInfo.modelProvider,
         petInfo.modelApiKey,
         petInfo.modelName,
-        petInfo.modelUrl
+        petInfo.modelUrl,
+        (chunk) => {
+            // 无论当前是否在同一个 tab，都更新对应 conversation 的流式内容
+            dispatch({ 
+                type: actionType.ADD_STREAMING_REPLY, 
+                content: chunk,
+                id: sendingConversationId 
+            });
+        },
+        controller.signal // Pass the signal
       );
+      
+      abortControllerRef.current = null; // Clear ref after completion
     }
 
-    const botReply = { role: "assistant", content: reply.content };
+    // 清除流式输出内容，准备显示最终消息
+    dispatch({ type: actionType.CLEAR_STREAMING_REPLY, id: sendingConversationId });
 
-    // 只在 AI 回复后插入机器人消息
-    dispatch({ type: actionType.ADD_MESSAGE, message: botReply });
+    if (!reply) {
+        reply = { content: "Error: No response from AI.", mood: "normal" };
+    }
 
-    if (!conversationIdRef.current) {
+    const botReply = { role: "assistant", content: reply.content || "Error: Empty response" };
+
+    // 只在 AI 回复后插入机器人消息，且仅当用户仍停留在当前对话时
+    if (sendingConversationId === conversationIdRef.current) {
+      dispatch({ type: actionType.ADD_MESSAGE, message: botReply });
+    }
+
+    if (!sendingConversationId) {
       try {
         const newConversation = await window.electron.createConversation({
           petId: petInfo._id,
-          title: `${_userText} with ${petInfo.name}`,
+          title: _userText,
           history: [...userMessages, { role: "user", content: _userText }, botReply],
         });
-        conversationIdRef.current = newConversation._id;
+        if (newConversation) {
+            sendingConversationId = newConversation._id;
+            // 如果用户还在当前页面，更新 ref
+            if (!conversationIdRef.current) {
+                conversationIdRef.current = newConversation._id;
+            }
+        }
       } catch (error) {
-        alert("Failed to create conversation:", error);
+        console.error("Failed to create conversation:", error);
       }
     }
 
-    await window.electron.updateConversation(conversationIdRef.current, {
-      petId: petInfo._id,
-      title: `${_userText} with ${petInfo.name}`,
-      history: [...userMessages, { role: "user", content: _userText }, botReply],
-    });
+    // 使用 sendingConversationId 更新数据库，确保写入正确的对话
+    if (sendingConversationId) {
+        const newHistory = [...userMessages, { role: "user", content: _userText }, botReply];
+        
+        // Only update title if it's the first message
+        const isFirstMessage = userMessages.length === 0;
+        const newTitle = isFirstMessage ? _userText : undefined;
 
-    window.electron?.sendMoodUpdate(reply.mood);
+        const updatePayload = {
+            petId: petInfo._id,
+            history: newHistory,
+        };
+        if (newTitle) {
+            updatePayload.title = newTitle;
+        }
+
+        await window.electron.updateConversation(sendingConversationId, updatePayload);
+        
+        // 通知全局状态更新该会话的消息记录（无论是否当前激活）
+        dispatch({
+            type: actionType.UPDATE_CONVERSATION_MESSAGES,
+            id: sendingConversationId,
+            messages: newHistory,
+            title: newTitle
+        });
+    }
+
+    window.electron?.sendMoodUpdate(reply.mood || "normal");
     setIsGenerating(false);
 
     window.electron.updateChatbodyStatus("");
 
-    setStateReply(reply);
-    setStateThisModel(thisModel);
-    setStateUserText(_userText);
+    if (reply) setStateReply(reply);
+    if (thisModel) setStateThisModel(thisModel);
+    if (_userText) setStateUserText(_userText);
   };
 
 
@@ -639,114 +729,142 @@ const handlePaste = (e) => {
 
 const [showReplyOptions, setShowReplyOptions] = useState(false);
 
+const handleStop = () => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
+      setIsGenerating(false);
+    }
+  };
 
   return (
-    <div className="relative w-full">
-      {/* 主容器：包含输入框和 Agent、Memory 及 Share Conversation 按钮 */}
-      <div className="bg-[rgba(220,220,230,0.9)] border-gray-300 rounded-3xl border-2 p-3 text-gray-800">
-      <PastedImagePreview
-        imageUrl={userImage}
-        onRemove={() => setUserImage(null)}
-      />
+    <div className="relative w-full max-w-3xl mx-auto px-4 pb-4">
+      {/* 主输入框容器：模仿图2的紧凑风格 */}
+      <div className="relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border border-transparent focus-within:border-gray-200 transition-all">
+        <PastedImagePreview
+            imageUrl={userImage}
+            onRemove={() => setUserImage(null)}
+        />
         <textarea
           ref={inputRef}
           value={userText}
           onKeyDown={handleKeyDown}
-          onPaste={handlePaste}   // 添加 onPaste 事件监听
+          onPaste={handlePaste}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
           onInput={autoResize}
-          placeholder="Message PetGPT"
-          className="w-full bg-transparent outline-none resize-none"
+          placeholder="Ask anything"
+          className="w-full bg-transparent outline-none resize-none text-gray-800 placeholder-gray-500 min-h-[24px] max-h-[200px] overflow-y-auto mb-8" 
           onChange={handleChange}
-          style={{ height: 'auto', maxHeight: '200px', overflow: 'auto' }}
+          style={{ height: 'auto' }}
         />
-        {/* 按钮区域：将 Agent、Memory、Share Conversation 及 Search 按钮放在一起 */}
-        <div className="flex justify-between">
-          
-          <div className="flex items-center space-x-2">
-            <button
-              onClick={toggleAgent}
-              className="border-none flex items-center space-x-1 px-1 py-1 hover:bg-gray-400 rounded-md border border-gray-300"
-            >
-              <FaGlobe className={`w-5 h-5 ${agentActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:420px)]:inline">
-                {agentActive ? "Agent" : "Agent"}
-              </span>
-            </button>
-            <button
-              onClick={toggleMemory}
-              className="border-none flex items-center space-x-1  py-1 hover:bg-gray-400 rounded-md border border-gray-300"
-            >
-              <FaFile className={`w-5 h-5 ${memoryEnabled ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:420px)]:inline">
-                {memoryEnabled ? "Memory" : "Memory"}
-              </span>
-            </button>
-            <button
-              onClick={handleShare}
-              className="border-none flex items-center space-x-1  py-1 hover:bg-gray-400 rounded-md border border-gray-300"
-            >
-              <FaShareNodes className="w-5 h-5 text-gray-600" />
-              <span className="text-sm hidden [@media(min-width:420px)]:inline">Share</span>
-            </button>
-            <button
-              onClick={toggleSearch}
-              className="border-none flex items-center space-x-1  py-1 hover:bg-gray-400 rounded-md border border-gray-300"
-            >
-              <FaMagnifyingGlass className={`w-5 h-5 ${searchActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:420px)]:inline">Search</span>
-            </button>
-          </div>
+
+        {/* 底部工具栏：左侧功能开关 + 右侧发送按钮 */}
+        <div className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
+            {/* Left: Tools (Agent, Memory, Search) */}
+            <div className="flex items-center gap-1">
+                <button className="p-2 text-gray-500 hover:bg-gray-200 rounded-full transition-colors">
+                    <AiOutlinePlus className="w-5 h-5" />
+                </button>
+                
+                <button
+                    onClick={toggleAgent}
+                    className={`p-2 rounded-full transition-colors ${
+                        agentActive ? "text-green-600 bg-green-100" : "text-gray-500 hover:bg-gray-200"
+                    }`}
+                    title="Agent Mode"
+                >
+                    <FaGlobe className="w-4 h-4" />
+                </button>
+
+                <button
+                    onClick={toggleMemory}
+                    className={`p-2 rounded-full transition-colors ${
+                        memoryEnabled ? "text-blue-600 bg-blue-100" : "text-gray-500 hover:bg-gray-200"
+                    }`}
+                    title="Memory"
+                >
+                    <FaFile className="w-4 h-4" />
+                </button>
+
+                <button
+                    onClick={toggleSearch}
+                    className={`p-2 rounded-full transition-colors ${
+                        searchActive ? "text-purple-600 bg-purple-100" : "text-gray-500 hover:bg-gray-200"
+                    }`}
+                    title="Search"
+                >
+                    <FaMagnifyingGlass className="w-4 h-4" />
+                </button>
+
+                {/* Model Info / Status (Figure 2 style) */}
+                {petInfo && (
+                    <div className="ml-2 px-2 py-1 bg-gray-200/50 rounded-md text-xs font-medium text-gray-600 flex flex-col justify-center select-none min-w-[60px]">
+                        <div className="font-bold text-gray-800 leading-tight truncate max-w-[100px]">
+                            {petInfo.name}
+                        </div>
+                        <div className="text-[10px] text-gray-500 leading-tight truncate max-w-[100px] flex items-center gap-1">
+                            {isGenerating ? (
+                                <span className="animate-pulse text-blue-500">Thinking...</span>
+                            ) : (
+                                <span>{petInfo.modelName || "3.0"}</span>
+                            )}
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            {/* Right: Quick Reply & Send */}
+            <div className="flex items-center gap-2">
+                {/* Quick Reply Button */}
+                <div className="relative">
+                    <button
+                        onClick={() => {}}
+                        onMouseEnter={() => setShowReplyOptions(true)}
+                        onMouseLeave={() => setShowReplyOptions(false)}
+                        className="p-2 rounded-full hover:bg-gray-200 transition-colors text-gray-500"
+                    >
+                        <SiQuicktype className="w-5 h-5" style={{ color:(suggestText.length == 0) ? "#c1c1c1" : "#555" }} />
+                    </button>
+                    
+                    {showReplyOptions && suggestText.length !== 0 && (
+                        <div 
+                        className="absolute bottom-full right-0 mb-2 w-48 bg-white border border-gray-200 rounded-xl shadow-xl p-2 z-50"
+                        onMouseEnter={() => setShowReplyOptions(true)}
+                        onMouseLeave={() => setShowReplyOptions(false)}
+                        >
+                        <div className="font-bold mb-2 text-xs text-gray-400 px-1">Quick reply</div>
+                        <ul className="space-y-1">
+                            {suggestText.map((item, index) => (
+                            <li key={index} className="cursor-pointer hover:bg-gray-100 p-2 rounded-lg text-xs text-gray-700 transition-colors"
+                            onClick={() => setUserText(userText + suggestText[index])}>
+                                {item}
+                            </li>
+                            ))}
+                        </ul>
+                        </div>
+                    )}
+                </div>
+
+                {/* Send Button */}
+                <button
+                    onClick={isGenerating ? handleStop : handleSend}
+                    disabled={!String(userText).trim() && !isGenerating}
+                    className={`p-2 rounded-full transition-all duration-200 ${
+                        !String(userText).trim() && !isGenerating 
+                        ? "bg-gray-300 cursor-not-allowed" 
+                        : "bg-black hover:bg-gray-800 shadow-md"
+                    }`}
+                >
+                    {!isGenerating ? (
+                    <FaArrowUp className="w-4 h-4 text-white" />
+                    ) : (
+                    <FaStop className="w-4 h-4 text-white animate-pulse" />
+                    )}
+                </button>
+            </div>
         </div>
       </div>
-      <button
-            onClick={() => {}}
-            className="absolute bottom-2 right-13 rounded-full"
-            onMouseEnter={() => setShowReplyOptions(true)}
-            onMouseLeave={() => setShowReplyOptions(false)}
-          >
-          <SiQuicktype
-            className="w-9 h-9"
-            style={{ color:(suggestText.length == 0) ? "#c1c1c1" : "#000000" }}
-          />
-      </button>
-      {showReplyOptions && suggestText.length !== 0 && (
-        <div 
-          className="absolute bottom-11 right-9 bg-white border border-gray-200 rounded-lg shadow-lg p-2"
-          onMouseEnter={() => setShowReplyOptions(true)}
-          onMouseLeave={() => setShowReplyOptions(false)}
-        >
-        <div className="font-bold mb-1 text-xs">Quick reply</div>
-        <ul>
-          {suggestText.map((item, index) => (
-            <li key={index} className="cursor-pointer hover:bg-gray-100 p-1 text-xs"
-            onClick={() => setUserText(userText + suggestText[index])}>
-              {item}
-            </li>
-          ))}
-        </ul>
-        </div>
-      )}
-
-      {/* 发送按钮：绝对定位于右下角 */}
-      <button
-        onClick={handleSend}
-        disabled={!String(userText).trim() || isGenerating}
-        className="absolute bottom-2 right-2 rounded-full"
-      >
-        {!isGenerating ? (
-          <FaCircleArrowUp
-            className="w-9 h-9"
-            style={{ color: !String(userText).trim() ? "#c1c1c1" : "#000000" }}
-          />
-        ) : (
-          <BsFillRecordCircleFill
-            className="w-9 h-9"
-            style={{ color: "#000000" }}
-          />
-        )}
-      </button>
     </div>
   );
 };

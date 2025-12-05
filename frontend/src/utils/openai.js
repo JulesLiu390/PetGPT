@@ -16,8 +16,70 @@ const StructuredResponseSchema = z.object({
   mood: z.enum(["angry", "normal", "smile"]),
 });
 
+const MoodSchema = z.object({
+  mood: z.enum(["angry", "normal", "smile"]),
+});
+
 // 定义不支持结构化输出的模型列表
 const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "claude-3-7-sonnet-20250219", "deepseek-r1-searching","huihui_ai/gemma3-abliterated:4b"];
+
+// 独立的情绪判断函数
+const detectMood = async (messages, provider, apiKey, model, baseURL) => {
+  // 构造一个新的 client 实例，避免干扰
+  let url = baseURL;
+  if (url === "default") {
+    url = providerURLs[provider] || url;
+  } else {
+    if(url.slice(-1) == "/") {
+      url += 'v1';
+    } else {
+      url += '/v1'
+    }
+  }
+
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: url,
+    dangerouslyAllowBrowser: true,
+  });
+
+  // 构造专门用于判断情绪的消息列表
+  // 我们需要让模型根据当前的对话上下文（主要是用户的最后一句话）来判断助手应该有的情绪
+  // 为了不破坏原有 messages 的结构（可能包含 system prompt），我们构建一个新的上下文
+  const moodMessages = [
+    ...messages,
+    { 
+      role: "system", 
+      content: "Analyze the conversation context and the user's last message. Determine the appropriate mood for the assistant's response. Choose exactly one from: 'angry', 'normal', 'smile'. Return only the JSON object: {\"mood\": \"...\"}." 
+    }
+  ];
+
+  try {
+    if (notSupportedModels.includes(model)) {
+      // 不支持结构化输出，使用普通对话并解析
+      const completion = await openai.chat.completions.create({
+        model: model,
+        messages: moodMessages,
+        stream: false
+      });
+      const content = completion.choices[0]?.message?.content?.toLowerCase() || "";
+      if (content.includes("angry")) return "angry";
+      if (content.includes("smile")) return "smile";
+      return "normal";
+    } else {
+      // 支持结构化输出
+      const completion = await openai.beta.chat.completions.parse({
+        model: model,
+        messages: moodMessages,
+        response_format: zodResponseFormat(MoodSchema, "mood_response"),
+      });
+      return completion.choices[0]?.message?.parsed?.mood || "normal";
+    }
+  } catch (error) {
+    console.warn("Mood detection failed, defaulting to normal:", error);
+    return "normal";
+  }
+};
 
 export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
@@ -38,27 +100,29 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
   });
 
   try {
-    if (notSupportedModels.includes(model)) {
-      // 模型不支持结构化输出，采用普通调用并人工构造 JSON 回复，情绪默认 normal
-      const chatCompletion = await openai.chat.completions.create({
+    // 并发执行：内容生成 + 情绪判断
+    const moodPromise = detectMood(messages, provider, apiKey, model, baseURL === providerURLs[provider] ? "default" : baseURL.replace(/\/v1$/, ''));
+    
+    // 主回复生成（不再强制 schema，除非是特定需求，但这里为了保持一致性，我们改为普通文本生成）
+    // 注意：原代码中 callOpenAILib 是非流式的，且使用了 StructuredResponseSchema。
+    // 用户要求 "模型本身的回复应该是非schema的"。
+    // 所以我们将 content 生成改为普通 chat completion。
+    
+    const contentPromise = openai.chat.completions.create({
         model: model,
         messages: messages,
-        // stream: false  // 显式关闭流式输出
-      });
-      return {
-        content: chatCompletion.choices[0].message.content,
-        mood: "normal",
-      };
-    } else {
-      // 支持结构化输出
-      const chatCompletion = await openai.beta.chat.completions.parse({
-        model: model,
-        messages: messages,
-        response_format: zodResponseFormat(StructuredResponseSchema, "response"),
-        // stream: false  // 显式关闭流式输出
-      });
-      return chatCompletion.choices[0].message.parsed;
-    }
+        stream: false
+    });
+
+    const [moodResult, contentResult] = await Promise.all([moodPromise, contentPromise]);
+    
+    const content = contentResult.choices[0]?.message?.content || "Error: Empty response";
+
+    return {
+        content: content,
+        mood: moodResult
+    };
+
   } catch (error) {
     const fakeChatCompletion = {
       choices: [
@@ -72,11 +136,81 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
         }
       ]
     };
-    return fakeChatCompletion.choices[0].message.parsed;
+    // 保持原有错误处理结构，虽然现在我们不再直接返回 parsed
+    return { content: error.message, mood: "normal" };
   }
 };
 
+export const callOpenAILibStream = async (messages, provider, apiKey, model, baseURL, onChunk, abortSignal) => {
+  // 直接使用传入的 apiKey 和 model 参数
+  let url = baseURL;
+  if (url === "default") {
+    url = providerURLs[provider] || url;
+  } else {
+    // baseURL += '/v1';
+    if(url.slice(-1) == "/") {
+      url += 'v1';
+    } else {
+      url += '/v1'
+    }
+  }
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: url,
+    dangerouslyAllowBrowser: true,
+  });
 
+  try {
+    // 启动并发的情绪判断
+    // 注意：这里传入原始 baseURL (未加 v1 的)，因为 detectMood 内部会处理
+    const moodPromise = detectMood(messages, provider, apiKey, model, baseURL);
+
+    const stream = await openai.chat.completions.create({
+      model: model,
+      messages: messages,
+      stream: true,
+    }, { signal: abortSignal });
+
+    let fullContent = "";
+
+    for await (const chunk of stream) {
+      if (abortSignal?.aborted) {
+         break;
+      }
+      const content = chunk.choices[0]?.delta?.content || "";
+      if (content) {
+        fullContent += content;
+        if (onChunk) {
+            onChunk(content);
+        }
+      }
+    }
+    
+    // 等待情绪判断完成
+    // 按照需求：每次等问题回答完了再更新表情
+    // 这里我们在流式传输结束后，再等待 moodPromise，确保返回时 mood 已经就绪
+    const mood = await moodPromise;
+    
+    return {
+        content: fullContent,
+        mood: mood
+    };
+
+  } catch (error) {
+    if (error.name === 'AbortError') {
+        console.log('Stream aborted');
+        return {
+            content: fullContent || "Aborted", // Return what we have so far
+            mood: "normal"
+        };
+    }
+    console.error("Streaming error:", error);
+    return {
+        content: "Error: " + error.message,
+        mood: "normal"
+    };
+  }
+};
 
 export const refinedSearchFromPrompt = async (
   userPrompt,

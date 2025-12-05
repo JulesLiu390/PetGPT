@@ -1,13 +1,13 @@
 {
   "name": "petgpt",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "license": "MIT",
   "main": "electron/main.js",
   "scripts": {
     "unpacked": "yarn build && electron-builder --win --ia32 --x64 --dir",
-    "dev": "concurrently \"yarn frontend:dev\" \"yarn electron:dev\" \"yarn backend:dev\"",
+    "dev": "concurrently \"yarn frontend:dev\" \"yarn electron:dev\"",
     "frontend:dev": "cd frontend && yarn dev",
-    "electron:dev": "wait-on http://localhost:5173 && electron .",
+    "electron:dev": "wait-on tcp:5173 && npx nodemon --watch electron --exec electron .",
     "backend:dev": "cd backend && yarn dev",
     "build": "yarn build:frontend",
     "build:frontend": "cd frontend && yarn build",

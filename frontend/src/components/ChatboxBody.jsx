@@ -2,8 +2,8 @@ import React, { useEffect, useState } from 'react';
 import ChatboxTitleBar from './ChatboxTitleBar';
 import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
-import { useStateValue } from '../content/StateProvider';
-import { actionType } from '../content/reducer';
+import { useStateValue } from '../context/StateProvider';
+import { actionType } from '../context/reducer';
 import { MdDelete } from 'react-icons/md';
 import ChatboxTabBar from './ChatboxTabBar';
 

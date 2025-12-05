@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { AiFillChrome, AiOutlinePlus, AiOutlineClose } from 'react-icons/ai';
-import { useStateValue } from '../content/StateProvider';
-import { actionType } from '../content/reducer';
+import { useStateValue } from '../context/StateProvider';
+import { actionType } from '../context/reducer';
 
 const ChatboxTabBar = () => {
   const [{ navBarChats }, dispatch] = useStateValue();

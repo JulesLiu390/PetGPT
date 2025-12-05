@@ -5,6 +5,9 @@ const Pet = require('./models/pet');
 const Conversation = require('./models/conversation.js');
 const { sliceImageToFiles } = require('./models/image_processor.js');
 
+const isDev = !app.isPackaged;
+const DEV_URL = 'http://localhost:5173';
+
 require('./ipcMainHandler');
 
 // ------------------- 基础配置 ------------------- //
@@ -13,7 +16,7 @@ require('./ipcMainHandler');
 const baselineSizes = {
   character: { width: 200, height: 300 },
   chat: { width: 400, height: 350 },
-  addCharacter: { width: 500, height: 350 },
+  addCharacter: { width: 600, height: 600 },
   selectCharacter: { width: 500, height: 350 },
   settings: { width: 500, height: 700 }
 };
@@ -163,14 +166,15 @@ ipcMain.on("change-chat-window", () => {
 
 // 对于 addCharacter、selectCharacter 和 settings 窗口，仅进行显示/隐藏切换，显示时按 currentSizePreset 设置大小
 ipcMain.on("change-addCharacter-window", () => {
-  if (!AddCharacterWindow || !characterWindow) return;
+  if (!AddCharacterWindow) return;
   if (AddCharacterWindow.isVisible()) {
     AddCharacterWindow.hide();
   } else {
-    const { x, y } = characterWindow.getBounds();
     const size = getScaledSize(baselineSizes.addCharacter, currentSizePreset);
-    // 对 addCharacter 窗口的位置可采用 clamping
-    const { x: newX, y: newY } = clampPosition(x, y - size.height, size.width, size.height, screen.getPrimaryDisplay().workAreaSize.width, screenHeight);
+    const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+    const newX = Math.round((sw - size.width) / 2);
+    const newY = Math.round((sh - size.height) / 2);
+    
     AddCharacterWindow.setBounds({ x: newX, y: newY, width: size.width, height: size.height });
     AddCharacterWindow.show();
     AddCharacterWindow.focus();
@@ -254,13 +258,11 @@ function updateAllWindowsSizes(preset = currentSizePreset) {
     const newY = charBounds.y - newSize.height + charBounds.height;
     chatWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
   }
-  // 更新 AddCharacterWindow：相对于 characterWindow，进行 clamping
-  if (AddCharacterWindow && !AddCharacterWindow.isDestroyed() && characterWindow) {
+  // 更新 AddCharacterWindow：保持在屏幕中央
+  if (AddCharacterWindow && !AddCharacterWindow.isDestroyed()) {
     const newSize = getScaledSize(baselineSizes.addCharacter, currentSizePreset);
-    const charBounds = characterWindow.getBounds();
-    let newX = charBounds.x;
-    let newY = charBounds.y - newSize.height;
-    ({ x: newX, y: newY } = clampPosition(newX, newY, newSize.width, newSize.height, sw, sh));
+    const newX = Math.round((sw - newSize.width) / 2);
+    const newY = Math.round((sh - newSize.height) / 2);
     AddCharacterWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
   }
   // 更新 selectCharacterWindow：相对于 characterWindow，进行 clamping
@@ -305,7 +307,13 @@ const createcharacterWindow = () => {
     },
   });
 
-  characterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/character' });
+  if (isDev) {
+    characterWindow.loadURL(`${DEV_URL}/#/character`);
+    // characterWindow.webContents.openDevTools({ mode: 'detach' }); // 可选：开发模式自动打开控制台
+  } else {
+    characterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/character' });
+  }
+  
   characterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   characterWindow.on("closed", () => { characterWindow = null; });
 };
@@ -339,15 +347,30 @@ const createChatWindow = () => {
 
   chatWindow.setAlwaysOnTop(true, 'floating');
   chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
-  chatWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
+  
+  if (isDev) {
+    chatWindow.loadURL(`${DEV_URL}`); // 默认路由是 /
+  } else {
+    chatWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"));
+  }
+
+  chatWindow.on('maximize', () => {
+    chatWindow.webContents.send('window-maximized');
+  });
+
+  chatWindow.on('unmaximize', () => {
+    chatWindow.webContents.send('window-unmaximized');
+  });
+
   chatWindow.on("closed", () => { chatWindow = null; });
 };
 
 const createAddCharacterWindow = () => {
   const addCharSize = getScaledSize(baselineSizes.addCharacter, currentSizePreset);
-  let x = 500;
-  let y = screenHeight - addCharSize.height - 250;
-  ({ x, y } = clampPosition(x, y, addCharSize.width, addCharSize.height, screen.getPrimaryDisplay().workAreaSize.width, screenHeight));
+  const { width: screenWidth, height: screenHeight } = screen.getPrimaryDisplay().workAreaSize;
+  const x = Math.round((screenWidth - addCharSize.width) / 2);
+  const y = Math.round((screenHeight - addCharSize.height) / 2);
+
   AddCharacterWindow = new BrowserWindow({
     width: addCharSize.width,
     height: addCharSize.height,
@@ -366,7 +389,12 @@ const createAddCharacterWindow = () => {
     },
   });
 
-  AddCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/addCharacter' });
+  if (isDev) {
+    AddCharacterWindow.loadURL(`${DEV_URL}/#/addCharacter`);
+  } else {
+    AddCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/addCharacter' });
+  }
+
   AddCharacterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   AddCharacterWindow.on("closed", () => { AddCharacterWindow = null; });
 };
@@ -393,7 +421,12 @@ const createSelectCharacterWindow = () => {
     },
   });
 
-  selectCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/selectCharacter' });
+  if (isDev) {
+    selectCharacterWindow.loadURL(`${DEV_URL}/#/selectCharacter`);
+  } else {
+    selectCharacterWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/selectCharacter' });
+  }
+
   selectCharacterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   selectCharacterWindow.on("closed", () => { selectCharacterWindow = null; });
 };
@@ -446,7 +479,12 @@ const createSettingsWindow = () => {
     },
   });
 
-  settingsWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/settings' });
+  if (isDev) {
+    settingsWindow.loadURL(`${DEV_URL}/#/settings`);
+  } else {
+    settingsWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/settings' });
+  }
+
   settingsWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   settingsWindow.on("closed", () => { settingsWindow = null; });
 };

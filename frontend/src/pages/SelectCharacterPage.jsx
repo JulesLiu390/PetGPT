@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import SelectCharacterTitleBar from './SelectCharacterTitleBar';
+import SelectCharacterTitleBar from '../components/Layout/SelectCharacterTitleBar';
 
 const CustomImage = ({ imageName }) => {
   const [imgSrc, setImgSrc] = useState("");
