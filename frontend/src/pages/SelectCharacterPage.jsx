@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import SelectCharacterTitleBar from '../components/Layout/SelectCharacterTitleBar';
 import { FaPlus, FaPen } from 'react-icons/fa6';
 import { FaRobot, FaCogs } from 'react-icons/fa';
+import { PageLayout, Surface, Card, Tabs, Button, EmptyState, Badge } from '../components/UI/ui';
 
 const CustomImage = ({ imageName }) => {
   const [imgSrc, setImgSrc] = useState("");
@@ -36,7 +37,11 @@ const CustomImage = ({ imageName }) => {
     loadImage();
   }, [imageName]);
 
-  return <img src={imgSrc} alt="Character" className="w-12 h-12 rounded object-cover mr-2" />;
+  return (
+    <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-100 shrink-0">
+      <img src={imgSrc} alt="Character" className="w-full h-full object-cover" />
+    </div>
+  );
 };
 
 const TruncatedText = ({ label, text }) => {
@@ -106,12 +111,6 @@ const SelectCharacterPage = () => {
   }, []);
 
   const handleSelect = async (assistant) => {
-    // 获取关联的 ModelConfig
-    let modelConfig = null;
-    if (assistant.modelConfigId) {
-      modelConfig = await window.electron.getModelConfig(assistant.modelConfigId);
-    }
-    
     // 发送 assistant ID (兼容旧的 character-id)
     window.electron?.sendCharacterId(assistant._id);
     alert("Assistant Selected");
@@ -139,153 +138,199 @@ const SelectCharacterPage = () => {
   };
 
   return (
-    <div className="flex flex-col h-screen w-full items-center bg-[rgba(255,255,255,0.8)]">
-      <SelectCharacterTitleBar />
-      
-      {/* Tab Bar */}
-      <div className="w-[90%] flex mt-2 border-b border-gray-200">
-        <button
-          onClick={() => setActiveTab('assistants')}
-          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'assistants'
-              ? 'border-b-2 border-blue-500 text-blue-600'
-              : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <FaRobot className="w-4 h-4" />
-          Assistants ({assistants.length})
-        </button>
-        <button
-          onClick={() => setActiveTab('models')}
-          className={`flex items-center gap-2 px-4 py-2 text-sm font-medium transition-colors ${
-            activeTab === 'models'
-              ? 'border-b-2 border-purple-500 text-purple-600'
-              : 'text-gray-500 hover:text-gray-700'
-          }`}
-        >
-          <FaCogs className="w-4 h-4" />
-          Models ({models.length})
-        </button>
-      </div>
-      
-      <div className="w-[90%] p-2 mt-2 bg-gray-50 rounded-lg shadow max-h-full overflow-y-auto">
-        {/* Assistants Tab */}
-        {activeTab === 'assistants' && (
-          <>
-            <div className="flex justify-between items-center mb-2">
-              <h2 className="text-sm font-semibold">Select an Assistant</h2>
-              <button
-                onClick={() => navigate('/addAssistant')}
-                className="flex items-center gap-1 px-2 py-1 bg-blue-500 text-white rounded text-xs hover:bg-blue-600"
-              >
-                <FaPlus className="w-3 h-3" />
-                New Assistant
-              </button>
-            </div>
-            <div className="grid grid-cols-1 gap-2">
-              {assistants.length === 0 ? (
-                <div className="text-center text-gray-500 py-4 text-sm">
-                  No assistants yet. Create one to get started!
-                </div>
-              ) : (
-                assistants.map((assistant) => {
-                  // 查找关联的 Model Config
-                  const linkedModel = models.find(m => m._id === assistant.modelConfigId);
-                  return (
-                  <div key={assistant._id} className="flex items-start p-2 bg-white rounded shadow">
-                    <CustomImage imageName={assistant.imageName} />
-                    <div className="flex-1">
-                      <div className="text-base font-semibold">{assistant.name}</div>
-                      <TruncatedText label="System Instruction" text={assistant.systemInstruction} />
-                      <TruncatedText label="Appearance" text={assistant.appearance} />
-                      <div className="text-sm text-gray-600">
-                        <span className="font-medium">Model:</span> {linkedModel ? `${linkedModel.name} (${linkedModel.modelName})` : 'Not configured'}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => handleSelect(assistant)}
-                      className="ml-auto bg-blue-500 text-white py-1 px-2 rounded text-xs hover:bg-blue-600"
-                    >
-                      Select
-                    </button>
-                    <button
-                      onClick={() => navigate(`/editAssistant?id=${assistant._id}`)}
-                      className="ml-2 bg-gray-500 text-white py-1 px-2 rounded text-xs hover:bg-gray-600"
-                      title="Edit Assistant"
-                    >
-                      <FaPen className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteAssistant(assistant._id)}
-                      className="ml-2 bg-red-500 text-white py-1 px-2 rounded text-xs hover:bg-red-600"
-                    >
-                      Delete
-                    </button>
-                  </div>
-                  );
-                })
-              )}
-            </div>
-          </>
-        )}
+    <PageLayout className="bg-[rgba(255,255,255,0.8)]">
+      <div className="flex flex-col h-screen w-full items-center">
+        <SelectCharacterTitleBar />
+        <div className="w-[92%] mt-3">
+          <div className="flex items-center justify-between gap-3">
+            <Tabs
+              tabs={[
+                { id: 'assistants', label: `Assistants (${assistants.length})` },
+                { id: 'models', label: `Models (${models.length})` },
+              ]}
+              active={activeTab}
+              onChange={setActiveTab}
+            />
 
-        {/* Models Tab */}
-        {activeTab === 'models' && (
-          <>
-            <div className="flex justify-between items-center mb-2">
-              <h2 className="text-sm font-semibold">Model Configurations</h2>
-              <button
-                onClick={() => navigate('/addCharacter')}
-                className="flex items-center gap-1 px-2 py-1 bg-purple-500 text-white rounded text-xs hover:bg-purple-600"
-              >
-                <FaPlus className="w-3 h-3" />
+            {activeTab === 'assistants' ? (
+              <Button variant="primary" onClick={() => navigate('/addAssistant')}>
+                <FaPlus className="w-4 h-4" />
+                New Assistant
+              </Button>
+            ) : (
+              <Button variant="primary" onClick={() => navigate('/addCharacter')}>
+                <FaPlus className="w-4 h-4" />
                 New Model
-              </button>
-            </div>
-            <div className="grid grid-cols-1 gap-2">
-              {models.length === 0 ? (
-                <div className="text-center text-gray-500 py-4 text-sm">
-                  No model configurations yet. Add one to get started!
-                </div>
-              ) : (
-                models.map((model) => (
-                  <div key={model._id} className="flex items-center p-2 bg-white rounded shadow">
-                    <div className="w-10 h-10 rounded bg-purple-100 flex items-center justify-center mr-2">
-                      <FaCogs className="w-5 h-5 text-purple-600" />
-                    </div>
-                    <div className="flex-1">
-                      <div className="text-base font-semibold">{model.name}</div>
-                      <div className="text-sm text-gray-600">
-                        <span className="font-medium">Model:</span> {model.modelName || 'N/A'}
-                      </div>
-                      <div className="text-sm text-gray-600">
-                        <span className="font-medium">API Format:</span> {model.apiFormat || model.modelProvider || 'N/A'}
-                      </div>
-                      <div className="text-sm text-gray-600">
-                        <span className="font-medium">URL:</span> {model.modelUrl === 'default' ? 'Default' : (model.modelUrl || 'N/A')}
-                      </div>
-                    </div>
-                    <button
-                      onClick={() => navigate(`/editModel?id=${model._id}`)}
-                      className="ml-2 bg-purple-500 text-white py-1 px-2 rounded text-xs hover:bg-purple-600"
-                      title="Edit Model"
-                    >
-                      <FaPen className="w-3 h-3" />
-                    </button>
-                    <button
-                      onClick={() => handleDeleteModel(model._id)}
-                      className="ml-2 bg-red-500 text-white py-1 px-2 rounded text-xs hover:bg-red-600"
-                    >
-                      Delete
-                    </button>
+              </Button>
+            )}
+          </div>
+
+          <Surface className="mt-3 max-h-[calc(100vh-120px)] overflow-y-auto">
+            <div className="p-3">
+              {activeTab === 'assistants' && (
+                <Card
+                  title="Select an Assistant"
+                  description="Choose an assistant to start chatting."
+                  className="bg-transparent border-transparent shadow-none"
+                >
+                  <div className="grid grid-cols-1 gap-3">
+                    {assistants.length === 0 ? (
+                      <EmptyState
+                        title="No assistants yet"
+                        description="Create one to get started."
+                        icon={<FaRobot className="w-9 h-9" />}
+                        action={
+                          <Button variant="primary" onClick={() => navigate('/addAssistant')}>
+                            <FaPlus className="w-4 h-4" />
+                            New Assistant
+                          </Button>
+                        }
+                      />
+                    ) : (
+                      assistants.map((assistant) => {
+                        const linkedModel = models.find((m) => m._id === assistant.modelConfigId);
+                        return (
+                          <div
+                            key={assistant._id}
+                            className="bg-white border border-slate-200 shadow-sm rounded-xl p-4 flex items-start gap-4"
+                          >
+                            <CustomImage imageName={assistant.imageName} />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="text-sm font-semibold text-slate-900 truncate">
+                                    {assistant.name}
+                                  </div>
+                                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                                    <Badge tone="blue">
+                                      <FaRobot className="w-3 h-3" />
+                                      Assistant
+                                    </Badge>
+                                    {linkedModel ? (
+                                      <Badge tone="purple">
+                                        <FaCogs className="w-3 h-3" />
+                                        {linkedModel.name}
+                                      </Badge>
+                                    ) : (
+                                      <Badge tone="red">Model not set</Badge>
+                                    )}
+                                  </div>
+                                </div>
+                                <div className="shrink-0 flex items-center gap-2">
+                                  <Button variant="primary" onClick={() => handleSelect(assistant)}>
+                                    Select
+                                  </Button>
+                                  <Button
+                                    variant="secondary"
+                                    onClick={() => navigate(`/editAssistant?id=${assistant._id}`)}
+                                    title="Edit Assistant"
+                                  >
+                                    <FaPen className="w-4 h-4" />
+                                  </Button>
+                                  <Button
+                                    variant="danger"
+                                    onClick={() => handleDeleteAssistant(assistant._id)}
+                                  >
+                                    Delete
+                                  </Button>
+                                </div>
+                              </div>
+
+                              <div className="mt-3 space-y-2">
+                                <TruncatedText
+                                  label="System Instruction"
+                                  text={assistant.systemInstruction}
+                                />
+                                <TruncatedText label="Appearance" text={assistant.appearance} />
+                                <div className="text-sm text-gray-600">
+                                  <span className="font-medium">Model:</span>{' '}
+                                  {linkedModel ? `${linkedModel.name} (${linkedModel.modelName})` : 'Not configured'}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
                   </div>
-                ))
+                </Card>
+              )}
+
+              {activeTab === 'models' && (
+                <Card
+                  title="Model Configurations"
+                  description="Manage your model endpoints and credentials."
+                  className="bg-transparent border-transparent shadow-none"
+                >
+                  <div className="grid grid-cols-1 gap-3">
+                    {models.length === 0 ? (
+                      <EmptyState
+                        title="No model configurations yet"
+                        description="Add a model configuration to start creating assistants."
+                        icon={<FaCogs className="w-9 h-9" />}
+                        action={
+                          <Button variant="primary" onClick={() => navigate('/addCharacter')}>
+                            <FaPlus className="w-4 h-4" />
+                            New Model
+                          </Button>
+                        }
+                      />
+                    ) : (
+                      models.map((model) => (
+                        <div
+                          key={model._id}
+                          className="bg-white border border-slate-200 shadow-sm rounded-xl p-4 flex items-start gap-4"
+                        >
+                          <div className="w-12 h-12 rounded-xl bg-purple-50 border border-purple-100 flex items-center justify-center shrink-0">
+                            <FaCogs className="w-5 h-5 text-purple-700" />
+                          </div>
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-start justify-between gap-3">
+                              <div className="min-w-0">
+                                <div className="text-sm font-semibold text-slate-900 truncate">
+                                  {model.name}
+                                </div>
+                                <div className="mt-2 space-y-1 text-xs text-slate-600">
+                                  <div>
+                                    <span className="font-semibold text-slate-700">Model:</span>{' '}
+                                    {model.modelName || 'N/A'}
+                                  </div>
+                                  <div>
+                                    <span className="font-semibold text-slate-700">API Format:</span>{' '}
+                                    {model.apiFormat || model.modelProvider || 'N/A'}
+                                  </div>
+                                  <div className="truncate">
+                                    <span className="font-semibold text-slate-700">URL:</span>{' '}
+                                    {model.modelUrl === 'default' ? 'Default' : (model.modelUrl || 'N/A')}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="shrink-0 flex items-center gap-2">
+                                <Button
+                                  variant="secondary"
+                                  onClick={() => navigate(`/editModel?id=${model._id}`)}
+                                  title="Edit Model"
+                                >
+                                  <FaPen className="w-4 h-4" />
+                                </Button>
+                                <Button variant="danger" onClick={() => handleDeleteModel(model._id)}>
+                                  Delete
+                                </Button>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </Card>
               )}
             </div>
-          </>
-        )}
+          </Surface>
+        </div>
       </div>
-    </div>
+    </PageLayout>
   );
 };
 

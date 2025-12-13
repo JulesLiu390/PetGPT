@@ -91,4 +91,7 @@ contextBridge.exposeInMainWorld('electron', {
   },
   onWindowMaximized: (callback) => ipcRenderer.on('window-maximized', callback),
   onWindowUnmaximized: (callback) => ipcRenderer.on('window-unmaximized', callback),
+  
+  // 侧边栏展开/收起 - 窗口向外扩展
+  toggleSidebar: (open) => ipcRenderer.send('toggle-sidebar', open),
 });

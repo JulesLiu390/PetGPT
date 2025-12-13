@@ -3,6 +3,7 @@ import AddModelTitleBar from "../components/Layout/AddModelTitleBar";
 import { callOpenAILib, fetchModels } from "../utils/openai";
 import { FaCheck, FaSpinner, FaList, FaMagnifyingGlass } from "react-icons/fa6";
 import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl } from "../utils/llm/presets";
+import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
 
 /**
  * 根据 apiFormat 获取默认图片名
@@ -224,8 +225,10 @@ const AddModelPage = () => {
 
     try {
       // 创建 Model Config (使用新的分离 API)
+      // 如果没有填写 configName，则使用 modelName 作为默认名称
+      const displayName = modelConfig.configName.trim() || modelConfig.modelName;
       const modelData = { 
-        name: modelConfig.configName,
+        name: displayName,
         apiFormat: modelConfig.apiFormat,
         modelName: modelConfig.modelName,
         modelApiKey: modelConfig.modelApiKey,
@@ -241,7 +244,7 @@ const AddModelPage = () => {
       // Auto-create a default assistant if checkbox is checked
       if (createDefaultAssistant) {
         const assistantData = {
-          name: `${modelConfig.configName} Assistant`,
+          name: `${displayName} Assistant`,
           systemInstruction: "You are a helpful assistant.",
           appearance: "",
           imageName: getDefaultImageForFormat(modelConfig.apiFormat),
@@ -279,250 +282,215 @@ const AddModelPage = () => {
   };
 
   return (
-    <div className="h-screen bg-[rgba(255,255,255,0.95)] flex flex-col overflow-hidden">
-      <div className="sticky top-0 z-10">
+    <PageLayout className="bg-white/95">
+      <div className="h-screen flex flex-col overflow-hidden">
         <AddModelTitleBar />
-      </div>
-      
-      <div className="w-[90%] flex-1 mx-auto bg-gray-50 rounded-lg shadow-sm border border-gray-100 p-4 overflow-y-auto mb-4 scrollbar-hide mt-4">
-        <form onSubmit={handleSubmit} className="space-y-4 text-sm h-full flex flex-col">
-            
-            <div className="bg-blue-50 p-3 rounded-md border border-blue-100 text-blue-800 text-xs">
+        
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
+          <Surface className="max-w-lg mx-auto p-5">
+            <form onSubmit={handleSubmit} className="space-y-5">
+              
+              <Alert tone="blue">
                 <strong>Add Model Configuration</strong><br/>
                 Configure a new LLM backend that can be used by your assistants.
-            </div>
+              </Alert>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Configuration Name <span className="text-red-500">*</span></label>
-                <input
-                    name="configName"
-                    placeholder="e.g. My GPT-4o, Local Ollama..."
-                    value={modelConfig.configName}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-blue-300 outline-none"
-                    required
-                />
-            </div>
-
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">API Format</label>
-                <select
-                    name="apiFormat"
-                    value={modelConfig.apiFormat}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded"
+              <FormGroup label="API Format">
+                <Select
+                  name="apiFormat"
+                  value={modelConfig.apiFormat}
+                  onChange={handleChange}
                 >
-                    <option value="openai_compatible">OpenAI Compatible (OpenAI / Grok / Ollama / Custom)</option>
-                    <option value="gemini_official">Gemini Official (Image/Video/Audio support)</option>
-                </select>
-            </div>
+                  <option value="openai_compatible">OpenAI Compatible (OpenAI / Grok / Ollama / Custom)</option>
+                  <option value="gemini_official">Gemini Official (Image/Video/Audio support)</option>
+                </Select>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">API Key</label>
-                <input
-                    name="modelApiKey"
-                    type="password"
-                    placeholder="sk-..."
-                    value={modelConfig.modelApiKey}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded"
+              <FormGroup label="API Key">
+                <Input
+                  name="modelApiKey"
+                  type="password"
+                  placeholder="sk-..."
+                  value={modelConfig.modelApiKey}
+                  onChange={handleChange}
                 />
-            </div>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <div className="flex justify-between items-center">
-                    <label className="text-gray-700 font-medium">Base URL</label>
-                    {modelConfig.apiFormat === "openai_compatible" && (
-                        <button
-                            type="button"
-                            onClick={handleAutoDetect}
-                            disabled={isDetecting || !modelConfig.modelApiKey}
-                            className={`text-xs flex items-center gap-1 px-2 py-1 rounded ${
-                                !modelConfig.modelApiKey ? "text-gray-400 cursor-not-allowed" : "text-purple-600 hover:bg-purple-50"
-                            }`}
-                            title="Auto-detect will test your API key against known endpoints"
-                        >
-                            {isDetecting ? <FaSpinner className="animate-spin"/> : <FaMagnifyingGlass/>}
-                            {isDetecting ? "Detecting..." : "Auto-detect"}
-                        </button>
-                    )}
+              <FormGroup label="Base URL">
+                <div className="flex items-center justify-between mb-2">
+                  <div className="flex gap-2 flex-1">
+                    <Select
+                      value={presetId}
+                      onChange={handlePresetChange}
+                      className="flex-1"
+                    >
+                      {currentPresets.map(preset => (
+                        <option key={preset.id} value={preset.id}>{preset.label}</option>
+                      ))}
+                    </Select>
+                    <Select
+                      value={modelUrlType}
+                      onChange={handleModelUrlTypeChange}
+                      className="w-28"
+                    >
+                      <option value="default">Default</option>
+                      <option value="custom">Custom</option>
+                    </Select>
+                  </div>
+                  {modelConfig.apiFormat === "openai_compatible" && (
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={handleAutoDetect}
+                      disabled={isDetecting || !modelConfig.modelApiKey}
+                      className="ml-2 text-xs"
+                    >
+                      {isDetecting ? <FaSpinner className="animate-spin w-3 h-3"/> : <FaMagnifyingGlass className="w-3 h-3"/>}
+                      {isDetecting ? "Detecting..." : "Auto-detect"}
+                    </Button>
+                  )}
                 </div>
                 
-                {/* Preset 下拉 */}
-                <div className="flex gap-2">
-                    <select
-                        value={presetId}
-                        onChange={handlePresetChange}
-                        className="p-2 border rounded flex-1"
-                    >
-                        {currentPresets.map(preset => (
-                            <option key={preset.id} value={preset.id}>
-                                {preset.label}
-                            </option>
-                        ))}
-                    </select>
-                    <select
-                        value={modelUrlType}
-                        onChange={handleModelUrlTypeChange}
-                        className="p-2 border rounded w-24"
-                    >
-                        <option value="default">Default</option>
-                        <option value="custom">Custom</option>
-                    </select>
-                </div>
-                
-                {/* URL 输入框 */}
-                <input
-                    name="modelUrl"
-                    placeholder={getDefaultBaseUrl(modelConfig.apiFormat)}
-                    value={getDisplayUrl()}
-                    onChange={handleChange}
-                    disabled={modelUrlType === "default"}
-                    className={`w-full p-2 border rounded ${
-                        modelUrlType === "default" ? "bg-gray-100 text-gray-500" : ""
-                    }`}
+                <Input
+                  name="modelUrl"
+                  placeholder={getDefaultBaseUrl(modelConfig.apiFormat)}
+                  value={getDisplayUrl()}
+                  onChange={handleChange}
+                  disabled={modelUrlType === "default"}
+                  className={modelUrlType === "default" ? "bg-slate-50 text-slate-500" : ""}
                 />
                 
-                {/* Auto-detect 选项与结果 */}
                 {modelConfig.apiFormat === "openai_compatible" && (
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                        <label className="flex items-center gap-1 cursor-pointer">
-                            <input
-                                type="checkbox"
-                                checked={includeLocalEndpoints}
-                                onChange={(e) => setIncludeLocalEndpoints(e.target.checked)}
-                                className="w-3 h-3"
-                            />
-                            Include local endpoints (Ollama, LM Studio)
-                        </label>
-                    </div>
+                  <div className="mt-2">
+                    <Checkbox
+                      label="Include local endpoints (Ollama, LM Studio)"
+                      checked={includeLocalEndpoints}
+                      onChange={(e) => setIncludeLocalEndpoints(e.target.checked)}
+                    />
+                  </div>
                 )}
                 
                 {detectResult && (
-                    <div className={`text-xs mt-1 flex items-center gap-1 ${
-                        detectResult.success ? "text-green-600" : "text-orange-500"
-                    }`}>
-                        {detectResult.success ? <FaCheck className="w-3 h-3"/> : <span>⚠️</span>}
-                        {detectResult.message}
-                    </div>
+                  <div className={`mt-2 flex items-center gap-1.5 text-xs ${detectResult.success ? "text-emerald-600" : "text-amber-600"}`}>
+                    {detectResult.success ? <FaCheck className="w-3 h-3"/> : <span>⚠️</span>}
+                    {detectResult.message}
+                  </div>
                 )}
-            </div>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <div className="flex justify-between items-center">
-                    <label className="text-gray-700 font-medium">Model Name</label>
-                    <button 
-                        type="button" 
-                        onClick={handleFetchModels} 
-                        disabled={isFetchingModels || !modelConfig.modelApiKey}
-                        className={`text-xs flex items-center gap-1 px-2 py-1 rounded ${
-                            !modelConfig.modelApiKey ? "text-gray-400 cursor-not-allowed" : "text-blue-600 hover:bg-blue-50"
-                        }`}
-                    >
-                        {isFetchingModels ? <FaSpinner className="animate-spin"/> : <FaList/>}
-                        {isFetchingModels ? "Fetching..." : "Fetch Models"}
-                    </button>
+              <FormGroup label="Model Name">
+                <div className="flex items-center justify-between mb-2">
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={handleFetchModels}
+                    disabled={isFetchingModels || !modelConfig.modelApiKey}
+                    className="text-xs"
+                  >
+                    {isFetchingModels ? <FaSpinner className="animate-spin w-3 h-3"/> : <FaList className="w-3 h-3"/>}
+                    {isFetchingModels ? "Fetching..." : "Fetch Models"}
+                  </Button>
                 </div>
                 
-                {/* Custom Combobox Implementation */}
                 <div className="relative">
-                    <input
-                        name="modelName"
-                        placeholder="e.g. gpt-4o (Type or select from fetched list)"
-                        value={modelConfig.modelName}
-                        onChange={handleChange}
-                        onFocus={() => setShowModelDropdown(true)}
-                        onBlur={() => setTimeout(() => setShowModelDropdown(false), 200)}
-                        className="w-full p-2 border rounded"
-                        autoComplete="off"
-                    />
-                    {showModelDropdown && fetchedModels.length > 0 && (
-                        <div className="absolute z-50 w-full bg-white border border-gray-200 rounded-md shadow-lg max-h-60 overflow-y-auto mt-1">
-                            {fetchedModels
-                                .filter(m => m.id.toLowerCase().includes(modelConfig.modelName.toLowerCase()))
-                                .map((model) => (
-                                <div 
-                                    key={model.id} 
-                                    className="p-2 hover:bg-blue-50 cursor-pointer text-sm text-gray-700 border-b border-gray-50 last:border-none"
-                                    onMouseDown={() => {
-                                        setModelConfig({...modelConfig, modelName: model.id});
-                                        setShowModelDropdown(false);
-                                    }}
-                                >
-                                    {model.id}
-                                </div>
-                            ))}
-                            {fetchedModels.filter(m => m.id.toLowerCase().includes(modelConfig.modelName.toLowerCase())).length === 0 && (
-                                <div className="p-2 text-gray-400 text-xs text-center">No matching models found</div>
-                            )}
-                        </div>
-                    )}
+                  <Input
+                    name="modelName"
+                    placeholder="e.g. gpt-4o (Type or select from fetched list)"
+                    value={modelConfig.modelName}
+                    onChange={handleChange}
+                    onFocus={() => setShowModelDropdown(true)}
+                    onBlur={() => setTimeout(() => setShowModelDropdown(false), 200)}
+                    autoComplete="off"
+                  />
+                  {showModelDropdown && fetchedModels.length > 0 && (
+                    <div className="absolute z-50 w-full bg-white border border-slate-200 rounded-xl shadow-lg max-h-60 overflow-y-auto mt-1">
+                      {fetchedModels
+                        .filter(m => m.id.toLowerCase().includes(modelConfig.modelName.toLowerCase()))
+                        .map((model) => (
+                          <div 
+                            key={model.id} 
+                            className="px-3 py-2 hover:bg-slate-50 cursor-pointer text-sm text-slate-700 border-b border-slate-50 last:border-none"
+                            onMouseDown={() => {
+                              setModelConfig({...modelConfig, modelName: model.id});
+                              setShowModelDropdown(false);
+                            }}
+                          >
+                            {model.id}
+                          </div>
+                        ))}
+                      {fetchedModels.filter(m => m.id.toLowerCase().includes(modelConfig.modelName.toLowerCase())).length === 0 && (
+                        <div className="p-3 text-slate-400 text-xs text-center">No matching models found</div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 
                 {fetchError && (
-                    <div className="text-xs text-red-500 mt-1 flex items-center gap-1">
-                        <span>⚠️</span> {fetchError}
-                    </div>
+                  <div className="mt-2 text-xs text-rose-600 flex items-center gap-1">
+                    <span>⚠️</span> {fetchError}
+                  </div>
                 )}
                 {fetchedModels.length > 0 && !fetchError && (
-                    <div className="text-xs text-green-600 mt-1 flex items-center gap-1">
-                        <FaCheck className="w-3 h-3"/> Found {fetchedModels.length} models available
-                    </div>
+                  <div className="mt-2 flex items-center gap-1.5 text-xs text-emerald-600">
+                    <FaCheck className="w-3 h-3"/> Found {fetchedModels.length} models available
+                  </div>
                 )}
-            </div>
+              </FormGroup>
 
-            {/* Test Section */}
-            <div className="pt-2 border-t border-gray-200">
-                <div className="flex justify-between items-center mb-2">
-                    <span className="font-bold text-gray-600">Connection Test</span>
-                    <button
-                        type="button"
-                        onClick={handleTestAPI}
-                        disabled={testing}
-                        className={`px-3 py-1.5 rounded text-xs font-medium ${
-                            testing ? "bg-gray-300" : "bg-green-600 text-white hover:bg-green-700"
-                        }`}
-                    >
-                        {testing ? "Testing..." : "Test Connection"}
-                    </button>
-                </div>
-                {testResult && (
-                    <div className={`p-3 rounded text-xs whitespace-pre-wrap max-h-24 overflow-y-auto ${
-                        testResult.includes("Success") ? "bg-green-50 text-green-800 border border-green-100" : "bg-red-50 text-red-800 border border-red-100"
-                    }`}>
-                        {testResult}
-                    </div>
-                )}
-            </div>
+              <FormGroup label="Configuration Name" hint="Optional. Used to identify this configuration. Defaults to Model Name if not provided.">
+                <Input
+                  name="configName"
+                  placeholder="e.g. My GPT-4 Config (optional)"
+                  value={modelConfig.configName}
+                  onChange={handleChange}
+                />
+              </FormGroup>
 
-            <div className="mt-auto pt-4 space-y-3">
-                {/* Auto-create assistant checkbox */}
-                <label className="flex items-center gap-2 text-gray-700 cursor-pointer">
-                    <input
-                        type="checkbox"
-                        checked={createDefaultAssistant}
-                        onChange={(e) => setCreateDefaultAssistant(e.target.checked)}
-                        className="w-4 h-4 rounded border-gray-300 text-blue-600 focus:ring-blue-500"
-                    />
-                    <span className="text-xs">Create a default assistant using this model</span>
-                </label>
-                
-                <button
-                    type="submit"
-                    disabled={!testSuccess}
-                    className={`w-full py-2.5 rounded shadow transition-all transform font-bold ${
-                        testSuccess 
-                        ? "bg-gradient-to-r from-blue-500 to-blue-700 text-white hover:from-blue-600 hover:to-blue-800 hover:scale-[1.02]" 
-                        : "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    }`}
+              {/* Test Section */}
+              <Card title="Connection Test" action={
+                <Button
+                  type="button"
+                  variant={testSuccess ? "subtle" : "primary"}
+                  onClick={handleTestAPI}
+                  disabled={testing}
+                  className="text-xs"
                 >
-                    Save Model Configuration
-                </button>
-            </div>
+                  {testing ? "Testing..." : "Test Connection"}
+                </Button>
+              } className="bg-slate-50/50">
+                {testResult ? (
+                  <Alert tone={testSuccess ? "green" : "red"}>
+                    {testResult}
+                  </Alert>
+                ) : (
+                  <div className="text-xs text-slate-500 text-center py-2">
+                    Test your connection before saving
+                  </div>
+                )}
+              </Card>
 
-        </form>
+              <div className="pt-2 space-y-3">
+                <Checkbox
+                  label="Create a default assistant using this model"
+                  checked={createDefaultAssistant}
+                  onChange={(e) => setCreateDefaultAssistant(e.target.checked)}
+                />
+                
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={!testSuccess}
+                  className="w-full py-3"
+                >
+                  Save Model Configuration
+                </Button>
+              </div>
+
+            </form>
+          </Surface>
+        </div>
       </div>
-    </div>
+    </PageLayout>
   );
 };
 

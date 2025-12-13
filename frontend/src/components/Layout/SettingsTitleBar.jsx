@@ -1,24 +1,28 @@
-import React from 'react'
-import { MdCancel } from 'react-icons/md';
+import React from "react";
+import { MdCancel } from "react-icons/md";
+import TitleBar from "../UI/TitleBar";
 
 export const SettingsTitleBar = () => {
-
   const handleClose = () => {
     window.electron?.changeSettingsWindow();
   };
+
   return (
-    <div
-    className='draggable w-full h-16 flex justify-start p-3'
-    >
-      <MdCancel className='no-drag hover:text-gray-800 text-gray-400 cursor-pointer'
-      onClick={handleClose}
-      ></MdCancel>
-      <div className='h-full w-full flex items-center justify-center'>
-      <h2>SETTINGS</h2>
-      </div>
-      
-    </div>
+    <TitleBar
+      title="Settings"
+      left={
+        <button
+          type="button"
+          className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+          onClick={handleClose}
+          title="Close"
+        >
+          <MdCancel className="w-5 h-5" />
+        </button>
+      }
+      height="h-12"
+    />
   );
-}
+};
 
 export default SettingsTitleBar;

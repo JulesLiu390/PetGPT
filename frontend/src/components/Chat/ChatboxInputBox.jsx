@@ -141,9 +141,17 @@ export const ChatboxInputBox = ({ activePetId }) => {
           
           // console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
           
-          // 验证ID是否有效（是否能找到对应的pet数据）
+          // 验证ID是否有效（优先尝试 getAssistant，然后回退到 getPet）
           try {
-            const pet = await window.electron.getPet(settings.defaultRoleId);
+            let pet = null;
+            try {
+              pet = await window.electron.getAssistant(settings.defaultRoleId);
+            } catch (e) {
+              // 忽略，尝试旧 API
+            }
+            if (!pet) {
+              pet = await window.electron.getPet(settings.defaultRoleId);
+            }
             if (pet) {
               setFirstCharacter(settings.defaultRoleId);
               // console.log("Default character ID validated successfully111ß");
@@ -166,9 +174,17 @@ export const ChatboxInputBox = ({ activePetId }) => {
         if (settings && settings.defaultModelId) {
           // console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
           
-          // 验证ID是否有效（是否能找到对应的pet数据）
+          // 验证ID是否有效（优先尝试 getAssistant，然后回退到 getPet）
           try {
-            const pet = await window.electron.getPet(settings.defaultModelId);
+            let pet = null;
+            try {
+              pet = await window.electron.getAssistant(settings.defaultModelId);
+            } catch (e) {
+              // 忽略，尝试旧 API
+            }
+            if (!pet) {
+              pet = await window.electron.getPet(settings.defaultModelId);
+            }
             if (pet) {
               setFounctionModel(settings.defaultModelId);
               console.log("Default character ID validated successfully");

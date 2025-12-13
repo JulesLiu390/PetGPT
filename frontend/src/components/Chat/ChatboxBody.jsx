@@ -15,6 +15,14 @@ export const Chatbox = () => {
   const [conversations, setConversations] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
   const [characterMood, setCharacterMood] = useState("")
+  const [sidebarOpen, setSidebarOpen] = useState(false); // 侧边栏状态
+  
+  // 切换侧边栏时调整窗口大小
+  const handleToggleSidebar = () => {
+    const newState = !sidebarOpen;
+    setSidebarOpen(newState);
+    window.electron?.toggleSidebar(newState);
+  };
   
   // Tab State
   const [tabs, setTabs] = useState([]);
@@ -87,7 +95,20 @@ export const Chatbox = () => {
         navBarChats: [...(navBarChats || []), id],
       });
       const fetchCharacter = async () => {
-        const pet = await window.electron.getPet(id);
+        // 优先尝试新的 Assistant API，失败则回退到旧的 Pet API
+        let pet = null;
+        try {
+          pet = await window.electron.getAssistant(id);
+        } catch (e) {
+          // 回退到旧 API
+        }
+        if (!pet) {
+          pet = await window.electron.getPet(id);
+        }
+        if (!pet) {
+          console.error("Could not find assistant or pet with id:", id);
+          return;
+        }
         const newConversation = await window.electron.createConversation({
           petId: pet._id,
           title: "New Chat",
@@ -241,9 +262,46 @@ export const Chatbox = () => {
     }
   };
 
-  const handleShare = () => {
-    // Placeholder for share functionality
-    console.log("Share button clicked");
+  const handleShare = async () => {
+    const activeTab = tabs.find(tab => tab.id === activeTabId);
+    if (!activeTab || !activeTab.messages || activeTab.messages.length === 0) {
+      alert("No conversation to share.");
+      return;
+    }
+
+    // 获取角色信息用于显示名称
+    let petName = "Assistant";
+    try {
+      let pet = await window.electron.getAssistant(activeTab.petId);
+      if (!pet) {
+        pet = await window.electron.getPet(activeTab.petId);
+      }
+      if (pet && pet.name) {
+        petName = pet.name;
+      }
+    } catch (e) {
+      // 使用默认名称
+    }
+
+    const conversationText = activeTab.messages
+      .map(msg => {
+        if (msg.role === "assistant") {
+          return `${petName}: ${typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}`;
+        } else if (msg.role === "user") {
+          return `You: ${typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}`;
+        }
+        return `${msg.role}: ${typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)}`;
+      })
+      .join('\n\n');
+
+    navigator.clipboard.writeText(conversationText)
+      .then(() => {
+        alert("Conversation copied to clipboard!");
+      })
+      .catch((err) => {
+        console.error("Failed to copy conversation: ", err);
+        alert("Failed to copy conversation.");
+      });
   };
 
   const handleDelete = async (e, conversationId) => {
@@ -275,19 +333,24 @@ export const Chatbox = () => {
 
   return (
     <div className="h-full flex bg-white">
-      {/* Sidebar */}
-      <div className="hidden lg:flex lg:flex-col lg:w-64 bg-[#f9f9f9] border-r border-gray-200 h-full">
+      {/* Sidebar - 小窗口根据 sidebarOpen 状态显示，全屏时始终显示 */}
+      <div className={`${sidebarOpen ? 'flex' : 'hidden'} lg:!flex flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
         
         {/* Window Controls & Sidebar Toggle */}
         <div className="p-3 pt-4 draggable flex items-center justify-between">
             <div className="flex items-center gap-2 no-drag px-2">
+                {/* 红色：关闭 */}
                 <div onClick={handleClose} className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 cursor-pointer flex items-center justify-center group">
                     <MdClose className="text-white text-[8px] opacity-0 group-hover:opacity-100" />
                 </div>
-                <div onClick={handleMax} className="w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-600 cursor-pointer flex items-center justify-center group">
+                {/* 黄色：最小化（隐藏窗口） */}
+                <div onClick={handleClose} className="w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-600 cursor-pointer flex items-center justify-center group">
+                    <span className="text-white text-[8px] font-bold opacity-0 group-hover:opacity-100">−</span>
+                </div>
+                {/* 绿色：最大化/还原 */}
+                <div onClick={handleMax} className="w-3 h-3 rounded-full bg-green-500 hover:bg-green-600 cursor-pointer flex items-center justify-center group">
                     <LuMaximize2 className="text-white text-[8px] opacity-0 group-hover:opacity-100" />
                 </div>
-                <div className="w-3 h-3 rounded-full bg-green-500 hover:bg-green-600 cursor-pointer flex items-center justify-center group"></div>
             </div>
             
             <div className="flex items-center gap-3 no-drag text-gray-500">
@@ -343,6 +406,8 @@ export const Chatbox = () => {
             onCloseTab={handleCloseTab}
             onAddTab={handleAddTabClick}
             onShare={handleShare}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={handleToggleSidebar}
         />
         {characterMood != "" && (
           <div className="text-center text-sm text-gray-600 animate-pulse absolute top-10 left-0 right-0 z-10 pointer-events-none">

@@ -3,6 +3,8 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import { FaSpinner } from "react-icons/fa6";
 import { MdCancel } from "react-icons/md";
 import { callOpenAILib } from '../utils/openai';
+import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert } from "../components/UI/ui";
+import TitleBar from "../components/UI/TitleBar";
 
 const EditModelPage = () => {
   const navigate = useNavigate();
@@ -142,155 +144,150 @@ const EditModelPage = () => {
 
   if (loading) {
     return (
-      <div className="h-screen bg-[rgba(255,255,255,0.95)] flex flex-col items-center justify-center">
-        <FaSpinner className="animate-spin text-2xl text-purple-500" />
-        <p className="mt-2 text-gray-600">Loading...</p>
-      </div>
+      <PageLayout className="bg-white/95">
+        <div className="h-screen flex flex-col items-center justify-center">
+          <FaSpinner className="animate-spin text-2xl text-blue-500" />
+          <p className="mt-2 text-slate-600 text-sm">Loading...</p>
+        </div>
+      </PageLayout>
     );
   }
 
   return (
-    <div className="h-screen bg-[rgba(255,255,255,0.95)] flex flex-col overflow-hidden">
-      <div className="sticky top-0 z-10">
-        <div className="draggable w-full h-12 flex justify-between items-center px-3 border-b border-gray-100">
-          <MdCancel 
-            className="no-drag hover:text-gray-800 text-gray-400 cursor-pointer"
-            onClick={() => navigate('/selectCharacter')}
-          />
-          <span className="font-bold text-gray-700 text-sm">EDIT MODEL</span>
-          <div className="w-5"></div>
-        </div>
-      </div>
-      
-      <div className="w-[90%] flex-1 mx-auto bg-gray-50 rounded-lg shadow-sm border border-gray-100 p-4 overflow-y-auto mb-4 scrollbar-hide mt-4">
-        <form onSubmit={handleSubmit} className="space-y-4 text-sm h-full flex flex-col">
-            
-            <div className="bg-purple-50 p-3 rounded-md border border-purple-100 text-purple-800 text-xs">
+    <PageLayout className="bg-white/95">
+      <div className="h-screen flex flex-col overflow-hidden">
+        <TitleBar
+          title="Edit Model"
+          left={
+            <button
+              type="button"
+              className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+              onClick={() => navigate('/selectCharacter')}
+              title="Close"
+            >
+              <MdCancel className="w-5 h-5" />
+            </button>
+          }
+          height="h-12"
+        />
+        
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
+          <Surface className="max-w-lg mx-auto p-5">
+            <form onSubmit={handleSubmit} className="space-y-5">
+              
+              <Alert tone="blue">
                 <strong>Edit Model Configuration</strong><br/>
                 Update your LLM backend settings.
-            </div>
+              </Alert>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Config Name <span className="text-red-500">*</span></label>
-                <input
-                    name="name"
-                    placeholder="e.g. My GPT-4, Local Ollama..."
-                    value={modelConfig.name}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-300 outline-none"
-                    required
+              <FormGroup label="Configuration Name" required>
+                <Input
+                  name="name"
+                  placeholder="e.g. My GPT-4, Local Ollama..."
+                  value={modelConfig.name}
+                  onChange={handleChange}
+                  required
                 />
-            </div>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">API Format</label>
-                <select
-                    name="apiFormat"
-                    value={modelConfig.apiFormat}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded"
+              <FormGroup label="API Format">
+                <Select
+                  name="apiFormat"
+                  value={modelConfig.apiFormat}
+                  onChange={handleChange}
                 >
-                    <option value="openai_compatible">OpenAI Compatible</option>
-                    <option value="gemini_official">Gemini Official</option>
-                </select>
-            </div>
+                  <option value="openai_compatible">OpenAI Compatible</option>
+                  <option value="gemini_official">Gemini Official</option>
+                </Select>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Model Name</label>
-                <input
-                    name="modelName"
-                    placeholder="e.g. gpt-4o, gemini-pro..."
-                    value={modelConfig.modelName}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-300 outline-none"
+              <FormGroup label="Model Name">
+                <Input
+                  name="modelName"
+                  placeholder="e.g. gpt-4o, gemini-pro..."
+                  value={modelConfig.modelName}
+                  onChange={handleChange}
                 />
-            </div>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">API Key</label>
-                <input
-                    name="modelApiKey"
-                    type="password"
-                    placeholder="sk-..."
-                    value={modelConfig.modelApiKey}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-300 outline-none"
+              <FormGroup label="API Key">
+                <Input
+                  name="modelApiKey"
+                  type="password"
+                  placeholder="sk-..."
+                  value={modelConfig.modelApiKey}
+                  onChange={handleChange}
                 />
-            </div>
+              </FormGroup>
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">API URL</label>
-                <select
-                    value={modelUrlType}
-                    onChange={handleUrlTypeChange}
-                    className="w-full p-2 border rounded mb-2"
+              <FormGroup label="API URL">
+                <Select
+                  value={modelUrlType}
+                  onChange={handleUrlTypeChange}
+                  className="mb-2"
                 >
-                    <option value="default">Default (based on API format)</option>
-                    <option value="custom">Custom URL</option>
-                </select>
+                  <option value="default">Default (based on API format)</option>
+                  <option value="custom">Custom URL</option>
+                </Select>
                 {modelUrlType === "custom" && (
-                    <input
-                        name="modelUrl"
-                        placeholder="https://your-api-endpoint.com"
-                        value={modelConfig.modelUrl === "default" ? "" : modelConfig.modelUrl}
-                        onChange={handleChange}
-                        className="w-full p-2 border rounded focus:ring-2 focus:ring-purple-300 outline-none"
-                    />
+                  <Input
+                    name="modelUrl"
+                    placeholder="https://your-api-endpoint.com"
+                    value={modelConfig.modelUrl === "default" ? "" : modelConfig.modelUrl}
+                    onChange={handleChange}
+                  />
                 )}
-            </div>
+              </FormGroup>
 
-            {/* Test Button */}
-            <div className="flex flex-col space-y-2">
-                <button
-                    type="button"
-                    onClick={handleTestAPI}
-                    disabled={testing || !modelConfig.modelApiKey || !modelConfig.modelName}
-                    className={`w-full py-2 rounded shadow transition-all ${
-                        testing || !modelConfig.modelApiKey || !modelConfig.modelName
-                        ? "bg-gray-300 text-gray-500 cursor-not-allowed"
-                        : "bg-purple-100 text-purple-700 hover:bg-purple-200"
-                    }`}
+              {/* Test Section */}
+              <Card title="Connection Test" action={
+                <Button
+                  type="button"
+                  variant={testSuccess ? "subtle" : "primary"}
+                  onClick={handleTestAPI}
+                  disabled={testing || !modelConfig.modelApiKey || !modelConfig.modelName}
+                  className="text-xs"
                 >
-                    {testing ? (
-                        <span className="flex items-center justify-center gap-2">
-                            <FaSpinner className="animate-spin" />
-                            Testing...
-                        </span>
-                    ) : (
-                        "Test Connection"
-                    )}
-                </button>
-                {testResult && (
-                    <div className={`p-2 rounded text-xs ${testSuccess ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'}`}>
-                        {testResult}
-                    </div>
+                  {testing ? (
+                    <span className="flex items-center gap-2">
+                      <FaSpinner className="animate-spin w-3 h-3" />
+                      Testing...
+                    </span>
+                  ) : "Test Connection"}
+                </Button>
+              } className="bg-slate-50/50">
+                {testResult ? (
+                  <Alert tone={testSuccess ? "green" : "red"}>
+                    {testResult}
+                  </Alert>
+                ) : (
+                  <div className="text-xs text-slate-500 text-center py-2">
+                    Test your connection to verify settings
+                  </div>
                 )}
-            </div>
+              </Card>
 
-            <div className="mt-auto pt-4">
-                <button
-                    type="submit"
-                    disabled={saving}
-                    className={`w-full py-2.5 rounded shadow transition-all transform font-bold ${
-                        !saving
-                        ? "bg-gradient-to-r from-purple-500 to-purple-700 text-white hover:from-purple-600 hover:to-purple-800 hover:scale-[1.02]" 
-                        : "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    }`}
+              <div className="pt-2">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={saving}
+                  className="w-full py-3"
                 >
-                    {saving ? (
-                      <span className="flex items-center justify-center gap-2">
-                        <FaSpinner className="animate-spin" />
-                        Saving...
-                      </span>
-                    ) : (
-                      "Save Changes"
-                    )}
-                </button>
-            </div>
+                  {saving ? (
+                    <span className="flex items-center gap-2">
+                      <FaSpinner className="animate-spin w-4 h-4" />
+                      Saving...
+                    </span>
+                  ) : "Save Changes"}
+                </Button>
+              </div>
 
-        </form>
+            </form>
+          </Surface>
+        </div>
       </div>
-    </div>
+    </PageLayout>
   );
 };
 

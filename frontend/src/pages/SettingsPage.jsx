@@ -1,23 +1,37 @@
 import React, { useState, useEffect } from "react";
 import SettingsTitleBar from "../components/Layout/SettingsTitleBar";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
+import { PageLayout, Surface, Card, FormGroup, Label, Select, Button } from "../components/UI/ui";
+import { FaSpinner } from "react-icons/fa";
 
 // 设置页面组件
 const SettingsPage = () => {
   const [settings, setSettings] = useState(null);
-  const [pets, setPets] = useState([]);
+  const [assistants, setAssistants] = useState([]);
+  const [modelConfigs, setModelConfigs] = useState([]);
+  const [saving, setSaving] = useState(false);
 
-  // 获取宠物列表
-  const fetchPets = async () => {
+  // 获取 Assistants 列表
+  const fetchAssistants = async () => {
     try {
-      const data = await window.electron.getPets();
+      const data = await window.electron.getAssistants();
       if (Array.isArray(data)) {
-        setPets(data);
-      } else {
-        console.error("Invalid data format returned from getPets:", data);
+        setAssistants(data);
       }
     } catch (error) {
-      alert("Failed to load characters: " + error.message);
+      console.error("Failed to load assistants:", error);
+    }
+  };
+
+  // 获取 ModelConfigs 列表
+  const fetchModelConfigs = async () => {
+    try {
+      const data = await window.electron.getModelConfigs();
+      if (Array.isArray(data)) {
+        setModelConfigs(data);
+      }
+    } catch (error) {
+      console.error("Failed to load model configs:", error);
     }
   };
 
@@ -32,16 +46,20 @@ const SettingsPage = () => {
   };
 
   useEffect(() => {
-    fetchPets();
+    fetchAssistants();
+    fetchModelConfigs();
     fetchSettings();
   }, []);
 
   // 加载中显示
   if (!settings) {
     return (
-      <div className="min-h-screen flex items-center justify-center">
-        Loading...
-      </div>
+      <PageLayout className="bg-white/95">
+        <div className="h-screen flex flex-col items-center justify-center">
+          <FaSpinner className="animate-spin text-2xl text-blue-500" />
+          <p className="mt-2 text-slate-600 text-sm">Loading...</p>
+        </div>
+      </PageLayout>
     );
   }
 
@@ -52,115 +70,140 @@ const SettingsPage = () => {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    setSaving(true);
     try {
       const newSettings = await window.electron.updateSettings(settings);
       setSettings(newSettings);
       alert("Settings saved successfully!");
     } catch (error) {
       alert("Failed to save settings: " + error.message);
+    } finally {
+      setSaving(false);
     }
 
     window.electron.updateWindowSizePreset(settings.windowSize)
     window.electron.updateShortcuts(settings.programHotkey, settings.dialogHotkey)
   };
 
-  // 宠物显示文本
-  const getDisplayText = (pet) => {
-    return pet.modelName ? `${pet.name} (${pet.modelName})` : pet.name;
+  // 获取 Assistant 的显示文本（包含关联的 Model 信息）
+  const getAssistantDisplayText = (assistant) => {
+    const linkedModel = modelConfigs.find(m => m._id === assistant.modelConfigId);
+    if (linkedModel) {
+      return `${assistant.name} (${linkedModel.modelName})`;
+    }
+    return assistant.name;
+  };
+
+  // 获取 ModelConfig 的显示文本
+  const getModelConfigDisplayText = (model) => {
+    return `${model.name} (${model.modelName})`;
   };
 
   return (
-    <div className="min-h-screen bg-[rgba(255,255,255,0.8)]">
-      {/* 标题栏 */}
-      <div className="sticky top-0 z-10">
-        <SettingsTitleBar />
+    <PageLayout className="bg-white/95">
+      <div className="h-screen flex flex-col overflow-hidden">
+        {/* 标题栏 */}
+        <div className="sticky top-0 z-10">
+          <SettingsTitleBar />
+        </div>
+        
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
+          <Surface className="max-w-lg mx-auto p-5">
+            <form onSubmit={handleSubmit} className="space-y-5">
+              
+              {/* Default Assistants Section */}
+              <Card title="Default Assistants" description="Configure which assistants to use by default">
+                <div className="space-y-4">
+                  <FormGroup label="Default Chatbot" hint="The assistant used for new conversations">
+                    <Select
+                      name="defaultRoleId"
+                      value={settings.defaultRoleId || ""}
+                      onChange={handleChange}
+                    >
+                      <option value="">Select Default Assistant</option>
+                      {assistants.map((assistant) => (
+                        <option key={assistant._id} value={assistant._id}>
+                          {getAssistantDisplayText(assistant)}
+                        </option>
+                      ))}
+                    </Select>
+                  </FormGroup>
+                  
+                  <FormGroup label="Function Model" hint="Lightweight model for quick tasks (mini recommended)">
+                    <Select
+                      name="defaultModelId"
+                      value={settings.defaultModelId || ""}
+                      onChange={handleChange}
+                    >
+                      <option value="">Select Function Model</option>
+                      {modelConfigs.map((model) => (
+                        <option key={model._id} value={model._id}>
+                          {getModelConfigDisplayText(model)}
+                        </option>
+                      ))}
+                    </Select>
+                  </FormGroup>
+                </div>
+              </Card>
+              
+              {/* Window Settings */}
+              <Card title="Window Settings" description="Customize the application window">
+                <FormGroup label="Window Size">
+                  <Select
+                    name="windowSize"
+                    value={settings.windowSize || "medium"}
+                    onChange={handleChange}
+                  >
+                    <option value="large">Large</option>
+                    <option value="medium">Medium</option>
+                    <option value="small">Small</option>
+                  </Select>
+                </FormGroup>
+              </Card>
+              
+              {/* Hotkey Settings */}
+              <Card title="Keyboard Shortcuts" description="Configure global hotkeys for quick access">
+                <div className="space-y-4">
+                  <FormGroup label="Program Hotkey" hint="Show/hide the application">
+                    <SettingsHotkeyInput
+                      name="programHotkey"
+                      value={settings.programHotkey || ""}
+                      onChange={handleChange}
+                    />
+                  </FormGroup>
+                  
+                  <FormGroup label="Dialog Hotkey" hint="Open quick dialog anywhere">
+                    <SettingsHotkeyInput
+                      name="dialogHotkey"
+                      value={settings.dialogHotkey || ""}
+                      onChange={handleChange}
+                    />
+                  </FormGroup>
+                </div>
+              </Card>
+              
+              {/* 保存按钮 */}
+              <div className="pt-2">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={saving}
+                  className="w-full py-3"
+                >
+                  {saving ? (
+                    <span className="flex items-center gap-2">
+                      <FaSpinner className="animate-spin w-4 h-4" />
+                      Saving...
+                    </span>
+                  ) : "Save Settings"}
+                </Button>
+              </div>
+              
+            </form>
+          </Surface>
+        </div>
       </div>
-      <div className="w-[90%] p-4 mx-auto bg-gray-50 rounded-lg shadow">
-        <form onSubmit={handleSubmit} className="space-y-4 text-sm">
-          {/* 默认模型选择 */}
-          <div>
-            <label className="block text-gray-700 mb-1">
-              Default Chatbot
-            </label>
-            <select
-              name="defaultRoleId"
-              value={settings.defaultRoleId || ""}
-              onChange={handleChange}
-              className="w-full p-2 border rounded"
-            >
-              <option value="">Select Default Model</option>
-              {pets.map((pet) => (
-                <option key={pet._id} value={pet._id}>
-                  {getDisplayText(pet)}
-                </option>
-              ))}
-            </select>
-          </div>
-          {/* 功能模型选择 */}
-          <div>
-            <label className="block text-gray-700 mb-1">
-              Function Model (Recommended: mini)
-            </label>
-            <select
-              name="defaultModelId"
-              value={settings.defaultModelId || ""}
-              onChange={handleChange}
-              className="w-full p-2 border rounded"
-            >
-              <option value="">Select Function Model</option>
-              {pets.map((pet) => (
-                <option key={pet._id} value={pet._id}>
-                  {getDisplayText(pet)}
-                </option>
-              ))}
-            </select>
-          </div>
-          {/* 窗口大小 */}
-          <div>
-            <label className="block text-gray-700 mb-1">Window Size</label>
-            <select
-              name="windowSize"
-              value={settings.windowSize || "medium"}
-              onChange={handleChange}
-              className="w-full p-2 border rounded"
-            >
-              <option value="large">Large</option>
-              <option value="medium">Medium</option>
-              <option value="small">Small</option>
-            </select>
-          </div>
-          {/* 程序热键设置 */}
-          <div>
-            <label className="block text-gray-700 mb-1">
-              Program Hotkey
-            </label>
-            <SettingsHotkeyInput
-              name="programHotkey"
-              value={settings.programHotkey || ""}
-              onChange={handleChange}
-            />
-          </div>
-          {/* 对话热键设置 */}
-          <div>
-            <label className="block text-gray-700 mb-1">
-              Dialog Hotkey
-            </label>
-            <SettingsHotkeyInput
-              name="dialogHotkey"
-              value={settings.dialogHotkey || ""}
-              onChange={handleChange}
-            />
-          </div>
-          {/* 保存按钮 */}
-          <button
-            type="submit"
-            className="w-full bg-blue-500 text-white py-2 rounded hover:bg-blue-600"
-          >
-            Save Settings
-          </button>
-        </form>
-      </div>
-    </div>
+    </PageLayout>
   );
 };
 

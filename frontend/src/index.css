@@ -17,3 +17,32 @@
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
 }
+
+/* Chrome-style tab with curved corner connectors */
+.tab-active {
+  position: relative;
+  background: white;
+  border-radius: 10px 10px 0 0;
+}
+
+.tab-active::before,
+.tab-active::after {
+  content: '';
+  position: absolute;
+  bottom: 0;
+  width: 10px;
+  height: 10px;
+  background: transparent;
+}
+
+.tab-active::before {
+  left: -10px;
+  border-radius: 0 0 10px 0;
+  box-shadow: 5px 0 0 0 white;
+}
+
+.tab-active::after {
+  right: -10px;
+  border-radius: 0 0 0 10px;
+  box-shadow: -5px 0 0 0 white;
+}

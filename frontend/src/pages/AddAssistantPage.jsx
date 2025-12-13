@@ -2,6 +2,8 @@ import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { FaCheck, FaSpinner } from "react-icons/fa6";
 import { MdCancel } from "react-icons/md";
+import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
+import TitleBar from "../components/UI/TitleBar";
 
 /**
  * 根据 apiFormat 获取默认图片名
@@ -134,154 +136,150 @@ const AddAssistantPage = () => {
 
   if (loading) {
     return (
-      <div className="h-screen bg-[rgba(255,255,255,0.95)] flex flex-col items-center justify-center">
-        <FaSpinner className="animate-spin text-2xl text-blue-500" />
-        <p className="mt-2 text-gray-600">Loading...</p>
-      </div>
+      <PageLayout className="bg-white/95">
+        <div className="h-screen flex flex-col items-center justify-center">
+          <FaSpinner className="animate-spin text-2xl text-blue-500" />
+          <p className="mt-2 text-slate-600 text-sm">Loading...</p>
+        </div>
+      </PageLayout>
     );
   }
 
   return (
-    <div className="h-screen bg-[rgba(255,255,255,0.95)] flex flex-col overflow-hidden">
-      <div className="sticky top-0 z-10">
-        {/* Simple TitleBar */}
-        <div className="draggable w-full h-12 flex justify-between items-center px-3 border-b border-gray-100">
-          <MdCancel 
-            className="no-drag hover:text-gray-800 text-gray-400 cursor-pointer"
-            onClick={() => navigate('/selectCharacter')}
-          />
-          <span className="font-bold text-gray-700 text-sm">NEW ASSISTANT</span>
-          <div className="w-5"></div>
-        </div>
-      </div>
-      
-      <div className="w-[90%] flex-1 mx-auto bg-gray-50 rounded-lg shadow-sm border border-gray-100 p-4 overflow-y-auto mb-4 scrollbar-hide mt-4">
-        <form onSubmit={handleSubmit} className="space-y-4 text-sm h-full flex flex-col">
-            
-            <div className="bg-green-50 p-3 rounded-md border border-green-100 text-green-800 text-xs">
+    <PageLayout className="bg-white/95">
+      <div className="h-screen flex flex-col overflow-hidden">
+        <TitleBar
+          title="New Assistant"
+          left={
+            <button
+              type="button"
+              className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+              onClick={() => navigate('/selectCharacter')}
+              title="Close"
+            >
+              <MdCancel className="w-5 h-5" />
+            </button>
+          }
+          height="h-12"
+        />
+        
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
+          <Surface className="max-w-lg mx-auto p-5">
+            <form onSubmit={handleSubmit} className="space-y-5">
+              
+              <Alert tone="blue">
                 <strong>Create New Assistant</strong><br/>
                 Configure a new AI assistant with a system instruction and link it to a model.
-            </div>
+              </Alert>
 
-            {modelConfigs.length === 0 && (
-              <div className="bg-yellow-50 p-3 rounded-md border border-yellow-200 text-yellow-800 text-xs">
-                <strong>No Model Configurations Found</strong><br/>
-                Please add a model configuration first before creating an assistant.
-                <button
-                  type="button"
-                  onClick={() => navigate('/addCharacter')}
-                  className="mt-2 block text-blue-600 hover:underline"
+              {modelConfigs.length === 0 && (
+                <Alert tone="yellow">
+                  <strong>No Model Configurations Found</strong><br/>
+                  Please add a model configuration first before creating an assistant.
+                  <button
+                    type="button"
+                    onClick={() => navigate('/addCharacter')}
+                    className="mt-2 block text-blue-600 hover:underline font-medium"
+                  >
+                    → Add Model Configuration
+                  </button>
+                </Alert>
+              )}
+
+              <FormGroup label="Assistant Name" required>
+                <Input
+                  name="name"
+                  placeholder="e.g. My Helper, Code Assistant..."
+                  value={assistantConfig.name}
+                  onChange={handleChange}
+                  required
+                />
+              </FormGroup>
+
+              <Card title="Model Configuration" description="Select the LLM backend for this assistant" className="bg-slate-50/50">
+                <Select
+                  name="selectedModelId"
+                  value={assistantConfig.selectedModelId}
+                  onChange={handleChange}
+                  disabled={modelConfigs.length === 0}
                 >
-                  → Add Model Configuration
-                </button>
+                  {modelConfigs.length === 0 ? (
+                    <option value="">No models available</option>
+                  ) : (
+                    modelConfigs.map(config => (
+                      <option key={config._id} value={config._id}>
+                        {config.name} ({config.modelName})
+                      </option>
+                    ))
+                  )}
+                </Select>
+                {modelConfigs.length > 0 && (
+                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
+                    <Badge tone="blue">
+                      {modelConfigs.find(m => m._id === assistantConfig.selectedModelId)?.apiFormat || 'Unknown'}
+                    </Badge>
+                    <span>will power this assistant</span>
+                  </div>
+                )}
+              </Card>
+
+              <FormGroup label="System Instruction">
+                <Textarea
+                  name="systemInstruction"
+                  placeholder="Describe how the assistant should behave..."
+                  value={assistantConfig.systemInstruction}
+                  onChange={handleChange}
+                  rows={4}
+                />
+              </FormGroup>
+
+              <FormGroup label="Appearance Description" hint="Optional - for image generation">
+                <Textarea
+                  name="appearance"
+                  placeholder="Describe the assistant's appearance..."
+                  value={assistantConfig.appearance}
+                  onChange={handleChange}
+                  rows={2}
+                />
+              </FormGroup>
+
+              <FormGroup label="Avatar Style">
+                <Select
+                  name="imageName"
+                  value={assistantConfig.imageName}
+                  onChange={handleChange}
+                >
+                  <option value="default">Default</option>
+                  <option value="Opai">Opai (OpenAI style)</option>
+                  <option value="Gemina">Gemina (Gemini style)</option>
+                  <option value="Claudia">Claudia (Claude style)</option>
+                  <option value="Grocka">Grocka (Grok style)</option>
+                </Select>
+              </FormGroup>
+
+              <Checkbox
+                name="hasMood"
+                label="Enable mood expressions (Avatar will show emotions)"
+                checked={assistantConfig.hasMood}
+                onChange={handleChange}
+              />
+
+              <div className="pt-2">
+                <Button
+                  type="submit"
+                  variant="primary"
+                  disabled={modelConfigs.length === 0}
+                  className="w-full py-3"
+                >
+                  Create Assistant
+                </Button>
               </div>
-            )}
 
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Assistant Name <span className="text-red-500">*</span></label>
-                <input
-                    name="name"
-                    placeholder="e.g. My Helper, Code Assistant..."
-                    value={assistantConfig.name}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-green-300 outline-none"
-                    required
-                />
-            </div>
-
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Model Configuration</label>
-                <select
-                    name="selectedModelId"
-                    value={assistantConfig.selectedModelId}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded"
-                    disabled={modelConfigs.length === 0}
-                >
-                    {modelConfigs.length === 0 ? (
-                      <option value="">No models available</option>
-                    ) : (
-                      modelConfigs.map(config => (
-                        <option key={config._id} value={config._id}>
-                          {config.name} ({config.modelName})
-                        </option>
-                      ))
-                    )}
-                </select>
-            </div>
-
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">System Instruction</label>
-                <textarea
-                    name="systemInstruction"
-                    placeholder="Describe how the assistant should behave..."
-                    value={assistantConfig.systemInstruction}
-                    onChange={handleChange}
-                    rows={4}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-green-300 outline-none resize-none"
-                />
-            </div>
-
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Appearance Description (Optional)</label>
-                <textarea
-                    name="appearance"
-                    placeholder="Describe the assistant's appearance for image generation..."
-                    value={assistantConfig.appearance}
-                    onChange={handleChange}
-                    rows={2}
-                    className="w-full p-2 border rounded focus:ring-2 focus:ring-green-300 outline-none resize-none"
-                />
-            </div>
-
-            <div className="flex flex-col space-y-1">
-                <label className="text-gray-700 font-medium">Avatar Style</label>
-                <select
-                    name="imageName"
-                    value={assistantConfig.imageName}
-                    onChange={handleChange}
-                    className="w-full p-2 border rounded"
-                >
-                    <option value="default">Default</option>
-                    <option value="Opai">Opai (OpenAI style)</option>
-                    <option value="Gemina">Gemina (Gemini style)</option>
-                    <option value="Claudia">Claudia (Claude style)</option>
-                    <option value="Grocka">Grocka (Grok style)</option>
-                </select>
-            </div>
-
-            <div className="flex items-center space-x-2">
-                <input
-                    type="checkbox"
-                    id="hasMood"
-                    name="hasMood"
-                    checked={assistantConfig.hasMood}
-                    onChange={handleChange}
-                    className="w-4 h-4 text-green-600 rounded focus:ring-green-500"
-                />
-                <label htmlFor="hasMood" className="text-gray-700 font-medium cursor-pointer">
-                    Enable mood expressions
-                </label>
-                <span className="text-gray-400 text-xs">(Avatar will show emotions)</span>
-            </div>
-
-            <div className="mt-auto pt-4">
-                <button
-                    type="submit"
-                    disabled={modelConfigs.length === 0}
-                    className={`w-full py-2.5 rounded shadow transition-all transform font-bold ${
-                        modelConfigs.length > 0
-                        ? "bg-gradient-to-r from-green-500 to-green-700 text-white hover:from-green-600 hover:to-green-800 hover:scale-[1.02]" 
-                        : "bg-gray-300 text-gray-500 cursor-not-allowed"
-                    }`}
-                >
-                    Create Assistant
-                </button>
-            </div>
-
-        </form>
+            </form>
+          </Surface>
+        </div>
       </div>
-    </div>
+    </PageLayout>
   );
 };
 

@@ -6,18 +6,18 @@ const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onAddTab, co
   const [showDropdown, setShowDropdown] = useState(false);
 
   return (
-    <div className={`draggable w-full h-full flex items-center px-1 gap-1 min-w-0 ${compact ? 'h-full' : 'h-8 mt-1'}`}>
+    <div className={`draggable w-full h-full flex items-center px-1 gap-0 min-w-0 ${compact ? 'h-full' : 'h-8 mt-1'}`}>
       {/* Scrollable Tabs Area */}
-      <div className="flex-1 w-0 min-w-0 h-full flex flex-nowrap overflow-x-auto scrollbar-hide gap-1 items-end mask-linear-fade">
-        {tabs.map((tab) => (
+      <div className="flex-1 w-0 min-w-0 h-full flex flex-nowrap overflow-x-auto scrollbar-hide gap-0 items-end mask-linear-fade">
+        {tabs.map((tab, index) => (
           <motion.div
             key={tab.id}
             initial={false}
             onClick={() => onTabClick(tab.id)}
-            className={`no-drag group relative flex-1 min-w-[50px] max-w-[140px] flex items-center justify-between rounded-t-md cursor-pointer text-[10px] px-2 transition-all duration-200 border-t border-x ${
+            className={`no-drag group relative flex-1 min-w-[60px] max-w-[160px] flex items-center justify-between cursor-pointer text-[11px] px-3 transition-all duration-150 ${
               tab.id === activeTabId 
-                ? 'bg-white text-gray-800 border-gray-200 shadow-sm z-10 h-full pt-1' 
-                : 'bg-gray-50 text-gray-500 border-transparent hover:bg-gray-100 h-[80%] mb-0 pt-0.5'
+                ? 'tab-active text-gray-800 z-10 h-full' 
+                : 'bg-transparent text-gray-500 hover:bg-slate-200/50 h-[75%] rounded-t-lg'
             }`}
           >
             <span className="truncate flex-1 text-center">{tab.label}</span>

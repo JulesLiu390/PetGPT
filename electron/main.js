@@ -400,7 +400,7 @@ ipcMain.on("maximize-chat-window", () => {
     const charBounds = characterWindow.getBounds();
     const newSize = getScaledSize(baselineSizes.chat, currentSizePreset);
     // 对 chatWindow 位置不进行 clamping，只保持与 characterWindow 的相对位置
-    const newX = charBounds.x - newSize.width - 20;
+    const newX = charBounds.x - newSize.width - 50;
     const newY = charBounds.y - newSize.height + charBounds.height;
     chatWindow.setBounds({
       x: newX,
@@ -419,6 +419,45 @@ ipcMain.handle('update-window-size-preset', async (event, newPreset) => {
   updateAllWindowsSizes(currentSizePreset);
 });
 
+// 侧边栏展开/收起 - 窗口向左扩展
+const SIDEBAR_WIDTH = 256; // 与前端 w-64 (256px) 一致
+const BASE_MIN_WIDTH = 450; // 聊天区域的最小宽度
+let sidebarExpanded = false;
+
+ipcMain.on('toggle-sidebar', (event, open) => {
+  if (!chatWindow || chatWindow.isDestroyed() || chatWindow.isMaximized()) return;
+  
+  const bounds = chatWindow.getBounds();
+  
+  if (open && !sidebarExpanded) {
+    // 展开侧边栏：向左扩展窗口，更新最小宽度
+    chatWindow.setMinimumSize(BASE_MIN_WIDTH + SIDEBAR_WIDTH, 320);
+    chatWindow.setBounds({
+      x: bounds.x - SIDEBAR_WIDTH,
+      y: bounds.y,
+      width: bounds.width + SIDEBAR_WIDTH,
+      height: bounds.height,
+    });
+    sidebarExpanded = true;
+    // 更新置顶状态：侧边栏展开时变为普通窗口
+    chatWindow.setAlwaysOnTop(false);
+    chatWindow.setVisibleOnAllWorkspaces(false);
+  } else if (!open && sidebarExpanded) {
+    // 收起侧边栏：向右收缩窗口，恢复最小宽度
+    chatWindow.setMinimumSize(BASE_MIN_WIDTH, 320);
+    chatWindow.setBounds({
+      x: bounds.x + SIDEBAR_WIDTH,
+      y: bounds.y,
+      width: bounds.width - SIDEBAR_WIDTH,
+      height: bounds.height,
+    });
+    sidebarExpanded = false;
+    // 更新置顶状态：侧边栏关闭时恢复置顶
+    chatWindow.setAlwaysOnTop(true, 'floating');
+    chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+  }
+});
+
 // ============ 统一修改所有窗口尺寸及位置的函数 ============ //
 function updateAllWindowsSizes(preset = currentSizePreset) {
   currentSizePreset = preset;
@@ -435,7 +474,7 @@ function updateAllWindowsSizes(preset = currentSizePreset) {
   if (chatWindow && !chatWindow.isDestroyed() && characterWindow) {
     const newSize = getScaledSize(baselineSizes.chat, currentSizePreset);
     const charBounds = characterWindow.getBounds();
-    const newX = charBounds.x - newSize.width - 20;
+    const newX = charBounds.x - newSize.width - 50;
     const newY = charBounds.y - newSize.height + charBounds.height;
     chatWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
   }
@@ -503,7 +542,7 @@ const createChatWindow = () => {
   if (!characterWindow) return;
   const charBounds = characterWindow.getBounds();
   const chatSize = getScaledSize(baselineSizes.chat, currentSizePreset);
-  let x = charBounds.x - chatSize.width - 20;
+  let x = charBounds.x - chatSize.width - 50;
   let y = charBounds.y - chatSize.height + charBounds.height;
   // 对 chatWindow 不进行 clamping
   chatWindow = new BrowserWindow({
@@ -511,6 +550,8 @@ const createChatWindow = () => {
     y,
     width: chatSize.width,
     height: chatSize.height,
+    minWidth: 450,
+    minHeight: 320,
     icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
     frame: false,
     transparent: true,
@@ -529,6 +570,32 @@ const createChatWindow = () => {
   chatWindow.setAlwaysOnTop(true, 'floating');
   chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
   
+  // 根据侧边栏状态动态切换聊天窗口置顶
+  // 侧边栏关闭且非全屏时：置顶
+  // 侧边栏展开或全屏时：普通窗口层级
+  const updateChatWindowOnTop = () => {
+    if (!chatWindow || chatWindow.isDestroyed()) return;
+    const isMaximized = chatWindow.isMaximized();
+    const shouldChatBeOnTop = !sidebarExpanded && !isMaximized;
+    
+    // 聊天窗口：根据侧边栏和全屏状态切换
+    chatWindow.setAlwaysOnTop(shouldChatBeOnTop, 'floating');
+    chatWindow.setVisibleOnAllWorkspaces(shouldChatBeOnTop, { visibleOnFullScreen: false });
+    
+    // 角色窗口：始终置顶，除非聊天窗口全屏
+    if (characterWindow && !characterWindow.isDestroyed()) {
+      if (isMaximized) {
+        // 聊天全屏时，隐藏角色窗口
+        characterWindow.hide();
+      } else {
+        // 非全屏时，角色窗口始终置顶并显示
+        characterWindow.show();
+        characterWindow.setAlwaysOnTop(true, 'floating');
+        characterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+      }
+    }
+  };
+  
   // 开发模式自动打开控制台（需要时取消注释）
   // if (isDev) {
   //   chatWindow.webContents.openDevTools({ mode: 'detach' });
@@ -542,10 +609,27 @@ const createChatWindow = () => {
 
   chatWindow.on('maximize', () => {
     chatWindow.webContents.send('window-maximized');
+    // 全屏时隐藏角色窗口，聊天窗口变为普通窗口
+    chatWindow.setAlwaysOnTop(false);
+    chatWindow.setVisibleOnAllWorkspaces(false);
+    if (characterWindow && !characterWindow.isDestroyed()) {
+      characterWindow.hide();
+    }
   });
 
   chatWindow.on('unmaximize', () => {
     chatWindow.webContents.send('window-unmaximized');
+    // 退出全屏时显示角色窗口并恢复置顶
+    if (characterWindow && !characterWindow.isDestroyed()) {
+      characterWindow.show();
+      characterWindow.setAlwaysOnTop(true, 'floating');
+      characterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+    }
+    // 根据侧边栏状态更新聊天窗口置顶
+    if (!sidebarExpanded) {
+      chatWindow.setAlwaysOnTop(true, 'floating');
+      chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+    }
   });
 
   chatWindow.on("closed", () => { chatWindow = null; });
@@ -714,11 +798,15 @@ app.whenReady().then(() => {
   createSettingsWindow();
 
   // 当 characterWindow 移动时，重新计算 chatWindow 的位置（保持相对位置，不 clamping）
+  // 注意：侧边栏展开时不自动调整
   characterWindow.on('move', () => {
     if (!chatWindow || !characterWindow) return;
+    // 如果侧边栏已展开，不自动跟随调整
+    if (sidebarExpanded) return;
+    
     const charBounds = characterWindow.getBounds();
     const newChatSize = getScaledSize(baselineSizes.chat, currentSizePreset);
-    const newX = charBounds.x - newChatSize.width - 20;
+    const newX = charBounds.x - newChatSize.width - 50;
     const newY = charBounds.y - newChatSize.height + charBounds.height;
     chatWindow.setBounds({
       x: newX,

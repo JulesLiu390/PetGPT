@@ -28,7 +28,16 @@ export const Character = () => {
           
           try {
             window.electron.updateShortcuts(settings.programHotkey, settings.dialogHotkey)
-            const pet = await window.electron.getPet(settings.defaultRoleId);
+            // 优先尝试 getAssistant，失败则回退到 getPet
+            let pet = null;
+            try {
+              pet = await window.electron.getAssistant(settings.defaultRoleId);
+            } catch (e) {
+              // 忽略，尝试旧 API
+            }
+            if (!pet) {
+              pet = await window.electron.getPet(settings.defaultRoleId);
+            }
             if (pet && pet.imageName) {
               setImageName(pet.imageName);
               console.log("Using default character image:", pet.imageName);
@@ -67,8 +76,19 @@ export const Character = () => {
     const handleCharacterId = (id) => {
       console.log("📩 Received character ID:", id);
       const fetchCharacterImageName = async () => {
-        const pet = await window.electron.getPet(id);
-        setImageName(pet.imageName);        
+        // 优先尝试 getAssistant，失败则回退到 getPet
+        let pet = null;
+        try {
+          pet = await window.electron.getAssistant(id);
+        } catch (e) {
+          // 忽略，尝试旧 API
+        }
+        if (!pet) {
+          pet = await window.electron.getPet(id);
+        }
+        if (pet && pet.imageName) {
+          setImageName(pet.imageName);
+        }
       }
       fetchCharacterImageName();
     };
@@ -79,9 +99,19 @@ export const Character = () => {
     const fetch = async (conversationId) => {
       try {
         const conv = await window.electron.getConversationById(conversationId);
-        const pet = await window.electron.getPet(conv.petId);
-        setImageName(pet.imageName); 
-        // alert(conv.petID);
+        // 优先尝试 getAssistant，失败则回退到 getPet
+        let pet = null;
+        try {
+          pet = await window.electron.getAssistant(conv.petId);
+        } catch (e) {
+          // 忽略，尝试旧 API
+        }
+        if (!pet) {
+          pet = await window.electron.getPet(conv.petId);
+        }
+        if (pet && pet.imageName) {
+          setImageName(pet.imageName);
+        }
       } catch (error) {
         console.error("Error fetching conversation:", error);
         throw error;
