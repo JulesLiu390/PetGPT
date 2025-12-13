@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { MdCancel } from 'react-icons/md';
 
 
-export const AddCharacterTitleBar = () => {
+export const AddModelTitleBar = () => {
   const [apiSelection, setApiSelection] = useState('openai');
   const [modelName, setModelName] = useState('');
 
@@ -26,10 +26,10 @@ export const AddCharacterTitleBar = () => {
       onClick={handleClose}
       ></MdCancel>
             <div className='h-full w-full flex items-center justify-center'>
-      <h2 className='select-none'>ADD CHARACTER</h2>
+      <h2 className='select-none'>ADD MODEL</h2>
       </div>
     </div>
   );
 };
 
-export default AddCharacterTitleBar;
+export default AddModelTitleBar;

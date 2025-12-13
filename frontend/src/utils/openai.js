@@ -2,6 +2,7 @@ import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { searchDuckDuckGo } from './search';
 import { z } from "zod";
+import { callGeminiLib, callGeminiLibStream, fetchGeminiModels } from './gemini';
 
 // 定义 provider 对应的 URL 字典
 const providerURLs = {
@@ -9,6 +10,24 @@ const providerURLs = {
   gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
   anthropic: "https://api.anthropic.com/v1",
   grok: "https://api.x.ai/v1"
+};
+
+const sanitizeMessages = (messages) => {
+  return messages.map(msg => {
+    if (Array.isArray(msg.content)) {
+      const newContent = msg.content.map(part => {
+        if (part.type === 'text') return part;
+        if (part.type === 'image_url') return part;
+        if (part.type === 'file_url') {
+           // Convert file_url to text representation for now
+           return { type: 'text', text: `\n[Attachment: ${part.file_url.url}]` };
+        }
+        return null;
+      }).filter(Boolean);
+      return { ...msg, content: newContent };
+    }
+    return msg;
+  });
 };
 
 const StructuredResponseSchema = z.object({
@@ -59,7 +78,7 @@ const detectMood = async (messages, provider, apiKey, model, baseURL) => {
       // 不支持结构化输出，使用普通对话并解析
       const completion = await openai.chat.completions.create({
         model: model,
-        messages: moodMessages,
+        messages: sanitizeMessages(moodMessages),
         stream: false
       });
       const content = completion.choices[0]?.message?.content?.toLowerCase() || "";
@@ -70,7 +89,7 @@ const detectMood = async (messages, provider, apiKey, model, baseURL) => {
       // 支持结构化输出
       const completion = await openai.beta.chat.completions.parse({
         model: model,
-        messages: moodMessages,
+        messages: sanitizeMessages(moodMessages),
         response_format: zodResponseFormat(MoodSchema, "mood_response"),
       });
       return completion.choices[0]?.message?.parsed?.mood || "normal";
@@ -82,15 +101,21 @@ const detectMood = async (messages, provider, apiKey, model, baseURL) => {
 };
 
 export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) => {
+  if (provider === 'gemini') {
+    return await callGeminiLib(messages, apiKey, model);
+  }
+
   // 直接使用传入的 apiKey 和 model 参数
   if (baseURL === "default") {
-    baseURL = providerURLs[provider] || baseURL;
+    baseURL = providerURLs[provider] || "https://api.openai.com/v1";
   } else {
     // baseURL += '/v1';
-    if(baseURL.slice(-1) == "/") {
-      baseURL += 'v1';
-    } else {
-      baseURL += '/v1'
+    if (!baseURL.endsWith("/v1") && !baseURL.endsWith("/v1/")) {
+        if(baseURL.slice(-1) == "/") {
+            baseURL += 'v1';
+        } else {
+            baseURL += '/v1'
+        }
     }
   }
   const openai = new OpenAI({
@@ -110,7 +135,7 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
     
     const contentPromise = openai.chat.completions.create({
         model: model,
-        messages: messages,
+        messages: sanitizeMessages(messages),
         stream: false
     });
 
@@ -142,18 +167,25 @@ export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) 
 };
 
 export const callOpenAILibStream = async (messages, provider, apiKey, model, baseURL, onChunk, abortSignal) => {
+  if (provider === 'gemini') {
+    return await callGeminiLibStream(messages, apiKey, model, onChunk, abortSignal);
+  }
+
   // 直接使用传入的 apiKey 和 model 参数
   let url = baseURL;
   if (url === "default") {
-    url = providerURLs[provider] || url;
+    url = providerURLs[provider] || "https://api.openai.com/v1";
   } else {
     // baseURL += '/v1';
-    if(url.slice(-1) == "/") {
-      url += 'v1';
-    } else {
-      url += '/v1'
+    if (!url.endsWith("/v1") && !url.endsWith("/v1/")) {
+        if(url.slice(-1) == "/") {
+            url += 'v1';
+        } else {
+            url += '/v1'
+        }
     }
   }
+
   const openai = new OpenAI({
     apiKey: apiKey,
     baseURL: url,
@@ -167,7 +199,7 @@ export const callOpenAILibStream = async (messages, provider, apiKey, model, bas
 
     const stream = await openai.chat.completions.create({
       model: model,
-      messages: messages,
+      messages: sanitizeMessages(messages),
       stream: true,
     }, { signal: abortSignal });
 
@@ -470,5 +502,40 @@ export const promptSuggestion = async (messages, provider, apiKey, model, baseUR
   } catch (error) {
     console.error("OpenAI 请求出错：", error);
     return error;
+  }
+};
+
+export const fetchModels = async (provider, apiKey, baseURL) => {
+  if (provider === 'gemini') {
+    return await fetchGeminiModels(apiKey);
+  }
+
+  let url = baseURL;
+  if (url === "default") {
+    url = providerURLs[provider] || "https://api.openai.com/v1";
+  } else {
+    // Simple check to avoid double v1 if possible, but sticking to existing logic for now to be safe
+    // or better: check if it already ends in /v1
+    if (!url.endsWith("/v1") && !url.endsWith("/v1/")) {
+        if(url.slice(-1) == "/") {
+            url += 'v1';
+        } else {
+            url += '/v1'
+        }
+    }
+  }
+
+  const openai = new OpenAI({
+    apiKey: apiKey,
+    baseURL: url,
+    dangerouslyAllowBrowser: true,
+  });
+
+  try {
+    const list = await openai.models.list();
+    return list.data;
+  } catch (error) {
+    console.error("Error fetching models:", error);
+    throw error;
   }
 };

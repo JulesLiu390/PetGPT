@@ -62,13 +62,36 @@ class Conversation {
 
   static async findAll() {
     const conversations = await readData();
+    
+    // Normalize history content for backward compatibility
+    conversations.forEach(c => {
+      if (c.history) {
+        c.history.forEach(msg => {
+          if (typeof msg.content === 'string') {
+            msg.content = [{ type: 'text', text: msg.content }];
+          }
+        });
+      }
+    });
+
     // Filter out conversations with empty history
     return conversations.filter(c => c.history && c.history.length > 0).reverse();
   }
 
   static async findById(_id) {
     const conversations = await readData();
-    return conversations.find(conv => conv._id === _id);
+    const conv = conversations.find(conv => conv._id === _id);
+    
+    if (conv && conv.history) {
+      // Normalize history content for backward compatibility
+      conv.history.forEach(msg => {
+        if (typeof msg.content === 'string') {
+          msg.content = [{ type: 'text', text: msg.content }];
+        }
+      });
+    }
+    
+    return conv;
   }
 
   static async create(conversationData) {

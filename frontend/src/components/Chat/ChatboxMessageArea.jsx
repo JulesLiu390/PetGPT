@@ -75,8 +75,73 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
   );
 };
 
+import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh } from 'react-icons/md';
+import { actionType } from '../../context/reducer';
+
+// Render a single part (text, image, or file)
+const MessagePartContent = ({ part, isUser }) => {
+  const [imageSrc, setImageSrc] = useState(null);
+  
+  useEffect(() => {
+    if (part.type === 'image_url') {
+      const url = part.image_url.url;
+      // If it's already base64 or http URL, use directly
+      if (url.startsWith('data:') || url.startsWith('http')) {
+        setImageSrc(url);
+      } else {
+        // It's a file path, need to load via Electron
+        const fileName = url.split('/').pop();
+        window.electron?.readUpload(fileName).then(data => {
+          setImageSrc(data);
+        }).catch(err => {
+          console.error('Failed to load image:', err);
+          // Fallback: try using file:// protocol
+          setImageSrc(`file://${url}`);
+        });
+      }
+    }
+  }, [part]);
+
+  if (part.type === 'text') {
+    return isUser ? (
+        <div className="bg-[#f4f4f4] rounded-2xl px-4 py-2">
+            <span>{part.text}</span>
+        </div>
+    ) : (
+        <div className="prose-sm prose-neutral break-words w-full max-w-full">
+            <ReactMarkdown remarkPlugins={[remarkGfm]} components={{a: LinkRenderer, code: CodeBlock}}>
+                {part.text}
+            </ReactMarkdown>
+        </div>
+    );
+  } else if (part.type === 'image_url') {
+    if (!imageSrc) {
+      return (
+        <div className="rounded-lg overflow-hidden shadow-sm bg-gray-100 w-32 h-32 flex items-center justify-center">
+          <span className="text-gray-400 text-sm">Loading...</span>
+        </div>
+      );
+    }
+    return (
+        <div className="rounded-lg overflow-hidden shadow-sm">
+            <img src={imageSrc} alt="content" className="max-w-xs max-h-64 object-contain rounded-lg" />
+        </div>
+    );
+  } else if (part.type === 'file_url') {
+    return (
+        <div className="flex items-center gap-2 p-2 bg-gray-100 rounded-lg border border-gray-200">
+            <span className="text-xs text-gray-500">📎</span>
+            <span className="text-blue-500 truncate max-w-[200px] text-sm">
+                {part.file_url.url.split('/').pop()}
+            </span>
+        </div>
+    );
+  }
+  return null;
+};
+
 const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
-  const [{ currentConversationId }] = useStateValue();
+  const [{ currentConversationId, userMessages }, dispatch] = useStateValue();
   const messageEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
@@ -84,6 +149,176 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
   const [isThinking, setIsThinking] = useState(false);
   const [firstTime, setFirstTime] = useState(true);
   const [Chatlength, setChatlength] = useState(0)
+  const [hoveredMessageIndex, setHoveredMessageIndex] = useState(null);
+  const [editingIndex, setEditingIndex] = useState(null);
+  const [editingPartIndex, setEditingPartIndex] = useState(null);
+  const [editContent, setEditContent] = useState("");
+  const [copiedIndex, setCopiedIndex] = useState(null);
+
+  const handleCopyPart = (part, key) => {
+    let text = "";
+    if (part.type === 'text') {
+        text = part.text;
+    } else if (part.type === 'image_url') {
+        text = part.image_url.url;
+    } else if (part.type === 'file_url') {
+        text = part.file_url.url;
+    }
+    navigator.clipboard.writeText(text);
+    setCopiedIndex(key);
+    setTimeout(() => setCopiedIndex(null), 2000);
+  };
+
+  const startEditingPart = (msgIndex, partIndex, text) => {
+    setEditingIndex(msgIndex);
+    setEditingPartIndex(partIndex);
+    setEditContent(text);
+  };
+
+  const cancelEditing = () => {
+    setEditingIndex(null);
+    setEditingPartIndex(null);
+    setEditContent("");
+  };
+
+  const saveEditPart = async (msgIndex, partIndex) => {
+    const msg = messages[msgIndex];
+    let newContent;
+    
+    if (Array.isArray(msg.content)) {
+        newContent = msg.content.map((part, i) => 
+            i === partIndex ? { ...part, text: editContent } : part
+        );
+    } else {
+        newContent = editContent;
+    }
+
+    dispatch({ type: actionType.UPDATE_MESSAGE, index: msgIndex, message: { content: newContent } });
+
+    const newMessages = [...messages];
+    newMessages[msgIndex] = { ...msg, content: newContent };
+
+    if (currentConversationId) {
+        try {
+            await window.electron.updateConversation(currentConversationId, { history: newMessages });
+        } catch (error) {
+            console.error("Failed to save edit:", error);
+        }
+    }
+
+    cancelEditing();
+  };
+
+  const handleDeletePart = async (msgIndex, partIndex) => {
+    const msg = messages[msgIndex];
+    const parts = Array.isArray(msg.content) ? msg.content : [{ type: 'text', text: msg.content }];
+    
+    if (parts.length <= 1) {
+        // If only one part, delete the whole message
+        dispatch({ type: actionType.DELETE_MESSAGE, index: msgIndex });
+        const newMessages = messages.filter((_, i) => i !== msgIndex);
+        if (currentConversationId) {
+            try {
+                await window.electron.updateConversation(currentConversationId, { history: newMessages });
+            } catch (error) {
+                console.error("Failed to delete message:", error);
+            }
+        }
+        return;
+    }
+    
+    const newContent = parts.filter((_, i) => i !== partIndex);
+    const newMessages = [...messages];
+    newMessages[msgIndex] = { ...msg, content: newContent };
+
+    dispatch({ type: actionType.UPDATE_MESSAGE, index: msgIndex, message: { content: newContent } });
+
+    if (currentConversationId) {
+        try {
+            await window.electron.updateConversation(currentConversationId, { history: newMessages });
+        } catch (error) {
+            console.error("Failed to delete part:", error);
+        }
+    }
+  };
+
+  const handleRegeneratePart = async (msgIndex, partIndex) => {
+    const msg = messages[msgIndex];
+    
+    // 重新生成逻辑：
+    // - 点击 user 消息的任何 part：保留整个 user 消息，用它重新请求 AI
+    // - 点击 assistant 消息：保留到前一条 user 消息，用它重新请求 AI
+    
+    let newMessages;
+    
+    if (msg.role === 'user') {
+        // 点击的是 user 消息，保留整个 user 消息，移除之后的所有消息
+        newMessages = messages.slice(0, msgIndex + 1);
+    } else {
+        // 点击的是 assistant 消息，保留到前一条 user 消息
+        newMessages = messages.slice(0, msgIndex);
+        
+        // 确保最后一条是 user 消息
+        if (newMessages.length === 0 || newMessages[newMessages.length - 1].role !== 'user') {
+            console.error("Cannot regenerate: No valid user message found.");
+            return;
+        }
+    }
+    
+    // 如果没有消息了，无法重新生成
+    if (newMessages.length === 0) {
+        console.error("Cannot regenerate: No messages to regenerate from.");
+        return;
+    }
+    
+    // 确保最后一条是 user 消息
+    if (newMessages[newMessages.length - 1].role !== 'user') {
+        console.error("Cannot regenerate: Last message is not a user message.");
+        return;
+    }
+    
+    if (currentConversationId) {
+        try {
+            await window.electron.updateConversation(currentConversationId, {
+                history: newMessages
+            });
+            
+            dispatch({
+                type: actionType.SWITCH_CONVERSATION,
+                id: currentConversationId,
+                userMessages: newMessages
+            });
+
+            setTimeout(() => {
+                dispatch({ type: actionType.TRIGGER_RUN_FROM_HERE });
+            }, 50);
+            
+        } catch (error) {
+            console.error("Failed to regenerate:", error);
+        }
+    }
+  };
+
+  const handleDelete = async (index) => {
+    // 1. Update local state
+    dispatch({ type: actionType.DELETE_MESSAGE, index });
+
+    // 2. Calculate new messages array for backend update
+    // Note: We use messages prop here, but for consistency we should filter the current messages
+    const newMessages = messages.filter((_, i) => i !== index);
+
+    // 3. Update backend
+    if (currentConversationId) {
+        try {
+            await window.electron.updateConversation(currentConversationId, {
+                history: newMessages
+            });
+        } catch (error) {
+            console.error("Failed to delete message:", error);
+            // Optionally revert state here if needed
+        }
+    }
+  };
 
   // 监听滚动事件，判断用户是否手动向上滚动
   const handleScroll = () => {
@@ -165,31 +400,90 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
       {Array.isArray(messages) && messages.map((msg, index) => {
         if (!msg) return null; // Skip null/undefined messages
         const isUser = msg.role === 'user';
+        
+        // Flatten content into parts for rendering
+        const parts = Array.isArray(msg.content) 
+            ? msg.content 
+            : [{ type: 'text', text: msg.content }];
+
         return (
           <div
             key={index}
-            className={`flex mb-4 ${isUser ? 'justify-end' : 'justify-start'}`}
+            className={`flex flex-col gap-2 mb-2 w-full ${isUser ? 'items-end' : 'items-start'} ${index === 0 ? 'mt-4' : ''}`}
           >
-            <div
-              className={`rounded-2xl px-4 py-2 whitespace-pre-wrap ${
-                isUser ? 'bg-[#f4f4f4] text-gray-800 text-right text-sm' : 'bg-transparent text-left text-sm'
-              }`}
-              style={{ maxWidth: '100%' }}
-            >
-              {isUser ? (
-                typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content)
-              ) : (
-                <div className="prose-sm prose-neutral break-words w-full max-w-full">
-                    <ReactMarkdown
-                    remarkPlugins={[remarkGfm]}
-                    components={{a: LinkRenderer, code: CodeBlock,
-                    }}
+            {parts.map((part, partIndex) => (
+              <div
+                key={`${index}-${partIndex}`}
+                className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}
+                onMouseEnter={() => setHoveredMessageIndex(`${index}-${partIndex}`)}
+                onMouseLeave={() => setHoveredMessageIndex(null)}
+              >
+                <div className={`flex flex-col ${isUser ? 'items-end' : 'items-start'}`} style={{ maxWidth: '100%' }}>
+                    <div className={`whitespace-pre-wrap ${isUser ? 'text-gray-800 text-right text-sm' : 'bg-transparent text-left text-sm'}`}>
+                      {editingIndex === index && editingPartIndex === partIndex ? (
+                        <div className="flex flex-col gap-2 min-w-[200px]">
+                            <textarea
+                                value={editContent}
+                                onChange={(e) => setEditContent(e.target.value)}
+                                className="w-full p-2 bg-white/50 rounded border border-gray-200 focus:outline-none focus:border-blue-400 text-sm min-h-[60px]"
+                                autoFocus
+                            />
+                            <div className="flex justify-end gap-2">
+                                <button onClick={cancelEditing} className="p-1 text-gray-500 hover:text-gray-700 bg-gray-100 hover:bg-gray-200 rounded" title="Cancel">
+                                    <MdClose size={16} />
+                                </button>
+                                <button onClick={() => saveEditPart(index, partIndex)} className="p-1 text-white bg-blue-500 hover:bg-blue-600 rounded" title="Save">
+                                    <MdCheck size={16} />
+                                </button>
+                            </div>
+                        </div>
+                      ) : (
+                        <MessagePartContent part={part} isUser={isUser} />
+                      )}
+                    </div>
+
+                    {/* Action Buttons for each part */}
+                    <div 
+                        className={`flex items-center gap-0.5 mt-0.5 transition-opacity duration-200 ${
+                            !isUser || hoveredMessageIndex === `${index}-${partIndex}`
+                                ? 'opacity-100' 
+                                : 'opacity-0 pointer-events-none'
+                        }`}
                     >
-                    {typeof msg.content === 'string' ? msg.content : (msg.content ? String(msg.content) : "")}
-                    </ReactMarkdown>
+                        <button
+                            onClick={() => handleCopyPart(part, `${index}-${partIndex}`)}
+                            className="p-1 text-gray-400 hover:text-gray-600 transition-colors rounded"
+                            title="Copy"
+                        >
+                            {copiedIndex === `${index}-${partIndex}` ? <MdCheck size={12} /> : <MdContentCopy size={12} />}
+                        </button>
+                        {part.type === 'text' && (
+                            <button
+                                onClick={() => startEditingPart(index, partIndex, part.text)}
+                                className="p-1 text-gray-400 hover:text-blue-500 transition-colors rounded"
+                                title="Edit"
+                            >
+                                <MdEdit size={12} />
+                            </button>
+                        )}
+                        <button
+                            onClick={() => handleRegeneratePart(index, partIndex)}
+                            className="p-1 text-gray-400 hover:text-green-500 transition-colors rounded"
+                            title="Regenerate"
+                        >
+                            <MdRefresh size={12} />
+                        </button>
+                        <button
+                            onClick={() => handleDeletePart(index, partIndex)}
+                            className="p-1 text-gray-400 hover:text-red-500 transition-colors rounded"
+                            title="Delete"
+                        >
+                            <MdDelete size={12} />
+                        </button>
+                    </div>
                 </div>
-              )}
-            </div>
+              </div>
+            ))}
           </div>
         );
       })}

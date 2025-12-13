@@ -5,6 +5,8 @@ export const actionType = {
     SET_SUGGEST_TEXT:"SET_SUGGEST_TEXT",
     ADD_MESSAGE: "ADD_MESSAGE",         // 添加新消息
     SET_MESSAGE: "SET_MESSAGE",
+    UPDATE_MESSAGE: "UPDATE_MESSAGE",   // 更新特定消息
+    DELETE_MESSAGE: "DELETE_MESSAGE",   // 删除特定消息
     CLEAR_MESSAGES: "CLEAR_MESSAGES",   // 清空消息
     SET_CHARACTER_MOOD: "SET_CHARACTER_MOOD",
     ADD_STREAMING_REPLY: "ADD_STREAMING_REPLY",
@@ -13,12 +15,18 @@ export const actionType = {
     SET_CURRENT_CONVERSATION_ID: "SET_CURRENT_CONVERSATION_ID",
     SWITCH_CONVERSATION: "SWITCH_CONVERSATION",
     UPDATE_CONVERSATION_MESSAGES: "UPDATE_CONVERSATION_MESSAGES",
+    TRIGGER_RUN_FROM_HERE: "TRIGGER_RUN_FROM_HERE", // New action
 }
 
 const reducer = (state, action) => {
     console.log(action);
 
     switch(action.type) {
+        case actionType.TRIGGER_RUN_FROM_HERE:
+            return {
+                ...state,
+                runFromHereTimestamp: Date.now(),
+            };
         case actionType.UPDATE_CONVERSATION_MESSAGES:
             return {
                 ...state,
@@ -74,6 +82,25 @@ const reducer = (state, action) => {
             return {
                 ...state,
                 userMessages: action.userMessages,
+            };
+
+        case actionType.UPDATE_MESSAGE:
+            const updatedMessages = [...state.userMessages];
+            if (action.index >= 0 && action.index < updatedMessages.length) {
+                updatedMessages[action.index] = {
+                    ...updatedMessages[action.index],
+                    ...action.message
+                };
+            }
+            return {
+                ...state,
+                userMessages: updatedMessages,
+            };
+
+        case actionType.DELETE_MESSAGE:
+            return {
+                ...state,
+                userMessages: state.userMessages.filter((_, i) => i !== action.index),
             };
 
         case actionType.CLEAR_MESSAGES:

@@ -96,7 +96,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   };
 
   const inputRef = useRef(null);
-  const [{ userMessages, suggestText }, dispatch] = useStateValue();
+  const [{ userMessages, suggestText, runFromHereTimestamp }, dispatch] = useStateValue();
   // 将 userText 从全局状态中移除，改为本地状态管理
   const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
@@ -381,17 +381,71 @@ export const ChatboxInputBox = ({ activePetId }) => {
       alert("Please select a character first!");
       return;
     }
+
+    let isRunFromHere = false;
+    let currentInputText = userText;
+    let runFromHereContent = null; // Store original multimodal content for re-run
+
+    // 检查是否有内容可发送（文字或附件）
+    const hasText = currentInputText.trim().length > 0;
+    const hasAttachments = attachments.length > 0 || userImage != null;
+
+    if (!hasText && !hasAttachments) {
+        // 没有文字也没有附件，检查是否是重新生成
+        if (userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user') {
+            isRunFromHere = true;
+            const lastMsg = userMessages[userMessages.length - 1];
+            // Preserve original content structure for multimodal
+            runFromHereContent = lastMsg.content;
+            // Extract text for _userText (used for memory/search)
+            if (typeof lastMsg.content === 'string') {
+                currentInputText = lastMsg.content;
+            } else if (Array.isArray(lastMsg.content)) {
+                currentInputText = lastMsg.content.filter(p => p.type === 'text').map(p => p.text).join('\n');
+            } else {
+                currentInputText = JSON.stringify(lastMsg.content);
+            }
+        } else {
+            return;
+        }
+    }
+
     setIsGenerating(true);
-    if (!userText.trim()) return;
 
     // 🔒 锁定当前对话 ID，防止在等待 AI 回复期间切换标签导致数据错乱
     let sendingConversationId = conversationIdRef.current;
 
-    _userText = userText;
+    _userText = currentInputText;
     
+    // Construct display content (User Text + Attachments)
+    let displayContent;
+    if (isRunFromHere) {
+        // Use original content from history
+        displayContent = runFromHereContent;
+    } else if (userImage != null || attachments.length > 0) {
+        displayContent = [{ type: "text", text: _userText }];
+        if (userImage) {
+            displayContent.push({ type: "image_url", image_url: { url: userImage } });
+        }
+        attachments.forEach(att => {
+            if (att.type === 'image_url') {
+                // Use saved file path instead of base64 for persistence
+                displayContent.push({ type: 'image_url', image_url: { url: att.path } });
+            } else {
+                displayContent.push({ type: 'file_url', file_url: { url: att.path, data: att.data } });
+            }
+        });
+    } else {
+        displayContent = _userText;
+    }
+
     setUserText("");
     dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
 
+    // 仅当用户仍停留在当前对话时，才更新 UI
+    if (!isRunFromHere && sendingConversationId === conversationIdRef.current) {
+      dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: displayContent} });
+    }
 
     window.electron?.sendMoodUpdate('thinking');
 
@@ -406,13 +460,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
        petInfo.personality.trim().toLowerCase() === "default");
     thisModel = petInfo;
 
+    const historyMessages = isRunFromHere ? userMessages.slice(0, -1) : userMessages;
+
     if (agentActive) {
       // Agent 模式不改变原有逻辑
-      fullMessages = [...userMessages, { role: "user", content: _userText }];
-      // 仅当用户仍停留在当前对话时，才更新 UI
-      if (sendingConversationId === conversationIdRef.current) {
-        dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText } });
-      }
+      fullMessages = [...historyMessages, { role: "user", content: _userText }];
     } else {
 
       let searchContent = "";
@@ -428,7 +480,26 @@ export const ChatboxInputBox = ({ activePetId }) => {
         searchContent = await searchDuckDuckGo(searchContent);
         searchContent = "\n Combine the following information to answer the question, and list relevant links below (if they are related to the question, be sure to list them):\n" + searchContent + "根据问题使用恰当的语言回答（如英语、中文）";
       }
-      // alert(userImage)
+      
+      let content = displayContent;
+      if (searchContent) {
+          if (Array.isArray(content)) {
+              // Clone to avoid modifying displayContent
+              content = content.map(part => {
+                  if (part.type === 'text') {
+                      return { ...part, text: part.text + searchContent };
+                  }
+                  return part;
+              });
+          } else {
+              content = content + searchContent;
+          }
+      }
+
+      if (userImage || attachments.length > 0) {
+          setUserImage(null);
+          setAttachments([]);
+      }
 
       if (!isDefaultPersonality) {
         if (memoryEnabled) {
@@ -460,22 +531,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
             systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
-          // 仅当用户仍停留在当前对话时，才更新 UI
-          if (sendingConversationId === conversationIdRef.current) {
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          }
-          let content = _userText + searchContent;
-          if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
-            {
-                type: "image_url",
-                image_url: {
-                    url: `${userImage}`,
-                },
-            },]
-            setUserImage(null);
-          }
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
+          
+          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         } else {
           let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
           if (petInfo.isAgent) {
@@ -484,22 +541,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
             systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
           }
           const systemPrompt = { role: "system", content: systemContent };
-          // 仅当用户仍停留在当前对话时，才更新 UI
-          if (sendingConversationId === conversationIdRef.current) {
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          }
-          let content = _userText + searchContent;
-          if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
-            {
-                type: "image_url",
-                image_url: {
-                    url: `${userImage}`,
-                },
-            },]
-            setUserImage(null);
-          }
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
+          
+          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         }
       } else {
         thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
@@ -528,42 +571,19 @@ export const ChatboxInputBox = ({ activePetId }) => {
           let systemContent = `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
           systemContent += "You are a helpful assisatant";
           const systemPrompt = { role: "system", content: systemContent };
-          // 仅当用户仍停留在当前对话时，才更新 UI
-          if (sendingConversationId === conversationIdRef.current) {
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          }
-          let content = _userText + searchContent;
-          if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
-            {
-                type: "image_url",
-                image_url: {
-                    url: `${userImage}`,
-                },
-            },]
-            setUserImage(null);
-          }
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
+          
+          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         } else {
           let systemContent = `You are a helpful assisatant`;
           const systemPrompt = { role: "system", content: systemContent };
-          // 仅当用户仍停留在当前对话时，才更新 UI
-          if (sendingConversationId === conversationIdRef.current) {
-            dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          }
-          let content = _userText + searchContent;
-          if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
-            {
-                type: "image_url",
-                image_url: {
-                    url: `${userImage}`,
-                },
-            },]
-            setUserImage(null);
-          }
-          fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
+          
+          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         }
+      }
+      
+      if (userImage || attachments.length > 0) {
+          setUserImage(null);
+          setAttachments([]);
       }
     }
 
@@ -653,7 +673,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         const newConversation = await window.electron.createConversation({
           petId: petInfo._id,
           title: _userText,
-          history: [...userMessages, { role: "user", content: _userText }, botReply],
+          history: [...userMessages, { role: "user", content: displayContent }, botReply],
         });
         if (newConversation) {
             sendingConversationId = newConversation._id;
@@ -669,7 +689,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     // 使用 sendingConversationId 更新数据库，确保写入正确的对话
     if (sendingConversationId) {
-        const newHistory = [...userMessages, { role: "user", content: _userText }, botReply];
+        const newHistory = [...historyMessages, { role: "user", content: displayContent }, botReply];
         
         // Only update title if it's the first message
         const isFirstMessage = userMessages.length === 0;
@@ -705,6 +725,16 @@ export const ChatboxInputBox = ({ activePetId }) => {
   };
 
 
+  // Listen for regeneration requests
+  useEffect(() => {
+    if (runFromHereTimestamp) {
+        // Trigger send logic
+        // We need to ensure we don't trigger this on initial load, but runFromHereTimestamp is only set by action
+        handleSend();
+    }
+  }, [runFromHereTimestamp]);
+
+
 // 处理粘贴事件，检测是否有图片数据
 const handlePaste = (e) => {
   const items = e.clipboardData?.items;
@@ -737,14 +767,73 @@ const handleStop = () => {
     }
   };
 
+  const [attachments, setAttachments] = useState([]);
+  const fileInputRef = useRef(null);
+
+  const handleFileSelect = async (e) => {
+    const files = Array.from(e.target.files);
+    for (const file of files) {
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            const base64Data = event.target.result;
+            try {
+                // Save to Electron
+                const result = await window.electron.saveFile({
+                    fileName: file.name,
+                    fileData: base64Data
+                });
+                
+                if (!result || !result.path) {
+                    console.error('saveFile returned invalid result:', result);
+                    return;
+                }
+                
+                let type = 'file_url';
+                if (file.type.startsWith('image/')) type = 'image_url';
+                
+                setAttachments(prev => [...prev, {
+                    type,
+                    url: base64Data,  // Always use base64 for preview
+                    path: result.path,
+                    name: file.name,
+                    data: base64Data
+                }]);
+            } catch (err) {
+                console.error('Failed to save file:', err);
+            }
+        };
+        reader.readAsDataURL(file);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const handleRemoveAttachment = (index) => {
+    setAttachments(prev => prev.filter((_, i) => i !== index));
+  };
+
   return (
     <div className="relative w-full max-w-3xl mx-auto px-4 pb-4">
       {/* 主输入框容器：模仿图2的紧凑风格 */}
       <div className="relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border border-transparent focus-within:border-gray-200 transition-all">
-        <PastedImagePreview
-            imageUrl={userImage}
-            onRemove={() => setUserImage(null)}
-        />
+        <div className="flex flex-wrap gap-2">
+            <PastedImagePreview imageUrl={userImage} onRemove={() => setUserImage(null)} />
+            {attachments.map((att, index) => (
+                <div key={index} className="relative inline-block rounded-md mt-2 bg-gray-100 p-2 border border-gray-200">
+                    {att.type === 'image_url' ? (
+                        <img src={att.url} alt="Attachment" className="max-w-full max-h-32 object-cover rounded-md" />
+                    ) : (
+                        <div className="flex items-center gap-2">
+                            <FaFile className="text-gray-500" />
+                            <span className="text-xs max-w-[100px] truncate">{att.name}</span>
+                        </div>
+                    )}
+                    <MdOutlineCancel 
+                        className="absolute -top-2 -right-2 cursor-pointer z-10 text-gray-500 hover:text-red-500 bg-white rounded-full"
+                        onClick={() => handleRemoveAttachment(index)}
+                    />
+                </div>
+            ))}
+        </div>
         <textarea
           ref={inputRef}
           value={userText}
@@ -759,13 +848,26 @@ const handleStop = () => {
           style={{ height: 'auto' }}
         />
 
+
+
         {/* 底部工具栏：左侧功能开关 + 右侧发送按钮 */}
         <div className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
             {/* Left: Tools (Agent, Memory, Search) */}
             <div className="flex items-center gap-1">
-                <button className="p-2 text-gray-500 hover:bg-gray-200 rounded-full transition-colors">
+                <button 
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-2 text-gray-500 hover:bg-gray-200 rounded-full transition-colors"
+                    title="Add Attachment"
+                >
                     <AiOutlinePlus className="w-5 h-5" />
                 </button>
+                <input 
+                    type="file" 
+                    ref={fileInputRef} 
+                    onChange={handleFileSelect} 
+                    className="hidden" 
+                    multiple 
+                />
                 
                 <button
                     onClick={toggleAgent}
@@ -849,9 +951,9 @@ const handleStop = () => {
                 {/* Send Button */}
                 <button
                     onClick={isGenerating ? handleStop : handleSend}
-                    disabled={!String(userText).trim() && !isGenerating}
+                    disabled={!String(userText).trim() && !isGenerating && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')}
                     className={`p-2 rounded-full transition-all duration-200 ${
-                        !String(userText).trim() && !isGenerating 
+                        !String(userText).trim() && !isGenerating && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')
                         ? "bg-gray-300 cursor-not-allowed" 
                         : "bg-black hover:bg-gray-800 shadow-md"
                     }`}

@@ -80,6 +80,53 @@ ipcMain.handle('read-pet-image', async (event, fileName) => {
   }
 });
 
+// 保存上传文件
+ipcMain.handle('save-file', async (event, { fileName, fileData }) => {
+  try {
+    const documentsPath = app.getPath('documents');
+    const uploadsPath = path.join(documentsPath, 'PetGPT_Data', 'Uploads');
+    if (!fs.existsSync(uploadsPath)) {
+      fs.mkdirSync(uploadsPath, { recursive: true });
+    }
+    
+    const uniqueFileName = `${Date.now()}_${fileName}`;
+    const filePath = path.join(uploadsPath, uniqueFileName);
+    
+    // Remove header if present (e.g. "data:image/png;base64,")
+    const base64Data = fileData.replace(/^data:.*;base64,/, "");
+    const buffer = Buffer.from(base64Data, 'base64');
+    
+    fs.writeFileSync(filePath, buffer);
+    return { fileName: uniqueFileName, path: filePath };
+  } catch (err) {
+    console.error('Save file error:', err);
+    throw err;
+  }
+});
+
+// 读取上传文件
+ipcMain.handle('read-upload', async (event, fileName) => {
+  try {
+    const documentsPath = app.getPath('documents');
+    const filePath = path.join(documentsPath, 'PetGPT_Data', 'Uploads', fileName);
+    if (!fs.existsSync(filePath)) throw new Error(`File does not exist: ${filePath}`);
+    const buffer = fs.readFileSync(filePath);
+    
+    const ext = path.extname(fileName).toLowerCase();
+    let mimeType = 'application/octet-stream';
+    if (['.png', '.jpg', '.jpeg'].includes(ext)) mimeType = 'image/jpeg';
+    else if (['.gif'].includes(ext)) mimeType = 'image/gif';
+    else if (['.webp'].includes(ext)) mimeType = 'image/webp';
+    else if (['.txt'].includes(ext)) mimeType = 'text/plain';
+    else if (['.pdf'].includes(ext)) mimeType = 'application/pdf';
+    
+    return `data:${mimeType};base64,${buffer.toString('base64')}`;
+  } catch (err) {
+    console.error('Read upload error:', err);
+    throw err;
+  }
+});
+
 // 处理图片
 ipcMain.handle('process-image', async (event, base64Image) => {
   try {

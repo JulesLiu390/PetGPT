@@ -50,6 +50,8 @@ contextBridge.exposeInMainWorld('electron', {
   processImage: (base64Image, baseFilename) => ipcRenderer.invoke('process-image', base64Image),
   onProcessImageResult: (callback) => ipcRenderer.on('process-image-result', (event, filePaths) => callback(filePaths)),
   readPetImage: (fileName) => ipcRenderer.invoke('read-pet-image', fileName),
+  saveFile: (data) => ipcRenderer.invoke('save-file', data),
+  readUpload: (fileName) => ipcRenderer.invoke('read-upload', fileName),
   changeSettingsWindow: () => ipcRenderer.send("change-settings-window"),
   testOpen: (command) => ipcRenderer.send("say-hello", command),
   updateWindowSizePreset: async (preset) => ipcRenderer.invoke('update-window-size-preset', preset),
