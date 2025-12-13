@@ -5,13 +5,27 @@ contextBridge.exposeInMainWorld('electron', {
   // Expose settings interfaces
   getSettings: () => ipcRenderer.invoke('get-settings'),
   updateSettings: (data) => ipcRenderer.invoke('update-settings', data),
-  // 🐾 Pet 接口
+  // 🐾 Pet 接口 (保留兼容)
   getPets: () => ipcRenderer.invoke('get-pets'),
   createPet: (data) => ipcRenderer.invoke('create-pet', data),
   updatePet: (id, updatedData) => ipcRenderer.invoke('update-pet', { id, updatedData }),
   deletePet: (id) => ipcRenderer.invoke('delete-pet', id),
   // getPetById: (id) => ipcRenderer.invoke('get-pet-by-id', id),
   getPet: (id) => ipcRenderer.invoke('get-pet-by-id', id),
+  
+  // 🔧 ModelConfig 接口 (新)
+  getModelConfigs: () => ipcRenderer.invoke('get-model-configs'),
+  createModelConfig: (data) => ipcRenderer.invoke('create-model-config', data),
+  updateModelConfig: (id, updatedData) => ipcRenderer.invoke('update-model-config', { id, updatedData }),
+  deleteModelConfig: (id) => ipcRenderer.invoke('delete-model-config', id),
+  getModelConfig: (id) => ipcRenderer.invoke('get-model-config-by-id', id),
+  
+  // 🤖 Assistant 接口 (新)
+  getAssistants: () => ipcRenderer.invoke('get-assistants'),
+  createAssistant: (data) => ipcRenderer.invoke('create-assistant', data),
+  updateAssistant: (id, updatedData) => ipcRenderer.invoke('update-assistant', { id, updatedData }),
+  deleteAssistant: (id) => ipcRenderer.invoke('delete-assistant', id),
+  getAssistant: (id) => ipcRenderer.invoke('get-assistant-by-id', id),
   // 💬 Conversation 接口
   getConversations: () => ipcRenderer.invoke('get-conversations'),
   createConversation: (data) => ipcRenderer.invoke('create-conversation', data),
@@ -52,6 +66,9 @@ contextBridge.exposeInMainWorld('electron', {
   readPetImage: (fileName) => ipcRenderer.invoke('read-pet-image', fileName),
   saveFile: (data) => ipcRenderer.invoke('save-file', data),
   readUpload: (fileName) => ipcRenderer.invoke('read-upload', fileName),
+  extractDocumentText: (fileName) => ipcRenderer.invoke('extract-document-text', fileName),
+  openFileExternal: (filePath) => ipcRenderer.invoke('open-file-external', filePath),
+  probeOpenAICompatibleEndpoints: (options) => ipcRenderer.invoke('probe-openai-compatible-endpoints', options),
   changeSettingsWindow: () => ipcRenderer.send("change-settings-window"),
   testOpen: (command) => ipcRenderer.send("say-hello", command),
   updateWindowSizePreset: async (preset) => ipcRenderer.invoke('update-window-size-preset', preset),

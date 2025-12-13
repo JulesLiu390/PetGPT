@@ -144,8 +144,9 @@ export const ChatboxInputBox = () => {
             if (pet) {
               setFounctionModel(settings.defaultModelId);
               console.log("Default character ID validated successfully");
-              const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
-              setFunctionModelInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+              const { _id, name, modelName, modelApiKey, modelProvider, modelUrl } = pet;
+              const systemInstruction = pet.systemInstruction || pet.personality || '';
+              setFunctionModelInfo({ _id, name, modelName, systemInstruction, modelApiKey, modelProvider, modelUrl });
             } else {
               console.log("Default character ID not found in database, using null");
               setFunctionModelInfo(null);
@@ -213,8 +214,11 @@ export const ChatboxInputBox = () => {
       try {
         const pet = await window.electron.getPet(characterId);
         if (pet) {
-          const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
-          setPetInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+          const { _id, name, modelName, modelApiKey, modelProvider, modelUrl, hasMood, isAgent } = pet;
+          const systemInstruction = pet.systemInstruction || pet.personality || '';
+          // hasMood 向后兼容：如果没设置 hasMood，则根据 !isAgent 判断
+          const computedHasMood = typeof hasMood === 'boolean' ? hasMood : !isAgent;
+          setPetInfo({ _id, name, modelName, systemInstruction, modelApiKey, modelProvider, modelUrl, hasMood: computedHasMood });
           thisModel = null;
           if(functionModelInfo == null) {
             thisModel = pet;
@@ -377,9 +381,9 @@ export const ChatboxInputBox = () => {
     }
 
     let fullMessages = [];
-    const isDefaultPersonality = petInfo?.personality &&
-      (petInfo.personality.trim().toLowerCase() === "default model (english)" ||
-       petInfo.personality.trim().toLowerCase() === "default");
+    const isDefaultPersonality = petInfo?.systemInstruction &&
+      (petInfo.systemInstruction.trim().toLowerCase() === "default model (english)" ||
+       petInfo.systemInstruction.trim().toLowerCase() === "default");
     thisModel = petInfo;
 
     if (agentActive) {
@@ -426,12 +430,8 @@ export const ChatboxInputBox = () => {
             );
             setUserMemory(getUserMemory);
           }
-          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
-          if (petInfo.isAgent) {
-            systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
-          } else {
-            systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
-          }
+          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n关于用户的信息设定如下:\n${userMemory}\n`;
+          systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
           const systemPrompt = { role: "system", content: systemContent };
           dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
           let content = _userText + searchContent;
@@ -447,12 +447,8 @@ export const ChatboxInputBox = () => {
           }
           fullMessages = [...userMessages, systemPrompt, { role: "user", content: content   }];
         } else {
-          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
-          if (petInfo.isAgent) {
-            systemContent += "请在回答中保持角色特点，生成回复内容。";
-          } else {
-            systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
-          }
+          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n`;
+          systemContent += "请在回答中保持角色特点，生成回复内容。";
           const systemPrompt = { role: "system", content: systemContent };
           dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
           let content = _userText + searchContent;
@@ -576,7 +572,8 @@ export const ChatboxInputBox = () => {
         petInfo.modelProvider,
         petInfo.modelApiKey,
         petInfo.modelName,
-        petInfo.modelUrl
+        petInfo.modelUrl,
+        { hasMood: petInfo.hasMood !== false } // 传递 hasMood 选项
       );
     }
 

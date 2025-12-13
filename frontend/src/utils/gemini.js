@@ -1,9 +1,9 @@
 // Helper to convert OpenAI messages to Gemini contents
-const convertMessagesToGemini = (messages) => {
+const convertMessagesToGemini = async (messages) => {
   const contents = [];
   let systemInstruction = null;
 
-  messages.forEach((msg) => {
+  for (const msg of messages) {
     if (msg.role === 'system') {
       // Gemini 1.5 supports systemInstruction, but for broader compatibility 
       // or if using older models, we might need to handle it differently.
@@ -21,8 +21,8 @@ const convertMessagesToGemini = (messages) => {
       let parts = [];
       
       if (Array.isArray(msg.content)) {
-        // Handle multimodal (text + image)
-        msg.content.forEach(part => {
+        // Handle multimodal (text + image/video/audio/documents)
+        for (const part of msg.content) {
             if (part.type === 'text') {
                 parts.push({ text: part.text });
             } else if (part.type === 'image_url') {
@@ -39,24 +39,65 @@ const convertMessagesToGemini = (messages) => {
                             }
                         });
                     }
+                } else if (window.electron?.readUpload) {
+                    // Load from file path
+                    try {
+                        const fileName = url.split('/').pop();
+                        const base64Data = await window.electron.readUpload(fileName);
+                        const match = base64Data.match(/^data:(.*?);base64,(.*)$/);
+                        if (match) {
+                            parts.push({
+                                inline_data: {
+                                    mime_type: match[1],
+                                    data: match[2]
+                                }
+                            });
+                        }
+                    } catch (err) {
+                        console.error('Failed to load image for Gemini:', err);
+                        parts.push({ text: `[Image: ${url}]` });
+                    }
                 }
             } else if (part.type === 'file_url') {
-                if (part.file_url.data) {
-                    const base64Data = part.file_url.data;
-                    const match = base64Data.match(/^data:(.*?);base64,(.*)$/);
-                    if (match) {
-                        parts.push({
-                            inline_data: {
-                                mime_type: match[1],
-                                data: match[2]
+                const fileUrl = part.file_url?.url;
+                const mimeType = part.file_url?.mime_type;
+                
+                // Try to load file data
+                if (window.electron?.readUpload && fileUrl) {
+                    try {
+                        const fileName = fileUrl.split('/').pop();
+                        const base64Data = await window.electron.readUpload(fileName);
+                        const match = base64Data.match(/^data:(.*?);base64,(.*)$/);
+                        if (match) {
+                            // Gemini supports: images, audio, video, PDF
+                            // For documents like .doc/.docx, we can only send as text reference
+                            const fileMime = match[1];
+                            const isSupported = fileMime.startsWith('image/') || 
+                                               fileMime.startsWith('audio/') || 
+                                               fileMime.startsWith('video/') ||
+                                               fileMime === 'application/pdf';
+                            
+                            if (isSupported) {
+                                parts.push({
+                                    inline_data: {
+                                        mime_type: match[1],
+                                        data: match[2]
+                                    }
+                                });
+                            } else {
+                                // Unsupported file type - just add as text reference
+                                parts.push({ text: `[Attachment: ${part.file_url?.name || fileName}]` });
                             }
-                        });
+                        }
+                    } catch (err) {
+                        console.error('Failed to load file for Gemini:', err);
+                        parts.push({ text: `[Attachment: ${part.file_url?.name || fileUrl}]` });
                     }
                 } else {
-                    parts.push({ text: `[Attachment: ${part.file_url.url}]` });
+                    parts.push({ text: `[Attachment: ${part.file_url?.name || fileUrl}]` });
                 }
             }
-        });
+        }
       } else {
         parts = [{ text: msg.content }];
       }
@@ -66,14 +107,14 @@ const convertMessagesToGemini = (messages) => {
         parts: parts
       });
     }
-  });
+  }
 
   return { contents, systemInstruction };
 };
 
 export const callGeminiLib = async (messages, apiKey, model = "gemini-1.5-flash") => {
   try {
-    const { contents, systemInstruction } = convertMessagesToGemini(messages);
+    const { contents, systemInstruction } = await convertMessagesToGemini(messages);
     
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
     
@@ -127,7 +168,7 @@ export const callGeminiLib = async (messages, apiKey, model = "gemini-1.5-flash"
 
 export const callGeminiLibStream = async (messages, apiKey, model = "gemini-1.5-flash", onChunk, abortSignal) => {
   try {
-    const { contents, systemInstruction } = convertMessagesToGemini(messages);
+    const { contents, systemInstruction } = await convertMessagesToGemini(messages);
     
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse&key=${apiKey}`;
     
@@ -183,7 +224,8 @@ export const callGeminiLibStream = async (messages, apiKey, model = "gemini-1.5-
             const textChunk = data.candidates?.[0]?.content?.parts?.[0]?.text;
             if (textChunk) {
               fullText += textChunk;
-              if (onChunk) onChunk(fullText);
+              // 传增量 textChunk，因为 reducer 是 append 模式
+              if (onChunk) onChunk(textChunk);
             }
           } catch (e) {
             // Ignore parse errors for intermediate chunks

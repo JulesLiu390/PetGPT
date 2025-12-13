@@ -9,6 +9,26 @@ import { searchDuckDuckGo } from "../../utils/search"
 import { MdOutlineCancel } from "react-icons/md";
 import { SiQuicktype } from "react-icons/si";
 
+/**
+ * 获取模型的 API 格式
+ * 支持新的 apiFormat 字段和旧的 modelProvider 字段
+ * @param {Object} model - 模型配置对象
+ * @returns {string} - 'openai_compatible' | 'gemini_official'
+ */
+const getApiFormat = (model) => {
+  if (!model) return 'openai_compatible';
+  
+  // 优先使用新字段
+  if (model.apiFormat) return model.apiFormat;
+  
+  // 兼容旧的 modelProvider 字段
+  const provider = model.modelProvider;
+  if (provider === 'gemini') return 'gemini_official';
+  
+  // 所有其他 provider 都映射到 openai_compatible
+  return 'openai_compatible';
+};
+
 
 
 // 预览粘贴图片组件（无边框，圆角矩形）
@@ -152,8 +172,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
             if (pet) {
               setFounctionModel(settings.defaultModelId);
               console.log("Default character ID validated successfully");
-              const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
-              setFunctionModelInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+              const { _id, name, modelName, modelApiKey, modelProvider, modelUrl, apiFormat } = pet;
+              const systemInstruction = pet.systemInstruction || pet.personality || '';
+              setFunctionModelInfo({ _id, name, modelName, systemInstruction, modelApiKey, modelProvider, modelUrl, apiFormat });
             } else {
               console.log("Default character ID not found in database, using null");
               setFunctionModelInfo(null);
@@ -203,7 +224,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       try {
         let suggestion = await promptSuggestion(
             {user:_userText, assistant:stateReply.content},
-            thisModel.modelProvider,
+            getApiFormat(thisModel),
             thisModel.modelApiKey,
             thisModel.modelName,
             thisModel.modelUrl
@@ -231,13 +252,45 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     const fetchPetInfo = async () => {
       try {
-        const pet = await window.electron.getPet(characterId);
-        if (pet) {
-          const { _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl } = pet;
-          setPetInfo({ _id, name, modelName, personality, modelApiKey, modelProvider, modelUrl });
+        // 首先尝试从新的 Assistant API 获取
+        let assistant = await window.electron.getAssistant(characterId);
+        let modelConfig = null;
+        
+        if (assistant && assistant.modelConfigId) {
+          // 新数据模型：从关联的 ModelConfig 获取 API 配置
+          modelConfig = await window.electron.getModelConfig(assistant.modelConfigId);
+        }
+        
+        // 如果新 API 没有数据，回退到旧的 Pet API（向后兼容）
+        if (!assistant) {
+          assistant = await window.electron.getPet(characterId);
+        }
+        
+        if (assistant) {
+          const { _id, name, hasMood, isAgent } = assistant;
+          // 向后兼容：优先使用 systemInstruction，fallback 到 personality
+          const systemInstruction = assistant.systemInstruction || assistant.personality || '';
+          // hasMood 向后兼容：如果没设置 hasMood，则根据 !isAgent 判断
+          const computedHasMood = typeof hasMood === 'boolean' ? hasMood : !isAgent;
+          
+          // 从 ModelConfig 获取 API 配置，如果没有则从 assistant 本身获取（兼容旧数据）
+          const apiConfig = modelConfig || assistant;
+          const { modelName, modelApiKey, modelUrl, apiFormat, modelProvider } = apiConfig;
+          
+          setPetInfo({ 
+            _id, 
+            name, 
+            modelName, 
+            systemInstruction, 
+            modelApiKey, 
+            modelProvider, 
+            modelUrl, 
+            apiFormat, 
+            hasMood: computedHasMood 
+          });
           thisModel = null;
           if(functionModelInfo == null) {
-            thisModel = pet;
+            thisModel = apiConfig;
           } else {
             thisModel = functionModelInfo;
           }
@@ -247,7 +300,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
-              thisModel.modelProvider,
+              getApiFormat(thisModel),
               thisModel.modelApiKey,
               thisModel.modelName,
               thisModel.modelUrl
@@ -430,9 +483,21 @@ export const ChatboxInputBox = ({ activePetId }) => {
         attachments.forEach(att => {
             if (att.type === 'image_url') {
                 // Use saved file path instead of base64 for persistence
-                displayContent.push({ type: 'image_url', image_url: { url: att.path } });
+                displayContent.push({ 
+                    type: 'image_url', 
+                    image_url: { url: att.path },
+                    mime_type: att.mime_type 
+                });
             } else {
-                displayContent.push({ type: 'file_url', file_url: { url: att.path, data: att.data } });
+                // For video/audio/documents, include mime_type for proper rendering
+                displayContent.push({ 
+                    type: 'file_url', 
+                    file_url: { 
+                        url: att.path, 
+                        mime_type: att.mime_type,
+                        name: att.name 
+                    }
+                });
             }
         });
     } else {
@@ -455,9 +520,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }
 
     let fullMessages = [];
-    const isDefaultPersonality = petInfo?.personality &&
-      (petInfo.personality.trim().toLowerCase() === "default model (english)" ||
-       petInfo.personality.trim().toLowerCase() === "default");
+    const isDefaultPersonality = petInfo?.systemInstruction &&
+      (petInfo.systemInstruction.trim().toLowerCase() === "default model (english)" ||
+       petInfo.systemInstruction.trim().toLowerCase() === "default");
     thisModel = petInfo;
 
     const historyMessages = isRunFromHere ? userMessages.slice(0, -1) : userMessages;
@@ -472,7 +537,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       if(searchActive) {
         searchContent = await refinedSearchFromPrompt(
           _userText,
-          thisModel.modelProvider,
+          getApiFormat(thisModel),
           thisModel.modelApiKey,
           thisModel.modelName,
           thisModel.modelUrl
@@ -504,7 +569,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       if (!isDefaultPersonality) {
         if (memoryEnabled) {
           const index = await longTimeMemory(_userText, 
-            thisModel.modelProvider,
+            getApiFormat(thisModel),
             thisModel.modelApiKey,
             thisModel.modelName,
             thisModel.modelUrl
@@ -517,29 +582,21 @@ export const ChatboxInputBox = ({ activePetId }) => {
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
-              thisModel.modelProvider,
+              getApiFormat(thisModel),
               thisModel.modelApiKey,
               thisModel.modelName,
               thisModel.modelUrl
             );
             setUserMemory(getUserMemory);
           }
-          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n关于用户的信息设定如下:\n${userMemory}\n`;
-          if (petInfo.isAgent) {
-            systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
-          } else {
-            systemContent += "请在回答中保持角色特点和用户设定，同时生成回复内容和情绪(mood: angry, smile, normal)";
-          }
+          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n关于用户的信息设定如下:\n${userMemory}\n`;
+          systemContent += "请在回答中保持角色特点和用户设定。";
           const systemPrompt = { role: "system", content: systemContent };
           
           fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         } else {
-          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.personality}\n`;
-          if (petInfo.isAgent) {
-            systemContent += "请在回答中保持角色特点，生成回复内容。";
-          } else {
-            systemContent += "请在回答中保持角色特点，同时生成回复内容和情绪(mood: angry, smile, normal)";
-          }
+          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n`;
+          systemContent += "请在回答中保持角色特点。";
           const systemPrompt = { role: "system", content: systemContent };
           
           fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
@@ -548,7 +605,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
         if (memoryEnabled) {
           const index = await longTimeMemory(_userText, 
-            thisModel.modelProvider,
+            getApiFormat(thisModel),
             thisModel.modelApiKey,
             thisModel.modelName,
             thisModel.modelUrl
@@ -561,7 +618,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
-              thisModel.modelProvider,
+              getApiFormat(thisModel),
               thisModel.modelApiKey,
               thisModel.modelName,
               thisModel.modelUrl
@@ -592,7 +649,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
     if(agentActive) {
       reply = await callCommand(
         fullMessages,
-        petInfo.modelProvider,
+        getApiFormat(petInfo),
         petInfo.modelApiKey,
         petInfo.modelName,
         petInfo.modelUrl
@@ -634,9 +691,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
       const controller = new AbortController();
       abortControllerRef.current = controller;
 
+      console.log('[ChatboxInputBox] Calling callOpenAILibStream with hasMood:', petInfo.hasMood, 'petInfo:', petInfo);
+
       reply = await callOpenAILibStream(
         fullMessages,
-        petInfo.modelProvider,
+        getApiFormat(petInfo),
         petInfo.modelApiKey,
         petInfo.modelName,
         petInfo.modelUrl,
@@ -648,8 +707,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
                 id: sendingConversationId 
             });
         },
-        controller.signal // Pass the signal
+        controller.signal, // Pass the signal
+        { hasMood: petInfo.hasMood !== false } // 传递 hasMood 选项
       );
+      
+      console.log('[ChatboxInputBox] callOpenAILibStream returned:', reply);
       
       abortControllerRef.current = null; // Clear ref after completion
     }
@@ -735,23 +797,31 @@ export const ChatboxInputBox = ({ activePetId }) => {
   }, [runFromHereTimestamp]);
 
 
-// 处理粘贴事件，检测是否有图片数据
-const handlePaste = (e) => {
+// 处理粘贴事件，支持图片、视频、音频和其他文件
+const handlePaste = async (e) => {
   const items = e.clipboardData?.items;
-  if (items) {
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].type.indexOf("image") !== -1) {
-        const file = items[i].getAsFile();
-        // 使用 FileReader 将图片转换成 Base64 data URL
-        const reader = new FileReader();
-        reader.onload = (evt) => {
-          const imageUrl = evt.target.result;
-          setUserImage(imageUrl);
-        };
-        reader.readAsDataURL(file);
-        // 阻止默认粘贴行为，避免在 textarea 中出现乱码文本
-        e.preventDefault();
-        break; // 处理到图片后退出循环
+  if (!items) return;
+  
+  const filesToProcess = [];
+  
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    // Check if item is a file (image, video, audio, etc.)
+    if (item.kind === 'file') {
+      const file = item.getAsFile();
+      if (file) {
+        filesToProcess.push(file);
+      }
+    }
+  }
+  
+  if (filesToProcess.length > 0) {
+    e.preventDefault();
+    
+    for (const file of filesToProcess) {
+      const attachment = await processFile(file);
+      if (attachment) {
+        setAttachments(prev => [...prev, attachment]);
       }
     }
   }
@@ -769,40 +839,56 @@ const handleStop = () => {
 
   const [attachments, setAttachments] = useState([]);
   const fileInputRef = useRef(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  // Helper function to process a file and add to attachments
+  const processFile = async (file) => {
+    return new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const base64Data = event.target.result;
+        try {
+          // Save to Electron
+          const result = await window.electron.saveFile({
+            fileName: file.name,
+            fileData: base64Data,
+            mimeType: file.type
+          });
+          
+          if (!result || !result.path) {
+            console.error('saveFile returned invalid result:', result);
+            resolve(null);
+            return;
+          }
+          
+          // Determine type based on mime
+          let type = 'file_url';
+          if (file.type.startsWith('image/')) type = 'image_url';
+          
+          resolve({
+            type,
+            url: base64Data,
+            path: result.path,
+            name: file.name,
+            mime_type: file.type,
+            data: base64Data
+          });
+        } catch (err) {
+          console.error('Failed to save file:', err);
+          resolve(null);
+        }
+      };
+      reader.readAsDataURL(file);
+    });
+  };
 
   const handleFileSelect = async (e) => {
     const files = Array.from(e.target.files);
     for (const file of files) {
-        const reader = new FileReader();
-        reader.onload = async (event) => {
-            const base64Data = event.target.result;
-            try {
-                // Save to Electron
-                const result = await window.electron.saveFile({
-                    fileName: file.name,
-                    fileData: base64Data
-                });
-                
-                if (!result || !result.path) {
-                    console.error('saveFile returned invalid result:', result);
-                    return;
-                }
-                
-                let type = 'file_url';
-                if (file.type.startsWith('image/')) type = 'image_url';
-                
-                setAttachments(prev => [...prev, {
-                    type,
-                    url: base64Data,  // Always use base64 for preview
-                    path: result.path,
-                    name: file.name,
-                    data: base64Data
-                }]);
-            } catch (err) {
-                console.error('Failed to save file:', err);
-            }
-        };
-        reader.readAsDataURL(file);
+      const attachment = await processFile(file);
+      if (attachment) {
+        setAttachments(prev => [...prev, attachment]);
+      }
     }
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
@@ -811,20 +897,87 @@ const handleStop = () => {
     setAttachments(prev => prev.filter((_, i) => i !== index));
   };
 
+  // Drag and drop handlers
+  const handleDragEnter = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    // Only set dragging to false if leaving the container (not entering a child)
+    if (e.currentTarget === e.target) {
+      setIsDragging(false);
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  };
+
+  const handleDrop = async (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = Array.from(e.dataTransfer.files);
+    if (files.length === 0) return;
+    
+    for (const file of files) {
+      const attachment = await processFile(file);
+      if (attachment) {
+        setAttachments(prev => [...prev, attachment]);
+      }
+    }
+  };
+
   return (
     <div className="relative w-full max-w-3xl mx-auto px-4 pb-4">
       {/* 主输入框容器：模仿图2的紧凑风格 */}
-      <div className="relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border border-transparent focus-within:border-gray-200 transition-all">
+      <div 
+        className={`relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border transition-all ${
+          isDragging 
+            ? 'border-blue-400 bg-blue-50' 
+            : 'border-transparent focus-within:border-gray-200'
+        }`}
+        onDragEnter={handleDragEnter}
+        onDragLeave={handleDragLeave}
+        onDragOver={handleDragOver}
+        onDrop={handleDrop}
+      >
+        {/* Drag overlay */}
+        {isDragging && (
+          <div className="absolute inset-0 flex items-center justify-center bg-blue-100/80 rounded-[26px] z-10 pointer-events-none">
+            <div className="text-blue-500 font-medium text-sm">
+              Drop files here
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap gap-2">
             <PastedImagePreview imageUrl={userImage} onRemove={() => setUserImage(null)} />
             {attachments.map((att, index) => (
-                <div key={index} className="relative inline-block rounded-md mt-2 bg-gray-100 p-2 border border-gray-200">
+                <div key={index} className="relative inline-block rounded-md mt-2 bg-gray-100 border border-gray-200 overflow-hidden">
                     {att.type === 'image_url' ? (
-                        <img src={att.url} alt="Attachment" className="max-w-full max-h-32 object-cover rounded-md" />
+                        <img src={att.url} alt="Attachment" className="w-20 h-20 object-cover" />
+                    ) : att.mime_type?.startsWith('video/') ? (
+                        <div className="w-20 h-20 bg-black flex items-center justify-center relative">
+                            <video src={att.url} className="w-full h-full object-cover" muted />
+                            <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                                <span className="text-white text-2xl">▶</span>
+                            </div>
+                        </div>
+                    ) : att.mime_type?.startsWith('audio/') ? (
+                        <div className="w-20 h-20 bg-gradient-to-br from-green-400 to-green-600 flex flex-col items-center justify-center p-1">
+                            <span className="text-white text-2xl">🎵</span>
+                            <span className="text-white text-[8px] truncate w-full text-center mt-1">{att.name}</span>
+                        </div>
                     ) : (
-                        <div className="flex items-center gap-2">
-                            <FaFile className="text-gray-500" />
-                            <span className="text-xs max-w-[100px] truncate">{att.name}</span>
+                        <div className="w-20 h-20 flex flex-col items-center justify-center p-1">
+                            <FaFile className="text-gray-500 text-xl" />
+                            <span className="text-[8px] text-gray-600 truncate w-full text-center mt-1">{att.name}</span>
                         </div>
                     )}
                     <MdOutlineCancel 

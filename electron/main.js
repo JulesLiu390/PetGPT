@@ -2,8 +2,11 @@ const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu, Tray } = requ
 const path = require('path');
 const fs = require('fs');
 const Pet = require('./models/pet');
+const ModelConfig = require('./models/model_config');
+const Assistant = require('./models/assistant');
 const Conversation = require('./models/conversation.js');
 const { sliceImageToFiles } = require('./models/image_processor.js');
+const mammoth = require('mammoth');
 
 const isDev = !app.isPackaged;
 const DEV_URL = 'http://localhost:5173';
@@ -113,16 +116,133 @@ ipcMain.handle('read-upload', async (event, fileName) => {
     const buffer = fs.readFileSync(filePath);
     
     const ext = path.extname(fileName).toLowerCase();
-    let mimeType = 'application/octet-stream';
-    if (['.png', '.jpg', '.jpeg'].includes(ext)) mimeType = 'image/jpeg';
-    else if (['.gif'].includes(ext)) mimeType = 'image/gif';
-    else if (['.webp'].includes(ext)) mimeType = 'image/webp';
-    else if (['.txt'].includes(ext)) mimeType = 'text/plain';
-    else if (['.pdf'].includes(ext)) mimeType = 'application/pdf';
+    const mimeMap = {
+      // Images
+      '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', 
+      '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+      // Video
+      '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime',
+      '.avi': 'video/x-msvideo', '.mkv': 'video/x-matroska',
+      // Audio
+      '.mp3': 'audio/mpeg', '.wav': 'audio/wav', '.ogg': 'audio/ogg',
+      '.m4a': 'audio/mp4', '.flac': 'audio/flac', '.aac': 'audio/aac',
+      // Documents
+      '.pdf': 'application/pdf', '.txt': 'text/plain', '.md': 'text/markdown',
+      '.json': 'application/json', '.csv': 'text/csv',
+    };
+    const mimeType = mimeMap[ext] || 'application/octet-stream';
     
     return `data:${mimeType};base64,${buffer.toString('base64')}`;
   } catch (err) {
     console.error('Read upload error:', err);
+    throw err;
+  }
+});
+
+// 提取文档文本（用于让 LLM 实际“读到”内容）
+ipcMain.handle('extract-document-text', async (event, fileName) => {
+  try {
+    const documentsPath = app.getPath('documents');
+    const filePath = path.join(documentsPath, 'PetGPT_Data', 'Uploads', fileName);
+    if (!fs.existsSync(filePath)) throw new Error(`File does not exist: ${filePath}`);
+
+    const ext = path.extname(fileName).toLowerCase();
+
+    // Plain text / markdown / csv / json
+    if (['.txt', '.md', '.csv', '.json'].includes(ext)) {
+      return fs.readFileSync(filePath, 'utf8');
+    }
+
+    // DOCX
+    if (ext === '.docx') {
+      const buffer = fs.readFileSync(filePath);
+      const { value } = await mammoth.extractRawText({ buffer });
+      return value || '';
+    }
+
+    // Not supported yet
+    return '';
+  } catch (err) {
+    console.error('Extract document text error:', err);
+    throw err;
+  }
+});
+
+// Auto-detect OpenAI-compatible endpoints
+// 探测候选 URL 列表，找出哪个能响应
+ipcMain.handle('probe-openai-compatible-endpoints', async (event, { apiKey, includeLocal = false }) => {
+  // 候选端点列表
+  const candidates = [
+    { id: 'openai', label: 'OpenAI', baseUrl: 'https://api.openai.com/v1' },
+    { id: 'xai', label: 'xAI (Grok)', baseUrl: 'https://api.x.ai/v1' },
+    { id: 'openrouter', label: 'OpenRouter', baseUrl: 'https://openrouter.ai/api/v1' },
+  ];
+  
+  if (includeLocal) {
+    candidates.push(
+      { id: 'ollama', label: 'Ollama (Local)', baseUrl: 'http://localhost:11434/v1' },
+      { id: 'lmstudio', label: 'LM Studio (Local)', baseUrl: 'http://localhost:1234/v1' }
+    );
+  }
+  
+  const results = [];
+  
+  for (const candidate of candidates) {
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5s timeout
+      
+      const response = await fetch(`${candidate.baseUrl}/models`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      results.push({
+        ...candidate,
+        status: response.status,
+        ok: response.ok,
+        // 200 = 完美匹配，401/403 = URL正确但key不对
+        match: response.ok ? 'perfect' : (response.status === 401 || response.status === 403) ? 'auth_error' : 'no_match'
+      });
+    } catch (err) {
+      results.push({
+        ...candidate,
+        status: 0,
+        ok: false,
+        match: 'error',
+        error: err.message
+      });
+    }
+  }
+  
+  // 选择最佳匹配
+  // 优先 perfect (200)，其次 auth_error (401/403)
+  let bestMatch = results.find(r => r.match === 'perfect');
+  if (!bestMatch) {
+    bestMatch = results.find(r => r.match === 'auth_error');
+  }
+  
+  return {
+    tried: results,
+    bestMatch: bestMatch || null,
+    matches: results.filter(r => r.match === 'perfect' || r.match === 'auth_error')
+  };
+});
+
+// 用系统默认应用打开文件
+ipcMain.handle('open-file-external', async (event, filePath) => {
+  try {
+    const { shell } = require('electron');
+    await shell.openPath(filePath);
+    return { success: true };
+  } catch (err) {
+    console.error('Open file error:', err);
     throw err;
   }
 });
@@ -137,7 +257,7 @@ ipcMain.handle('process-image', async (event, base64Image) => {
   }
 });
 
-// Pet 相关
+// Pet 相关 (保留兼容旧数据)
 ipcMain.handle('get-pets', async () => await Pet.findAll());
 ipcMain.handle('create-pet', async (event, data) => await Pet.create(data));
 ipcMain.handle('update-pet', async (event, { id, updatedData }) => await Pet.update(id, updatedData));
@@ -150,6 +270,20 @@ ipcMain.handle('get-pet-by-id', async (event, id) => {
     throw err;
   }
 });
+
+// ModelConfig 相关 (新)
+ipcMain.handle('get-model-configs', async () => await ModelConfig.findAll());
+ipcMain.handle('create-model-config', async (event, data) => await ModelConfig.create(data));
+ipcMain.handle('update-model-config', async (event, { id, updatedData }) => await ModelConfig.update(id, updatedData));
+ipcMain.handle('delete-model-config', async (event, id) => await ModelConfig.delete(id));
+ipcMain.handle('get-model-config-by-id', async (event, id) => await ModelConfig.findById(id));
+
+// Assistant 相关 (新)
+ipcMain.handle('get-assistants', async () => await Assistant.findAll());
+ipcMain.handle('create-assistant', async (event, data) => await Assistant.create(data));
+ipcMain.handle('update-assistant', async (event, { id, updatedData }) => await Assistant.update(id, updatedData));
+ipcMain.handle('delete-assistant', async (event, id) => await Assistant.delete(id));
+ipcMain.handle('get-assistant-by-id', async (event, id) => await Assistant.findById(id));
 
 // Conversation 相关
 ipcMain.handle('get-conversations', async () => await Conversation.findAll());
@@ -394,6 +528,11 @@ const createChatWindow = () => {
 
   chatWindow.setAlwaysOnTop(true, 'floating');
   chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+  
+  // 开发模式自动打开控制台（需要时取消注释）
+  // if (isDev) {
+  //   chatWindow.webContents.openDevTools({ mode: 'detach' });
+  // }
   
   if (isDev) {
     chatWindow.loadURL(`${DEV_URL}`); // 默认路由是 /

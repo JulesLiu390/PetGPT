@@ -29,25 +29,30 @@ class Pet {
   constructor(
     _id,
     name,
-    personality,
+    systemInstruction,
     appearance,
     imageName,
     modelProvider,
     modelName,
     modelApiKey,
     modelUrl,
-    isAgent
+    isAgent,
+    apiFormat,
+    hasMood
   ) {
     this._id = _id || uuidv4();
     this.name = name || '';
-    this.personality = personality || '';
+    this.systemInstruction = systemInstruction || ''; // 原 personality，改为 systemInstruction
     this.appearance = appearance || '';
     this.imageName = imageName || '';
-    this.modelProvider = modelProvider || '';
+    this.modelProvider = modelProvider || ''; // 保留旧字段以兼容
+    this.apiFormat = apiFormat || ''; // 新字段：'openai_compatible' | 'gemini_official'
     this.modelName = modelName || '';
     this.modelApiKey = modelApiKey || '';
     this.modelUrl = modelUrl || 'default';
     this.isAgent = typeof isAgent === 'boolean' ? isAgent : false;
+    // hasMood: 是否启用情绪表情，向后兼容：如果未设置则根据 !isAgent 判断
+    this.hasMood = typeof hasMood === 'boolean' ? hasMood : !this.isAgent;
   }
 
   static async findAll() {
@@ -61,17 +66,21 @@ class Pet {
 
   static async create(petData) {
     const pets = await readData();
+    // 向后兼容：支持 personality 或 systemInstruction
+    const sysInstr = petData.systemInstruction || petData.personality || '';
     const newPet = new Pet(
       null,
       petData.name,
-      petData.personality,
+      sysInstr,
       petData.appearance,
       petData.imageName,
       petData.modelProvider,
       petData.modelName,
       petData.modelApiKey,
       petData.modelUrl,
-      petData.isAgent
+      petData.isAgent,
+      petData.apiFormat,
+      petData.hasMood
     );
     pets.push(newPet);
     await writeData(pets);
@@ -83,9 +92,14 @@ class Pet {
     const index = pets.findIndex(p => p._id === _id);
     if (index === -1) return null;
 
-    // 如果 personality 是对象，则取其 description 属性
-    if (updatedPetData.personality && typeof updatedPetData.personality === 'object') {
-      updatedPetData.personality = updatedPetData.personality.description || '';
+    // 向后兼容：支持 personality 或 systemInstruction
+    if (updatedPetData.personality && !updatedPetData.systemInstruction) {
+      updatedPetData.systemInstruction = updatedPetData.personality;
+      delete updatedPetData.personality;
+    }
+    // 如果 systemInstruction 是对象，则取其 description 属性
+    if (updatedPetData.systemInstruction && typeof updatedPetData.systemInstruction === 'object') {
+      updatedPetData.systemInstruction = updatedPetData.systemInstruction.description || '';
     }
 
     pets[index] = {

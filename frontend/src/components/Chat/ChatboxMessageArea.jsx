@@ -75,32 +75,138 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
   );
 };
 
-import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh } from 'react-icons/md';
+import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh, MdOpenInNew, MdPlayCircle, MdAudiotrack, MdInsertDriveFile } from 'react-icons/md';
 import { actionType } from '../../context/reducer';
+
+// Helper: get mime type from file extension
+const getMimeTypeFromPath = (filePath) => {
+  const ext = filePath.split('.').pop()?.toLowerCase() || '';
+  const mimeMap = {
+    // Video
+    'mp4': 'video/mp4', 'webm': 'video/webm', 'mov': 'video/quicktime', 'avi': 'video/x-msvideo', 'mkv': 'video/x-matroska',
+    // Audio
+    'mp3': 'audio/mpeg', 'wav': 'audio/wav', 'ogg': 'audio/ogg', 'm4a': 'audio/mp4', 'flac': 'audio/flac', 'aac': 'audio/aac',
+    // Documents
+    'pdf': 'application/pdf',
+    'doc': 'application/msword', 'docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    'xls': 'application/vnd.ms-excel', 'xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    'ppt': 'application/vnd.ms-powerpoint', 'pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    'txt': 'text/plain', 'md': 'text/markdown', 'json': 'application/json', 'csv': 'text/csv',
+    // Images (fallback)
+    'png': 'image/png', 'jpg': 'image/jpeg', 'jpeg': 'image/jpeg', 'gif': 'image/gif', 'webp': 'image/webp', 'svg': 'image/svg+xml',
+  };
+  return mimeMap[ext] || 'application/octet-stream';
+};
+
+// Helper: get file icon based on mime type
+const getFileIcon = (mimeType) => {
+  if (mimeType?.startsWith('video/')) return <MdPlayCircle size={24} className="text-purple-500" />;
+  if (mimeType?.startsWith('audio/')) return <MdAudiotrack size={24} className="text-green-500" />;
+  if (mimeType === 'application/pdf') return <span className="text-red-500 text-lg">📄</span>;
+  if (mimeType?.includes('word') || mimeType?.includes('document')) return <span className="text-blue-500 text-lg">📝</span>;
+  if (mimeType?.includes('sheet') || mimeType?.includes('excel')) return <span className="text-green-600 text-lg">📊</span>;
+  if (mimeType?.includes('presentation') || mimeType?.includes('powerpoint')) return <span className="text-orange-500 text-lg">📽️</span>;
+  return <MdInsertDriveFile size={24} className="text-gray-500" />;
+};
+
+// Media Preview Modal
+const MediaPreviewModal = ({ src, type, onClose }) => {
+  if (!src) return null;
+  
+  return (
+    <div 
+      className="fixed inset-0 z-50 bg-black/80 flex items-center justify-center p-4"
+      onClick={onClose}
+    >
+      <div className="relative max-w-[90vw] max-h-[90vh]" onClick={e => e.stopPropagation()}>
+        <button 
+          onClick={onClose}
+          className="absolute -top-10 right-0 text-white hover:text-gray-300 text-2xl"
+        >
+          <MdClose size={28} />
+        </button>
+        {type === 'video' ? (
+          <video 
+            controls 
+            autoPlay 
+            className="max-w-[90vw] max-h-[85vh] rounded-lg"
+          >
+            <source src={src} />
+          </video>
+        ) : (
+          <img 
+            src={src} 
+            alt="preview" 
+            className="max-w-[90vw] max-h-[85vh] object-contain rounded-lg" 
+          />
+        )}
+      </div>
+    </div>
+  );
+};
 
 // Render a single part (text, image, or file)
 const MessagePartContent = ({ part, isUser }) => {
-  const [imageSrc, setImageSrc] = useState(null);
+  const [mediaSrc, setMediaSrc] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
+  const [showPreview, setShowPreview] = useState(false);
+  const [previewType, setPreviewType] = useState('image');
+  
+  // Determine mime type
+  const mimeType = part.file_url?.mime_type || part.mime_type || 
+    (part.type === 'file_url' ? getMimeTypeFromPath(part.file_url?.url || '') : null);
   
   useEffect(() => {
-    if (part.type === 'image_url') {
-      const url = part.image_url.url;
+    const loadMedia = async () => {
+      let url = null;
+      
+      if (part.type === 'image_url') {
+        url = part.image_url?.url;
+      } else if (part.type === 'file_url') {
+        url = part.file_url?.url;
+      }
+      
+      if (!url) return;
+      
       // If it's already base64 or http URL, use directly
       if (url.startsWith('data:') || url.startsWith('http')) {
-        setImageSrc(url);
-      } else {
-        // It's a file path, need to load via Electron
+        setMediaSrc(url);
+        return;
+      }
+      
+      // It's a file path, need to load via Electron
+      setIsLoading(true);
+      try {
         const fileName = url.split('/').pop();
-        window.electron?.readUpload(fileName).then(data => {
-          setImageSrc(data);
-        }).catch(err => {
-          console.error('Failed to load image:', err);
-          // Fallback: try using file:// protocol
-          setImageSrc(`file://${url}`);
-        });
+        const data = await window.electron?.readUpload(fileName);
+        setMediaSrc(data);
+      } catch (err) {
+        console.error('Failed to load media:', err);
+        // Fallback: try using file:// protocol
+        setMediaSrc(`file://${url}`);
+      } finally {
+        setIsLoading(false);
+      }
+    };
+    
+    // Only load for image_url or video/audio file_url
+    if (part.type === 'image_url') {
+      loadMedia();
+    } else if (part.type === 'file_url') {
+      const mime = mimeType;
+      if (mime?.startsWith('video/') || mime?.startsWith('audio/')) {
+        loadMedia();
       }
     }
-  }, [part]);
+  }, [part, mimeType]);
+
+  // Handle opening file externally
+  const handleOpenFile = () => {
+    const url = part.file_url?.url;
+    if (url) {
+      window.electron?.openFileExternal?.(url) || window.electron?.openExternal?.(`file://${url}`);
+    }
+  };
 
   if (part.type === 'text') {
     return isUser ? (
@@ -115,25 +221,113 @@ const MessagePartContent = ({ part, isUser }) => {
         </div>
     );
   } else if (part.type === 'image_url') {
-    if (!imageSrc) {
+    if (!mediaSrc || isLoading) {
       return (
-        <div className="rounded-lg overflow-hidden shadow-sm bg-gray-100 w-32 h-32 flex items-center justify-center">
-          <span className="text-gray-400 text-sm">Loading...</span>
+        <div className="rounded-lg overflow-hidden shadow-sm bg-gray-100 w-20 h-20 flex items-center justify-center">
+          <span className="text-gray-400 text-xs">Loading...</span>
         </div>
       );
     }
     return (
-        <div className="rounded-lg overflow-hidden shadow-sm">
-            <img src={imageSrc} alt="content" className="max-w-xs max-h-64 object-contain rounded-lg" />
+      <>
+        <div 
+          className="rounded-lg overflow-hidden shadow-sm cursor-pointer hover:opacity-90 transition-opacity"
+          onClick={() => { setPreviewType('image'); setShowPreview(true); }}
+        >
+          <img 
+            src={mediaSrc} 
+            alt="content" 
+            className="w-20 h-20 object-cover rounded-lg" 
+          />
         </div>
+        {showPreview && (
+          <MediaPreviewModal 
+            src={mediaSrc} 
+            type="image" 
+            onClose={() => setShowPreview(false)} 
+          />
+        )}
+      </>
     );
   } else if (part.type === 'file_url') {
+    const fileName = part.file_url?.url?.split('/').pop() || 'file';
+    
+    // Video - thumbnail with play button overlay
+    if (mimeType?.startsWith('video/')) {
+      return (
+        <>
+          <div 
+            className="relative rounded-lg overflow-hidden shadow-sm bg-black w-24 h-24 cursor-pointer hover:opacity-90 transition-opacity group"
+            onClick={() => { setPreviewType('video'); setShowPreview(true); }}
+          >
+            {mediaSrc ? (
+              <>
+                <video 
+                  className="w-full h-full object-cover" 
+                  preload="metadata"
+                  muted
+                >
+                  <source src={mediaSrc} type={mimeType} />
+                </video>
+                <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/40 transition-colors">
+                  <MdPlayCircle size={32} className="text-white/90" />
+                </div>
+              </>
+            ) : (
+              <div className="flex flex-col items-center justify-center h-full bg-gray-800">
+                <MdPlayCircle size={24} className="text-gray-400" />
+                <span className="text-gray-400 text-xs mt-1">{isLoading ? 'Loading...' : 'Video'}</span>
+              </div>
+            )}
+          </div>
+          {showPreview && mediaSrc && (
+            <MediaPreviewModal 
+              src={mediaSrc} 
+              type="video" 
+              onClose={() => setShowPreview(false)} 
+            />
+          )}
+        </>
+      );
+    }
+    
+    // Audio
+    if (mimeType?.startsWith('audio/')) {
+      return (
+        <div className="rounded-lg overflow-hidden shadow-sm bg-gray-100 max-w-sm">
+          <div className="flex items-center gap-2 p-2 border-b border-gray-200">
+            <MdAudiotrack size={20} className="text-green-500" />
+            <span className="text-sm truncate flex-1">{fileName}</span>
+            <button onClick={handleOpenFile} className="text-gray-500 hover:text-blue-500" title="Open externally">
+              <MdOpenInNew size={14} />
+            </button>
+          </div>
+          {mediaSrc ? (
+            <audio controls className="w-full" preload="metadata">
+              <source src={mediaSrc} type={mimeType} />
+              Your browser does not support audio playback.
+            </audio>
+          ) : (
+            <div className="flex items-center justify-center h-12 bg-gray-50">
+              <span className="text-gray-400 text-sm">{isLoading ? 'Loading...' : 'Audio'}</span>
+            </div>
+          )}
+        </div>
+      );
+    }
+    
+    // PDF / Documents / Other files - show card with open button
     return (
-        <div className="flex items-center gap-2 p-2 bg-gray-100 rounded-lg border border-gray-200">
-            <span className="text-xs text-gray-500">📎</span>
-            <span className="text-blue-500 truncate max-w-[200px] text-sm">
-                {part.file_url.url.split('/').pop()}
-            </span>
+        <div 
+          className="flex items-center gap-3 p-3 bg-gray-50 hover:bg-gray-100 rounded-lg border border-gray-200 cursor-pointer transition-colors max-w-xs"
+          onClick={handleOpenFile}
+        >
+            {getFileIcon(mimeType)}
+            <div className="flex-1 min-w-0">
+              <span className="text-sm text-gray-800 truncate block">{fileName}</span>
+              <span className="text-xs text-gray-400">{mimeType?.split('/')[1]?.toUpperCase() || 'FILE'}</span>
+            </div>
+            <MdOpenInNew size={16} className="text-gray-400" />
         </div>
     );
   }

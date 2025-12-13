@@ -3,6 +3,9 @@ import ChatboxBody from './Chat/ChatboxBody'
 import { HashRouter, Routes, Route } from "react-router-dom";
 import CharacterPage from '../pages/CharacterPage';
 import AddModelPage from '../pages/AddModelPage';
+import AddAssistantPage from '../pages/AddAssistantPage';
+import EditAssistantPage from '../pages/EditAssistantPage';
+import EditModelPage from '../pages/EditModelPage';
 import SelectCharacterPage from '../pages/SelectCharacterPage';
 import SettingsPage from '../pages/SettingsPage';
 
@@ -21,6 +24,9 @@ function App() {
           } />
           <Route path="/character" element={<CharacterPage />} />
           <Route path="/addCharacter" element={<AddModelPage />} />
+          <Route path="/addAssistant" element={<AddAssistantPage />} />
+          <Route path="/editAssistant" element={<EditAssistantPage />} />
+          <Route path="/editModel" element={<EditModelPage />} />
           <Route path="/selectCharacter" element={<SelectCharacterPage />} />
           <Route path="/settings" element={<SettingsPage />} />
         </Routes>

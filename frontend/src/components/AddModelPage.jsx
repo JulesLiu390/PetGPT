@@ -27,7 +27,7 @@ const presetCharacterOptions = [
     value: "own character",
     data: {
       name: "",
-      personality: "",
+      systemInstruction: "",
       imageName: "default",
       modelProvider: "openai",
       modelName: "",
@@ -35,14 +35,14 @@ const presetCharacterOptions = [
       modelUrl: "default",
       isAgent: false,
     },
-    useDefaultPersonality: false,
+    useDefaultSystemInstruction: false,
   },
   {
     label: "Opai (Openai pure assistant)",
     value: "Opai",
     data: {
       name: "Opai",
-      personality: "You are a useful assistant",
+      systemInstruction: "You are a useful assistant",
       imageName: "Opai",
       modelProvider: "openai",
       modelName: "gpt-4o",
@@ -50,14 +50,14 @@ const presetCharacterOptions = [
       modelUrl: "default",
       isAgent: true,
     },
-    useDefaultPersonality: true,
+    useDefaultSystemInstruction: true,
   },
   {
     label: "Gemina (Openai pure assistant)",
     value: "Gemina",
     data: {
       name: "Gemina",
-      personality: "You are a useful assistant",
+      systemInstruction: "You are a useful assistant",
       imageName: "Gemina",
       modelProvider: "gemini",
       modelName: "gemini-2.0-flash",
@@ -65,14 +65,14 @@ const presetCharacterOptions = [
       modelUrl: "default",
       isAgent: true,
     },
-    useDefaultPersonality: true,
+    useDefaultSystemInstruction: true,
   },
   {
     label: "Grocka (Grok pure assistant)",
     value: "Grocka",
     data: {
       name: "Grocka",
-      personality: "You are a useful assistant",
+      systemInstruction: "You are a useful assistant",
       imageName: "Grocka",
       modelProvider: "grok",
       modelName: "grok-2-1212",
@@ -80,14 +80,14 @@ const presetCharacterOptions = [
       modelUrl: "default",
       isAgent: true,
     },
-    useDefaultPersonality: true,
+    useDefaultSystemInstruction: true,
   },
   {
     label: "Claudia (Anthropic pure assistant)",
     value: "Claudia",
     data: {
       name: "Claudia",
-      personality: "You are a useful assistant",
+      systemInstruction: "You are a useful assistant",
       imageName: "Claudia",
       modelProvider: "anthropic",
       modelName: "claude-3-7-sonnet-20250219",
@@ -95,14 +95,14 @@ const presetCharacterOptions = [
       modelUrl: "default",
       isAgent: true,
     },
-    useDefaultPersonality: true,
+    useDefaultSystemInstruction: true,
   },
 ];
 
 const AddCharacterPage = () => {
   const [character, setCharacter] = useState({
     name: "",
-    personality: "",
+    systemInstruction: "",
     imageName: "default",
     modelProvider: "openai",
     modelName: "",
@@ -111,7 +111,7 @@ const AddCharacterPage = () => {
     isAgent: false,
   });
 
-  const [useDefaultPersonality, setUseDefaultPersonality] = useState(false);
+  const [useDefaultSystemInstruction, setUseDefaultSystemInstruction] = useState(false);
   const [modelUrlType, setModelUrlType] = useState("default");
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
@@ -124,11 +124,11 @@ const AddCharacterPage = () => {
     const preset = presetCharacterOptions.find(opt => opt.value === presetValue);
     if (preset && preset.data) {
       const presetData = { ...preset.data };
-      if (preset.useDefaultPersonality) {
-        presetData.personality = "default";
-        setUseDefaultPersonality(true);
+      if (preset.useDefaultSystemInstruction) {
+        presetData.systemInstruction = "default";
+        setUseDefaultSystemInstruction(true);
       } else {
-        setUseDefaultPersonality(false);
+        setUseDefaultSystemInstruction(false);
       }
       setCharacter(presetData);
       setPresetSelected(presetValue);
@@ -192,7 +192,7 @@ const AddCharacterPage = () => {
     try {
       const submitData = { 
         ...character, 
-        personality: useDefaultPersonality ? "default" : character.personality 
+        systemInstruction: useDefaultSystemInstruction ? "default" : character.systemInstruction 
       };
       if (!selectedImageFile && submitData.imageName === "default") {
         submitData.imageName = "default";
@@ -208,7 +208,7 @@ const AddCharacterPage = () => {
       applyPreset("own character");
       setModelUrlType("default");
       setTestResult(null);
-      setUseDefaultPersonality(false);
+      setUseDefaultSystemInstruction(false);
       setSelectedImageFile(null);
     } catch (error) {
       console.error("Error creating pet:", error.message);
@@ -221,11 +221,11 @@ const AddCharacterPage = () => {
     setTestResult(null);
     try {
       let messages = [];
-      const personalityDesc =
-        character.personality.trim() === "" ? "default" : character.personality;
+      const sysInstrDesc =
+        character.systemInstruction.trim() === "" ? "default" : character.systemInstruction;
       messages.push({
         role: "system",
-        content: `Your personality: ${personalityDesc}`,
+        content: `Your system instruction: ${sysInstrDesc}`,
       });
       messages.push({ role: "user", content: "Who are you?" });
       let result = await callOpenAILib(
@@ -291,27 +291,27 @@ const AddCharacterPage = () => {
             className="w-full p-1 border rounded focus:outline-none"
           />
 
-          {/* 人格描述及 Use Default Personality 勾选框 */}
+          {/* System Instruction 及 Use Default 勾选框 */}
           <div className="flex flex-col space-y-1">
-            <label className="text-gray-700">Personality Description:</label>
+            <label className="text-gray-700">System Instruction:</label>
             <textarea
-              name="personality"
-              placeholder="Enter personality description or function for agent"
-              value={useDefaultPersonality ? "You are a useful assistant" : character.personality}
+              name="systemInstruction"
+              placeholder="Enter system instruction or function for agent"
+              value={useDefaultSystemInstruction ? "You are a useful assistant" : character.systemInstruction}
               onChange={handleChange}
-              disabled={useDefaultPersonality}
+              disabled={useDefaultSystemInstruction}
               className={`w-full p-1 border rounded resize-none h-12 ${
-                useDefaultPersonality ? "bg-gray-200 cursor-not-allowed" : ""
+                useDefaultSystemInstruction ? "bg-gray-200 cursor-not-allowed" : ""
               }`}
             />
             <label className="text-gray-700">
               <input
                 type="checkbox"
-                checked={useDefaultPersonality}
-                onChange={(e) => setUseDefaultPersonality(e.target.checked)}
+                checked={useDefaultSystemInstruction}
+                onChange={(e) => setUseDefaultSystemInstruction(e.target.checked)}
                 className="mr-1"
               />
-              Use Default Personality
+              Use Default System Instruction
             </label>
           </div>
 

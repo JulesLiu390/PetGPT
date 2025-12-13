@@ -2,16 +2,25 @@ import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { searchDuckDuckGo } from './search';
 import { z } from "zod";
-import { callGeminiLib, callGeminiLibStream, fetchGeminiModels } from './gemini';
+import { callLLM, callLLMStream, fetchModels as llmFetchModels } from './llm/index.js';
 
-// 定义 provider 对应的 URL 字典
-const providerURLs = {
-  openai: "https://api.openai.com/v1",
-  gemini: "https://generativelanguage.googleapis.com/v1beta/openai",
-  anthropic: "https://api.anthropic.com/v1",
-  grok: "https://api.x.ai/v1"
+// 根据 apiFormat 获取默认 URL（用于辅助函数）
+// 注意：这些辅助函数使用 OpenAI SDK，所以 gemini_official 走 OpenAI 兼容端点
+const getDefaultUrl = (apiFormat) => {
+  const urls = {
+    // 新格式
+    'openai_compatible': 'https://api.openai.com/v1',
+    'gemini_official': 'https://generativelanguage.googleapis.com/v1beta/openai',
+    // 兼容旧格式
+    'openai': 'https://api.openai.com/v1',
+    'gemini': 'https://generativelanguage.googleapis.com/v1beta/openai',
+    'anthropic': 'https://api.anthropic.com/v1',
+    'grok': 'https://api.x.ai/v1'
+  };
+  return urls[apiFormat] || 'https://api.openai.com/v1';
 };
 
+// 保留 sanitizeMessages 用于辅助函数（情绪检测、记忆等）
 const sanitizeMessages = (messages) => {
   return messages.map(msg => {
     if (Array.isArray(msg.content)) {
@@ -42,19 +51,26 @@ const MoodSchema = z.object({
 // 定义不支持结构化输出的模型列表
 const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "claude-3-7-sonnet-20250219", "deepseek-r1-searching","huihui_ai/gemma3-abliterated:4b"];
 
-// 独立的情绪判断函数
-const detectMood = async (messages, provider, apiKey, model, baseURL) => {
+// 独立的情绪判断函数 - 基于用户问题判断情绪
+const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL) => {
+  console.log('[detectMood] Starting mood detection based on user question');
+  
   // 构造一个新的 client 实例，避免干扰
   let url = baseURL;
   if (url === "default") {
-    url = providerURLs[provider] || url;
+    url = getDefaultUrl(apiFormat);
   } else {
-    if(url.slice(-1) == "/") {
-      url += 'v1';
-    } else {
-      url += '/v1'
+    // 只有当 URL 不包含 /v1 时才添加
+    if (!url.includes('/v1')) {
+      if(url.slice(-1) == "/") {
+        url += 'v1';
+      } else {
+        url += '/v1';
+      }
     }
   }
+  
+  console.log('[detectMood] Using URL:', url);
 
   const openai = new OpenAI({
     apiKey: apiKey,
@@ -62,19 +78,21 @@ const detectMood = async (messages, provider, apiKey, model, baseURL) => {
     dangerouslyAllowBrowser: true,
   });
 
-  // 构造专门用于判断情绪的消息列表
-  // 我们需要让模型根据当前的对话上下文（主要是用户的最后一句话）来判断助手应该有的情绪
-  // 为了不破坏原有 messages 的结构（可能包含 system prompt），我们构建一个新的上下文
+  // 基于用户问题判断情绪
   const moodMessages = [
-    ...messages,
     { 
       role: "system", 
-      content: "Analyze the conversation context and the user's last message. Determine the appropriate mood for the assistant's response. Choose exactly one from: 'angry', 'normal', 'smile'. Return only the JSON object: {\"mood\": \"...\"}." 
+      content: "Based on the user's message, determine what mood/emotion the assistant should show when responding. Choose exactly one from: 'angry' (for complaints, frustration), 'normal' (for neutral questions), 'smile' (for happy, grateful, or friendly messages). Return only JSON: {\"mood\": \"...\"}." 
+    },
+    {
+      role: "user",
+      content: userQuestion
     }
   ];
 
   try {
     if (notSupportedModels.includes(model)) {
+      console.log('[detectMood] Using non-structured output path for model:', model);
       // 不支持结构化输出，使用普通对话并解析
       const completion = await openai.chat.completions.create({
         model: model,
@@ -82,171 +100,118 @@ const detectMood = async (messages, provider, apiKey, model, baseURL) => {
         stream: false
       });
       const content = completion.choices[0]?.message?.content?.toLowerCase() || "";
+      console.log('[detectMood] Raw response:', content);
       if (content.includes("angry")) return "angry";
       if (content.includes("smile")) return "smile";
       return "normal";
     } else {
+      console.log('[detectMood] Using structured output path for model:', model);
       // 支持结构化输出
       const completion = await openai.beta.chat.completions.parse({
         model: model,
         messages: sanitizeMessages(moodMessages),
         response_format: zodResponseFormat(MoodSchema, "mood_response"),
       });
-      return completion.choices[0]?.message?.parsed?.mood || "normal";
+      const result = completion.choices[0]?.message?.parsed?.mood || "normal";
+      console.log('[detectMood] Structured output result:', result);
+      return result;
     }
   } catch (error) {
-    console.warn("Mood detection failed, defaulting to normal:", error);
+    console.warn("[detectMood] Mood detection failed, defaulting to normal:", error);
     return "normal";
   }
 };
 
-export const callOpenAILib = async (messages, provider, apiKey, model, baseURL) => {
-  if (provider === 'gemini') {
-    return await callGeminiLib(messages, apiKey, model);
-  }
-
-  // 直接使用传入的 apiKey 和 model 参数
-  if (baseURL === "default") {
-    baseURL = providerURLs[provider] || "https://api.openai.com/v1";
-  } else {
-    // baseURL += '/v1';
-    if (!baseURL.endsWith("/v1") && !baseURL.endsWith("/v1/")) {
-        if(baseURL.slice(-1) == "/") {
-            baseURL += 'v1';
-        } else {
-            baseURL += '/v1'
-        }
-    }
-  }
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: baseURL,
-    dangerouslyAllowBrowser: true,
+export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL, options = {}) => {
+  const { hasMood = true } = options;
+  
+  // 使用统一的 LLM 适配层
+  const result = await callLLM({
+    messages,
+    apiFormat,
+    apiKey,
+    model,
+    baseUrl: baseURL
   });
 
-  try {
-    // 并发执行：内容生成 + 情绪判断
-    const moodPromise = detectMood(messages, provider, apiKey, model, baseURL === providerURLs[provider] ? "default" : baseURL.replace(/\/v1$/, ''));
-    
-    // 主回复生成（不再强制 schema，除非是特定需求，但这里为了保持一致性，我们改为普通文本生成）
-    // 注意：原代码中 callOpenAILib 是非流式的，且使用了 StructuredResponseSchema。
-    // 用户要求 "模型本身的回复应该是非schema的"。
-    // 所以我们将 content 生成改为普通 chat completion。
-    
-    const contentPromise = openai.chat.completions.create({
-        model: model,
-        messages: sanitizeMessages(messages),
-        stream: false
-    });
-
-    const [moodResult, contentResult] = await Promise.all([moodPromise, contentPromise]);
-    
-    const content = contentResult.choices[0]?.message?.content || "Error: Empty response";
-
-    return {
-        content: content,
-        mood: moodResult
-    };
-
-  } catch (error) {
-    const fakeChatCompletion = {
-      choices: [
-        {
-          message: {
-            parsed: {
-              content: error.message,
-              mood: "normal"
-            }
-          }
-        }
-      ]
-    };
-    // 保持原有错误处理结构，虽然现在我们不再直接返回 parsed
-    return { content: error.message, mood: "normal" };
+  // 只有启用情绪时才调用情绪检测
+  let mood = "normal";
+  if (hasMood) {
+    try {
+      // 从 messages 中提取用户最后一条消息
+      const userMessages = messages.filter(m => m.role === 'user');
+      const lastUserMessage = userMessages[userMessages.length - 1];
+      const userQuestion = typeof lastUserMessage?.content === 'string' 
+        ? lastUserMessage.content 
+        : (lastUserMessage?.content?.[0]?.text || '');
+      
+      mood = await detectMood(userQuestion, apiFormat, apiKey, model, baseURL);
+    } catch (e) {
+      console.warn("Mood detection failed:", e);
+    }
   }
+
+  return {
+    content: result.content,
+    mood: mood
+  };
 };
 
-export const callOpenAILibStream = async (messages, provider, apiKey, model, baseURL, onChunk, abortSignal) => {
-  if (provider === 'gemini') {
-    return await callGeminiLibStream(messages, apiKey, model, onChunk, abortSignal);
-  }
-
-  // 直接使用传入的 apiKey 和 model 参数
-  let url = baseURL;
-  if (url === "default") {
-    url = providerURLs[provider] || "https://api.openai.com/v1";
+export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, baseURL, onChunk, abortSignal, options = {}) => {
+  const { hasMood = true } = options;
+  
+  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'options:', options);
+  
+  // 从 messages 中提取用户最后一条消息
+  const userMessages = messages.filter(m => m.role === 'user');
+  const lastUserMessage = userMessages[userMessages.length - 1];
+  const userQuestion = typeof lastUserMessage?.content === 'string' 
+    ? lastUserMessage.content 
+    : (lastUserMessage?.content?.[0]?.text || '');
+  
+  console.log('[callOpenAILibStream] userQuestion for mood:', userQuestion);
+  
+  // 只有启用情绪时才启动并发的情绪判断（基于用户问题）
+  let moodPromise;
+  if (hasMood && userQuestion) {
+    console.log('[callOpenAILibStream] Starting mood detection...');
+    moodPromise = detectMood(userQuestion, apiFormat, apiKey, model, baseURL).catch((e) => {
+      console.warn('[callOpenAILibStream] Mood detection failed:', e);
+      return "normal";
+    });
   } else {
-    // baseURL += '/v1';
-    if (!url.endsWith("/v1") && !url.endsWith("/v1/")) {
-        if(url.slice(-1) == "/") {
-            url += 'v1';
-        } else {
-            url += '/v1'
-        }
-    }
+    console.log('[callOpenAILibStream] Skipping mood detection, hasMood:', hasMood, 'userQuestion:', !!userQuestion);
+    moodPromise = Promise.resolve("normal");
   }
 
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: url,
-    dangerouslyAllowBrowser: true,
+  // 使用统一的 LLM 适配层
+  const result = await callLLMStream({
+    messages,
+    apiFormat,
+    apiKey,
+    model,
+    baseUrl: baseURL,
+    onChunk: (deltaText, fullText) => {
+      // 传增量 deltaText，因为 reducer 是 append 模式
+      if (onChunk) onChunk(deltaText);
+    },
+    abortSignal
   });
 
-  try {
-    // 启动并发的情绪判断
-    // 注意：这里传入原始 baseURL (未加 v1 的)，因为 detectMood 内部会处理
-    const moodPromise = detectMood(messages, provider, apiKey, model, baseURL);
+  // 等待情绪判断完成
+  const mood = await moodPromise;
+  
+  console.log('[callOpenAILibStream] Final mood result:', mood);
 
-    const stream = await openai.chat.completions.create({
-      model: model,
-      messages: sanitizeMessages(messages),
-      stream: true,
-    }, { signal: abortSignal });
-
-    let fullContent = "";
-
-    for await (const chunk of stream) {
-      if (abortSignal?.aborted) {
-         break;
-      }
-      const content = chunk.choices[0]?.delta?.content || "";
-      if (content) {
-        fullContent += content;
-        if (onChunk) {
-            onChunk(content);
-        }
-      }
-    }
-    
-    // 等待情绪判断完成
-    // 按照需求：每次等问题回答完了再更新表情
-    // 这里我们在流式传输结束后，再等待 moodPromise，确保返回时 mood 已经就绪
-    const mood = await moodPromise;
-    
-    return {
-        content: fullContent,
-        mood: mood
-    };
-
-  } catch (error) {
-    if (error.name === 'AbortError') {
-        console.log('Stream aborted');
-        return {
-            content: fullContent || "Aborted", // Return what we have so far
-            mood: "normal"
-        };
-    }
-    console.error("Streaming error:", error);
-    return {
-        content: "Error: " + error.message,
-        mood: "normal"
-    };
-  }
+  return {
+    content: result.content,
+    mood: mood
+  };
 };
 
 export const refinedSearchFromPrompt = async (
   userPrompt,
-  provider,
+  apiFormat,
   apiKey,
   model,
   baseURL
@@ -264,7 +229,7 @@ export const refinedSearchFromPrompt = async (
   ];
   // 直接使用传入的 apiKey 和 model 参数
   if (baseURL === "default") {
-    baseURL = providerURLs[provider] || baseURL;
+    baseURL = getDefaultUrl(apiFormat);
   } else {
     // baseURL += '/v1';
     if(baseURL.slice(-1) == "/") {
@@ -287,10 +252,10 @@ export const refinedSearchFromPrompt = async (
 
 
 
-export const callCommand = async (messages, provider, apiKey, model, baseURL) => {
+export const callCommand = async (messages, apiFormat, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
   if (baseURL === "default") {
-    baseURL = providerURLs[provider] || baseURL;
+    baseURL = getDefaultUrl(apiFormat);
   } else {
     if(baseURL.slice(-1) == "/") {
       baseURL += 'v1';
@@ -358,9 +323,9 @@ const LongTermMemoryResponseSchema = z.object({
   value: z.string(),
 });
 
-export const longTimeMemory = async (message, provider, apiKey, model, baseURL) => {
+export const longTimeMemory = async (message, apiFormat, apiKey, model, baseURL) => {
   if (baseURL === "default") {
-    baseURL = providerURLs[provider] || baseURL;
+    baseURL = getDefaultUrl(apiFormat);
   } else {
     if(baseURL.slice(-1) == "/") {
       baseURL += 'v1';
@@ -418,9 +383,9 @@ export const longTimeMemory = async (message, provider, apiKey, model, baseURL) 
   }
 };
 
-export const processMemory = async (configStr, provider, apiKey, model, baseURL) => {
+export const processMemory = async (configStr, apiFormat, apiKey, model, baseURL) => {
   if (baseURL === "default") {
-    baseURL = providerURLs[provider] || baseURL;
+    baseURL = getDefaultUrl(apiFormat);
   } else {
     if(baseURL.slice(-1) == "/") {
       baseURL += 'v1';
@@ -465,9 +430,9 @@ export const processMemory = async (configStr, provider, apiKey, model, baseURL)
   }
 };
 
-export const promptSuggestion = async (messages, provider, apiKey, model, baseURL) => {
+export const promptSuggestion = async (messages, apiFormat, apiKey, model, baseURL) => {
   if (baseURL === "default") {
-    baseURL = providerURLs[provider] || baseURL;
+    baseURL = getDefaultUrl(apiFormat);
   } else {
     if(baseURL.slice(-1) == "/") {
       baseURL += 'v1';
@@ -505,37 +470,7 @@ export const promptSuggestion = async (messages, provider, apiKey, model, baseUR
   }
 };
 
-export const fetchModels = async (provider, apiKey, baseURL) => {
-  if (provider === 'gemini') {
-    return await fetchGeminiModels(apiKey);
-  }
-
-  let url = baseURL;
-  if (url === "default") {
-    url = providerURLs[provider] || "https://api.openai.com/v1";
-  } else {
-    // Simple check to avoid double v1 if possible, but sticking to existing logic for now to be safe
-    // or better: check if it already ends in /v1
-    if (!url.endsWith("/v1") && !url.endsWith("/v1/")) {
-        if(url.slice(-1) == "/") {
-            url += 'v1';
-        } else {
-            url += '/v1'
-        }
-    }
-  }
-
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: url,
-    dangerouslyAllowBrowser: true,
-  });
-
-  try {
-    const list = await openai.models.list();
-    return list.data;
-  } catch (error) {
-    console.error("Error fetching models:", error);
-    throw error;
-  }
+export const fetchModels = async (apiFormat, apiKey, baseURL) => {
+  // 使用统一的 LLM 适配层
+  return await llmFetchModels({ apiFormat, apiKey, baseUrl: baseURL });
 };
