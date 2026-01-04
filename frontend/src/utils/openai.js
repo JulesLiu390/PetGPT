@@ -1,6 +1,5 @@
 import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
-import { searchDuckDuckGo } from './search';
 import { z } from "zod";
 import { callLLM, callLLMStream, fetchModels as llmFetchModels } from './llm/index.js';
 
@@ -158,9 +157,9 @@ export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL,
 };
 
 export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, baseURL, onChunk, abortSignal, options = {}) => {
-  const { hasMood = true } = options;
+  const { hasMood = true, enableSearch = false } = options;
   
-  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'options:', options);
+  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'enableSearch:', enableSearch, 'options:', options);
   
   // 从 messages 中提取用户最后一条消息
   const userMessages = messages.filter(m => m.role === 'user');
@@ -191,6 +190,7 @@ export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, ba
     apiKey,
     model,
     baseUrl: baseURL,
+    options: { enableSearch }, // 传递 enableSearch 给 adapter
     onChunk: (deltaText, fullText) => {
       // 传增量 deltaText，因为 reducer 是 append 模式
       if (onChunk) onChunk(deltaText);
@@ -209,58 +209,18 @@ export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, ba
   };
 };
 
-export const refinedSearchFromPrompt = async (
-  userPrompt,
-  apiFormat,
-  apiKey,
-  model,
-  baseURL
-) => {
-  // 步骤 1：调用 LLM 提取关键词
-  const messages = [
-    {
-      role: "system",
-      content: "你是一个关键词压缩器。用户会给出一句话，请你从中提炼出最核心的一个关键词并且改正拼写（英语），如果是非英语则返回英语，只返回关键词，不加任何解释。",
-    },
-    {
-      role: "user",
-      content: userPrompt
-    }
-  ];
-  // 直接使用传入的 apiKey 和 model 参数
-  if (baseURL === "default") {
-    baseURL = getDefaultUrl(apiFormat);
-  } else {
-    // baseURL += '/v1';
-    if(baseURL.slice(-1) == "/") {
-      baseURL += 'v1';
-    } else {
-      baseURL += '/v1'
-    }
-  }
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: baseURL,
-    dangerouslyAllowBrowser: true,
-  });
-  const chatCompletion = await openai.chat.completions.create({
-    model: model,
-    messages: messages,
-  });
-  return chatCompletion.choices[0].message.content
-};
-
-
-
 export const callCommand = async (messages, apiFormat, apiKey, model, baseURL) => {
   // 直接使用传入的 apiKey 和 model 参数
   if (baseURL === "default") {
     baseURL = getDefaultUrl(apiFormat);
   } else {
-    if(baseURL.slice(-1) == "/") {
-      baseURL += 'v1';
-    } else {
-      baseURL += '/v1'
+    // 只有当 URL 不包含 /v1 时才添加
+    if (!baseURL.includes('/v1')) {
+      if(baseURL.slice(-1) == "/") {
+        baseURL += 'v1';
+      } else {
+        baseURL += '/v1';
+      }
     }
   }
   const openai = new OpenAI({
@@ -327,10 +287,13 @@ export const longTimeMemory = async (message, apiFormat, apiKey, model, baseURL)
   if (baseURL === "default") {
     baseURL = getDefaultUrl(apiFormat);
   } else {
-    if(baseURL.slice(-1) == "/") {
-      baseURL += 'v1';
-    } else {
-      baseURL += '/v1'
+    // 只有当 URL 不包含 /v1 时才添加
+    if (!baseURL.includes('/v1')) {
+      if(baseURL.slice(-1) == "/") {
+        baseURL += 'v1';
+      } else {
+        baseURL += '/v1';
+      }
     }
   }
 
@@ -387,10 +350,13 @@ export const processMemory = async (configStr, apiFormat, apiKey, model, baseURL
   if (baseURL === "default") {
     baseURL = getDefaultUrl(apiFormat);
   } else {
-    if(baseURL.slice(-1) == "/") {
-      baseURL += 'v1';
-    } else {
-      baseURL += '/v1'
+    // 只有当 URL 不包含 /v1 时才添加
+    if (!baseURL.includes('/v1')) {
+      if(baseURL.slice(-1) == "/") {
+        baseURL += 'v1';
+      } else {
+        baseURL += '/v1';
+      }
     }
   }
   
@@ -434,10 +400,13 @@ export const promptSuggestion = async (messages, apiFormat, apiKey, model, baseU
   if (baseURL === "default") {
     baseURL = getDefaultUrl(apiFormat);
   } else {
-    if(baseURL.slice(-1) == "/") {
-      baseURL += 'v1';
-    } else {
-      baseURL += '/v1'
+    // 只有当 URL 不包含 /v1 时才添加
+    if (!baseURL.includes('/v1')) {
+      if(baseURL.slice(-1) == "/") {
+        baseURL += 'v1';
+      } else {
+        baseURL += '/v1';
+      }
     }
   }
 

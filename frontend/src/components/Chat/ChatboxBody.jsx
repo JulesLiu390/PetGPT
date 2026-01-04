@@ -256,8 +256,13 @@ export const Chatbox = () => {
   const handleNewChat = () => {
     const activeTab = tabs.find(tab => tab.id === activeTabId);
     if (activeTab) {
+        // 如果有活跃的 Tab，使用其 petId 创建新对话
         window.electron.sendCharacterId(activeTab.petId);
+    } else if (tabs.length > 0) {
+        // 如果有其他 Tab，使用第一个 Tab 的 petId
+        window.electron.sendCharacterId(tabs[0].petId);
     } else {
+        // 没有任何 Tab，打开角色选择窗口
         window.electron?.changeSelectCharacterWindow();
     }
   };
@@ -417,8 +422,14 @@ export const Chatbox = () => {
         
         <div className="flex-1 overflow-hidden relative flex flex-col">
              {tabs.length === 0 ? (
-                <div className="flex-1 flex items-center justify-center text-gray-300">
-                    Start a new conversation...
+                <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
+                    <span>No active conversations</span>
+                    <button 
+                        onClick={() => window.electron?.changeSelectCharacterWindow()}
+                        className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
+                    >
+                        Select an Assistant
+                    </button>
                 </div>
              ) : (
                 tabs.map(tab => (

@@ -8,6 +8,9 @@ import EditAssistantPage from '../pages/EditAssistantPage';
 import EditModelPage from '../pages/EditModelPage';
 import SelectCharacterPage from '../pages/SelectCharacterPage';
 import SettingsPage from '../pages/SettingsPage';
+import McpPage from '../pages/McpPage';
+import AddMcpServerPage from '../pages/AddMcpServerPage';
+import EditMcpServerPage from '../pages/EditMcpServerPage';
 
 
 
@@ -29,6 +32,9 @@ function App() {
           <Route path="/editModel" element={<EditModelPage />} />
           <Route path="/selectCharacter" element={<SelectCharacterPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/mcp" element={<McpPage />} />
+          <Route path="/addMcpServer" element={<AddMcpServerPage />} />
+          <Route path="/editMcpServer" element={<EditMcpServerPage />} />
         </Routes>
   )
 }

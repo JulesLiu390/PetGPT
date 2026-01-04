@@ -4,6 +4,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/atom-one-dark.css'; // 引入暗色主题
+import { LiveToolCalls, ToolCallHistory } from './ToolCallDisplay';
 
 // 自定义链接组件，自动添加 target="_blank"
 const LinkRenderer = ({ href, children, ...props }) => {
@@ -335,7 +336,10 @@ const MessagePartContent = ({ part, isUser }) => {
 };
 
 const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
-  const [{ currentConversationId, userMessages }, dispatch] = useStateValue();
+  const [{ currentConversationId, userMessages, liveToolCalls }, dispatch] = useStateValue();
+  
+  // Get tool calls for current conversation
+  const activeToolCalls = liveToolCalls[currentConversationId] || [];
   const messageEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
@@ -605,6 +609,10 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
             key={index}
             className={`flex flex-col gap-2 mb-2 w-full ${isUser ? 'items-end' : 'items-start'} ${index === 0 ? 'mt-4' : ''}`}
           >
+            {/* 显示工具调用历史 (仅 assistant 消息) */}
+            {!isUser && msg.toolCallHistory && msg.toolCallHistory.length > 0 && (
+              <ToolCallHistory toolCalls={msg.toolCallHistory} compact={true} />
+            )}
             {parts.map((part, partIndex) => (
               <div
                 key={`${index}-${partIndex}`}
@@ -682,6 +690,19 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
         );
       })}
       
+
+      {/* ✅ Live Tool Calls Display */}
+      {activeToolCalls.length > 0 && (
+        <div className="mb-2">
+          <LiveToolCalls toolCalls={activeToolCalls.map(tc => ({
+            name: tc.toolName,
+            arguments: tc.args,
+            status: tc.status,
+            result: tc.result,
+            duration: tc.duration
+          }))} />
+        </div>
+      )}
 
       {/* ✅ Streaming Reply Area */}
       {streamingContent && (

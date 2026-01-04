@@ -1,5 +1,6 @@
 const { app, BrowserWindow, globalShortcut, ipcMain, screen, Menu, Tray } = require("electron");
 const path = require('path');
+// Node fetch is available in modern Electron/Node; fallback handled in helper.
 const fs = require('fs');
 const Pet = require('./models/pet');
 const ModelConfig = require('./models/model_config');
@@ -13,6 +14,9 @@ const DEV_URL = 'http://localhost:5173';
 
 require('./ipcMainHandler');
 
+// MCP 系统
+const { initializeMCP, cleanupMCP } = require('./mcp/ipcHandlers');
+
 // ------------------- 基础配置 ------------------- //
 
 // 定义各窗口的基准尺寸（以 medium 为标准）
@@ -21,7 +25,8 @@ const baselineSizes = {
   chat: { width: 400, height: 350 },
   addCharacter: { width: 600, height: 600 },
   selectCharacter: { width: 500, height: 350 },
-  settings: { width: 500, height: 700 }
+  settings: { width: 500, height: 700 },
+  mcp: { width: 550, height: 650 }
 };
 
 // 定义比例因子： small、medium、large
@@ -56,6 +61,7 @@ let characterWindow;
 let AddCharacterWindow;
 let selectCharacterWindow;
 let settingsWindow;
+let mcpWindow;
 let screenHeight = 0;
 let tray = null;
 
@@ -302,11 +308,16 @@ ipcMain.on('send-conversation-id', (event, id) => {
   console.log('[主进程] 当前会话 ID:', id);
 });
 
-// Mood 更新
-ipcMain.on('update-character-mood', (event, mood) => {
-  console.log("Received mood update:", mood);
-  sharedState.characterMood = mood;
-  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('character-mood-updated', mood));
+// Mood 更新 (支持按会话 ID 独立管理)
+ipcMain.on('update-character-mood', (event, mood, conversationId) => {
+  console.log("Received mood update:", mood, "for conversation:", conversationId);
+  // 保存到共享状态
+  if (!sharedState.characterMoods) sharedState.characterMoods = {};
+  if (conversationId) {
+    sharedState.characterMoods[conversationId] = mood;
+  }
+  sharedState.characterMood = mood; // 保持全局状态兼容
+  BrowserWindow.getAllWindows().forEach(win => win.webContents.send('character-mood-updated', mood, conversationId));
 });
 
 ipcMain.on('update-pets', () => {
@@ -342,6 +353,20 @@ ipcMain.on("change-chat-window", () => {
   } else {
     chatWindow.show();
     chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+  }
+});
+
+// 隐藏 addCharacter 窗口（用于关闭按钮）
+ipcMain.on("hide-addCharacter-window", () => {
+  if (AddCharacterWindow && AddCharacterWindow.isVisible()) {
+    AddCharacterWindow.hide();
+  }
+});
+
+// 隐藏 selectCharacter 窗口（用于关闭按钮）
+ipcMain.on("hide-selectCharacter-window", () => {
+  if (selectCharacterWindow && selectCharacterWindow.isVisible()) {
+    selectCharacterWindow.hide();
   }
 });
 
@@ -387,6 +412,23 @@ ipcMain.on("change-settings-window", () => {
     settingsWindow.setBounds({ x: newX, y: newY, width: size.width, height: size.height });
     settingsWindow.show();
     settingsWindow.focus();
+  }
+});
+
+ipcMain.on("change-mcp-window", () => {
+  if (!mcpWindow) return;
+  if (mcpWindow.isVisible()) {
+    mcpWindow.hide();
+  } else {
+    const size = getScaledSize(baselineSizes.mcp, currentSizePreset);
+    const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+    // MCP 窗口居中显示
+    const x = Math.round((sw - size.width) / 2);
+    const y = Math.round((sh - size.height) / 2);
+    const { x: newX, y: newY } = clampPosition(x, y, size.width, size.height, sw, sh);
+    mcpWindow.setBounds({ x: newX, y: newY, width: size.width, height: size.height });
+    mcpWindow.show();
+    mcpWindow.focus();
   }
 });
 
@@ -501,6 +543,15 @@ function updateAllWindowsSizes(preset = currentSizePreset) {
     if (newSize.height > sh) newSize.height = sh;
     settingsWindow.setBounds({ x: 0, y: 0, width: newSize.width, height: newSize.height });
   }
+  // 更新 mcpWindow：居中显示
+  if (mcpWindow && !mcpWindow.isDestroyed()) {
+    let newSize = getScaledSize(baselineSizes.mcp, currentSizePreset);
+    if (newSize.width > sw) newSize.width = sw;
+    if (newSize.height > sh) newSize.height = sh;
+    const newX = Math.round((sw - newSize.width) / 2);
+    const newY = Math.round((sh - newSize.height) / 2);
+    mcpWindow.setBounds({ x: newX, y: newY, width: newSize.width, height: newSize.height });
+  }
 }
 
 // ============ 创建窗口函数们 ============ //
@@ -535,6 +586,15 @@ const createcharacterWindow = () => {
   }
   
   characterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // 拦截关闭事件（Cmd+W / Ctrl+W），改为隐藏窗口而不是关闭
+  characterWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      characterWindow.hide();
+    }
+  });
+
   characterWindow.on("closed", () => { characterWindow = null; });
 };
 
@@ -596,10 +656,10 @@ const createChatWindow = () => {
     }
   };
   
-  // 开发模式自动打开控制台（需要时取消注释）
-  // if (isDev) {
-  //   chatWindow.webContents.openDevTools({ mode: 'detach' });
-  // }
+  // 开发模式自动打开控制台
+  if (isDev) {
+    chatWindow.webContents.openDevTools({ mode: 'detach' });
+  }
   
   if (isDev) {
     chatWindow.loadURL(`${DEV_URL}`); // 默认路由是 /
@@ -629,6 +689,15 @@ const createChatWindow = () => {
     if (!sidebarExpanded) {
       chatWindow.setAlwaysOnTop(true, 'floating');
       chatWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: false });
+    }
+  });
+
+  // 拦截关闭事件（Cmd+W / Ctrl+W），改为隐藏窗口而不是关闭
+  chatWindow.on('close', (event) => {
+    // 如果不是应用正在退出，则阻止关闭，改为隐藏
+    if (!app.isQuitting) {
+      event.preventDefault();
+      chatWindow.hide();
     }
   });
 
@@ -666,6 +735,15 @@ const createAddCharacterWindow = () => {
   }
 
   AddCharacterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // 拦截关闭事件（Cmd+W / Ctrl+W），改为隐藏窗口而不是关闭
+  AddCharacterWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      AddCharacterWindow.hide();
+    }
+  });
+
   AddCharacterWindow.on("closed", () => { AddCharacterWindow = null; });
 };
 
@@ -698,6 +776,15 @@ const createSelectCharacterWindow = () => {
   }
 
   selectCharacterWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // 拦截关闭事件（Cmd+W / Ctrl+W），改为隐藏窗口而不是关闭
+  selectCharacterWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      selectCharacterWindow.hide();
+    }
+  });
+
   selectCharacterWindow.on("closed", () => { selectCharacterWindow = null; });
 };
 
@@ -756,7 +843,61 @@ const createSettingsWindow = () => {
   }
 
   settingsWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // 拦截关闭事件（Cmd+W / Ctrl+W），改为隐藏窗口而不是关闭
+  settingsWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      settingsWindow.hide();
+    }
+  });
+
   settingsWindow.on("closed", () => { settingsWindow = null; });
+};
+
+const createMcpWindow = () => {
+  const mcpSize = getScaledSize(baselineSizes.mcp, currentSizePreset);
+  const { width: sw, height: sh } = screen.getPrimaryDisplay().workAreaSize;
+  let width = mcpSize.width > sw ? sw : mcpSize.width;
+  let height = mcpSize.height > sh ? sh : mcpSize.height;
+  const x = Math.round((sw - width) / 2);
+  const y = Math.round((sh - height) / 2);
+  
+  mcpWindow = new BrowserWindow({
+    width,
+    height,
+    x,
+    y,
+    show: false,
+    frame: false,
+    transparent: true,
+    alwaysOnTop: true,
+    hasShadow: true,
+    icon: process.platform === 'win32' ? path.join(__dirname, 'assets', 'icon.ico') : undefined,
+    webPreferences: {
+      nodeIntegration: false,
+      contextIsolation: true,
+      preload: path.join(__dirname, "Preload.js"),
+    },
+  });
+
+  if (isDev) {
+    mcpWindow.loadURL(`${DEV_URL}/#/mcp`);
+  } else {
+    mcpWindow.loadFile(path.join(__dirname, "../frontend/dist/index.html"), { hash: '#/mcp' });
+  }
+
+  mcpWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+
+  // 拦截关闭事件（Cmd+W / Ctrl+W），改为隐藏窗口而不是关闭
+  mcpWindow.on('close', (event) => {
+    if (!app.isQuitting) {
+      event.preventDefault();
+      mcpWindow.hide();
+    }
+  });
+
+  mcpWindow.on("closed", () => { mcpWindow = null; });
 };
 
 function createTrayIcon() {
@@ -796,6 +937,7 @@ app.whenReady().then(() => {
   createAddCharacterWindow();
   createSelectCharacterWindow();
   createSettingsWindow();
+  createMcpWindow();
 
   // 当 characterWindow 移动时，重新计算 chatWindow 的位置（保持相对位置，不 clamping）
   // 注意：侧边栏展开时不自动调整
@@ -817,13 +959,24 @@ app.whenReady().then(() => {
   });
   setTimeout(createTrayIcon, 300);
 
-
+  // 初始化 MCP 系统
+  initializeMCP().catch(err => {
+    console.error('[Main] Failed to initialize MCP:', err);
+  });
 });
 
 
 
 
-app.on("will-quit", () => globalShortcut.unregisterAll());
+app.on('before-quit', () => {
+  app.isQuitting = true;
+});
+
+app.on("will-quit", async () => {
+  globalShortcut.unregisterAll();
+  // 清理 MCP 系统
+  await cleanupMCP();
+});
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0) createChatWindow();

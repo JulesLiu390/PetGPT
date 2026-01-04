@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
 import { FaRocketchat } from "react-icons/fa";
+import { FaPlug } from "react-icons/fa6";
 import { CgAdd, CgHello } from "react-icons/cg";
 import { GoMultiSelect } from "react-icons/go";
 import { IoIosSettings } from "react-icons/io";
@@ -195,7 +196,10 @@ export const Character = () => {
   };
   const handleClickSettings = () => {
     window.electron?.changeSettingsWindow();
-  }
+  };
+  const handleClickMcp = () => {
+    window.electron?.changeMcpWindow();
+  };
 
   useEffect(() => {
     let windowSize = "medium";
@@ -246,8 +250,13 @@ export const Character = () => {
               onClick={handleClickSelectCharacter}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
+            <FaPlug
+              title="MCP Servers"
+              onClick={handleClickMcp}
+              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
+            />
             <IoIosSettings
-              title="to be continue..."
+              title="Settings"
               onClick={handleClickSettings}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />

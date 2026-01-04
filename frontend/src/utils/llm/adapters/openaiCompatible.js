@@ -120,10 +120,33 @@ export const convertMessages = async (messages) => {
 
 /**
  * 构建 API 请求
+ * 
+ * @param {Object} config
+ * @param {Array} config.messages - 消息数组
+ * @param {string} config.apiFormat
+ * @param {string} config.apiKey
+ * @param {string} config.model
+ * @param {string} config.baseUrl
+ * @param {Object} config.options
+ * @param {Array} config.options.tools - OpenAI 格式的工具数组 (可选)
+ * @param {string} config.options.tool_choice - 工具选择策略: 'auto' | 'none' | 'required' (可选)
  */
 export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl, options = {} }) => {
   const url = getApiUrl(apiFormat, baseUrl);
   const convertedMessages = await convertMessages(messages);
+  
+  const body = {
+    model,
+    messages: convertedMessages,
+    stream: options.stream || false,
+    ...(options.temperature !== undefined && { temperature: options.temperature })
+  };
+  
+  // 添加工具支持
+  if (options.tools && options.tools.length > 0) {
+    body.tools = options.tools;
+    body.tool_choice = options.tool_choice || 'auto';
+  }
   
   return {
     endpoint: `${url}/chat/completions`,
@@ -131,22 +154,34 @@ export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`
     },
-    body: {
-      model,
-      messages: convertedMessages,
-      stream: options.stream || false,
-      ...(options.temperature !== undefined && { temperature: options.temperature })
-    }
+    body
   };
 };
 
 /**
  * 解析响应
+ * 
+ * @param {Object} responseJson - API 响应
+ * @returns {Object} 解析结果，包含 content、toolCalls、usage、raw
  */
 export const parseResponse = (responseJson) => {
-  const content = responseJson.choices?.[0]?.message?.content || '';
+  const message = responseJson.choices?.[0]?.message;
+  const content = message?.content || '';
+  
+  // 解析工具调用
+  let toolCalls = null;
+  if (message?.tool_calls && message.tool_calls.length > 0) {
+    toolCalls = message.tool_calls.map(tc => ({
+      id: tc.id,
+      name: tc.function.name,
+      arguments: JSON.parse(tc.function.arguments || '{}')
+    }));
+  }
+  
   return {
     content,
+    toolCalls,
+    finishReason: responseJson.choices?.[0]?.finish_reason,
     usage: responseJson.usage,
     raw: responseJson
   };
@@ -154,27 +189,77 @@ export const parseResponse = (responseJson) => {
 
 /**
  * 解析流式响应块
+ * 
+ * @param {string|Object} chunk - SSE 数据块
+ * @returns {Object} 解析结果，包含 deltaText、deltaToolCalls、done
  */
 export const parseStreamChunk = (chunk) => {
   // OpenAI SSE: data: {"choices":[{"delta":{"content":"..."}}]}
   if (!chunk || chunk === '[DONE]') {
-    return { deltaText: '', done: true };
+    return { deltaText: '', deltaToolCalls: null, done: true };
   }
   
   try {
     const data = typeof chunk === 'string' ? JSON.parse(chunk) : chunk;
-    const deltaText = data.choices?.[0]?.delta?.content || '';
+    const delta = data.choices?.[0]?.delta;
+    const deltaText = delta?.content || '';
     const done = data.choices?.[0]?.finish_reason != null;
-    return { deltaText, done };
+    
+    // 解析流式工具调用
+    let deltaToolCalls = null;
+    if (delta?.tool_calls) {
+      deltaToolCalls = delta.tool_calls.map(tc => ({
+        index: tc.index,
+        id: tc.id,
+        name: tc.function?.name,
+        arguments: tc.function?.arguments || ''
+      }));
+    }
+    
+    return { deltaText, deltaToolCalls, done, finishReason: data.choices?.[0]?.finish_reason };
   } catch (e) {
-    return { deltaText: '', done: false };
+    return { deltaText: '', deltaToolCalls: null, done: false };
   }
 };
+
+/**
+ * 格式化工具结果消息
+ * 
+ * @param {string} toolCallId - 工具调用 ID
+ * @param {*} result - 工具执行结果
+ * @returns {Object} OpenAI tool message
+ */
+export const formatToolResultMessage = (toolCallId, result) => ({
+  role: "tool",
+  tool_call_id: toolCallId,
+  content: typeof result === 'string' ? result : JSON.stringify(result)
+});
+
+/**
+ * 创建带有工具调用的 assistant 消息
+ * 
+ * @param {Array} toolCalls - 工具调用数组
+ * @returns {Object} Assistant message
+ */
+export const createAssistantToolCallMessage = (toolCalls) => ({
+  role: "assistant",
+  content: null,
+  tool_calls: toolCalls.map(tc => ({
+    id: tc.id,
+    type: "function",
+    function: {
+      name: tc.name,
+      arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments)
+    }
+  }))
+});
 
 export default {
   capabilities,
   convertMessages,
   buildRequest,
   parseResponse,
-  parseStreamChunk
+  parseStreamChunk,
+  formatToolResultMessage,
+  createAssistantToolCallMessage
 };

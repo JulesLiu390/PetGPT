@@ -1,10 +1,9 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../context/StateProvider';
 import { actionType } from '../context/reducer';
-import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass } from "react-icons/fa6";
+import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { promptSuggestion, callOpenAILib, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../utils/openai';
-import { searchDuckDuckGo } from "../utils/search"
+import { promptSuggestion, callOpenAILib, callCommand, longTimeMemory, processMemory } from '../utils/openai';
 import { MdOutlineCancel } from "react-icons/md";
 import { SiQuicktype } from "react-icons/si";
 
@@ -37,8 +36,6 @@ export const ChatboxInputBox = () => {
   const [agentActive, setAgentActive] = useState(false); // Agent 开关
   // 新增记忆功能开关状态
   const [memoryEnabled, setMemoryEnabled] = useState(true);
-  // 新增搜索按钮高亮状态
-  const [searchActive, setSearchActive] = useState(false);
 
   const [userImage, setUserImage] = useState(null);
   const [stateReply, setStateReply] = useState(null);
@@ -62,12 +59,6 @@ export const ChatboxInputBox = () => {
   const toggleMemory = () => {
     setMemoryEnabled(prev => !prev);
     console.log(!memoryEnabled ? "记忆功能开启" : "记忆功能关闭");
-  };
-
-  // 搜索按钮点击时仅切换高亮状态，不执行搜索逻辑
-  const toggleSearch = () => {
-    setSearchActive(prev => !prev);
-    console.log(!searchActive ? "Search highlight turned on" : "Search highlight turned off");
   };
 
   // 修改后的：点击按钮时复制对话内容
@@ -392,19 +383,7 @@ export const ChatboxInputBox = () => {
       dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText } });
     } else {
 
-      let searchContent = "";
       thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
-      if(searchActive) {
-        searchContent = await refinedSearchFromPrompt(
-          _userText,
-          thisModel.modelProvider,
-          thisModel.modelApiKey,
-          thisModel.modelName,
-          thisModel.modelUrl
-        )
-        searchContent = await searchDuckDuckGo(searchContent);
-        searchContent = "\n Combine the following information to answer the question, and list relevant links below (if they are related to the question, be sure to list them):\n" + searchContent + "根据问题使用恰当的语言回答（如英语、中文）";
-      }
       // alert(userImage)
 
       if (!isDefaultPersonality) {
@@ -434,9 +413,9 @@ export const ChatboxInputBox = () => {
           systemContent += "请在回答中保持角色特点和用户设定，生成回复内容。";
           const systemPrompt = { role: "system", content: systemContent };
           dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          let content = _userText + searchContent;
+          let content = _userText;
           if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
+            content = [{ type: "text", text: _userText },
             {
                 type: "image_url",
                 image_url: {
@@ -451,9 +430,9 @@ export const ChatboxInputBox = () => {
           systemContent += "请在回答中保持角色特点，生成回复内容。";
           const systemPrompt = { role: "system", content: systemContent };
           dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          let content = _userText + searchContent;
+          let content = _userText;
           if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
+            content = [{ type: "text", text: _userText },
             {
                 type: "image_url",
                 image_url: {
@@ -492,9 +471,9 @@ export const ChatboxInputBox = () => {
           systemContent += "You are a helpful assisatant";
           const systemPrompt = { role: "system", content: systemContent };
           dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          let content = _userText + searchContent;
+          let content = _userText;
           if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
+            content = [{ type: "text", text: _userText },
             {
                 type: "image_url",
                 image_url: {
@@ -508,9 +487,9 @@ export const ChatboxInputBox = () => {
           let systemContent = `You are a helpful assisatant`;
           const systemPrompt = { role: "system", content: systemContent };
           dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: _userText} });
-          let content = _userText + searchContent;
+          let content = _userText;
           if(userImage != null) {
-            content = [{ type: "text", text: _userText + searchContent },
+            content = [{ type: "text", text: _userText },
             {
                 type: "image_url",
                 image_url: {
@@ -686,13 +665,6 @@ const [showReplyOptions, setShowReplyOptions] = useState(false);
             >
               <FaShareNodes className="w-5 h-5 text-gray-600" />
               <span className="text-sm hidden [@media(min-width:420px)]:inline">Share</span>
-            </button>
-            <button
-              onClick={toggleSearch}
-              className="border-none flex items-center space-x-1  py-1 hover:bg-gray-400 rounded-md border border-gray-300"
-            >
-              <FaMagnifyingGlass className={`w-5 h-5 ${searchActive ? 'text-green-500' : 'text-gray-600'}`} />
-              <span className="text-sm hidden [@media(min-width:420px)]:inline">Search</span>
             </button>
           </div>
         </div>

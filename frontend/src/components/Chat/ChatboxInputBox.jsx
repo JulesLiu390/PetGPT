@@ -1,13 +1,15 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import { FaArrowUp, FaGlobe, FaShareNodes, FaFile, FaMagnifyingGlass, FaStop } from "react-icons/fa6";
+import { FaArrowUp, FaShareNodes, FaFile, FaStop } from "react-icons/fa6";
 import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { promptSuggestion, callOpenAILib, callOpenAILibStream, callCommand, longTimeMemory, processMemory, refinedSearchFromPrompt } from '../../utils/openai';
-import { searchDuckDuckGo } from "../../utils/search"
+import { promptSuggestion, callOpenAILib, callOpenAILibStream, longTimeMemory, processMemory } from '../../utils/openai';
 import { MdOutlineCancel } from "react-icons/md";
 import { SiQuicktype } from "react-icons/si";
+import { useMcpTools } from '../../utils/mcp/useMcpTools';
+import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
+import McpToolbar from './McpToolbar';
 
 /**
  * 获取模型的 API 格式
@@ -54,12 +56,22 @@ const PastedImagePreview = ({ imageUrl, onRemove }) => {
 
 
 export const ChatboxInputBox = ({ activePetId }) => {
-  const [isGenerating, setIsGenerating] = useState(false);
-  const [agentActive, setAgentActive] = useState(false); // Agent 开关
+  // 会话 ID ref（需要先声明，供其他地方引用）
+  const conversationIdRef = useRef(null);
+  
+  // 按会话管理生成状态，支持多会话并行
+  const [generatingConversations, setGeneratingConversations] = useState(new Set());
+  // 按会话管理 AbortController，支持独立取消
+  const abortControllersRef = useRef(new Map()); // Map<conversationId, AbortController>
+  
+  // 兼容性：当前会话是否在生成
+  const isGenerating = generatingConversations.has(conversationIdRef.current) || 
+                       generatingConversations.has('temp');
+  
   // 新增记忆功能开关状态
   const [memoryEnabled, setMemoryEnabled] = useState(true);
-  // 新增搜索按钮高亮状态
-  const [searchActive, setSearchActive] = useState(false);
+  // MCP 服务器启用状态 (服务器名称集合)
+  const [enabledMcpServers, setEnabledMcpServers] = useState(new Set());
 
   const [userImage, setUserImage] = useState(null);
   const [stateReply, setStateReply] = useState(null);
@@ -69,33 +81,133 @@ export const ChatboxInputBox = ({ activePetId }) => {
   let thisModel = null;
   let _userText = null;
 
+  // 获取当前模型的 API 格式
+  const [currentApiFormat, setCurrentApiFormat] = useState('openai_compatible');
+  
+  // MCP 工具 Hook
+  const { 
+    mcpServers,
+    mcpTools, 
+    llmTools, 
+    hasTools,
+    executeToolCalls,
+    toolCallHistory,
+    refresh: refreshMcpTools,
+    refreshServers 
+  } = useMcpTools({ 
+    enabledServers: enabledMcpServers, 
+    apiFormat: currentApiFormat 
+  });
+
   useEffect(() => {
     if (activePetId) {
       setCharacterId(activePetId);
     }
   }, [activePetId]);
 
-  const toggleAgent = () => {
-    // alert(system)
-    if(!system.toLowerCase().includes("mac")) {
-      alert("sorry, agent function is only supported on MacOS now.")
-      return;
-    }
-    setAgentActive(prev => !prev);
-    console.log(!agentActive ? "Agent 已启动" : "Agent 已关闭");
-  };
-
   // 新增记忆功能切换函数
   const toggleMemory = () => {
     setMemoryEnabled(prev => !prev);
     console.log(!memoryEnabled ? "记忆功能开启" : "记忆功能关闭");
   };
-
-  // 搜索按钮点击时仅切换高亮状态，不执行搜索逻辑
-  const toggleSearch = () => {
-    setSearchActive(prev => !prev);
-    console.log(!searchActive ? "Search highlight turned on" : "Search highlight turned off");
-  };
+  
+  // MCP 服务器切换函数 - 启用时自动启动服务器
+  const toggleMcpServer = useCallback(async (serverName) => {
+    // 查找服务器信息
+    const server = mcpServers.find(s => s.name === serverName);
+    
+    // 检查是否要启用
+    const isCurrentlyEnabled = enabledMcpServers.has(serverName);
+    
+    if (!isCurrentlyEnabled && server) {
+      // 启用服务器：如果未运行，先自动启动
+      if (!server.isRunning && server._id) {
+        try {
+          console.log(`[MCP] 服务器 "${serverName}" 未运行，正在自动启动...`);
+          await window.electron?.mcp?.startServer(server._id);
+          // 刷新服务器列表以获取最新状态
+          await refreshServers();
+          console.log(`[MCP] 服务器 "${serverName}" 已自动启动`);
+        } catch (err) {
+          console.error(`[MCP] 自动启动服务器 "${serverName}" 失败:`, err);
+          // 启动失败，不添加到启用列表
+          return;
+        }
+      }
+    }
+    
+    setEnabledMcpServers(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(serverName)) {
+        newSet.delete(serverName);
+        console.log(`[MCP] 服务器 "${serverName}" 已禁用`);
+      } else {
+        newSet.add(serverName);
+        console.log(`[MCP] 服务器 "${serverName}" 已启用`);
+      }
+      return newSet;
+    });
+  }, [mcpServers, enabledMcpServers, refreshServers]);
+  
+  // 更新 MCP 服务器配置 (按名称)
+  const updateMcpServer = useCallback(async (serverName, updates) => {
+    try {
+      if (!window.electron?.mcp?.updateServerByName) {
+        console.error('[MCP] updateServerByName API not available');
+        return;
+      }
+      await window.electron.mcp.updateServerByName(serverName, updates);
+      await refreshServers();
+      console.log(`[MCP] 服务器 "${serverName}" 配置已更新:`, updates);
+    } catch (err) {
+      console.error('[MCP] Failed to update server:', err);
+    }
+  }, [refreshServers]);
+  
+  // 批量更新 MCP 服务器顺序
+  const batchUpdateMcpOrder = useCallback(async (orderList) => {
+    // orderList: [{ name: 'xxx', toolbarOrder: 0 }, ...]
+    try {
+      for (const item of orderList) {
+        if (window.electron?.mcp?.updateServerByName) {
+          await window.electron.mcp.updateServerByName(item.name, { toolbarOrder: item.toolbarOrder });
+        }
+      }
+      await refreshServers();
+      console.log('[MCP] 服务器顺序已更新');
+    } catch (err) {
+      console.error('[MCP] Failed to batch update order:', err);
+    }
+  }, [refreshServers]);
+  
+  // 删除 MCP 服务器 (按名称)
+  const deleteMcpServer = useCallback(async (serverName) => {
+    try {
+      if (!window.electron?.mcp?.deleteServerByName) {
+        console.error('[MCP] deleteServerByName API not available');
+        return;
+      }
+      // 从启用列表中移除
+      setEnabledMcpServers(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(serverName);
+        return newSet;
+      });
+      await window.electron.mcp.deleteServerByName(serverName);
+      await refreshServers();
+      console.log(`[MCP] 服务器 "${serverName}" 已删除`);
+    } catch (err) {
+      console.error('[MCP] Failed to delete server:', err);
+    }
+  }, [refreshServers]);
+  
+  // 编辑 MCP 服务器图标 (打开 MCP 设置窗口)
+  const editMcpServerIcon = useCallback((server) => {
+    // TODO: 打开图标选择器或跳转到设置页面
+    console.log('[MCP] Edit icon for server:', server.name);
+    // 可以通过 IPC 打开 MCP 设置窗口
+    window.electron?.openMcpSettings?.();
+  }, []);
 
   // 修改后的：点击按钮时复制对话内容
   const handleShare = () => {
@@ -116,16 +228,15 @@ export const ChatboxInputBox = ({ activePetId }) => {
   };
 
   const inputRef = useRef(null);
-  const [{ userMessages, suggestText, runFromHereTimestamp }, dispatch] = useStateValue();
+  const [{ userMessages, suggestText, runFromHereTimestamp, characterMoods }, dispatch] = useStateValue();
   // 将 userText 从全局状态中移除，改为本地状态管理
   const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
   const [petInfo, setPetInfo] = useState(null);
+  const [activeModelConfig, setActiveModelConfig] = useState(null);
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
-  const conversationIdRef = useRef(null);
-  const abortControllerRef = useRef(null);
   const [userMemory, setUserMemory] = useState(null);
   const [founctionModel, setFounctionModel] = useState(null);
   const [system, setSystem] = useState(null);
@@ -276,6 +387,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
           // 新数据模型：从关联的 ModelConfig 获取 API 配置
           modelConfig = await window.electron.getModelConfig(assistant.modelConfigId);
         }
+
+        setActiveModelConfig(modelConfig);
         
         // 如果新 API 没有数据，回退到旧的 Pet API（向后兼容）
         if (!assistant) {
@@ -304,6 +417,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
             apiFormat, 
             hasMood: computedHasMood 
           });
+          
+          // 更新当前 API 格式，用于 MCP 工具转换
+          setCurrentApiFormat(getApiFormat(apiConfig));
+          
           thisModel = null;
           if(functionModelInfo == null) {
             thisModel = apiConfig;
@@ -418,21 +535,27 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }
   };
 
-  const [characterMood, setCharacterMood] = useState("normal");
+  // 获取当前会话的表情
+  const currentMood = characterMoods?.[conversationIdRef.current] || characterMoods?.['global'] || 'normal';
 
   // 回车发送
   const handleKeyDown = (e) => {
     if (composingRef.current || ignoreEnterRef.current) return;
-    if (e.key === "Enter" && !e.shiftKey && characterMood != "thinking" && String(userText).trim()) {
+    if (e.key === "Enter" && !e.shiftKey && currentMood != "thinking" && String(userText).trim()) {
       e.preventDefault();
       handleSend();
     }
   };
 
   useEffect(() => {
-    const moodUpdateHandler = (event, updatedMood) => {
-      console.log("Received updated mood:", updatedMood);
-      setCharacterMood(updatedMood);
+    const moodUpdateHandler = (event, updatedMood, targetConversationId) => {
+      console.log("Received updated mood:", updatedMood, "for conversation:", targetConversationId);
+      // 更新全局状态中对应会话的表情
+      dispatch({
+        type: actionType.SET_CHARACTER_MOOD,
+        characterMood: updatedMood,
+        conversationId: targetConversationId || conversationIdRef.current || 'global'
+      });
     };
     window.electron?.onMoodUpdated(moodUpdateHandler);
 
@@ -440,7 +563,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
     return () => {
       // window.electron?.removeMoodUpdated(moodUpdateHandler);
     };
-  }, []);
+  }, [dispatch]);
 
   
 
@@ -479,10 +602,13 @@ export const ChatboxInputBox = ({ activePetId }) => {
         }
     }
 
-    setIsGenerating(true);
-
     // 🔒 锁定当前对话 ID，防止在等待 AI 回复期间切换标签导致数据错乱
-    let sendingConversationId = conversationIdRef.current;
+    let sendingConversationId = conversationIdRef.current || 'temp';
+    // 保存初始 ID 用于状态清理（因为 sendingConversationId 后面可能会变）
+    const initialConversationId = sendingConversationId;
+    
+    // 标记该会话正在生成
+    setGeneratingConversations(prev => new Set(prev).add(initialConversationId));
 
     _userText = currentInputText;
     
@@ -528,13 +654,14 @@ export const ChatboxInputBox = ({ activePetId }) => {
       dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: displayContent} });
     }
 
-    window.electron?.sendMoodUpdate('thinking');
+    window.electron?.sendMoodUpdate('thinking', initialConversationId);
 
     if (inputRef.current) {
       inputRef.current.value = "";
       inputRef.current.style.height = 'auto';
     }
 
+    try {
     let fullMessages = [];
     const isDefaultPersonality = petInfo?.systemInstruction &&
       (petInfo.systemInstruction.trim().toLowerCase() === "default model (english)" ||
@@ -543,39 +670,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     const historyMessages = isRunFromHere ? userMessages.slice(0, -1) : userMessages;
 
-    if (agentActive) {
-      // Agent 模式不改变原有逻辑
-      fullMessages = [...historyMessages, { role: "user", content: _userText }];
-    } else {
-
-      let searchContent = "";
-      thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
-      if(searchActive) {
-        searchContent = await refinedSearchFromPrompt(
-          _userText,
-          getApiFormat(thisModel),
-          thisModel.modelApiKey,
-          thisModel.modelName,
-          thisModel.modelUrl
-        )
-        searchContent = await searchDuckDuckGo(searchContent);
-        searchContent = "\n Combine the following information to answer the question, and list relevant links below (if they are related to the question, be sure to list them):\n" + searchContent + "根据问题使用恰当的语言回答（如英语、中文）";
-      }
+    thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
       
       let content = displayContent;
-      if (searchContent) {
-          if (Array.isArray(content)) {
-              // Clone to avoid modifying displayContent
-              content = content.map(part => {
-                  if (part.type === 'text') {
-                      return { ...part, text: part.text + searchContent };
-                  }
-                  return part;
-              });
-          } else {
-              content = content + searchContent;
-          }
-      }
 
       if (userImage || attachments.length > 0) {
           setUserImage(null);
@@ -658,55 +755,104 @@ export const ChatboxInputBox = ({ activePetId }) => {
           setUserImage(null);
           setAttachments([]);
       }
-    }
 
     reply = null;
 
-    if(agentActive) {
-      reply = await callCommand(
-        fullMessages,
-        getApiFormat(petInfo),
-        petInfo.modelApiKey,
-        petInfo.modelName,
-        petInfo.modelUrl
-      );
-      const commands = reply.excution || '';  // 你的多行命令
+    // Create new AbortController for this conversation's request
+    const controller = new AbortController();
+    abortControllersRef.current.set(initialConversationId, controller);
 
-      function escapeShellCommand(cmd) {
-        let cleaned = cmd
-          .replace(/^```(?:bash|shell)\n/, '')
-          .replace(/\n```$/, '');
-        cleaned = cleaned
-          .replace(/\\/g, '\\\\')
-          .replace(/"/g, '\\"')
-          .replace(/`/g, '\\`');
-        return cleaned;
+    // 检查是否启用了 MCP 工具
+    const mcpEnabled = enabledMcpServers.size > 0;
+
+    // 调试日志：检查 MCP 状态
+    console.log('[ChatboxInputBox] MCP Debug:', {
+      mcpEnabled,
+      enabledMcpServersSize: enabledMcpServers.size,
+      enabledMcpServers: Array.from(enabledMcpServers),
+      hasTools,
+      mcpToolsLength: mcpTools.length,
+      mcpToolNames: mcpTools.map(t => t.name)
+    });
+
+    // 根据是否启用 MCP 工具选择不同的调用方式
+    if (mcpEnabled && hasTools && mcpTools.length > 0) {
+      console.log('[ChatboxInputBox] Calling LLM with MCP tools:', mcpTools.length, 'tools available');
+      
+      try {
+        const mcpResult = await callLLMStreamWithTools({
+          messages: fullMessages,
+          apiFormat: getApiFormat(petInfo),
+          apiKey: petInfo.modelApiKey,
+          model: petInfo.modelName,
+          baseUrl: petInfo.modelUrl,
+          mcpTools: mcpTools,
+          options: {},
+          onChunk: (deltaText, fullText) => {
+            dispatch({ 
+              type: actionType.ADD_STREAMING_REPLY, 
+              content: deltaText,
+              id: sendingConversationId 
+            });
+          },
+          onToolCall: (toolName, args, toolCallId) => {
+            console.log('[MCP] Tool called:', toolName, args);
+            // Dispatch to add tool call to live display
+            dispatch({
+              type: actionType.ADD_TOOL_CALL,
+              conversationId: sendingConversationId || 'temp',
+              toolCall: {
+                id: toolCallId || `${toolName}-${Date.now()}`,
+                toolName,
+                args,
+                status: 'running',
+                startTime: Date.now()
+              }
+            });
+          },
+          onToolResult: (toolName, result, toolCallId, isError) => {
+            console.log('[MCP] Tool result:', toolName, result?.slice?.(0, 100));
+            // Update tool call status
+            dispatch({
+              type: actionType.UPDATE_TOOL_CALL,
+              conversationId: sendingConversationId || 'temp',
+              toolCallId: toolCallId || `${toolName}`,
+              updates: {
+                status: isError ? 'error' : 'success',
+                result: result,
+                endTime: Date.now()
+              }
+            });
+          },
+          abortSignal: controller.signal
+        });
+        
+        reply = {
+          content: mcpResult.content,
+          mood: 'normal',  // MCP 模式暂不支持情绪检测
+          toolCallHistory: mcpResult.toolCallHistory
+        };
+        
+        console.log('[ChatboxInputBox] MCP call completed with', mcpResult.toolCallHistory?.length || 0, 'tool calls');
+        
+        // Clear live tool calls after a short delay to let user see final status
+        setTimeout(() => {
+          dispatch({
+            type: actionType.CLEAR_TOOL_CALLS,
+            conversationId: sendingConversationId || 'temp'
+          });
+        }, 2000);
+      } catch (error) {
+        console.error('[ChatboxInputBox] MCP call failed:', error);
+        reply = { content: `Error: ${error.message}`, mood: 'normal' };
+        
+        // Clear tool calls on error too
+        dispatch({
+          type: actionType.CLEAR_TOOL_CALLS,
+          conversationId: sendingConversationId || 'temp'
+        });
       }
-
-      function escapeForAppleScript(str) {
-        return str.replace(/'/g, "'\\''");
-      }
-
-      const shellCmdEscaped = escapeShellCommand(commands);
-      const appleScriptCode = `
-      tell application "Terminal"
-        if (count of windows) = 0 then
-          do script "${shellCmdEscaped}"
-        else
-          do script "${shellCmdEscaped}" in front window
-        end if
-      end tell
-      `;
-      const appleScriptEscaped = escapeForAppleScript(appleScriptCode);
-      const osascriptCmd = `osascript -e '${appleScriptEscaped}'`;
-
-      window.electron?.testOpen(osascriptCmd);
-
     } else {
-      // Create new AbortController for this request
-      const controller = new AbortController();
-      abortControllerRef.current = controller;
-
       console.log('[ChatboxInputBox] Calling callOpenAILibStream with hasMood:', petInfo.hasMood, 'petInfo:', petInfo);
 
       reply = await callOpenAILibStream(
@@ -728,9 +874,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
       );
       
       console.log('[ChatboxInputBox] callOpenAILibStream returned:', reply);
-      
-      abortControllerRef.current = null; // Clear ref after completion
     }
+      
+    // Clear this conversation's abort controller after completion
+    abortControllersRef.current.delete(initialConversationId);
 
     // 清除流式输出内容，准备显示最终消息
     dispatch({ type: actionType.CLEAR_STREAMING_REPLY, id: sendingConversationId });
@@ -739,7 +886,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
         reply = { content: "Error: No response from AI.", mood: "normal" };
     }
 
-    const botReply = { role: "assistant", content: reply.content || "Error: Empty response" };
+    const botReply = { 
+      role: "assistant", 
+      content: reply.content || "Error: Empty response",
+      // 保存 MCP 工具调用历史到消息中
+      ...(reply.toolCallHistory && reply.toolCallHistory.length > 0 && { toolCallHistory: reply.toolCallHistory })
+    };
 
     // 只在 AI 回复后插入机器人消息，且仅当用户仍停留在当前对话时
     if (sendingConversationId === conversationIdRef.current) {
@@ -792,14 +944,29 @@ export const ChatboxInputBox = ({ activePetId }) => {
         });
     }
 
-    window.electron?.sendMoodUpdate(reply.mood || "normal");
-    setIsGenerating(false);
-
-    window.electron.updateChatbodyStatus("");
-
     if (reply) setStateReply(reply);
     if (thisModel) setStateThisModel(thisModel);
     if (_userText) setStateUserText(_userText);
+    
+    } catch (error) {
+      console.error('[handleSend] Error occurred:', error);
+      // Ensure we have some reply object for the finally block
+      if (!reply) {
+        reply = { content: `Error: ${error.message}`, mood: 'normal' };
+      }
+    } finally {
+      // ✅ 确保无论如何都会重置 thinking 状态，避免卡住
+      window.electron?.sendMoodUpdate(reply?.mood || "normal", initialConversationId);
+      // 从生成中会话集合中移除（使用初始 ID）
+      setGeneratingConversations(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(initialConversationId);
+        return newSet;
+      });
+      // 清理 AbortController
+      abortControllersRef.current.delete(initialConversationId);
+      window.electron?.updateChatbodyStatus?.("");
+    }
   };
 
 
@@ -844,12 +1011,40 @@ const handlePaste = async (e) => {
 };
 
 const [showReplyOptions, setShowReplyOptions] = useState(false);
+const replyOptionsTimeoutRef = useRef(null);
+
+// 延迟关闭 Quick Reply 菜单
+const handleReplyOptionsLeave = () => {
+  replyOptionsTimeoutRef.current = setTimeout(() => {
+    setShowReplyOptions(false);
+  }, 300); // 300ms 延迟，给用户时间移动到菜单
+};
+
+const handleReplyOptionsEnter = () => {
+  if (replyOptionsTimeoutRef.current) {
+    clearTimeout(replyOptionsTimeoutRef.current);
+    replyOptionsTimeoutRef.current = null;
+  }
+  setShowReplyOptions(true);
+};
 
 const handleStop = () => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
-      abortControllerRef.current = null;
-      setIsGenerating(false);
+    // 取消当前会话的请求
+    const currentConvId = conversationIdRef.current || 'temp';
+    const controller = abortControllersRef.current.get(currentConvId);
+    if (controller) {
+      controller.abort();
+      abortControllersRef.current.delete(currentConvId);
+      setGeneratingConversations(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(currentConvId);
+        return newSet;
+      });
+      // 清除该会话的工具调用状态
+      dispatch({
+        type: actionType.CLEAR_TOOL_CALLS,
+        conversationId: currentConvId
+      });
     }
   };
 
@@ -1039,16 +1234,6 @@ const handleStop = () => {
                 />
                 
                 <button
-                    onClick={toggleAgent}
-                    className={`p-2 rounded-full transition-colors ${
-                        agentActive ? "text-green-600 bg-green-100" : "text-gray-500 hover:bg-gray-200"
-                    }`}
-                    title="Agent Mode"
-                >
-                    <FaGlobe className="w-4 h-4" />
-                </button>
-
-                <button
                     onClick={toggleMemory}
                     className={`p-2 rounded-full transition-colors ${
                         memoryEnabled ? "text-blue-600 bg-blue-100" : "text-gray-500 hover:bg-gray-200"
@@ -1057,16 +1242,18 @@ const handleStop = () => {
                 >
                     <FaFile className="w-4 h-4" />
                 </button>
-
-                <button
-                    onClick={toggleSearch}
-                    className={`p-2 rounded-full transition-colors ${
-                        searchActive ? "text-purple-600 bg-purple-100" : "text-gray-500 hover:bg-gray-200"
-                    }`}
-                    title="Search"
-                >
-                    <FaMagnifyingGlass className="w-4 h-4" />
-                </button>
+                
+                {/* MCP 工具栏 - 每个服务器单独的图标 */}
+                <McpToolbar
+                    servers={mcpServers}
+                    enabledServers={enabledMcpServers}
+                    onToggleServer={toggleMcpServer}
+                    onUpdateServer={updateMcpServer}
+                    onDeleteServer={deleteMcpServer}
+                    onEditIcon={editMcpServerIcon}
+                    onBatchUpdateOrder={batchUpdateMcpOrder}
+                    maxVisible={5}
+                />
 
                 {/* Model Info / Status (Figure 2 style) */}
                 {petInfo && (
@@ -1088,11 +1275,13 @@ const handleStop = () => {
             {/* Right: Quick Reply & Send */}
             <div className="flex items-center gap-2">
                 {/* Quick Reply Button */}
-                <div className="relative">
+                <div 
+                    className="relative"
+                    onMouseEnter={handleReplyOptionsEnter}
+                    onMouseLeave={handleReplyOptionsLeave}
+                >
                     <button
-                        onClick={() => {}}
-                        onMouseEnter={() => setShowReplyOptions(true)}
-                        onMouseLeave={() => setShowReplyOptions(false)}
+                        onClick={() => setShowReplyOptions(prev => !prev)}
                         className="p-2 rounded-full hover:bg-gray-200 transition-colors text-gray-500"
                     >
                         <SiQuicktype className="w-5 h-5" style={{ color:(suggestText.length == 0) ? "#c1c1c1" : "#555" }} />
@@ -1100,15 +1289,18 @@ const handleStop = () => {
                     
                     {showReplyOptions && suggestText.length !== 0 && (
                         <div 
-                        className="absolute bottom-full right-0 mb-2 w-48 bg-white border border-gray-200 rounded-xl shadow-xl p-2 z-50"
-                        onMouseEnter={() => setShowReplyOptions(true)}
-                        onMouseLeave={() => setShowReplyOptions(false)}
+                            className="absolute bottom-full right-0 mb-2 w-48 bg-white border border-gray-200 rounded-xl shadow-xl p-2 z-50"
+                            onMouseEnter={handleReplyOptionsEnter}
+                            onMouseLeave={handleReplyOptionsLeave}
                         >
                         <div className="font-bold mb-2 text-xs text-gray-400 px-1">Quick reply</div>
                         <ul className="space-y-1">
                             {suggestText.map((item, index) => (
                             <li key={index} className="cursor-pointer hover:bg-gray-100 p-2 rounded-lg text-xs text-gray-700 transition-colors"
-                            onClick={() => setUserText(userText + suggestText[index])}>
+                            onClick={() => {
+                                setUserText(userText + suggestText[index]);
+                                setShowReplyOptions(false);
+                            }}>
                                 {item}
                             </li>
                             ))}

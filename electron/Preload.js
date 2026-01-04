@@ -47,8 +47,10 @@ contextBridge.exposeInMainWorld('electron', {
   showChatWindow: () => ipcRenderer.send("show-chat-window"),
   changeChatWindow: () => ipcRenderer.send("change-chat-window"),
   changeAddCharacterWindow: () => ipcRenderer.send("change-addCharacter-window"),
+  hideAddCharacterWindow: () => ipcRenderer.send("hide-addCharacter-window"),
   changeSelectCharacterWindow: () => ipcRenderer.send("change-selectCharacter-window"),
-  sendMoodUpdate: (mood) => ipcRenderer.send('update-character-mood', mood),
+  hideSelectCharacterWindow: () => ipcRenderer.send("hide-selectCharacter-window"),
+  sendMoodUpdate: (mood, conversationId) => ipcRenderer.send('update-character-mood', mood, conversationId),
   onMoodUpdated: (callback) => ipcRenderer.on('character-mood-updated', callback),
   sendPetsUpdate: (mood) => ipcRenderer.send('update-pets', mood),
   onPetsUpdated: (callback) => ipcRenderer.on('pets-updated', callback),
@@ -70,6 +72,7 @@ contextBridge.exposeInMainWorld('electron', {
   openFileExternal: (filePath) => ipcRenderer.invoke('open-file-external', filePath),
   probeOpenAICompatibleEndpoints: (options) => ipcRenderer.invoke('probe-openai-compatible-endpoints', options),
   changeSettingsWindow: () => ipcRenderer.send("change-settings-window"),
+  changeMcpWindow: () => ipcRenderer.send("change-mcp-window"),
   testOpen: (command) => ipcRenderer.send("say-hello", command),
   updateWindowSizePreset: async (preset) => ipcRenderer.invoke('update-window-size-preset', preset),
   updateShortcuts: (shortcut1, shortcut2) => ipcRenderer.invoke('update-shortcuts', { shortcut1, shortcut2 }),
@@ -94,4 +97,52 @@ contextBridge.exposeInMainWorld('electron', {
   
   // 侧边栏展开/收起 - 窗口向外扩展
   toggleSidebar: (open) => ipcRenderer.send('toggle-sidebar', open),
+
+  // ==================== MCP (Model Context Protocol) 接口 ====================
+  
+  // Server 配置管理
+  mcp: {
+    // 获取所有 MCP server 配置
+    getServers: () => ipcRenderer.invoke('mcp:getServers'),
+    listServers: () => ipcRenderer.invoke('mcp:getServers'),  // 别名，用于工具栏
+    // 获取单个 server 配置
+    getServer: (serverId) => ipcRenderer.invoke('mcp:getServer', serverId),
+    // 创建新的 server 配置
+    createServer: (config) => ipcRenderer.invoke('mcp:createServer', config),
+    // 更新 server 配置 (按 ID)
+    updateServer: (serverId, updates) => ipcRenderer.invoke('mcp:updateServer', { serverId, updates }),
+    // 更新 server 配置 (按名称，用于工具栏)
+    updateServerByName: (serverName, updates) => ipcRenderer.invoke('mcp:updateServerByName', { serverName, updates }),
+    // 删除 server 配置 (按 ID)
+    deleteServer: (serverId) => ipcRenderer.invoke('mcp:deleteServer', serverId),
+    // 删除 server 配置 (按名称，用于工具栏)
+    deleteServerByName: (serverName) => ipcRenderer.invoke('mcp:deleteServerByName', serverName),
+    // 切换 server 启用状态
+    toggleServerEnabled: (serverId) => ipcRenderer.invoke('mcp:toggleServerEnabled', serverId),
+    
+    // Server 生命周期管理
+    startServer: (serverId) => ipcRenderer.invoke('mcp:startServer', serverId),
+    stopServer: (serverId) => ipcRenderer.invoke('mcp:stopServer', serverId),
+    restartServer: (serverId) => ipcRenderer.invoke('mcp:restartServer', serverId),
+    getServerStatus: (serverId) => ipcRenderer.invoke('mcp:getServerStatus', serverId),
+    getAllServerStatus: () => ipcRenderer.invoke('mcp:getAllServerStatus'),
+    getRunningCount: () => ipcRenderer.invoke('mcp:getRunningCount'),
+    
+    // 工具和资源
+    getAllTools: () => ipcRenderer.invoke('mcp:getAllTools'),
+    getAllResources: () => ipcRenderer.invoke('mcp:getAllResources'),
+    callTool: (serverId, toolName, args) => ipcRenderer.invoke('mcp:callTool', { serverId, toolName, args }),
+    callToolByName: (toolName, args) => ipcRenderer.invoke('mcp:callToolByName', { toolName, args }),
+    readResource: (serverId, uri) => ipcRenderer.invoke('mcp:readResource', { serverId, uri }),
+    
+    // 测试服务器配置
+    testServer: (config) => ipcRenderer.invoke('mcp:testServer', config),
+    
+    // 监听服务器列表更新事件
+    onServersUpdated: (callback) => {
+      const subscription = () => callback();
+      ipcRenderer.on('mcp-servers-updated', subscription);
+      return () => ipcRenderer.removeListener('mcp-servers-updated', subscription);
+    },
+  },
 });

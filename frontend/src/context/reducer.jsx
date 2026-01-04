@@ -16,6 +16,10 @@ export const actionType = {
     SWITCH_CONVERSATION: "SWITCH_CONVERSATION",
     UPDATE_CONVERSATION_MESSAGES: "UPDATE_CONVERSATION_MESSAGES",
     TRIGGER_RUN_FROM_HERE: "TRIGGER_RUN_FROM_HERE", // New action
+    // MCP Tool Call Actions
+    ADD_TOOL_CALL: "ADD_TOOL_CALL",           // 添加工具调用
+    UPDATE_TOOL_CALL: "UPDATE_TOOL_CALL",     // 更新工具调用状态
+    CLEAR_TOOL_CALLS: "CLEAR_TOOL_CALLS",     // 清除工具调用
 }
 
 const reducer = (state, action) => {
@@ -68,6 +72,56 @@ const reducer = (state, action) => {
               ...state,
               streamingReplies: newStreamingReplies,
             };
+        // MCP Tool Call cases
+        case actionType.ADD_TOOL_CALL: {
+            const toolCall = action.toolCall;
+            return {
+              ...state,
+              liveToolCalls: {
+                ...state.liveToolCalls,
+                [action.conversationId]: [
+                  ...(state.liveToolCalls?.[action.conversationId] || []),
+                  {
+                    id: toolCall.id,
+                    toolName: toolCall.toolName,
+                    args: toolCall.args,
+                    status: toolCall.status || 'running',
+                    startTime: toolCall.startTime || Date.now()
+                  }
+                ]
+              }
+            };
+        }
+        case actionType.UPDATE_TOOL_CALL: {
+            const convCalls = state.liveToolCalls?.[action.conversationId] || [];
+            const updatedCalls = convCalls.map((tc) => {
+              // Match by id or by toolName (fallback for calls without specific id match)
+              if (tc.id === action.toolCallId || 
+                  (action.toolCallId && action.toolCallId.startsWith(tc.toolName))) {
+                return {
+                  ...tc,
+                  ...action.updates,
+                  duration: action.updates.endTime ? action.updates.endTime - tc.startTime : tc.duration
+                };
+              }
+              return tc;
+            });
+            return {
+              ...state,
+              liveToolCalls: {
+                ...state.liveToolCalls,
+                [action.conversationId]: updatedCalls
+              }
+            };
+        }
+        case actionType.CLEAR_TOOL_CALLS: {
+            const newLiveToolCalls = { ...state.liveToolCalls };
+            delete newLiveToolCalls[action.conversationId];
+            return {
+              ...state,
+              liveToolCalls: newLiveToolCalls,
+            };
+        }
         case actionType.SET_SUGGEST_TEXT:
             return {
                 ...state,
@@ -112,7 +166,10 @@ const reducer = (state, action) => {
         case actionType.SET_CHARACTER_MOOD:
             return {
                 ...state,
-                characterMood: action.characterMood, // 👈 清空数组
+                characterMoods: {
+                    ...state.characterMoods,
+                    [action.conversationId || 'global']: action.characterMood
+                }
             };
         default :
         console.log(state);

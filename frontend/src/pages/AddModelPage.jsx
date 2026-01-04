@@ -23,6 +23,7 @@ const AddModelPage = () => {
     modelName: "",
     modelApiKey: "",
     modelUrl: "default",
+    searchMode: "native",
   });
 
   const [modelUrlType, setModelUrlType] = useState("default");
@@ -44,6 +45,11 @@ const AddModelPage = () => {
   
   // Auto-create assistant checkbox
   const [createDefaultAssistant, setCreateDefaultAssistant] = useState(true);
+
+  // Capabilities probing state
+  const [isProbingCaps, setIsProbingCaps] = useState(false);
+  const [capsError, setCapsError] = useState(null);
+  const [capabilities, setCapabilities] = useState(null);
 
   // 获取当前 apiFormat 的 presets
   const currentPresets = getPresetsForFormat(modelConfig.apiFormat);
@@ -145,6 +151,37 @@ const AddModelPage = () => {
       setDetectResult({ success: false, message: `Detection failed: ${error.message}` });
     } finally {
       setIsDetecting(false);
+    }
+  };
+
+  const handleProbeCapabilities = async () => {
+    if (!testSuccess) {
+      alert("Please test the connection successfully first.");
+      return;
+    }
+
+    setIsProbingCaps(true);
+    setCapsError(null);
+    setCapabilities(null);
+
+    try {
+      const result = await window.electron?.probeModelCapabilities({
+        apiFormat: modelConfig.apiFormat,
+        apiKey: modelConfig.modelApiKey,
+        modelName: modelConfig.modelName,
+        baseUrl: modelConfig.modelUrl,
+      });
+
+      if (result) {
+        setCapabilities(result);
+      } else {
+        setCapsError("Could not detect capabilities.");
+      }
+    } catch (error) {
+      console.error("Capabilities probe failed:", error);
+      setCapsError(error.message || "Failed to detect capabilities.");
+    } finally {
+      setIsProbingCaps(false);
     }
   };
 
@@ -315,6 +352,57 @@ const AddModelPage = () => {
                   onChange={handleChange}
                 />
               </FormGroup>
+
+              <Card title="Search" action={
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={handleProbeCapabilities}
+                  disabled={isProbingCaps || !testSuccess}
+                  className="text-xs"
+                  title={!testSuccess ? "Please test connection first" : "Detect native search capability"}
+                >
+                  {isProbingCaps ? <FaSpinner className="animate-spin w-3 h-3"/> : <FaMagnifyingGlass className="w-3 h-3"/>}
+                  {isProbingCaps ? "Detecting..." : "Detect"}
+                </Button>
+              } className="bg-slate-50/50">
+                <FormGroup label="Search Mode" hint="This switch controls native-search vs injected-search, not whether search exists.">
+                  <Select
+                    name="searchMode"
+                    value={modelConfig.searchMode}
+                    onChange={handleChange}
+                  >
+                    <option value="native">Native (provider web search / grounding)</option>
+                    <option value="inject">Injected (DuckDuckGo)</option>
+                    <option value="off">Off</option>
+                  </Select>
+                </FormGroup>
+
+                {capsError && (
+                  <div className="mt-2 text-xs text-rose-600 flex items-center gap-1">
+                    <span>⚠️</span> {capsError}
+                  </div>
+                )}
+
+                {capabilities?.nativeSearch && (
+                  <div className="mt-2 text-xs text-slate-600">
+                    <div className="flex items-center gap-2">
+                      <Badge tone={capabilities.nativeSearch.supported === true ? 'green' : (capabilities.nativeSearch.supported === false ? 'red' : 'slate')}>
+                        Native search: {capabilities.nativeSearch.supported === true ? 'Supported' : (capabilities.nativeSearch.supported === false ? 'Not supported' : 'Unknown')}
+                      </Badge>
+                      {capabilities.nativeSearch.reason ? (
+                        <span className="text-slate-500">{capabilities.nativeSearch.reason}</span>
+                      ) : null}
+                    </div>
+                  </div>
+                )}
+
+                {modelConfig.searchMode === 'native' && capabilities?.nativeSearch?.supported !== true && (
+                  <div className="mt-2 text-xs text-amber-600 flex items-center gap-1">
+                    <span>⚠️</span> Native search is not confirmed; app will fall back to injected search (DuckDuckGo).
+                  </div>
+                )}
+              </Card>
 
               <FormGroup label="Base URL">
                 <div className="flex items-center justify-between mb-2">
