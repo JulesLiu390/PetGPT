@@ -492,21 +492,250 @@ export const openExternal = (url) => {
 
 // ==================== 其他 Electron 特定接口 ====================
 
+import { getDetectionCandidates, GEMINI_OFFICIAL_PRESETS } from './llm/presets.js';
+
+// Gemini 官方 API Base URL
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
+
+/**
+ * 检测 API Key 对应的端点（支持 OpenAI 兼容和 Gemini 官方）
+ * 通过依次尝试各个预设端点的 API 来验证
+ */
 export const probeOpenAICompatibleEndpoints = async (options) => {
   if (isElectron()) {
     return window.electron.probeOpenAICompatibleEndpoints(options);
   }
-  // Tauri 需要前端直接实现或通过 command
-  console.warn('probeOpenAICompatibleEndpoints not yet implemented for Tauri');
-  return null;
+  
+  // Tauri/Web 前端实现
+  const { apiKey, includeLocal = false } = options || {};
+  if (!apiKey) return null;
+  
+  const candidates = getDetectionCandidates(includeLocal);
+  const allResults = [];
+  
+  // 1. 先测试 Gemini 官方 API（优先级高，因为它有独特的 API 格式）
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    
+    const geminiResponse = await fetch(`${GEMINI_BASE_URL}/models?key=${apiKey}`, {
+      method: 'GET',
+      signal: controller.signal
+    });
+    
+    clearTimeout(timeoutId);
+    
+    if (geminiResponse.ok) {
+      const data = await geminiResponse.json();
+      if (data && Array.isArray(data.models) && data.models.length > 0) {
+        // Gemini 官方 API 验证成功
+        const geminiResult = {
+          id: 'gemini_official',
+          label: 'Google AI (Gemini Official)',
+          baseUrl: GEMINI_OFFICIAL_PRESETS[0].baseUrl,
+          apiFormat: 'gemini_official',
+          success: true,
+          modelCount: data.models.length
+        };
+        allResults.push(geminiResult);
+        // 直接返回 Gemini 作为 bestMatch
+        return {
+          bestMatch: geminiResult,
+          allResults: [geminiResult]
+        };
+      }
+    }
+    allResults.push({ id: 'gemini_official', label: 'Google AI (Gemini Official)', success: false });
+  } catch (error) {
+    allResults.push({ id: 'gemini_official', label: 'Google AI (Gemini Official)', success: false, error: error.message });
+  }
+  
+  // 2. 并行测试所有 OpenAI 兼容端点（设置超时）
+  const probePromises = candidates.map(async (candidate) => {
+    const url = candidate.baseUrl.endsWith('/v1') 
+      ? candidate.baseUrl 
+      : (candidate.baseUrl.endsWith('/') ? candidate.baseUrl + 'v1' : candidate.baseUrl + '/v1');
+    
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 5000); // 5秒超时
+      
+      const response = await fetch(`${url}/models`, {
+        method: 'GET',
+        headers: {
+          'Authorization': `Bearer ${apiKey}`,
+          'Content-Type': 'application/json'
+        },
+        signal: controller.signal
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (response.ok) {
+        const data = await response.json();
+        // 验证返回的是有效的模型列表
+        if (data && (Array.isArray(data.data) || Array.isArray(data))) {
+          const modelCount = Array.isArray(data.data) ? data.data.length : data.length;
+          
+          // OpenRouter 特殊处理：/models 端点不验证 API Key，需要用 /chat/completions 验证
+          if (candidate.id === 'openrouter') {
+            try {
+              const verifyController = new AbortController();
+              const verifyTimeoutId = setTimeout(() => verifyController.abort(), 8000);
+              
+              const verifyResponse = await fetch(`${url}/chat/completions`, {
+                method: 'POST',
+                headers: {
+                  'Authorization': `Bearer ${apiKey}`,
+                  'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                  model: 'openai/gpt-3.5-turbo',
+                  messages: [{ role: 'user', content: 'hi' }],
+                  max_tokens: 1
+                }),
+                signal: verifyController.signal
+              });
+              
+              clearTimeout(verifyTimeoutId);
+              
+              // 如果返回 401/403，说明 API Key 无效
+              if (verifyResponse.status === 401 || verifyResponse.status === 403) {
+                return { ...candidate, success: false, error: 'Invalid API Key' };
+              }
+              
+              // 如果返回 200 或 4xx（如 402 余额不足、400 参数错误），说明 Key 有效
+              // 只有 401/403 才是 Key 无效
+            } catch (verifyError) {
+              // 网络错误时跳过验证，仍然返回成功（可能是网络问题）
+              console.warn('OpenRouter verification failed:', verifyError.message);
+            }
+          }
+          
+          return {
+            ...candidate,
+            apiFormat: 'openai_compatible',
+            success: true,
+            modelCount,
+            responseTime: Date.now()
+          };
+        }
+      }
+      return { ...candidate, success: false };
+    } catch (error) {
+      // 超时或网络错误
+      return { ...candidate, success: false, error: error.message };
+    }
+  });
+  
+  const probeResults = await Promise.all(probePromises);
+  allResults.push(...probeResults);
+  
+  // 过滤出成功的端点
+  const successfulEndpoints = probeResults.filter(r => r.success);
+  
+  if (successfulEndpoints.length === 0) {
+    return { bestMatch: null, allResults };
+  }
+  
+  // 返回第一个成功的作为 bestMatch（按预设顺序优先）
+  return {
+    bestMatch: successfulEndpoints[0],
+    allResults
+  };
 };
 
+/**
+ * 探测模型的能力（是否支持视觉、函数调用等）
+ */
 export const probeModelCapabilities = async (options) => {
   if (isElectron()) {
     return window.electron.probeModelCapabilities(options);
   }
-  console.warn('probeModelCapabilities not yet implemented for Tauri');
-  return null;
+  
+  // Tauri/Web 前端实现
+  const { apiFormat, apiKey, modelName, baseUrl } = options || {};
+  if (!apiKey || !modelName) return null;
+  
+  // 构建 URL
+  let url = baseUrl;
+  if (url === 'default' || !url) {
+    url = 'https://api.openai.com/v1';
+  } else if (!url.endsWith('/v1')) {
+    url = url.endsWith('/') ? url + 'v1' : url + '/v1';
+  }
+  
+  const capabilities = {
+    vision: false,
+    functionCalling: false,
+    streaming: true, // 大多数 OpenAI 兼容端点都支持
+    jsonMode: false
+  };
+  
+  try {
+    // 方法1：尝试获取模型详情（部分 API 支持）
+    const modelResponse = await fetch(`${url}/models/${encodeURIComponent(modelName)}`, {
+      headers: { 'Authorization': `Bearer ${apiKey}` }
+    });
+    
+    if (modelResponse.ok) {
+      const modelInfo = await modelResponse.json();
+      // 根据模型名称或元数据推断能力
+      const modelId = (modelInfo.id || modelName).toLowerCase();
+      
+      // 视觉能力检测
+      if (modelId.includes('vision') || 
+          modelId.includes('gpt-4o') || 
+          modelId.includes('gpt-4-turbo') ||
+          modelId.includes('claude-3') ||
+          modelId.includes('gemini')) {
+        capabilities.vision = true;
+      }
+      
+      // 函数调用能力检测
+      if (modelId.includes('gpt-4') || 
+          modelId.includes('gpt-3.5-turbo') ||
+          modelId.includes('claude-3') ||
+          modelId.includes('gemini')) {
+        capabilities.functionCalling = true;
+      }
+      
+      // JSON 模式检测
+      if (modelId.includes('gpt-4') || 
+          modelId.includes('gpt-3.5-turbo-1106') ||
+          modelId.includes('gpt-3.5-turbo-0125')) {
+        capabilities.jsonMode = true;
+      }
+    }
+    
+    // 方法2：基于模型名称的启发式检测（作为后备）
+    const modelLower = modelName.toLowerCase();
+    
+    if (!capabilities.vision) {
+      capabilities.vision = modelLower.includes('vision') || 
+                           modelLower.includes('gpt-4o') ||
+                           modelLower.includes('gpt-4-turbo') ||
+                           modelLower.includes('claude-3') ||
+                           modelLower.includes('gemini-1.5') ||
+                           modelLower.includes('gemini-2');
+    }
+    
+    if (!capabilities.functionCalling) {
+      capabilities.functionCalling = modelLower.includes('gpt-4') ||
+                                    modelLower.includes('gpt-3.5') ||
+                                    modelLower.includes('claude') ||
+                                    modelLower.includes('gemini');
+    }
+    
+    return capabilities;
+  } catch (error) {
+    console.warn('probeModelCapabilities error:', error);
+    // 返回基于模型名称的基本推断
+    const modelLower = modelName.toLowerCase();
+    capabilities.vision = modelLower.includes('vision') || modelLower.includes('4o') || modelLower.includes('turbo');
+    capabilities.functionCalling = modelLower.includes('gpt') || modelLower.includes('claude') || modelLower.includes('gemini');
+    return capabilities;
+  }
 };
 
 export const processImage = async (base64Image) => {

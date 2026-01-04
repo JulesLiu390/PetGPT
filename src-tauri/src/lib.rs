@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use tauri::{State, Manager, AppHandle, LogicalPosition, LogicalSize, Emitter};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::TrayIconBuilder;
+use tauri::image::Image;
 use serde_json::Value as JsonValue;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
@@ -1155,8 +1156,12 @@ pub fn run() {
             let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
             let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
 
+            // Load dedicated tray icon (44x44, optimized for menu bar)
+            let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
+                .map_err(|e| format!("Failed to load tray icon: {}", e))?;
+
             let _tray = TrayIconBuilder::new()
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {

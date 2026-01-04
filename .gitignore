@@ -26,3 +26,8 @@ dist-ssr
 .env
 
 release/
+
+# Build documentation and scripts
+documents/
+scripts/
+design/

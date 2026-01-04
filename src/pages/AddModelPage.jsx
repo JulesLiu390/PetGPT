@@ -3,7 +3,7 @@ import AddModelTitleBar from "../components/Layout/AddModelTitleBar";
 import { callOpenAILib, fetchModels } from "../utils/openai";
 import { FaCheck, FaSpinner, FaList, FaMagnifyingGlass } from "react-icons/fa6";
 import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl } from "../utils/llm/presets";
-import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
+import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert, Checkbox } from "../components/UI/ui";
 import * as bridge from "../utils/bridge";
 
 /**
@@ -24,7 +24,6 @@ const AddModelPage = () => {
     modelName: "",
     modelApiKey: "",
     modelUrl: "default",
-    searchMode: "native",
   });
 
   const [modelUrlType, setModelUrlType] = useState("default");
@@ -46,11 +45,6 @@ const AddModelPage = () => {
   
   // Auto-create assistant checkbox
   const [createDefaultAssistant, setCreateDefaultAssistant] = useState(true);
-
-  // Capabilities probing state
-  const [isProbingCaps, setIsProbingCaps] = useState(false);
-  const [capsError, setCapsError] = useState(null);
-  const [capabilities, setCapabilities] = useState(null);
 
   // 获取当前 apiFormat 的 presets
   const currentPresets = getPresetsForFormat(modelConfig.apiFormat);
@@ -138,12 +132,24 @@ const AddModelPage = () => {
       
       if (result?.bestMatch) {
         // 找到了匹配的端点
-        setDetectResult({ success: true, message: `Detected: ${result.bestMatch.label}`, url: result.bestMatch.baseUrl });
+        const match = result.bestMatch;
+        setDetectResult({ success: true, message: `Detected: ${match.label}`, url: match.baseUrl });
         
-        // 自动填入
-        setModelUrlType("custom");
-        setModelConfig(prev => ({ ...prev, modelUrl: result.bestMatch.baseUrl }));
-        setPresetId(findPresetByUrl(modelConfig.apiFormat, result.bestMatch.baseUrl));
+        // 如果检测到 Gemini 官方 API，自动切换 apiFormat
+        if (match.apiFormat === 'gemini_official') {
+          setModelConfig(prev => ({ 
+            ...prev, 
+            apiFormat: 'gemini_official',
+            modelUrl: match.baseUrl 
+          }));
+          setModelUrlType("custom");
+          setPresetId('google');
+        } else {
+          // OpenAI Compatible
+          setModelUrlType("custom");
+          setModelConfig(prev => ({ ...prev, modelUrl: match.baseUrl }));
+          setPresetId(findPresetByUrl('openai_compatible', match.baseUrl));
+        }
       } else {
         setDetectResult({ success: false, message: "Could not auto-detect endpoint. Please select manually." });
       }
@@ -152,37 +158,6 @@ const AddModelPage = () => {
       setDetectResult({ success: false, message: `Detection failed: ${error.message}` });
     } finally {
       setIsDetecting(false);
-    }
-  };
-
-  const handleProbeCapabilities = async () => {
-    if (!testSuccess) {
-      alert("Please test the connection successfully first.");
-      return;
-    }
-
-    setIsProbingCaps(true);
-    setCapsError(null);
-    setCapabilities(null);
-
-    try {
-      const result = await bridge.probeModelCapabilities({
-        apiFormat: modelConfig.apiFormat,
-        apiKey: modelConfig.modelApiKey,
-        modelName: modelConfig.modelName,
-        baseUrl: modelConfig.modelUrl,
-      });
-
-      if (result) {
-        setCapabilities(result);
-      } else {
-        setCapsError("Could not detect capabilities.");
-      }
-    } catch (error) {
-      console.error("Capabilities probe failed:", error);
-      setCapsError(error.message || "Failed to detect capabilities.");
-    } finally {
-      setIsProbingCaps(false);
     }
   };
 
@@ -356,57 +331,6 @@ const AddModelPage = () => {
                 />
               </FormGroup>
 
-              <Card title="Search" action={
-                <Button
-                  type="button"
-                  variant="ghost"
-                  onClick={handleProbeCapabilities}
-                  disabled={isProbingCaps || !testSuccess}
-                  className="text-xs"
-                  title={!testSuccess ? "Please test connection first" : "Detect native search capability"}
-                >
-                  {isProbingCaps ? <FaSpinner className="animate-spin w-3 h-3"/> : <FaMagnifyingGlass className="w-3 h-3"/>}
-                  {isProbingCaps ? "Detecting..." : "Detect"}
-                </Button>
-              } className="bg-slate-50/50">
-                <FormGroup label="Search Mode" hint="This switch controls native-search vs injected-search, not whether search exists.">
-                  <Select
-                    name="searchMode"
-                    value={modelConfig.searchMode}
-                    onChange={handleChange}
-                  >
-                    <option value="native">Native (provider web search / grounding)</option>
-                    <option value="inject">Injected (DuckDuckGo)</option>
-                    <option value="off">Off</option>
-                  </Select>
-                </FormGroup>
-
-                {capsError && (
-                  <div className="mt-2 text-xs text-rose-600 flex items-center gap-1">
-                    <span>⚠️</span> {capsError}
-                  </div>
-                )}
-
-                {capabilities?.nativeSearch && (
-                  <div className="mt-2 text-xs text-slate-600">
-                    <div className="flex items-center gap-2">
-                      <Badge tone={capabilities.nativeSearch.supported === true ? 'green' : (capabilities.nativeSearch.supported === false ? 'red' : 'slate')}>
-                        Native search: {capabilities.nativeSearch.supported === true ? 'Supported' : (capabilities.nativeSearch.supported === false ? 'Not supported' : 'Unknown')}
-                      </Badge>
-                      {capabilities.nativeSearch.reason ? (
-                        <span className="text-slate-500">{capabilities.nativeSearch.reason}</span>
-                      ) : null}
-                    </div>
-                  </div>
-                )}
-
-                {modelConfig.searchMode === 'native' && capabilities?.nativeSearch?.supported !== true && (
-                  <div className="mt-2 text-xs text-amber-600 flex items-center gap-1">
-                    <span>⚠️</span> Native search is not confirmed; app will fall back to injected search (DuckDuckGo).
-                  </div>
-                )}
-              </Card>
-
               <FormGroup label="Base URL">
                 <div className="flex items-center justify-between mb-2">
                   <div className="flex gap-2 flex-1">
@@ -428,18 +352,16 @@ const AddModelPage = () => {
                       <option value="custom">Custom</option>
                     </Select>
                   </div>
-                  {modelConfig.apiFormat === "openai_compatible" && (
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      onClick={handleAutoDetect}
-                      disabled={isDetecting || !modelConfig.modelApiKey}
-                      className="ml-2 text-xs"
-                    >
-                      {isDetecting ? <FaSpinner className="animate-spin w-3 h-3"/> : <FaMagnifyingGlass className="w-3 h-3"/>}
-                      {isDetecting ? "Detecting..." : "Auto-detect"}
-                    </Button>
-                  )}
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={handleAutoDetect}
+                    disabled={isDetecting || !modelConfig.modelApiKey}
+                    className="ml-2 text-xs"
+                  >
+                    {isDetecting ? <FaSpinner className="animate-spin w-3 h-3"/> : <FaMagnifyingGlass className="w-3 h-3"/>}
+                    {isDetecting ? "Detecting..." : "Auto-detect"}
+                  </Button>
                 </div>
                 
                 <Input

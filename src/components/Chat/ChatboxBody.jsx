@@ -37,6 +37,29 @@ export const Chatbox = () => {
     bridge.toggleSidebar?.(newState);
   };
 
+  // Auto-load default assistant on first mount
+  useEffect(() => {
+    const loadDefaultAssistant = async () => {
+      // Only run on first mount when no tabs exist
+      if (tabs.length > 0) return;
+      
+      try {
+        const settings = await bridge.getSettings();
+        const defaultAssistantId = settings?.defaultAssistant;
+        
+        if (defaultAssistantId) {
+          console.log('[ChatboxBody] Auto-loading default assistant:', defaultAssistantId);
+          // Trigger character selection which will create a new tab
+          bridge.sendCharacterId?.(defaultAssistantId);
+        }
+      } catch (error) {
+        console.error('[ChatboxBody] Error loading default assistant:', error);
+      }
+    };
+    
+    loadDefaultAssistant();
+  }, []); // Run only once on mount
+
   useEffect(() => {
     const fetchConversations = async () => {
       console.log('[ChatboxBody] fetchConversations called');

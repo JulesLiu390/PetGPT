@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "build:dmg": "npm run tauri:build && sh scripts/create-dmg.sh"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.0.14",
