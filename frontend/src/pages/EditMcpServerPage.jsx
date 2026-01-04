@@ -4,6 +4,7 @@ import { FiRefreshCw } from 'react-icons/fi';
 import { PageLayout, Card, FormGroup, Input, Textarea, Button, Alert, Checkbox } from '../components/UI/ui';
 import TitleBar from '../components/UI/TitleBar';
 import { IconSelectorTrigger } from '../components/UI/IconSelector';
+import { mcp as mcpBridge } from '../utils/bridge';
 
 const EditMcpServerPage = () => {
   const navigate = useNavigate();
@@ -14,10 +15,17 @@ const EditMcpServerPage = () => {
   const [originalServer, setOriginalServer] = useState(null);
   
   const [name, setName] = useState('');
+  // Transport type
+  const [transport, setTransport] = useState('stdio');
+  // Stdio fields
   const [command, setCommand] = useState('');
   const [args, setArgs] = useState('');
-  const [autoStart, setAutoStart] = useState(false);
   const [envVars, setEnvVars] = useState('');
+  // HTTP fields
+  const [url, setUrl] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  // Common fields
+  const [autoStart, setAutoStart] = useState(false);
   const [icon, setIcon] = useState('🔧');
   const [showInToolbar, setShowInToolbar] = useState(true);
   
@@ -35,12 +43,13 @@ const EditMcpServerPage = () => {
       }
       
       try {
-        const servers = await window.electron?.mcp?.getServers();
+        const servers = await mcpBridge.getServers();
         const server = servers?.find(s => s._id === serverId);
         
         if (server) {
           setOriginalServer(server);
           setName(server.name || '');
+          setTransport(server.transport || 'stdio');
           setCommand(server.command || '');
           setArgs(server.args?.join(', ') || '');
           setAutoStart(server.autoStart || false);
@@ -49,6 +58,8 @@ const EditMcpServerPage = () => {
           setEnvVars(
             server.env ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''
           );
+          setUrl(server.url || '');
+          setApiKey(server.apiKey || '');
         } else {
           setError('Server not found');
         }
@@ -65,26 +76,46 @@ const EditMcpServerPage = () => {
 
   // 构建配置对象
   const buildConfig = () => {
-    const env = {};
-    if (envVars.trim()) {
-      envVars.split('\n').forEach(line => {
-        const [key, ...valueParts] = line.split('=');
-        if (key && valueParts.length > 0) {
-          env[key.trim()] = valueParts.join('=').trim();
-        }
-      });
-    }
-    
-    return {
+    const config = {
       _id: serverId,
       name: name.trim(),
-      command: command.trim(),
-      args: args.trim() ? args.trim().split(/,|\s+/).filter(Boolean) : [],
-      env,
+      transport,
       autoStart,
       icon,
       showInToolbar
     };
+    
+    if (transport === 'stdio') {
+      const env = {};
+      if (envVars.trim()) {
+        envVars.split('\n').forEach(line => {
+          const [key, ...valueParts] = line.split('=');
+          if (key && valueParts.length > 0) {
+            env[key.trim()] = valueParts.join('=').trim();
+          }
+        });
+      }
+      config.command = command.trim();
+      config.args = args.trim() ? args.trim().split(/,|\s+/).filter(Boolean) : [];
+      config.env = env;
+    } else {
+      config.url = url.trim();
+      if (apiKey.trim()) {
+        config.apiKey = apiKey.trim();
+      }
+    }
+    
+    return config;
+  };
+
+  // 验证必填字段
+  const isValid = () => {
+    if (!name.trim()) return false;
+    if (transport === 'stdio') {
+      return !!command.trim();
+    } else {
+      return !!url.trim();
+    }
   };
 
   // 测试服务器连接
@@ -92,8 +123,10 @@ const EditMcpServerPage = () => {
     setError('');
     setTestResult(null);
     
-    if (!name.trim() || !command.trim()) {
-      setError('Name and command are required');
+    if (!isValid()) {
+      setError(transport === 'stdio' 
+        ? 'Name and command are required' 
+        : 'Name and URL are required');
       return;
     }
     
@@ -103,17 +136,21 @@ const EditMcpServerPage = () => {
       const config = buildConfig();
       console.log('[EditMcpServer] Testing config:', config);
       
-      if (!window.electron?.mcp?.testServer) {
-        throw new Error('Test API not available');
-      }
-      
-      const result = await window.electron.mcp.testServer(config);
+      const result = await mcpBridge.testServer(config);
       console.log('[EditMcpServer] Test result:', result);
       
       if (result) {
-        setTestResult(result);
-        if (!result.success) {
-          setError(result.message || result.error || 'Test failed');
+        // 兼容 Rust 返回的 ServerStatus 格式
+        const formattedResult = {
+          success: result.isRunning !== undefined ? result.isRunning : result.success,
+          toolCount: result.tools?.length || result.toolCount || 0,
+          resourceCount: result.resources?.length || result.resourceCount || 0,
+          tools: result.tools || [],
+          message: result.error || result.message,
+        };
+        setTestResult(formattedResult);
+        if (!formattedResult.success) {
+          setError(formattedResult.message || 'Test failed');
         }
       } else {
         setError('No response from server');
@@ -121,7 +158,7 @@ const EditMcpServerPage = () => {
       }
     } catch (err) {
       console.error('[EditMcpServer] Test error:', err);
-      const errorMessage = err.message || 'Test failed';
+      const errorMessage = err.message || err.toString() || 'Test failed';
       setError(errorMessage);
       setTestResult({ success: false, message: errorMessage });
     } finally {
@@ -133,18 +170,15 @@ const EditMcpServerPage = () => {
     e.preventDefault();
     setError('');
     
-    if (!name.trim() || !command.trim()) {
-      setError('Name and command are required');
+    if (!isValid()) {
+      setError(transport === 'stdio' 
+        ? 'Name and command are required' 
+        : 'Name and URL are required');
       return;
     }
     
-    // 如果配置没有变化，直接保存
-    const configChanged = 
-      name !== originalServer.name ||
-      command !== originalServer.command ||
-      args !== (originalServer.args?.join(', ') || '') ||
-      autoStart !== (originalServer.autoStart || false) ||
-      envVars !== (originalServer.env ? Object.entries(originalServer.env).map(([k, v]) => `${k}=${v}`).join('\n') : '');
+    // 检查配置是否变化
+    const configChanged = checkConfigChanged();
     
     // 如果配置变了且没有测试成功，需要先测试
     if (configChanged && !testResult?.success) {
@@ -154,11 +188,41 @@ const EditMcpServerPage = () => {
     
     try {
       const config = buildConfig();
-      await window.electron?.mcp?.updateServer(config._id, config);
+      await mcpBridge.updateServer(config._id, config);
+      
+      // 通知其他窗口（如 chatbox）更新 MCP 服务器列表
+      await mcpBridge.emitServersUpdated({ action: 'updated', serverName: config.name });
+      
+      // 显示成功提示
+      alert(`MCP Server "${config.name}" updated successfully!`);
+      
+      // 返回上一页
       navigate('/mcp');
     } catch (err) {
       setError(err.message);
     }
+  };
+
+  const checkConfigChanged = () => {
+    if (!originalServer) return true;
+    
+    if (transport !== (originalServer.transport || 'stdio')) return true;
+    if (name !== originalServer.name) return true;
+    if (autoStart !== (originalServer.autoStart || false)) return true;
+    
+    if (transport === 'stdio') {
+      if (command !== (originalServer.command || '')) return true;
+      if (args !== (originalServer.args?.join(', ') || '')) return true;
+      const originalEnvStr = originalServer.env 
+        ? Object.entries(originalServer.env).map(([k, v]) => `${k}=${v}`).join('\n') 
+        : '';
+      if (envVars !== originalEnvStr) return true;
+    } else {
+      if (url !== (originalServer.url || '')) return true;
+      if (apiKey !== (originalServer.apiKey || '')) return true;
+    }
+    
+    return false;
   };
 
   if (loading) {
@@ -191,32 +255,89 @@ const EditMcpServerPage = () => {
               />
             </FormGroup>
             
-            <FormGroup label="Command *" help="The executable to run (e.g., npx, uvx, python)">
-              <Input
-                value={command}
-                onChange={(e) => { setCommand(e.target.value); setTestResult(null); }}
-                placeholder="e.g., npx"
-                required
-              />
+            <FormGroup label="Transport Type" help="How to connect to the MCP server">
+              <div className="flex gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="transport"
+                    value="stdio"
+                    checked={transport === 'stdio'}
+                    onChange={(e) => { setTransport(e.target.value); setTestResult(null); }}
+                    className="w-4 h-4 text-blue-600"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium">Stdio</span>
+                    <span className="text-gray-500 ml-1">(Local Process)</span>
+                  </span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="radio"
+                    name="transport"
+                    value="http"
+                    checked={transport === 'http'}
+                    onChange={(e) => { setTransport(e.target.value); setTestResult(null); }}
+                    className="w-4 h-4 text-blue-600"
+                  />
+                  <span className="text-sm">
+                    <span className="font-medium">HTTP/SSE</span>
+                    <span className="text-gray-500 ml-1">(Remote Server)</span>
+                  </span>
+                </label>
+              </div>
             </FormGroup>
             
-            <FormGroup label="Arguments" help="Comma or space separated arguments">
-              <Input
-                value={args}
-                onChange={(e) => { setArgs(e.target.value); setTestResult(null); }}
-                placeholder="e.g., -y, @modelcontextprotocol/server-filesystem, /path/to/allowed/dir"
-              />
-            </FormGroup>
-            
-            <FormGroup label="Environment Variables" help="One per line: KEY=value">
-              <Textarea
-                value={envVars}
-                onChange={(e) => { setEnvVars(e.target.value); setTestResult(null); }}
-                placeholder="TAVILY_API_KEY=tvly-xxxxxxxx&#10;ANOTHER_KEY=value"
-                rows={3}
-                className="font-mono text-sm"
-              />
-            </FormGroup>
+            {transport === 'stdio' ? (
+              <>
+                <FormGroup label="Command *" help="The executable to run (e.g., npx, uvx, python)">
+                  <Input
+                    value={command}
+                    onChange={(e) => { setCommand(e.target.value); setTestResult(null); }}
+                    placeholder="e.g., npx"
+                    required
+                  />
+                </FormGroup>
+                
+                <FormGroup label="Arguments" help="Comma or space separated arguments">
+                  <Input
+                    value={args}
+                    onChange={(e) => { setArgs(e.target.value); setTestResult(null); }}
+                    placeholder="e.g., -y, @modelcontextprotocol/server-filesystem, /path/to/allowed/dir"
+                  />
+                </FormGroup>
+                
+                <FormGroup label="Environment Variables" help="One per line: KEY=value">
+                  <Textarea
+                    value={envVars}
+                    onChange={(e) => { setEnvVars(e.target.value); setTestResult(null); }}
+                    placeholder="TAVILY_API_KEY=tvly-xxxxxxxx&#10;ANOTHER_KEY=value"
+                    rows={3}
+                    className="font-mono text-sm"
+                  />
+                </FormGroup>
+              </>
+            ) : (
+              <>
+                <FormGroup label="Server URL *" help="The HTTP endpoint URL of the MCP server">
+                  <Input
+                    value={url}
+                    onChange={(e) => { setUrl(e.target.value); setTestResult(null); }}
+                    placeholder="e.g., https://api.example.com/mcp"
+                    required
+                  />
+                </FormGroup>
+                
+                <FormGroup label="API Key" help="Optional authentication key">
+                  <Input
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
+                    placeholder="Your API key (optional)"
+                  />
+                </FormGroup>
+              </>
+            )}
             
             <FormGroup label="Icon" help="Select an icon for the toolbar">
               <div className="flex items-center gap-3">
@@ -301,7 +422,7 @@ const EditMcpServerPage = () => {
               <Button
                 variant="warning"
                 onClick={handleTest}
-                disabled={testing || !name.trim() || !command.trim()}
+                disabled={testing || !isValid()}
                 type="button"
               >
                 {testing ? (

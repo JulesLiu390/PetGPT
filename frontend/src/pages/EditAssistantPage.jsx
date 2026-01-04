@@ -4,6 +4,7 @@ import { FaCheck, FaSpinner } from "react-icons/fa6";
 import { MdCancel } from "react-icons/md";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
 import TitleBar from "../components/UI/TitleBar";
+import * as bridge from "../utils/bridge";
 
 const EditAssistantPage = () => {
   const navigate = useNavigate();
@@ -34,13 +35,13 @@ const EditAssistantPage = () => {
       
       try {
         // 加载所有 Model Configs (使用新的 API)
-        const models = await window.electron?.getModelConfigs();
+        const models = await bridge.getModelConfigs();
         if (Array.isArray(models)) {
           setModelConfigs(models);
         }
 
         // 加载当前 assistant (使用新的 API)
-        const assistant = await window.electron?.getAssistant(petId);
+        const assistant = await bridge.getAssistant(petId);
         if (assistant) {
           // hasMood 向后兼容
           const computedHasMood = typeof assistant.hasMood === 'boolean' ? assistant.hasMood : true;
@@ -102,13 +103,13 @@ const EditAssistantPage = () => {
         modelConfigId: assistantConfig.modelConfigId,
       };
 
-      const updatedAssistant = await window.electron?.updateAssistant(petId, updateData);
+      const updatedAssistant = await bridge.updateAssistant(petId, updateData);
       
       // 通知所有组件更新列表
-      window.electron?.sendPetsUpdate(updatedAssistant);
+      bridge.sendPetsUpdate(updatedAssistant);
       
       // 重新发送 characterId 以刷新当前选中角色的内存数据
-      window.electron?.sendCharacterId(petId);
+      bridge.sendCharacterId(petId);
       
       alert("Assistant updated successfully!");
       navigate('/selectCharacter');

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import AddCharacterTitleBar from "./AddCharacterTitleBar";
 import { callOpenAILib } from "../utils/openai";
+import bridge from '../utils/bridge';
 import defaultNormal from "../assets/default-normal.png";
 import OpaiNormal from "../assets/Opai-normal.png";
 import GeminaNormal from "../assets/Gemina-normal.png";
@@ -176,7 +177,7 @@ const AddCharacterPage = () => {
     reader.onload = async (event) => {
       const base64Image = event.target.result;
       try {
-        const result = await window.electron.processImage(base64Image);
+        const result = await bridge.processImage(base64Image);
         console.log("Processed image result:", result);
         setProcessedImagePaths(result.paths);
         setCharacter(prev => ({ ...prev, imageName: result.uuid }));
@@ -198,12 +199,12 @@ const AddCharacterPage = () => {
         submitData.imageName = "default";
         setProcessedImagePaths([]);
       }
-      const newPet = await window.electron?.createPet(submitData);
+      const newPet = await bridge.createPet(submitData);
       if (!newPet || !newPet._id) {
         throw new Error("Creation failed or no ID returned");
       }
-      window.electron?.sendCharacterId(newPet._id);
-      window.electron?.sendPetsUpdate(newPet);
+      bridge.sendCharacterId?.(newPet._id);
+      bridge.sendPetsUpdate?.(newPet);
       // 重置时也模拟选择 own character
       applyPreset("own character");
       setModelUrlType("default");
@@ -212,7 +213,7 @@ const AddCharacterPage = () => {
       setSelectedImageFile(null);
     } catch (error) {
       console.error("Error creating pet:", error.message);
-      window.electron?.sendCharacterId(null);
+      bridge.sendCharacterId?.(null);
     }
   };
 

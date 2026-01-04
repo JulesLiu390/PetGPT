@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useStateValue } from '../context/StateProvider';
+import bridge from '../utils/bridge';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
@@ -87,7 +88,7 @@ const ChatboxMessageArea = () => {
     const handler = (event, updatedMood) => {
       setIsThinking(updatedMood == 'thinking');
     };
-    window.electron?.onMoodUpdated(handler);
+    bridge.onMoodUpdated?.(handler);
   }, []);
 
   useEffect(() => {
@@ -95,7 +96,7 @@ const ChatboxMessageArea = () => {
       setIsThinking(false);
       setFirstTime(false);
     };
-    window.electron?.onCharacterId(handleCharacterId);
+    bridge.onCharacterId?.(handleCharacterId);
   }, []);
 
   // 自动滚动到底部

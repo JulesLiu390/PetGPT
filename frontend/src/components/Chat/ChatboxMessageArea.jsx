@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useStateValue } from '../../context/StateProvider';
+import bridge from '../../utils/bridge';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
@@ -179,7 +180,7 @@ const MessagePartContent = ({ part, isUser }) => {
       setIsLoading(true);
       try {
         const fileName = url.split('/').pop();
-        const data = await window.electron?.readUpload(fileName);
+        const data = await bridge.readUpload(fileName);
         setMediaSrc(data);
       } catch (err) {
         console.error('Failed to load media:', err);
@@ -205,7 +206,7 @@ const MessagePartContent = ({ part, isUser }) => {
   const handleOpenFile = () => {
     const url = part.file_url?.url;
     if (url) {
-      window.electron?.openFileExternal?.(url) || window.electron?.openExternal?.(`file://${url}`);
+      bridge.openFileExternal?.(url) || bridge.openExternal?.(`file://${url}`);
     }
   };
 
@@ -336,7 +337,9 @@ const MessagePartContent = ({ part, isUser }) => {
 };
 
 const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
-  const [{ currentConversationId, userMessages, liveToolCalls }, dispatch] = useStateValue();
+  const stateValue = useStateValue();
+  const [state, dispatch] = stateValue || [{}, () => {}];
+  const { currentConversationId, userMessages = [], liveToolCalls = {} } = state;
   
   // Get tool calls for current conversation
   const activeToolCalls = liveToolCalls[currentConversationId] || [];
@@ -398,7 +401,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
 
     if (currentConversationId) {
         try {
-            await window.electron.updateConversation(currentConversationId, { history: newMessages });
+            await bridge.updateConversation(currentConversationId, { history: newMessages });
         } catch (error) {
             console.error("Failed to save edit:", error);
         }
@@ -417,7 +420,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
         const newMessages = messages.filter((_, i) => i !== msgIndex);
         if (currentConversationId) {
             try {
-                await window.electron.updateConversation(currentConversationId, { history: newMessages });
+                await bridge.updateConversation(currentConversationId, { history: newMessages });
             } catch (error) {
                 console.error("Failed to delete message:", error);
             }
@@ -433,7 +436,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
 
     if (currentConversationId) {
         try {
-            await window.electron.updateConversation(currentConversationId, { history: newMessages });
+            await bridge.updateConversation(currentConversationId, { history: newMessages });
         } catch (error) {
             console.error("Failed to delete part:", error);
         }
@@ -477,7 +480,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     
     if (currentConversationId) {
         try {
-            await window.electron.updateConversation(currentConversationId, {
+            await bridge.updateConversation(currentConversationId, {
                 history: newMessages
             });
             
@@ -508,7 +511,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     // 3. Update backend
     if (currentConversationId) {
         try {
-            await window.electron.updateConversation(currentConversationId, {
+            await bridge.updateConversation(currentConversationId, {
                 history: newMessages
             });
         } catch (error) {
@@ -532,7 +535,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     const handler = (event, updatedMood) => {
       setIsThinking(updatedMood == 'thinking');
     };
-    window.electron?.onMoodUpdated(handler);
+    bridge.onMoodUpdated?.(handler);
   }, []);
 
   useEffect(() => {
@@ -540,7 +543,10 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
       setIsThinking(false);
       setFirstTime(false);
     };
-    window.electron?.onCharacterId(handleCharacterId);
+    const cleanup = bridge.onCharacterId?.(handleCharacterId);
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   // 处理 Tab 切换时的滚动 (瞬间到底)

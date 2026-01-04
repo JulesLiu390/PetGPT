@@ -1,5 +1,6 @@
 import React, { useRef, useState, useEffect } from 'react';
 import { useStateValue } from '../context/StateProvider';
+import bridge from '../utils/bridge';
 import { actionType } from '../context/reducer';
 import { FaCircleArrowUp, FaGlobe, FaShareNodes, FaFile } from "react-icons/fa6";
 import { BsFillRecordCircleFill } from "react-icons/bs";
@@ -98,7 +99,7 @@ export const ChatboxInputBox = () => {
   useEffect(() => {
     setSystem(window.navigator.platform);
     const loadDefaultCharacter = async () => {
-      const settings = await window.electron.getSettings();
+      const settings = await bridge.getSettings();
       try {
         if (settings && settings.defaultRoleId) {
           
@@ -106,7 +107,7 @@ export const ChatboxInputBox = () => {
           
           // 验证ID是否有效（是否能找到对应的pet数据）
           try {
-            const pet = await window.electron.getPet(settings.defaultRoleId);
+            const pet = await bridge.getPet(settings.defaultRoleId);
             if (pet) {
               setFirstCharacter(settings.defaultRoleId);
               // console.log("Default character ID validated successfully111ß");
@@ -125,13 +126,13 @@ export const ChatboxInputBox = () => {
       }
 
       try {
-        const settings = await window.electron.getSettings();
+        const settings = await bridge.getSettings();
         if (settings && settings.defaultModelId) {
           // console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
           
           // 验证ID是否有效（是否能找到对应的pet数据）
           try {
-            const pet = await window.electron.getPet(settings.defaultModelId);
+            const pet = await bridge.getPet(settings.defaultModelId);
             if (pet) {
               setFounctionModel(settings.defaultModelId);
               console.log("Default character ID validated successfully");
@@ -158,7 +159,7 @@ export const ChatboxInputBox = () => {
 
   useEffect(() => {
     if(firstCharacter!=null) {
-      window.electron?.sendCharacterId(firstCharacter);
+      bridge.sendCharacterId?.(firstCharacter);
     }
   
     // return () => {
@@ -173,7 +174,7 @@ export const ChatboxInputBox = () => {
       console.log("📩 Received character ID:", id);
       setCharacterId(id);
     };
-    window.electron?.onCharacterId(handleCharacterId);
+    bridge.onCharacterId?.(handleCharacterId);
   }, []);
 
   useEffect(() => {
@@ -203,7 +204,7 @@ export const ChatboxInputBox = () => {
 
     const fetchPetInfo = async () => {
       try {
-        const pet = await window.electron.getPet(characterId);
+        const pet = await bridge.getPet(characterId);
         if (pet) {
           const { _id, name, modelName, modelApiKey, modelProvider, modelUrl, hasMood, isAgent } = pet;
           const systemInstruction = pet.systemInstruction || pet.personality || '';
@@ -218,7 +219,7 @@ export const ChatboxInputBox = () => {
           }
 
           try {
-            const memoryJson = await window.electron.getPetUserMemory(characterId);
+            const memoryJson = await bridge.getPetUserMemory(characterId);
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
@@ -238,7 +239,7 @@ export const ChatboxInputBox = () => {
         }
 
         if (conversationIdRef.current) {
-          const currentConv = await window.electron.getConversationById(conversationIdRef.current);
+          const currentConv = await bridge.getConversationById(conversationIdRef.current);
           if (!currentConv || currentConv.petId !== characterId) {
             dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
             conversationIdRef.current = null;
@@ -262,11 +263,13 @@ export const ChatboxInputBox = () => {
     };
 
     // 注册监听器
-    window.electron.onNewChatCreated(handleNewChat);
+    if (bridge.onNewChatCreated) {
+      bridge.onNewChatCreated(handleNewChat);
+    }
 
     // 卸载时清理监听器，避免内存泄漏
     return () => {
-      window.electron.removeListener?.('new-chat-created', handleNewChat);
+      // cleanup handled by bridge
     };
   }, []);
 
@@ -274,7 +277,7 @@ export const ChatboxInputBox = () => {
   useEffect(() => {
     const fetch = async (conversationId) => {
       try {
-        const conv = await window.electron.getConversationById(conversationId);
+        const conv = await bridge.getConversationById(conversationId);
         setCharacterId(conv.petId)
         // alert(conv.petID);
       } catch (error) {
@@ -291,8 +294,8 @@ export const ChatboxInputBox = () => {
       conversationIdRef.current = id;
     };
 
-    if (window.electron?.onConversationId) {
-      window.electron.onConversationId(handleConversationId);
+    if (bridge.onConversationId) {
+      bridge.onConversationId(handleConversationId);
     }
   }, []);
 
@@ -337,11 +340,11 @@ export const ChatboxInputBox = () => {
       console.log("Received updated mood:", updatedMood);
       setCharacterMood(updatedMood);
     };
-    window.electron?.onMoodUpdated(moodUpdateHandler);
+    bridge.onMoodUpdated?.(moodUpdateHandler);
 
     // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
     return () => {
-      // window.electron?.removeMoodUpdated(moodUpdateHandler);
+      // bridge.removeMoodUpdated?.(moodUpdateHandler);
     };
   }, []);
 
@@ -364,7 +367,7 @@ export const ChatboxInputBox = () => {
     dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
 
 
-    window.electron?.sendMoodUpdate('thinking');
+    bridge.sendMoodUpdate?.('thinking');
 
     if (inputRef.current) {
       inputRef.current.value = "";
@@ -396,9 +399,9 @@ export const ChatboxInputBox = () => {
           );
           let getUserMemory = "";
           if (index.isImportant === true) {
-            await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
-            window.electron.updateChatbodyStatus(index.key + ":" + index.value);
-            const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+            await bridge.updatePetUserMemory(petInfo._id, index.key, index.value);
+            bridge.updateChatbodyStatus(index.key + ":" + index.value);
+            const memoryJson = await bridge.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
@@ -454,9 +457,9 @@ export const ChatboxInputBox = () => {
           );
           let getUserMemory = "";
           if (index.isImportant === true) {
-            await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
-            window.electron.updateChatbodyStatus(index.key + ":" + index.value);
-            const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+            await bridge.updatePetUserMemory(petInfo._id, index.key, index.value);
+            bridge.updateChatbodyStatus(index.key + ":" + index.value);
+            const memoryJson = await bridge.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
@@ -543,7 +546,7 @@ export const ChatboxInputBox = () => {
       const appleScriptEscaped = escapeForAppleScript(appleScriptCode);
       const osascriptCmd = `osascript -e '${appleScriptEscaped}'`;
 
-      window.electron?.testOpen(osascriptCmd);
+      bridge.testOpen(osascriptCmd);
 
     } else {
       reply = await callOpenAILib(
@@ -563,7 +566,7 @@ export const ChatboxInputBox = () => {
 
     if (!conversationIdRef.current) {
       try {
-        const newConversation = await window.electron.createConversation({
+        const newConversation = await bridge.createConversation({
           petId: petInfo._id,
           title: `${_userText} with ${petInfo.name}`,
           history: [...userMessages, { role: "user", content: _userText }, botReply],
@@ -574,16 +577,16 @@ export const ChatboxInputBox = () => {
       }
     }
 
-    await window.electron.updateConversation(conversationIdRef.current, {
+    await bridge.updateConversation(conversationIdRef.current, {
       petId: petInfo._id,
       title: `${_userText} with ${petInfo.name}`,
       history: [...userMessages, { role: "user", content: _userText }, botReply],
     });
 
-    window.electron?.sendMoodUpdate(reply.mood);
+    bridge.sendMoodUpdate(reply.mood);
     setIsGenerating(false);
 
-    window.electron.updateChatbodyStatus("");
+    bridge.updateChatbodyStatus("");
 
     setStateReply(reply);
     setStateThisModel(thisModel);

@@ -1,5 +1,5 @@
 export const initialState = {
-    suggestText: [],
+    suggestText: {}, // { conversationId: [] } 按会话管理建议回复
     navBarChats: [],
     characterMoods: {}, // { conversationId: mood } 按会话管理表情状态
     userMessages: [],

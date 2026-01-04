@@ -7,6 +7,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import { getMcpTools, convertToolsForLLM, executeToolByName, formatToolResult } from './toolExecutor.js';
+import bridge from '../bridge.js';
 
 /**
  * 用于管理 MCP 工具状态的 React Hook
@@ -27,13 +28,15 @@ export const useMcpTools = ({ enabledServers = new Set(), apiFormat = 'openai_co
   // 加载服务器列表
   const loadServers = useCallback(async () => {
     try {
-      if (!window.electron?.mcp?.listServers) {
-        console.warn('[useMcpTools] MCP API not available');
+      if (!bridge.mcp?.listServers) {
+        console.warn('[useMcpTools] MCP API (listServers) not available');
         return [];
       }
-      const servers = await window.electron.mcp.listServers();
-      setMcpServers(servers);
-      return servers;
+      console.log('[useMcpTools] Loading servers...');
+      const servers = await bridge.mcp.listServers();
+      console.log('[useMcpTools] Loaded servers:', servers?.length, servers?.map(s => ({ name: s.name, id: s._id })));
+      setMcpServers(servers || []);
+      return servers || [];
     } catch (err) {
       console.error('[useMcpTools] Failed to load servers:', err);
       return [];
@@ -95,9 +98,9 @@ export const useMcpTools = ({ enabledServers = new Set(), apiFormat = 'openai_co
   
   // 监听 MCP 服务器更新事件
   useEffect(() => {
-    if (!window.electron?.mcp?.onServersUpdated) return;
+    if (!bridge.mcp?.onServersUpdated) return;
     
-    const cleanup = window.electron.mcp.onServersUpdated(() => {
+    const cleanup = bridge.mcp.onServersUpdated(() => {
       console.log('[useMcpTools] Received servers updated event, reloading...');
       loadServers();
     });

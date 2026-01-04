@@ -3,18 +3,29 @@ import SettingsTitleBar from "../components/Layout/SettingsTitleBar";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
 import { PageLayout, Surface, Card, FormGroup, Label, Select, Button } from "../components/UI/ui";
 import { FaSpinner } from "react-icons/fa";
+import * as bridge from "../utils/bridge";
+import { useSettings } from "../utils/useSettings";
 
 // 设置页面组件
 const SettingsPage = () => {
-  const [settings, setSettings] = useState(null);
+  // 使用 useSettings hook 获取实时同步的设置
+  const { settings: syncedSettings, loading: settingsLoading, updateSettings: saveSettings } = useSettings();
+  const [localSettings, setLocalSettings] = useState(null);
   const [assistants, setAssistants] = useState([]);
   const [modelConfigs, setModelConfigs] = useState([]);
   const [saving, setSaving] = useState(false);
 
+  // 当同步设置加载完成时，初始化本地设置
+  useEffect(() => {
+    if (!settingsLoading && syncedSettings && Object.keys(syncedSettings).length > 0) {
+      setLocalSettings(syncedSettings);
+    }
+  }, [syncedSettings, settingsLoading]);
+
   // 获取 Assistants 列表
   const fetchAssistants = async () => {
     try {
-      const data = await window.electron.getAssistants();
+      const data = await bridge.getAssistants();
       if (Array.isArray(data)) {
         setAssistants(data);
       }
@@ -26,7 +37,7 @@ const SettingsPage = () => {
   // 获取 ModelConfigs 列表
   const fetchModelConfigs = async () => {
     try {
-      const data = await window.electron.getModelConfigs();
+      const data = await bridge.getModelConfigs();
       if (Array.isArray(data)) {
         setModelConfigs(data);
       }
@@ -35,21 +46,13 @@ const SettingsPage = () => {
     }
   };
 
-  // 获取设置
-  const fetchSettings = async () => {
-    try {
-      const data = await window.electron.getSettings();
-      setSettings(data);
-    } catch (error) {
-      console.error("Failed to get settings:", error);
-    }
-  };
-
   useEffect(() => {
     fetchAssistants();
     fetchModelConfigs();
-    fetchSettings();
   }, []);
+  
+  // 使用本地设置作为显示，便于编辑
+  const settings = localSettings;
 
   // 加载中显示
   if (!settings) {
@@ -65,15 +68,16 @@ const SettingsPage = () => {
 
   const handleChange = (e) => {
     const { name, value } = e.target;
-    setSettings((prev) => ({ ...prev, [name]: value }));
+    setLocalSettings((prev) => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSaving(true);
     try {
-      const newSettings = await window.electron.updateSettings(settings);
-      setSettings(newSettings);
+      // 使用 useSettings hook 的 saveSettings 方法保存设置
+      // 这会自动触发事件，同步到所有窗口
+      await saveSettings(localSettings);
       alert("Settings saved successfully!");
     } catch (error) {
       alert("Failed to save settings: " + error.message);
@@ -81,8 +85,8 @@ const SettingsPage = () => {
       setSaving(false);
     }
 
-    window.electron.updateWindowSizePreset(settings.windowSize)
-    window.electron.updateShortcuts(settings.programHotkey, settings.dialogHotkey)
+    bridge.updateWindowSizePreset(localSettings.windowSize);
+    bridge.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey);
   };
 
   // 获取 Assistant 的显示文本（包含关联的 Model 信息）

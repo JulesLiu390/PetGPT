@@ -4,37 +4,50 @@ import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
+import bridge from '../../utils/bridge';
 import { MdDelete, MdAdd, MdSearch, MdClose } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
-import { AiFillChrome } from 'react-icons/ai';
-import ChatboxTabBar from './ChatboxTabBar';
+// import { AiFillChrome } from 'react-icons/ai';
+// import ChatboxTabBar from './ChatboxTabBar';
 
 export const Chatbox = () => {
-  const [{ userMessages, suggestText, navBarChats, streamingReplies, updatedConversation }, dispatch] = useStateValue();
+  const [{ userMessages, navBarChats, updatedConversation, streamingReplies, characterMoods }, dispatch] = useStateValue();
+  const [testCount, setTestCount] = useState(0);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [conversations, setConversations] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
-  const [characterMood, setCharacterMood] = useState("")
-  const [sidebarOpen, setSidebarOpen] = useState(false); // 侧边栏状态
+  // Per-tab chatbody status for "Memory updating" display
+  const [chatbodyStatuses, setChatbodyStatuses] = useState({}); // { conversationId: status }
+  
+  // Tab State - declare early so we can use activeTabId
+  const [tabs, setTabs] = useState([]);
+  const [activeTabId, setActiveTabId] = useState(null);
+  const activeTabIdRef = useRef(null);
+  
+  // chatbodyStatus is for "Memory updating" display - use activeTabId state for immediate reactivity
+  const chatbodyStatus = activeTabId ? (chatbodyStatuses[activeTabId] || '') : '';
+
+  console.log('[ChatboxBody] Render, testCount:', testCount);
   
   // 切换侧边栏时调整窗口大小
   const handleToggleSidebar = () => {
     const newState = !sidebarOpen;
     setSidebarOpen(newState);
-    window.electron?.toggleSidebar(newState);
+    bridge.toggleSidebar?.(newState);
   };
-  
-  // Tab State
-  const [tabs, setTabs] = useState([]);
-  const [activeTabId, setActiveTabId] = useState(null);
-  const activeTabIdRef = useRef(null);
 
   useEffect(() => {
     const fetchConversations = async () => {
+      console.log('[ChatboxBody] fetchConversations called');
       try {
-        const data = await window.electron.getConversations();
+        const data = await bridge.getConversations();
+        console.log('[ChatboxBody] getConversations returned:', data);
         if (Array.isArray(data)) {
-            setConversations(data);
+            // Filter out empty conversations (no messages)
+            const nonEmptyConversations = data.filter(conv => conv.messageCount > 0);
+            setConversations(nonEmptyConversations);
+            console.log('[ChatboxBody] setConversations with', nonEmptyConversations.length, 'non-empty items');
         } else {
             console.warn("getConversations returned non-array:", data);
             setConversations([]);
@@ -49,13 +62,20 @@ export const Chatbox = () => {
 
   // Sync global userMessages to active tab
   useEffect(() => {
+    console.log('[ChatboxBody] userMessages changed:', userMessages, 'activeTabId:', activeTabId);
     if (activeTabId && userMessages) {
-        setTabs(prevTabs => prevTabs.map(tab => {
-            if (tab.id === activeTabId) {
-                return { ...tab, messages: userMessages };
-            }
-            return tab;
-        }));
+        console.log('[ChatboxBody] Syncing userMessages to tab:', activeTabId);
+        setTabs(prevTabs => {
+            const newTabs = prevTabs.map(tab => {
+                if (tab.id === activeTabId) {
+                    console.log('[ChatboxBody] Updated tab messages:', userMessages);
+                    return { ...tab, messages: userMessages };
+                }
+                return tab;
+            });
+            console.log('[ChatboxBody] New tabs state:', newTabs);
+            return newTabs;
+        });
     }
   }, [userMessages, activeTabId]);
 
@@ -76,45 +96,64 @@ export const Chatbox = () => {
   }, [updatedConversation]);
 
   useEffect(() => {
-    const moodUpdateHandler = (chatbodyStatus) => {
-      setCharacterMood(chatbodyStatus);
+    // This handler is for "Memory updating" status, NOT mood
+    const chatbodyStatusHandler = (status, conversationId) => {
+      const targetId = conversationId || activeTabIdRef.current;
+      if (targetId) {
+        setChatbodyStatuses(prev => ({
+          ...prev,
+          [targetId]: status
+        }));
+      }
     };
-    window.electron?.onChatbodyStatusUpdated(moodUpdateHandler);
-    return () => {};
+    const cleanup = bridge.onChatbodyStatusUpdated?.(chatbodyStatusHandler);
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   useEffect(() => {
-    setIsThinking(true);
-  }, [characterMood]);
+    if (chatbodyStatus) {
+      setIsThinking(true);
+    } else {
+      setIsThinking(false);
+    }
+  }, [chatbodyStatus]);
 
   // Handle New Tab from Character ID (moved from ChatboxTabBar)
   useEffect(() => {
+    console.log('[ChatboxBody] Setting up character-id listener');
     const handleCharacterId = (id) => {
+      console.log('[ChatboxBody] Received character-id:', id);
       dispatch({
         type: actionType.SET_NAVBAR_CHAT,
         navBarChats: [...(navBarChats || []), id],
       });
       const fetchCharacter = async () => {
+        console.log('[ChatboxBody] Fetching character for id:', id);
         // 优先尝试新的 Assistant API，失败则回退到旧的 Pet API
         let pet = null;
         try {
-          pet = await window.electron.getAssistant(id);
+          pet = await bridge.getAssistant(id);
+          console.log('[ChatboxBody] Got assistant:', pet);
         } catch (e) {
+          console.log('[ChatboxBody] getAssistant failed, trying getPet');
           // 回退到旧 API
         }
         if (!pet) {
-          pet = await window.electron.getPet(id);
+          pet = await bridge.getPet(id);
+          console.log('[ChatboxBody] Got pet:', pet);
         }
         if (!pet) {
           console.error("Could not find assistant or pet with id:", id);
           return;
         }
-        const newConversation = await window.electron.createConversation({
+        const newConversation = await bridge.createConversation({
           petId: pet._id,
           title: "New Chat",
           history: [],
         });
-        window.electron.sendConversationId(newConversation._id);
+        bridge.sendConversationId?.(newConversation._id);
         
         const newTab = {
             id: newConversation._id,
@@ -123,6 +162,18 @@ export const Chatbox = () => {
             messages: [],
             isActive: true
         };
+        
+        // Initialize mood and suggestText for new conversation
+        dispatch({
+            type: actionType.SET_CHARACTER_MOOD,
+            characterMood: '',
+            conversationId: newConversation._id
+        });
+        dispatch({
+            type: actionType.SET_SUGGEST_TEXT,
+            suggestText: [],
+            conversationId: newConversation._id
+        });
         
         setTabs(prev => {
             if (prev.some(t => t.id === newTab.id)) return prev;
@@ -133,7 +184,7 @@ export const Chatbox = () => {
       };
       fetchCharacter();
     };
-    const cleanup = window.electron?.onCharacterId(handleCharacterId);
+    const cleanup = bridge.onCharacterId?.(handleCharacterId);
     return () => {
       if (cleanup) cleanup();
     };
@@ -141,7 +192,7 @@ export const Chatbox = () => {
 
   const fetchConversationById = async (conversationId) => {
     try {
-      return await window.electron.getConversationById(conversationId);
+      return await bridge.getConversationById(conversationId);
     } catch (error) {
       console.error("Error fetching conversation:", error);
       throw error;
@@ -173,9 +224,10 @@ export const Chatbox = () => {
          }
     }
 
-    // Sync global
-    window.electron?.sendMoodUpdate('normal');
-    window.electron?.sendConversationId(clickedId);
+    // Sync global - send the mood of the clicked tab to update character display
+    const tabMood = characterMoods[clickedId] || 'normal';
+    bridge.sendMoodUpdate?.(tabMood, clickedId);
+    bridge.sendConversationId?.(clickedId);
     
     dispatch({
       type: actionType.SET_MESSAGE,
@@ -241,8 +293,19 @@ export const Chatbox = () => {
     setActiveTabId(conv._id);
     activeTabIdRef.current = conv._id;
     
-    window.electron?.sendMoodUpdate('normal');
-    window.electron?.sendConversationId(conv._id);
+    // Initialize mood and suggestText for new tab
+    dispatch({
+        type: actionType.SET_CHARACTER_MOOD,
+        characterMood: '', // Reset to empty
+        conversationId: conv._id
+    });
+    dispatch({
+        type: actionType.SET_SUGGEST_TEXT,
+        suggestText: [], // Reset to empty
+        conversationId: conv._id
+    });
+
+    bridge.sendConversationId?.(conv._id);
     dispatch({
       type: actionType.SET_MESSAGE,
       userMessages: conversation.history
@@ -257,13 +320,13 @@ export const Chatbox = () => {
     const activeTab = tabs.find(tab => tab.id === activeTabId);
     if (activeTab) {
         // 如果有活跃的 Tab，使用其 petId 创建新对话
-        window.electron.sendCharacterId(activeTab.petId);
+        bridge.sendCharacterId?.(activeTab.petId);
     } else if (tabs.length > 0) {
         // 如果有其他 Tab，使用第一个 Tab 的 petId
-        window.electron.sendCharacterId(tabs[0].petId);
+        bridge.sendCharacterId?.(tabs[0].petId);
     } else {
         // 没有任何 Tab，打开角色选择窗口
-        window.electron?.changeSelectCharacterWindow();
+        bridge.changeSelectCharacterWindow?.();
     }
   };
 
@@ -277,9 +340,9 @@ export const Chatbox = () => {
     // 获取角色信息用于显示名称
     let petName = "Assistant";
     try {
-      let pet = await window.electron.getAssistant(activeTab.petId);
+      let pet = await bridge.getAssistant(activeTab.petId);
       if (!pet) {
-        pet = await window.electron.getPet(activeTab.petId);
+        pet = await bridge.getPet(activeTab.petId);
       }
       if (pet && pet.name) {
         petName = pet.name;
@@ -315,7 +378,7 @@ export const Chatbox = () => {
     if (!confirmDelete) return;
 
     try {
-      await window.electron.deleteConversation(conversationId);
+      await bridge.deleteConversation(conversationId);
       setConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
       
       // Also close tab if open
@@ -330,10 +393,10 @@ export const Chatbox = () => {
   };
 
   const handleClose = () => {
-    window.electron?.hideChatWindow();
+    bridge.hideChatWindow?.();
   };
   const handleMax = () => {
-    window.electron?.maxmizeChatWindow();
+    bridge.maxmizeChatWindow?.();
   };
 
   return (
@@ -342,7 +405,7 @@ export const Chatbox = () => {
       <div className={`${sidebarOpen ? 'flex' : 'hidden'} lg:!flex flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
         
         {/* Window Controls & Sidebar Toggle */}
-        <div className="p-3 pt-4 draggable flex items-center justify-between">
+        <div className="p-3 pt-4 draggable flex items-center justify-between" data-tauri-drag-region>
             <div className="flex items-center gap-2 no-drag px-2">
                 {/* 红色：关闭 */}
                 <div onClick={handleClose} className="w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 cursor-pointer flex items-center justify-center group">
@@ -414,9 +477,9 @@ export const Chatbox = () => {
             sidebarOpen={sidebarOpen}
             onToggleSidebar={handleToggleSidebar}
         />
-        {characterMood != "" && (
+        {chatbodyStatus != "" && (
           <div className="text-center text-sm text-gray-600 animate-pulse absolute top-10 left-0 right-0 z-10 pointer-events-none">
-            Memory updating: {characterMood}
+            Memory updating: {chatbodyStatus}
           </div>
         )}
         
@@ -425,7 +488,7 @@ export const Chatbox = () => {
                 <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
                     <span>No active conversations</span>
                     <button 
-                        onClick={() => window.electron?.changeSelectCharacterWindow()}
+                        onClick={() => bridge.changeSelectCharacterWindow?.()}
                         className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
                     >
                         Select an Assistant

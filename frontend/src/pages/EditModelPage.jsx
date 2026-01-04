@@ -5,6 +5,7 @@ import { MdCancel } from "react-icons/md";
 import { callOpenAILib } from '../utils/openai';
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert } from "../components/UI/ui";
 import TitleBar from "../components/UI/TitleBar";
+import * as bridge from "../utils/bridge";
 
 const EditModelPage = () => {
   const navigate = useNavigate();
@@ -36,7 +37,7 @@ const EditModelPage = () => {
       }
       
       try {
-        const model = await window.electron?.getModelConfig(modelId);
+        const model = await bridge.getModelConfig(modelId);
         if (model) {
           setModelConfig({
             name: model.name || "",
@@ -128,8 +129,8 @@ const EditModelPage = () => {
         modelUrl: modelConfig.modelUrl,
       };
 
-      await window.electron?.updateModelConfig(modelId, updateData);
-      window.electron?.sendPetsUpdate();
+      await bridge.updateModelConfig(modelId, updateData);
+      bridge.sendPetsUpdate();
       
       alert("Model configuration updated successfully!");
       navigate('/selectCharacter');

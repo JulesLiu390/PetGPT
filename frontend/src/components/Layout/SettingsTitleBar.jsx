@@ -1,10 +1,12 @@
 import React from "react";
 import { MdCancel } from "react-icons/md";
 import TitleBar from "../UI/TitleBar";
+import bridge from "../../utils/bridge";
 
 export const SettingsTitleBar = () => {
   const handleClose = () => {
-    window.electron?.changeSettingsWindow();
+    // 直接隐藏窗口（不是 toggle）
+    bridge.hideSettingsWindow?.();
   };
 
   return (

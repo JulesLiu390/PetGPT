@@ -3,7 +3,7 @@ import React from "react";
 export const cx = (...classes) => classes.filter(Boolean).join(" ");
 
 export const PageLayout = ({ children, className }) => (
-  <div className={cx("min-h-screen bg-slate-50 text-slate-900", className)}>
+  <div className={cx("min-h-screen bg-slate-50 text-slate-900 rounded-2xl overflow-hidden border border-slate-200/50", className)}>
     {children}
   </div>
 );
@@ -115,7 +115,7 @@ export const Badge = ({ children, tone = "slate", className }) => {
   return (
     <span
       className={cx(
-        "inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-semibold",
+        "inline-flex items-center rounded-md border px-2 py-0.5 text-[11px] font-semibold",
         tones[tone],
         className
       )}

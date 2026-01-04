@@ -4,6 +4,7 @@ import { callOpenAILib, fetchModels } from "../utils/openai";
 import { FaCheck, FaSpinner, FaList, FaMagnifyingGlass } from "react-icons/fa6";
 import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl } from "../utils/llm/presets";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
+import * as bridge from "../utils/bridge";
 
 /**
  * 根据 apiFormat 获取默认图片名
@@ -130,7 +131,7 @@ const AddModelPage = () => {
     setDetectResult(null);
     
     try {
-      const result = await window.electron?.probeOpenAICompatibleEndpoints({
+      const result = await bridge.probeOpenAICompatibleEndpoints({
         apiKey: modelConfig.modelApiKey,
         includeLocal: includeLocalEndpoints
       });
@@ -165,7 +166,7 @@ const AddModelPage = () => {
     setCapabilities(null);
 
     try {
-      const result = await window.electron?.probeModelCapabilities({
+      const result = await bridge.probeModelCapabilities({
         apiFormat: modelConfig.apiFormat,
         apiKey: modelConfig.modelApiKey,
         modelName: modelConfig.modelName,
@@ -272,11 +273,11 @@ const AddModelPage = () => {
         modelUrl: modelConfig.modelUrl,
       };
 
-      const newModel = await window.electron?.createModelConfig(modelData);
+      const newModel = await bridge.createModelConfig(modelData);
       if (!newModel || !newModel._id) {
         throw new Error("Model creation failed or no ID returned");
       }
-      window.electron?.sendPetsUpdate(newModel);
+      bridge.sendPetsUpdate(newModel);
       
       // Auto-create a default assistant if checkbox is checked
       if (createDefaultAssistant) {
@@ -289,10 +290,10 @@ const AddModelPage = () => {
           hasMood: true,
         };
         
-        const newAssistant = await window.electron?.createAssistant(assistantData);
+        const newAssistant = await bridge.createAssistant(assistantData);
         if (newAssistant?._id) {
-          window.electron?.sendCharacterId(newAssistant._id);
-          window.electron?.sendPetsUpdate(newAssistant);
+          bridge.sendCharacterId(newAssistant._id);
+          bridge.sendPetsUpdate(newAssistant);
         }
       }
       

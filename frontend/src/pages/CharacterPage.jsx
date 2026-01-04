@@ -5,6 +5,7 @@ import { FaPlug } from "react-icons/fa6";
 import { CgAdd, CgHello } from "react-icons/cg";
 import { GoMultiSelect } from "react-icons/go";
 import { IoIosSettings } from "react-icons/io";
+import * as bridge from '../utils/bridge';
 
 
 
@@ -24,20 +25,20 @@ export const Character = () => {
   useEffect(() => {
     const loadDefaultCharacter = async () => {
       try {
-        const settings = await window.electron.getSettings();
+        const settings = await bridge.getSettings();
         if (settings && settings.defaultRoleId) {
           
           try {
-            window.electron.updateShortcuts(settings.programHotkey, settings.dialogHotkey)
+            bridge.updateShortcuts(settings.programHotkey, settings.dialogHotkey);
             // 优先尝试 getAssistant，失败则回退到 getPet
             let pet = null;
             try {
-              pet = await window.electron.getAssistant(settings.defaultRoleId);
+              pet = await bridge.getAssistant(settings.defaultRoleId);
             } catch (e) {
               // 忽略，尝试旧 API
             }
             if (!pet) {
-              pet = await window.electron.getPet(settings.defaultRoleId);
+              pet = await bridge.getPet(settings.defaultRoleId);
             }
             if (pet && pet.imageName) {
               setImageName(pet.imageName);
@@ -64,11 +65,11 @@ export const Character = () => {
       console.log("Received updated mood:", updatedMood);
       setCharacterMood(updatedMood);
     };
-    window.electron?.onMoodUpdated(moodUpdateHandler);
+    const cleanup = bridge.onMoodUpdated(moodUpdateHandler);
 
     // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
     return () => {
-      // window.electron?.removeMoodUpdated(moodUpdateHandler);
+      if (cleanup) cleanup();
     };
   }, []);
 
@@ -80,12 +81,12 @@ export const Character = () => {
         // 优先尝试 getAssistant，失败则回退到 getPet
         let pet = null;
         try {
-          pet = await window.electron.getAssistant(id);
+          pet = await bridge.getAssistant(id);
         } catch (e) {
           // 忽略，尝试旧 API
         }
         if (!pet) {
-          pet = await window.electron.getPet(id);
+          pet = await bridge.getPet(id);
         }
         if (pet && pet.imageName) {
           setImageName(pet.imageName);
@@ -93,22 +94,25 @@ export const Character = () => {
       }
       fetchCharacterImageName();
     };
-    window.electron?.onCharacterId(handleCharacterId);
+    const cleanup = bridge.onCharacterId(handleCharacterId);
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   useEffect(() => {
-    const fetch = async (conversationId) => {
+    const fetchConv = async (conversationId) => {
       try {
-        const conv = await window.electron.getConversationById(conversationId);
+        const conv = await bridge.getConversationById(conversationId);
         // 优先尝试 getAssistant，失败则回退到 getPet
         let pet = null;
         try {
-          pet = await window.electron.getAssistant(conv.petId);
+          pet = await bridge.getAssistant(conv.petId);
         } catch (e) {
           // 忽略，尝试旧 API
         }
         if (!pet) {
-          pet = await window.electron.getPet(conv.petId);
+          pet = await bridge.getPet(conv.petId);
         }
         if (pet && pet.imageName) {
           setImageName(pet.imageName);
@@ -120,12 +124,13 @@ export const Character = () => {
     };
 
     const handleConversationId = async(id) => {
-      await fetch(id);
+      await fetchConv(id);
     };
 
-    if (window.electron?.onConversationId) {
-      window.electron.onConversationId(handleConversationId);
-    }
+    const cleanup = bridge.onConversationId(handleConversationId);
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   // 根据 characterMood 动态加载对应图片
@@ -149,7 +154,7 @@ export const Character = () => {
           const module = await import(`../assets/Gemina-${characterMood}.png`);
           setImgSrc(module.default);
         } else {
-          const base64Image = await window.electron.readPetImage(`${imageName}-${characterMood}.png`);
+          const base64Image = await bridge.readPetImage(`${imageName}-${characterMood}.png`);
           setImgSrc(base64Image);
         }
         
@@ -173,7 +178,7 @@ export const Character = () => {
             const module = await import(`../assets/Gemina-normal.png`);
             setImgSrc(module.default);
           } else {
-            const base64Image = await window.electron.readPetImage(`${imageName}-normal.png`);
+            const base64Image = await bridge.readPetImage(`${imageName}-normal.png`);
             setImgSrc(base64Image);
           }
         } catch (fallbackErr) {
@@ -186,27 +191,27 @@ export const Character = () => {
 
   // 各种点击事件
   const handleClick = () => {
-    window.electron?.changeChatWindow();
+    bridge.changeChatWindow();
   };
   const handleClickAddCharacter = () => {
-    window.electron?.changeAddCharacterWindow();
+    bridge.changeAddCharacterWindow();
   };
   const handleClickSelectCharacter = () => {
-    window.electron?.changeSelectCharacterWindow();
+    bridge.changeSelectCharacterWindow();
   };
   const handleClickSettings = () => {
-    window.electron?.changeSettingsWindow();
+    bridge.changeSettingsWindow();
   };
   const handleClickMcp = () => {
-    window.electron?.changeMcpWindow();
+    bridge.changeMcpWindow();
   };
 
   useEffect(() => {
     let windowSize = "medium";
     const getWindowSize = async() => {
-      const settings = await window.electron.getSettings()
+      const settings = await bridge.getSettings();
       windowSize = settings.windowSize;
-      window.electron.updateWindowSizePreset(windowSize)
+      bridge.updateWindowSizePreset(windowSize);
     }
     getWindowSize()
     // alert(settings.windowSize)
@@ -221,7 +226,7 @@ export const Character = () => {
 
   return (
     <div
-      className="select-none h-full w-full flex flex-col justify-center items-center"
+      className="select-none h-full w-full flex flex-col justify-center items-center rounded-xl overflow-hidden"
       onMouseEnter={() => setIsShowOptions(true)}
       onMouseLeave={() => setIsShowOptions(false)}
     >
@@ -279,8 +284,12 @@ export const Character = () => {
         "
       />
 
-      {/* 底部可拖拽区域 */}
-      <div className="mt-3 w-[120px] h-[12px] rounded-full bg-gray-400 opacity-70 shadow-sm draggable" />
+      {/* 底部可拖拽区域 - 增加点击热区 */}
+      <div className="w-full h-[60px] flex justify-center items-center cursor-move draggable group" data-tauri-drag-region>
+        <div 
+          className="w-[140px] h-[14px] rounded-full bg-gray-400 opacity-70 shadow-sm group-hover:opacity-100 transition-opacity pointer-events-none" 
+        />
+      </div>
     </div>
   );
 };

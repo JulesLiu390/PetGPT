@@ -7,6 +7,7 @@
 import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
+import bridge from '../bridge.js';
 
 // 最大工具调用轮次，防止无限循环
 const MAX_TOOL_ITERATIONS = 10;
@@ -18,12 +19,12 @@ const MAX_TOOL_ITERATIONS = 10;
  */
 export const getMcpTools = async () => {
   try {
-    if (!window.electron?.mcp?.getAllTools) {
+    if (!bridge.mcp?.getAllTools) {
       console.log('[MCP] MCP API not available');
       return [];
     }
     
-    const tools = await window.electron.mcp.getAllTools();
+    const tools = await bridge.mcp.getAllTools();
     console.log('[MCP] Available tools:', tools.length);
     return tools;
   } catch (error) {
@@ -42,12 +43,12 @@ export const getMcpTools = async () => {
  */
 export const executeMcpTool = async (serverName, toolName, args) => {
   try {
-    if (!window.electron?.mcp?.callTool) {
+    if (!bridge.mcp?.callTool) {
       throw new Error('MCP API not available');
     }
     
     console.log(`[MCP] Executing tool: ${serverName}/${toolName}`, args);
-    const result = await window.electron.mcp.callTool(serverName, toolName, args);
+    const result = await bridge.mcp.callTool(serverName, toolName, args);
     console.log(`[MCP] Tool result:`, result);
     return result;
   } catch (error) {
@@ -65,12 +66,12 @@ export const executeMcpTool = async (serverName, toolName, args) => {
  */
 export const executeToolByName = async (toolName, args) => {
   try {
-    if (!window.electron?.mcp?.callToolByName) {
+    if (!bridge.mcp?.callToolByName) {
       throw new Error('MCP API not available');
     }
     
     console.log(`[MCP] Executing tool by name: ${toolName}`, args);
-    const result = await window.electron.mcp.callToolByName(toolName, args);
+    const result = await bridge.mcp.callToolByName(toolName, args);
     console.log(`[MCP] Tool result:`, result);
     return result;
   } catch (error) {
@@ -452,6 +453,16 @@ export const callLLMStreamWithTools = async ({
     console.log('[MCP] Stream collected tool calls:', collectedToolCalls);
     
     for (const call of collectedToolCalls) {
+      // 检查是否已中断
+      if (abortSignal?.aborted) {
+        console.log('[MCP] Tool execution aborted by user');
+        return {
+          content: fullContent,
+          toolCallHistory,
+          aborted: true
+        };
+      }
+      
       const toolCallId = call.id || `${call.name}-${Date.now()}`;
       
       if (onToolCall) {
@@ -461,11 +472,27 @@ export const callLLMStreamWithTools = async ({
       let isError = false;
       let toolResult;
       try {
+        // 再次检查中断状态
+        if (abortSignal?.aborted) {
+          throw new Error('Tool execution cancelled');
+        }
         toolResult = await executeToolByName(call.name, call.arguments);
         if (toolResult && toolResult.error) {
           isError = true;
         }
       } catch (error) {
+        // 如果是中断导致的错误，直接返回
+        if (abortSignal?.aborted || error.message === 'Tool execution cancelled') {
+          console.log('[MCP] Tool execution cancelled');
+          if (onToolResult) {
+            onToolResult(call.name, 'Cancelled by user', toolCallId, true);
+          }
+          return {
+            content: fullContent,
+            toolCallHistory,
+            aborted: true
+          };
+        }
         isError = true;
         toolResult = { error: error.message };
       }

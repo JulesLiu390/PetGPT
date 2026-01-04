@@ -381,10 +381,15 @@ const McpToolbar = ({
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, [showDropdown]);
   
+  // 调试日志
+  console.log('[McpToolbar] servers received:', servers?.length, servers?.map(s => ({ name: s.name, showInToolbar: s.showInToolbar, _id: s._id })));
+  
   // 按 toolbarOrder 排序
   const sortedServers = [...servers].sort((a, b) => (a.toolbarOrder || 0) - (b.toolbarOrder || 0));
   // 只显示标记为显示在工具栏的服务器
   const visibleServers = sortedServers.filter(s => s.showInToolbar !== false).slice(0, maxVisible);
+  
+  console.log('[McpToolbar] visibleServers:', visibleServers.length);
   
   const handleContextMenu = (server, e) => {
     setContextMenu({

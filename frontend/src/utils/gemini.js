@@ -1,3 +1,5 @@
+import bridge from './bridge.js';
+
 // Helper to convert OpenAI messages to Gemini contents
 const convertMessagesToGemini = async (messages) => {
   const contents = [];
@@ -39,11 +41,11 @@ const convertMessagesToGemini = async (messages) => {
                             }
                         });
                     }
-                } else if (window.electron?.readUpload) {
+                } else if (bridge?.readUpload) {
                     // Load from file path
                     try {
                         const fileName = url.split('/').pop();
-                        const base64Data = await window.electron.readUpload(fileName);
+                        const base64Data = await bridge.readUpload(fileName);
                         const match = base64Data.match(/^data:(.*?);base64,(.*)$/);
                         if (match) {
                             parts.push({
@@ -63,10 +65,10 @@ const convertMessagesToGemini = async (messages) => {
                 const mimeType = part.file_url?.mime_type;
                 
                 // Try to load file data
-                if (window.electron?.readUpload && fileUrl) {
+                if (bridge?.readUpload && fileUrl) {
                     try {
                         const fileName = fileUrl.split('/').pop();
-                        const base64Data = await window.electron.readUpload(fileName);
+                        const base64Data = await bridge.readUpload(fileName);
                         const match = base64Data.match(/^data:(.*?);base64,(.*)$/);
                         if (match) {
                             // Gemini supports: images, audio, video, PDF

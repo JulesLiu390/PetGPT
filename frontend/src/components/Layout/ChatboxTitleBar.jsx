@@ -4,6 +4,7 @@ import { HiOutlinePencilAlt } from "react-icons/hi";
 import { MdClose } from "react-icons/md";
 import { TbArrowsMaximize, TbArrowsMinimize } from "react-icons/tb";
 import ChatboxTabBar from '../Chat/ChatboxTabBar';
+import bridge from '../../utils/bridge';
 
 
 export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, onCloseTab, onAddTab, onShare, sidebarOpen, onToggleSidebar }) => {
@@ -34,8 +35,8 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
     const handleMaximized = () => setIsMaximized(true);
     const handleUnmaximized = () => setIsMaximized(false);
     
-    window.electron?.onWindowMaximized?.(handleMaximized);
-    window.electron?.onWindowUnmaximized?.(handleUnmaximized);
+    bridge.onWindowMaximized?.(handleMaximized);
+    bridge.onWindowUnmaximized?.(handleUnmaximized);
     
     return () => {};
   }, []);
@@ -47,12 +48,12 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
         // 优先尝试 getAssistant，失败则回退到 getPet
         let pet = null;
         try {
-          pet = await window.electron.getAssistant(activePetId);
+          pet = await bridge.getAssistant(activePetId);
         } catch (e) {
           // 忽略，尝试旧 API
         }
         if (!pet) {
-          pet = await window.electron.getPet(activePetId);
+          pet = await bridge.getPet(activePetId);
         }
         if (pet) {
           setTitleInfo({
@@ -70,18 +71,18 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
 
   // Title bar component
   const handleClose = () => {
-    window.electron?.hideChatWindow();
+    bridge.hideChatWindow?.();
   };
   const handleMax = () => {
-    window.electron?.maxmizeChatWindow();
+    bridge.maxmizeChatWindow?.();
   };
   const handleNew = () => {
-    window.electron?.createNewChat();
+    bridge.createNewChat?.();
   };
 
 
   return (
-    <div className='draggable w-full h-9 flex items-center justify-between px-2 bg-slate-100 gap-2 relative z-30'>
+    <div className='draggable w-full h-9 flex items-center justify-between px-2 bg-slate-100 gap-2 relative z-30' data-tauri-drag-region>
       {/* Window Close Button (Only visible when NOT large window/sidebar hidden) */}
       {!isLargeWindow && (
         <div 

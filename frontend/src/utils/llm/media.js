@@ -3,6 +3,7 @@
  * 
  * 负责文件读取、base64 编码、以及文档文本提取
  */
+import bridge from '../bridge.js';
 
 /**
  * 通过 Electron IPC 读取本地文件为 base64 data URI
@@ -26,7 +27,7 @@ export const readFileAsBase64 = async (filePath) => {
   // 通过 Electron 读取
   try {
     const fileName = filePath.split('/').pop();
-    const data = await window.electron?.readUpload(fileName);
+    const data = await bridge?.readUpload(fileName);
     return data || null;
   } catch (err) {
     console.error('Failed to read file:', filePath, err);

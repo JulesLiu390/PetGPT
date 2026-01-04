@@ -4,6 +4,7 @@ import SelectCharacterTitleBar from '../components/Layout/SelectCharacterTitleBa
 import { FaPlus, FaPen } from 'react-icons/fa6';
 import { FaRobot, FaCogs } from 'react-icons/fa';
 import { PageLayout, Surface, Card, Tabs, Button, EmptyState, Badge } from '../components/UI/ui';
+import * as bridge from '../utils/bridge';
 
 const CustomImage = ({ imageName }) => {
   const [imgSrc, setImgSrc] = useState("");
@@ -27,7 +28,7 @@ const CustomImage = ({ imageName }) => {
           const module = await import(`../assets/Gemina-normal.png`);
           setImgSrc(module.default);
         } else {
-          const base64Image = await window.electron.readPetImage(`${imageName}-normal.png`);
+          const base64Image = await bridge.readPetImage(`${imageName}-normal.png`);
           setImgSrc(base64Image);
         }
       } catch (error) {
@@ -77,8 +78,8 @@ const SelectCharacterPage = () => {
   const fetchData = async () => {
     try {
       // 分别获取 Models 和 Assistants
-      const modelData = await window.electron.getModelConfigs();
-      const assistantData = await window.electron.getAssistants();
+      const modelData = await bridge.getModelConfigs();
+      const assistantData = await bridge.getAssistants();
       
       if (Array.isArray(modelData)) {
         setModels(modelData);
@@ -102,25 +103,28 @@ const SelectCharacterPage = () => {
       fetchData();
     };
 
-    if (window.electron?.onPetsUpdated) {
-      window.electron.onPetsUpdated(petsUpdateHandler);
-    }
+    const cleanup = bridge.onPetsUpdated(petsUpdateHandler);
     return () => {
-      // window.electron.removePetsUpdated(petsUpdateHandler);
+      if (cleanup) cleanup();
     };
   }, []);
 
   const handleSelect = async (assistant) => {
+    console.log('[SelectCharacterPage] handleSelect called with:', assistant);
     // 发送 assistant ID (兼容旧的 character-id)
-    window.electron?.sendCharacterId(assistant._id);
-    alert("Assistant Selected");
-    window.electron?.sendMoodUpdate('normal');
+    await bridge.sendCharacterId(assistant._id);
+    console.log('[SelectCharacterPage] sendCharacterId done');
+    // 隐藏选择窗口，显示 chat 窗口
+    await bridge.hideSelectCharacterWindow();
+    console.log('[SelectCharacterPage] hideSelectCharacterWindow done');
+    await bridge.showChatWindow();
+    console.log('[SelectCharacterPage] showChatWindow done');
   };
 
   const handleDeleteModel = async (modelId) => {
     if (!confirm("Are you sure you want to delete this model configuration?")) return;
     try {
-      await window.electron.deleteModelConfig(modelId);
+      await bridge.deleteModelConfig(modelId);
       fetchData();
     } catch (error) {
       alert("删除 Model 失败: " + error.message);
@@ -130,7 +134,7 @@ const SelectCharacterPage = () => {
   const handleDeleteAssistant = async (assistantId) => {
     if (!confirm("Are you sure you want to delete this assistant?")) return;
     try {
-      await window.electron.deleteAssistant(assistantId);
+      await bridge.deleteAssistant(assistantId);
       fetchData();
     } catch (error) {
       alert("删除 Assistant 失败: " + error.message);

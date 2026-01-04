@@ -2,6 +2,7 @@ import React from "react";
 import { useNavigate } from "react-router-dom";
 import { MdCancel } from "react-icons/md";
 import TitleBar from "../UI/TitleBar";
+import bridge from "../../utils/bridge";
 
 export const AddModelTitleBar = () => {
   const navigate = useNavigate();
@@ -14,7 +15,7 @@ export const AddModelTitleBar = () => {
       navigate('/selectCharacter');
     } else {
       // 没有导航历史，说明是独立窗口直接加载的，隐藏窗口
-      window.electron?.hideAddCharacterWindow();
+      bridge.hideAddCharacterWindow?.();
     }
   };
 

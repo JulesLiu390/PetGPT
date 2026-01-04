@@ -21,7 +21,7 @@ function App() {
     // </div>
         <Routes>
           <Route path="/" element={
-            <div className='h-screen rounded-3xl bg-[rgba(245,245,255,0.99)]'>
+            <div className='h-screen rounded-3xl bg-[rgba(245,245,255,0.99)] overflow-hidden'>
             <ChatboxBody className='z-10' />
             </div>
           } />

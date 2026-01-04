@@ -125,21 +125,27 @@ const reducer = (state, action) => {
         case actionType.SET_SUGGEST_TEXT:
             return {
                 ...state,
-                suggestText : action.suggestText,
+                suggestText: {
+                    ...state.suggestText,
+                    [action.conversationId]: action.suggestText
+                }
             };
         case actionType.ADD_MESSAGE:
+            console.log('[Reducer] ADD_MESSAGE called, current userMessages:', state.userMessages, 'new message:', action.message);
+            const newUserMessages = [...(state.userMessages || []), action.message];
+            console.log('[Reducer] New userMessages:', newUserMessages);
             return {
                 ...state,
-                userMessages: [...state.userMessages, action.message], // 👈 推入新项
+                userMessages: newUserMessages, // 👈 推入新项
             };
         case actionType.SET_MESSAGE:
             return {
                 ...state,
-                userMessages: action.userMessages,
+                userMessages: action.userMessages || [],
             };
 
         case actionType.UPDATE_MESSAGE:
-            const updatedMessages = [...state.userMessages];
+            const updatedMessages = [...(state.userMessages || [])];
             if (action.index >= 0 && action.index < updatedMessages.length) {
                 updatedMessages[action.index] = {
                     ...updatedMessages[action.index],
@@ -154,7 +160,7 @@ const reducer = (state, action) => {
         case actionType.DELETE_MESSAGE:
             return {
                 ...state,
-                userMessages: state.userMessages.filter((_, i) => i !== action.index),
+                userMessages: (state.userMessages || []).filter((_, i) => i !== action.index),
             };
 
         case actionType.CLEAR_MESSAGES:

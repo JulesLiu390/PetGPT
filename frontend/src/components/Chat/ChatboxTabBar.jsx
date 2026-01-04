@@ -6,9 +6,9 @@ const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onAddTab, co
   const [showDropdown, setShowDropdown] = useState(false);
 
   return (
-    <div className={`draggable w-full h-full flex items-center px-1 gap-0 min-w-0 ${compact ? 'h-full' : 'h-8 mt-1'}`}>
+    <div className={`draggable w-full h-full flex items-center px-1 gap-0 min-w-0 ${compact ? 'h-full' : 'h-8 mt-1'}`} data-tauri-drag-region>
       {/* Scrollable Tabs Area */}
-      <div className="flex-1 w-0 min-w-0 h-full flex flex-nowrap overflow-x-auto scrollbar-hide gap-0 items-end mask-linear-fade">
+      <div className="flex-1 w-0 min-w-0 h-full flex flex-nowrap overflow-x-auto scrollbar-hide gap-0 items-end mask-linear-fade" data-tauri-drag-region>
         {tabs.map((tab, index) => (
           <motion.div
             key={tab.id}

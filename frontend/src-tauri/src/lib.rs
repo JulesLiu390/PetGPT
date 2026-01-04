@@ -1,0 +1,1035 @@
+mod database;
+mod mcp;
+
+use database::{Database, pets, conversations, messages, settings, mcp_servers};
+use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::collections::HashMap;
+use tauri::{State, Manager, AppHandle, LogicalPosition, LogicalSize, Emitter};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use serde_json::Value as JsonValue;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+// Type alias for MCP manager state
+type McpState = Arc<tokio::sync::RwLock<McpManager>>;
+
+#[allow(unused_imports)]
+use tauri::WebviewWindow;
+
+// Type alias for database state
+type DbState = Arc<Database>;
+
+// ============ Event Broadcasting ============
+
+/// 广播事件到所有窗口
+#[tauri::command]
+fn emit_to_all(app: AppHandle, event: String, payload: JsonValue) -> Result<(), String> {
+    println!("[Rust] emit_to_all called: event={}, payload={:?}", event, payload);
+    let result = app.emit(&event, payload.clone());
+    match &result {
+        Ok(_) => println!("[Rust] Event emitted successfully"),
+        Err(e) => println!("[Rust] Failed to emit event: {:?}", e),
+    }
+    result.map_err(|e| e.to_string())
+}
+
+// ============ Pet Commands ============
+
+#[tauri::command]
+fn get_pets(db: State<DbState>) -> Result<Vec<pets::Pet>, String> {
+    db.get_all_pets().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_pet(db: State<DbState>, id: String) -> Result<Option<pets::Pet>, String> {
+    db.get_pet_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_pet(db: State<DbState>, data: pets::CreatePetData) -> Result<pets::Pet, String> {
+    db.create_pet(data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_pet(db: State<DbState>, id: String, data: pets::UpdatePetData) -> Result<Option<pets::Pet>, String> {
+    db.update_pet(&id, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_pet(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.delete_pet(&id).map_err(|e| e.to_string())
+}
+
+// ============ Conversation Commands ============
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn get_conversations_by_pet(db: State<DbState>, petId: String) -> Result<Vec<conversations::Conversation>, String> {
+    db.get_conversations_by_pet(&petId).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_conversation(db: State<DbState>, id: String) -> Result<Option<conversations::Conversation>, String> {
+    db.get_conversation_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_conversation(db: State<DbState>, data: conversations::CreateConversationData) -> Result<conversations::Conversation, String> {
+    db.create_conversation(data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_conversation_title(db: State<DbState>, id: String, title: String) -> Result<bool, String> {
+    db.update_conversation_title(&id, &title).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_conversation(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.delete_conversation(&id).map_err(|e| e.to_string())
+}
+
+// ============ Message Commands ============
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn get_messages(db: State<DbState>, conversationId: String) -> Result<Vec<messages::Message>, String> {
+    db.get_messages_by_conversation(&conversationId).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_message(db: State<DbState>, data: messages::CreateMessageData) -> Result<messages::Message, String> {
+    db.create_message(data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn clear_conversation_messages(db: State<DbState>, conversationId: String) -> Result<usize, String> {
+    db.clear_conversation_messages(&conversationId).map_err(|e| e.to_string())
+}
+
+// ============ Settings Commands ============
+
+#[tauri::command]
+fn get_setting(db: State<DbState>, key: String) -> Result<Option<String>, String> {
+    db.get_setting(&key).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_setting(app: AppHandle, db: State<DbState>, key: String, value: String) -> Result<(), String> {
+    db.set_setting(&key, &value).map_err(|e| e.to_string())?;
+    
+    // 广播设置更新事件到所有窗口
+    let payload = serde_json::json!({
+        "key": key,
+        "value": value
+    });
+    let _ = app.emit("settings-updated", payload);
+    
+    Ok(())
+}
+
+#[tauri::command]
+fn get_all_settings(db: State<DbState>) -> Result<Vec<settings::Setting>, String> {
+    db.get_all_settings().map_err(|e| e.to_string())
+}
+
+// ============ MCP Server Commands ============
+
+#[tauri::command]
+fn get_mcp_servers(db: State<DbState>) -> Result<Vec<mcp_servers::McpServer>, String> {
+    db.get_all_mcp_servers().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_mcp_server(db: State<DbState>, id: String) -> Result<Option<mcp_servers::McpServer>, String> {
+    db.get_mcp_server_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_mcp_server_by_name(db: State<DbState>, name: String) -> Result<Option<mcp_servers::McpServer>, String> {
+    db.get_mcp_server_by_name(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_mcp_server(db: State<DbState>, data: mcp_servers::CreateMcpServerData) -> Result<mcp_servers::McpServer, String> {
+    db.create_mcp_server(data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_mcp_server(db: State<DbState>, id: String, data: mcp_servers::UpdateMcpServerData) -> Result<Option<mcp_servers::McpServer>, String> {
+    db.update_mcp_server(&id, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_mcp_server(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.delete_mcp_server(&id).map_err(|e| e.to_string())
+}
+
+// ============ MCP Runtime Commands ============
+
+#[tauri::command]
+async fn mcp_start_server(
+    db: State<'_, DbState>,
+    mcp: State<'_, McpState>,
+    server_id: String,
+) -> Result<ServerStatus, String> {
+    // Get server config from database
+    let server = db.get_mcp_server_by_id(&server_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Server not found: {}", server_id))?;
+
+    let manager = mcp.read().await;
+    
+    // Start based on transport type
+    match server.transport {
+        mcp_servers::TransportType::Http => {
+            let url = server.url.ok_or_else(|| "HTTP server requires a URL".to_string())?;
+            manager.start_http_server(
+                &server.id,
+                &server.name,
+                &url,
+                server.api_key,
+            ).await
+        }
+        mcp_servers::TransportType::Stdio => {
+            manager.start_server(
+                &server.id,
+                &server.name,
+                &server.command,
+                server.args.unwrap_or_default(),
+                server.env.unwrap_or_default(),
+            ).await
+        }
+    }
+}
+
+#[tauri::command]
+async fn mcp_stop_server(
+    mcp: State<'_, McpState>,
+    server_id: String,
+) -> Result<(), String> {
+    let manager = mcp.read().await;
+    manager.stop_server(&server_id).await
+}
+
+#[tauri::command]
+async fn mcp_restart_server(
+    db: State<'_, DbState>,
+    mcp: State<'_, McpState>,
+    server_id: String,
+) -> Result<ServerStatus, String> {
+    // Stop first
+    {
+        let manager = mcp.read().await;
+        let _ = manager.stop_server(&server_id).await;
+    }
+    
+    // Wait a bit
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    
+    // Get server config and start again
+    let server = db.get_mcp_server_by_id(&server_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Server not found: {}", server_id))?;
+
+    let manager = mcp.read().await;
+    
+    match server.transport {
+        mcp_servers::TransportType::Http => {
+            let url = server.url.ok_or_else(|| "HTTP server requires a URL".to_string())?;
+            manager.start_http_server(
+                &server.id,
+                &server.name,
+                &url,
+                server.api_key,
+            ).await
+        }
+        mcp_servers::TransportType::Stdio => {
+            manager.start_server(
+                &server.id,
+                &server.name,
+                &server.command,
+                server.args.unwrap_or_default(),
+                server.env.unwrap_or_default(),
+            ).await
+        }
+    }
+}
+
+#[tauri::command]
+async fn mcp_get_server_status(
+    mcp: State<'_, McpState>,
+    server_id: String,
+) -> Result<Option<ServerStatus>, String> {
+    let manager = mcp.read().await;
+    Ok(manager.get_server_status(&server_id).await)
+}
+
+#[tauri::command]
+async fn mcp_get_all_statuses(
+    mcp: State<'_, McpState>,
+) -> Result<Vec<ServerStatus>, String> {
+    let manager = mcp.read().await;
+    Ok(manager.get_all_statuses().await)
+}
+
+#[tauri::command]
+async fn mcp_get_all_tools(
+    mcp: State<'_, McpState>,
+) -> Result<Vec<McpToolInfo>, String> {
+    let manager = mcp.read().await;
+    Ok(manager.get_all_tools().await)
+}
+
+#[tauri::command]
+async fn mcp_call_tool(
+    mcp: State<'_, McpState>,
+    server_id: String,
+    tool_name: String,
+    arguments: Option<serde_json::Value>,
+) -> Result<CallToolResponse, String> {
+    let manager = mcp.read().await;
+    manager.call_tool(&server_id, &tool_name, arguments).await
+}
+
+#[tauri::command]
+async fn mcp_is_server_running(
+    mcp: State<'_, McpState>,
+    server_id: String,
+) -> Result<bool, String> {
+    let manager = mcp.read().await;
+    Ok(manager.is_server_running(&server_id).await)
+}
+
+#[tauri::command]
+async fn mcp_cancel_all_tool_calls(
+    mcp: State<'_, McpState>,
+) -> Result<(), String> {
+    let manager = mcp.read().await;
+    manager.cancel_all_tool_calls();
+    Ok(())
+}
+
+#[tauri::command]
+async fn mcp_reset_cancellation(
+    mcp: State<'_, McpState>,
+) -> Result<(), String> {
+    let manager = mcp.read().await;
+    manager.reset_cancellation();
+    Ok(())
+}
+
+#[tauri::command]
+async fn mcp_test_server(
+    transport: Option<String>,
+    command: Option<String>,
+    args: Option<Vec<String>>,
+    env: Option<HashMap<String, String>>,
+    url: Option<String>,
+    api_key: Option<String>,
+) -> Result<ServerStatus, String> {
+    // Create a temporary manager for testing
+    let manager = McpManager::new();
+    let test_id = format!("test-{}", uuid::Uuid::new_v4());
+    
+    let result = match transport.as_deref() {
+        Some("http") => {
+            let url = url.ok_or_else(|| "HTTP transport requires a URL".to_string())?;
+            manager.start_http_server(
+                &test_id,
+                "Test Server",
+                &url,
+                api_key,
+            ).await
+        }
+        _ => {
+            let command = command.ok_or_else(|| "Stdio transport requires a command".to_string())?;
+            manager.start_server(
+                &test_id,
+                "Test Server",
+                &command,
+                args.unwrap_or_default(),
+                env.unwrap_or_default(),
+            ).await
+        }
+    };
+    
+    // Always stop the test server
+    let _ = manager.stop_server(&test_id).await;
+    
+    result
+}
+
+// ============ File Management Commands ============
+
+use std::fs;
+use std::path::PathBuf;
+
+/// 获取上传文件的存储目录
+fn get_uploads_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let uploads_dir = app_data_dir.join("uploads");
+    
+    // 确保目录存在
+    if !uploads_dir.exists() {
+        fs::create_dir_all(&uploads_dir)
+            .map_err(|e| format!("Failed to create uploads dir: {}", e))?;
+    }
+    
+    Ok(uploads_dir)
+}
+
+#[derive(serde::Serialize)]
+struct SaveFileResult {
+    path: String,
+    name: String,
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn save_file(app: AppHandle, fileName: String, fileData: String, mimeType: String) -> Result<SaveFileResult, String> {
+    let uploads_dir = get_uploads_dir(&app)?;
+    
+    // 生成唯一文件名（时间戳 + 原文件名）
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("Time error: {}", e))?
+        .as_millis();
+    let unique_name = format!("{}_{}", timestamp, fileName);
+    let file_path = uploads_dir.join(&unique_name);
+    
+    // 解码 base64 数据
+    // fileData 格式可能是 "data:image/png;base64,XXXX" 或纯 base64
+    let base64_data = if fileData.contains(",") {
+        fileData.split(",").nth(1).unwrap_or(&fileData)
+    } else {
+        &fileData
+    };
+    
+    let decoded = BASE64.decode(base64_data)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+    
+    // 写入文件
+    fs::write(&file_path, decoded)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+    
+    println!("[Rust] File saved: {:?}, mime: {}", file_path, mimeType);
+    
+    Ok(SaveFileResult {
+        path: file_path.to_string_lossy().to_string(),
+        name: unique_name,
+    })
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn read_upload(app: AppHandle, fileName: String) -> Result<String, String> {
+    let uploads_dir = get_uploads_dir(&app)?;
+    let file_path = uploads_dir.join(&fileName);
+    
+    if !file_path.exists() {
+        return Err(format!("File not found: {}", fileName));
+    }
+    
+    // 读取文件
+    let data = fs::read(&file_path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+    
+    // 推测 mime 类型
+    let mime_type = match file_path.extension().and_then(|e| e.to_str()) {
+        Some("png") => "image/png",
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("mp4") => "video/mp4",
+        Some("webm") => "video/webm",
+        Some("mov") => "video/quicktime",
+        Some("mp3") => "audio/mpeg",
+        Some("wav") => "audio/wav",
+        Some("ogg") => "audio/ogg",
+        Some("pdf") => "application/pdf",
+        _ => "application/octet-stream",
+    };
+    
+    // 编码为 base64 data URL
+    let base64_data = BASE64.encode(&data);
+    let data_url = format!("data:{};base64,{}", mime_type, base64_data);
+    
+    Ok(data_url)
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn read_pet_image(app: AppHandle, fileName: String) -> Result<String, String> {
+    // Pet 图片存储在 assets 目录或 uploads 目录
+    let uploads_dir = get_uploads_dir(&app)?;
+    let file_path = uploads_dir.join(&fileName);
+    
+    if file_path.exists() {
+        return read_upload(app, fileName);
+    }
+    
+    // 如果不在 uploads 目录，尝试其他可能的位置
+    Err(format!("Pet image not found: {}", fileName))
+}
+
+#[tauri::command]
+fn get_uploads_path(app: AppHandle) -> Result<String, String> {
+    let uploads_dir = get_uploads_dir(&app)?;
+    Ok(uploads_dir.to_string_lossy().to_string())
+}
+
+// ============ Window Management Commands ============
+
+#[tauri::command]
+fn show_chat_window(app: AppHandle) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        // Position chat window relative to character window (bottom-aligned)
+        if let Some(character) = app.get_webview_window("character") {
+            if let (Ok(char_pos), Ok(char_size), Ok(chat_size)) = 
+                (character.outer_position(), character.outer_size(), chat.outer_size()) {
+                // Bottom-aligned: chat window bottom should align with character window bottom
+                // char_pos.y is the TOP of character window
+                // char_pos.y + char_size.height is the BOTTOM of character window
+                // We want: chat_pos.y + chat_size.height = char_pos.y + char_size.height
+                // So: chat_pos.y = char_pos.y + char_size.height - chat_size.height
+                let char_bottom = char_pos.y + char_size.height as i32;
+                let x = char_pos.x - chat_size.width as i32 - 20;
+                let y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
+                let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: x.max(0), y: y.max(0) }));
+            }
+        }
+        chat.show().map_err(|e| e.to_string())?;
+        chat.set_focus().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_chat_window(app: AppHandle) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        chat.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn toggle_chat_window(app: AppHandle) -> Result<bool, String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        let is_visible = chat.is_visible().unwrap_or(false);
+        if is_visible {
+            chat.hide().map_err(|e| e.to_string())?;
+            Ok(false)
+        } else {
+            // Position chat window relative to character window (bottom-aligned)
+            if let Some(character) = app.get_webview_window("character") {
+                if let (Ok(char_pos), Ok(char_size), Ok(chat_size)) = 
+                    (character.outer_position(), character.outer_size(), chat.outer_size()) {
+                    // Bottom-aligned with 150px offset
+                    let char_bottom = char_pos.y + char_size.height as i32;
+                    let x = char_pos.x - chat_size.width as i32 - 20;
+                    let y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
+                    let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: x.max(0), y: y.max(0) }));
+                }
+            }
+            chat.show().map_err(|e| e.to_string())?;
+            chat.set_focus().map_err(|e| e.to_string())?;
+            Ok(true)
+        }
+    } else {
+        Err("Chat window not found".to_string())
+    }
+}
+
+#[tauri::command]
+fn minimize_window(app: AppHandle, label: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.minimize().map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn maximize_window(app: AppHandle, label: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        if window.is_maximized().unwrap_or(false) {
+            window.unmaximize().map_err(|e| e.to_string())
+        } else {
+            window.maximize().map_err(|e| e.to_string())
+        }
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn close_window(app: AppHandle, label: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.hide().map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn set_window_always_on_top(app: AppHandle, label: String, always_on_top: bool) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.set_always_on_top(always_on_top).map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn get_window_position(app: AppHandle, label: String) -> Result<(i32, i32), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        let pos = window.outer_position().map_err(|e| e.to_string())?;
+        Ok((pos.x, pos.y))
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn set_window_position(app: AppHandle, label: String, x: f64, y: f64) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.set_position(LogicalPosition::new(x, y)).map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn get_window_size(app: AppHandle, label: String) -> Result<(u32, u32), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        let size = window.outer_size().map_err(|e| e.to_string())?;
+        Ok((size.width, size.height))
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn set_window_size(app: AppHandle, label: String, width: f64, height: f64) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.set_size(LogicalSize::new(width, height)).map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn is_window_maximized(app: AppHandle, label: String) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.is_maximized().map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn is_window_visible(app: AppHandle, label: String) -> Result<bool, String> {
+    if let Some(window) = app.get_webview_window(&label) {
+        window.is_visible().map_err(|e| e.to_string())
+    } else {
+        Err(format!("Window {} not found", label))
+    }
+}
+
+#[tauri::command]
+fn get_screen_size(app: AppHandle) -> Result<(u32, u32), String> {
+    if let Some(window) = app.get_webview_window("character") {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            let size = monitor.size();
+            return Ok((size.width, size.height));
+        }
+    }
+    Err("Could not get screen size".to_string())
+}
+
+// Position character window at bottom-right of screen
+fn position_character_window(app: &AppHandle) {
+    if let Some(character) = app.get_webview_window("character") {
+        if let Some(monitor) = character.current_monitor().ok().flatten() {
+            let screen_size = monitor.size();
+            let scale_factor = monitor.scale_factor();
+            let char_size = character.outer_size().unwrap_or(tauri::PhysicalSize { width: 160, height: 240 });
+            
+            // 计算右下角位置，考虑 Dock 和菜单栏
+            // macOS 通常 Dock 高度约 70px，留出边距
+            let x = screen_size.width as i32 - char_size.width as i32 - (20.0 * scale_factor) as i32;
+            let y = screen_size.height as i32 - char_size.height as i32 - (80.0 * scale_factor) as i32;
+            
+            let _ = character.set_position(tauri::PhysicalPosition::new(x.max(0), y.max(0)));
+            println!("Character window positioned at ({}, {}), screen: {:?}", x, y, screen_size);
+        }
+    }
+}
+
+// 通用窗口切换函数
+fn toggle_window(app: &AppHandle, label: &str) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window(label) {
+        if window.is_visible().unwrap_or(false) {
+            window.hide().map_err(|e| e.to_string())?;
+        } else {
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+// 打开设置/选择角色/MCP等页面（在chat窗口中导航）
+fn navigate_chat_to(app: &AppHandle, route: &str) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        // 显示chat窗口
+        let _ = chat.show();
+        let _ = chat.set_focus();
+        
+        // 导航到指定路由 (使用 hash routing)
+        chat.eval(&format!("window.location.hash = '{}';", route))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn open_page_in_chat(app: AppHandle, route: String) -> Result<(), String> {
+    navigate_chat_to(&app, &route)
+}
+
+#[tauri::command]
+fn open_settings_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "settings")
+}
+
+#[tauri::command]
+fn open_select_character_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "select_character")
+}
+
+#[tauri::command]
+fn open_add_character_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "add_character")
+}
+
+#[tauri::command]
+fn open_mcp_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "mcp")
+}
+
+// 隐藏窗口 (用于关闭按钮)
+#[tauri::command]
+fn hide_add_character_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("add_character") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_select_character_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("select_character") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_settings_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("settings") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_mcp_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("mcp") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+// 最大化/还原聊天窗口
+#[tauri::command]
+fn maximize_chat_window(app: AppHandle) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        let is_maximized = chat.is_maximized().unwrap_or(false);
+        if is_maximized {
+            // 还原
+            chat.unmaximize().map_err(|e| e.to_string())?;
+            chat.set_always_on_top(true).map_err(|e| e.to_string())?;
+            
+            // 恢复到角色窗口旁边的位置
+            if let Some(character) = app.get_webview_window("character") {
+                if let Ok(char_pos) = character.outer_position() {
+                    // 获取聊天窗口大小
+                    if let Ok(chat_size) = chat.outer_size() {
+                        let x = char_pos.x - chat_size.width as i32 - 50;
+                        let y = char_pos.y + 240 - chat_size.height as i32;
+                        let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+                    }
+                }
+                // 显示角色窗口
+                let _ = character.show();
+            }
+        } else {
+            // 最大化
+            chat.maximize().map_err(|e| e.to_string())?;
+            chat.set_always_on_top(false).map_err(|e| e.to_string())?;
+            
+            // 隐藏角色窗口
+            if let Some(character) = app.get_webview_window("character") {
+                let _ = character.hide();
+            }
+        }
+    }
+    Ok(())
+}
+
+// 侧边栏展开/收起 - 窗口向左扩展
+const SIDEBAR_WIDTH: f64 = 256.0; // 与前端 w-64 (256px) 一致，使用逻辑像素
+static SIDEBAR_EXPANDED: AtomicBool = AtomicBool::new(false);
+// 保存展开前的原始宽度，用于收起时恢复
+static ORIGINAL_WIDTH: AtomicU32 = AtomicU32::new(0);
+
+#[tauri::command]
+fn toggle_sidebar(app: AppHandle, open: bool) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        // 如果是最大化状态，不处理
+        if chat.is_maximized().unwrap_or(false) {
+            return Ok(());
+        }
+        
+        let sidebar_expanded = SIDEBAR_EXPANDED.load(Ordering::SeqCst);
+        
+        // 获取缩放因子
+        let scale_factor = chat.scale_factor().unwrap_or(1.0);
+        
+        if let (Ok(pos), Ok(size)) = (chat.outer_position(), chat.outer_size()) {
+            // 转换为逻辑坐标
+            let logical_x = pos.x as f64 / scale_factor;
+            let logical_y = pos.y as f64 / scale_factor;
+            let logical_width = size.width as f64 / scale_factor;
+            let logical_height = size.height as f64 / scale_factor;
+            
+            if open && !sidebar_expanded {
+                // 保存展开前的原始宽度
+                ORIGINAL_WIDTH.store(logical_width as u32, Ordering::SeqCst);
+                
+                // 展开侧边栏：向左扩展窗口
+                let new_x = logical_x - SIDEBAR_WIDTH;
+                let new_width = logical_width + SIDEBAR_WIDTH;
+                
+                // 展开时：先移动位置，再增加宽度（窗口向左扩展）
+                let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: new_x, y: logical_y }));
+                let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: new_width, height: logical_height }));
+                
+                SIDEBAR_EXPANDED.store(true, Ordering::SeqCst);
+                
+                // 变为普通窗口（不置顶）
+                let _ = chat.set_always_on_top(false);
+            } else if !open && sidebar_expanded {
+                // 收起侧边栏：恢复到展开前的原始宽度
+                let original_width = ORIGINAL_WIDTH.load(Ordering::SeqCst) as f64;
+                // 如果没有保存过原始宽度，则使用当前宽度减去侧边栏宽度
+                let new_width = if original_width > 0.0 { original_width } else { logical_width - SIDEBAR_WIDTH };
+                let new_x = logical_x + SIDEBAR_WIDTH;
+                
+                // 收起时：先缩小宽度，再移动位置（保持主体区域不动）
+                let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: new_width, height: logical_height }));
+                let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: new_x, y: logical_y }));
+                
+                SIDEBAR_EXPANDED.store(false, Ordering::SeqCst);
+                
+                // 恢复置顶
+                let _ = chat.set_always_on_top(true);
+            }
+        }
+    }
+    Ok(())
+}
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .setup(|app| {
+            // Initialize database
+            let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
+            std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
+            let db_path = app_data_dir.join("petgpt.db");
+            
+            let db = Database::new(db_path).expect("Failed to initialize database");
+            app.manage(Arc::new(db));
+
+            // Initialize MCP manager
+            let mcp_manager = Arc::new(tokio::sync::RwLock::new(McpManager::new()));
+            app.manage(mcp_manager);
+
+            // Position character window at bottom-right
+            position_character_window(app.handle());
+            
+            // Listen for character window move events to sync chat window position
+            let app_handle = app.handle().clone();
+            if let Some(character) = app.get_webview_window("character") {
+                character.on_window_event(move |event| {
+                    if let tauri::WindowEvent::Moved(_) = event {
+                        // Skip if sidebar is expanded
+                        if SIDEBAR_EXPANDED.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        
+                        if let Some(character) = app_handle.get_webview_window("character") {
+                            if let Some(chat) = app_handle.get_webview_window("chat") {
+                                // Skip if chat window is not visible
+                                if !chat.is_visible().unwrap_or(false) {
+                                    return;
+                                }
+                                
+                                // Get character window position and size
+                                if let (Ok(char_pos), Ok(char_size), Ok(chat_size)) = 
+                                    (character.outer_position(), character.outer_size(), chat.outer_size()) {
+                                    // Calculate new chat position (to the left of character, bottom-aligned with offset)
+                                    let char_bottom = char_pos.y + char_size.height as i32;
+                                    let new_x = char_pos.x - chat_size.width as i32 - 20; // 20px gap
+                                    let new_y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
+                                    
+                                    let _ = chat.set_position(tauri::Position::Physical(
+                                        tauri::PhysicalPosition { x: new_x.max(0), y: new_y.max(0) }
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Setup tray menu
+            let show_item = MenuItem::with_id(app, "show", "显示 PetGPT", true, None::<&str>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+
+            let _tray = TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&menu)
+                .on_menu_event(|app, event| {
+                    match event.id.as_ref() {
+                        "show" => {
+                            if let Some(window) = app.get_webview_window("character") {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                            }
+                            if let Some(chat) = app.get_webview_window("chat") {
+                                let _ = chat.show();
+                                let _ = chat.set_focus();
+                            }
+                        }
+                        "quit" => {
+                            app.exit(0);
+                        }
+                        _ => {}
+                    }
+                })
+                .build(app)?;
+
+            if cfg!(debug_assertions) {
+                app.handle().plugin(
+                    tauri_plugin_log::Builder::default()
+                        .level(log::LevelFilter::Info)
+                        .build(),
+                )?;
+            }
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            // Pet commands
+            get_pets,
+            get_pet,
+            create_pet,
+            update_pet,
+            delete_pet,
+            // Conversation commands
+            get_conversations_by_pet,
+            get_conversation,
+            create_conversation,
+            update_conversation_title,
+            delete_conversation,
+            // Message commands
+            get_messages,
+            create_message,
+            clear_conversation_messages,
+            // Settings commands
+            get_setting,
+            set_setting,
+            get_all_settings,
+            // MCP Server commands (database)
+            get_mcp_servers,
+            get_mcp_server,
+            get_mcp_server_by_name,
+            create_mcp_server,
+            update_mcp_server,
+            delete_mcp_server,
+            // MCP Runtime commands
+            mcp_start_server,
+            mcp_stop_server,
+            mcp_restart_server,
+            mcp_get_server_status,
+            mcp_get_all_statuses,
+            mcp_get_all_tools,
+            mcp_call_tool,
+            mcp_is_server_running,
+            mcp_test_server,
+            mcp_cancel_all_tool_calls,
+            mcp_reset_cancellation,
+            // File handling commands
+            save_file,
+            read_upload,
+            get_uploads_path,
+            // Window management commands
+            show_chat_window,
+            hide_chat_window,
+            toggle_chat_window,
+            minimize_window,
+            maximize_window,
+            close_window,
+            set_window_always_on_top,
+            get_window_position,
+            set_window_position,
+            get_window_size,
+            set_window_size,
+            is_window_maximized,
+            is_window_visible,
+            get_screen_size,
+            // Page navigation commands
+            open_page_in_chat,
+            open_settings_window,
+            open_select_character_window,
+            open_add_character_window,
+            open_mcp_window,
+            // Hide window commands
+            hide_add_character_window,
+            hide_select_character_window,
+            hide_settings_window,
+            hide_mcp_window,
+            // Chat window controls
+            maximize_chat_window,
+            toggle_sidebar,
+            // Event broadcasting
+            emit_to_all,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

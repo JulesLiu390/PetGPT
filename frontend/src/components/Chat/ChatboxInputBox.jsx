@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import { FaArrowUp, FaShareNodes, FaFile, FaStop } from "react-icons/fa6";
+import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain } from "react-icons/fa6";
 import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { promptSuggestion, callOpenAILib, callOpenAILibStream, longTimeMemory, processMemory } from '../../utils/openai';
@@ -10,6 +10,7 @@ import { SiQuicktype } from "react-icons/si";
 import { useMcpTools } from '../../utils/mcp/useMcpTools';
 import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
+import * as bridge from '../../utils/bridge';
 
 /**
  * 获取模型的 API 格式
@@ -75,6 +76,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
   const [userImage, setUserImage] = useState(null);
   const [stateReply, setStateReply] = useState(null);
+  const [stateReplyConversationId, setStateReplyConversationId] = useState(null); // Track which conversation the reply belongs to
   const [stateThisModel, setStateThisModel] = useState(null);
   const [stateUserText, setStateUserText] = useState(null);
   let reply = null;
@@ -124,7 +126,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       if (!server.isRunning && server._id) {
         try {
           console.log(`[MCP] 服务器 "${serverName}" 未运行，正在自动启动...`);
-          await window.electron?.mcp?.startServer(server._id);
+          await bridge.mcp.startServer(server._id);
           // 刷新服务器列表以获取最新状态
           await refreshServers();
           console.log(`[MCP] 服务器 "${serverName}" 已自动启动`);
@@ -152,11 +154,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
   // 更新 MCP 服务器配置 (按名称)
   const updateMcpServer = useCallback(async (serverName, updates) => {
     try {
-      if (!window.electron?.mcp?.updateServerByName) {
+      if (!bridge.mcp.updateServer) {
         console.error('[MCP] updateServerByName API not available');
         return;
       }
-      await window.electron.mcp.updateServerByName(serverName, updates);
+      await bridge.mcp.updateServer(serverName, updates);
       await refreshServers();
       console.log(`[MCP] 服务器 "${serverName}" 配置已更新:`, updates);
     } catch (err) {
@@ -169,8 +171,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     // orderList: [{ name: 'xxx', toolbarOrder: 0 }, ...]
     try {
       for (const item of orderList) {
-        if (window.electron?.mcp?.updateServerByName) {
-          await window.electron.mcp.updateServerByName(item.name, { toolbarOrder: item.toolbarOrder });
+        if (bridge.mcp.updateServer) {
+          await bridge.mcp.updateServer(item.name, { toolbarOrder: item.toolbarOrder });
         }
       }
       await refreshServers();
@@ -183,7 +185,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   // 删除 MCP 服务器 (按名称)
   const deleteMcpServer = useCallback(async (serverName) => {
     try {
-      if (!window.electron?.mcp?.deleteServerByName) {
+      if (!bridge.mcp.deleteServer) {
         console.error('[MCP] deleteServerByName API not available');
         return;
       }
@@ -193,7 +195,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         newSet.delete(serverName);
         return newSet;
       });
-      await window.electron.mcp.deleteServerByName(serverName);
+      await bridge.mcp.deleteServer(serverName);
       await refreshServers();
       console.log(`[MCP] 服务器 "${serverName}" 已删除`);
     } catch (err) {
@@ -206,7 +208,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
     // TODO: 打开图标选择器或跳转到设置页面
     console.log('[MCP] Edit icon for server:', server.name);
     // 可以通过 IPC 打开 MCP 设置窗口
-    window.electron?.openMcpSettings?.();
+    bridge.openMcpSettings();
   }, []);
 
   // 修改后的：点击按钮时复制对话内容
@@ -228,7 +230,13 @@ export const ChatboxInputBox = ({ activePetId }) => {
   };
 
   const inputRef = useRef(null);
-  const [{ userMessages, suggestText, runFromHereTimestamp, characterMoods }, dispatch] = useStateValue();
+  const stateValue = useStateValue();
+  console.log('[ChatboxInputBox] stateValue:', stateValue);
+  const [state, dispatch] = stateValue || [{}, () => {}];
+  console.log('[ChatboxInputBox] state:', state, 'dispatch:', dispatch);
+  const { userMessages = [], suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {} } = state;
+  const suggestText = allSuggestTexts[currentConversationId] || [];
+  console.log('[ChatboxInputBox] userMessages:', userMessages);
   // 将 userText 从全局状态中移除，改为本地状态管理
   const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
@@ -246,7 +254,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   useEffect(() => {
     setSystem(window.navigator.platform);
     const loadDefaultCharacter = async () => {
-      const settings = await window.electron.getSettings();
+      const settings = await bridge.getSettings();
       try {
         if (settings && settings.defaultRoleId) {
           
@@ -256,12 +264,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
           try {
             let pet = null;
             try {
-              pet = await window.electron.getAssistant(settings.defaultRoleId);
+              pet = await bridge.getAssistant(settings.defaultRoleId);
             } catch (e) {
               // 忽略，尝试旧 API
             }
             if (!pet) {
-              pet = await window.electron.getPet(settings.defaultRoleId);
+              pet = await bridge.getPet(settings.defaultRoleId);
             }
             if (pet) {
               setFirstCharacter(settings.defaultRoleId);
@@ -281,7 +289,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       }
 
       try {
-        const settings = await window.electron.getSettings();
+        const settings = await bridge.getSettings();
         if (settings && settings.defaultModelId) {
           // console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
           
@@ -289,12 +297,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
           try {
             let pet = null;
             try {
-              pet = await window.electron.getAssistant(settings.defaultModelId);
+              pet = await bridge.getAssistant(settings.defaultModelId);
             } catch (e) {
               // 忽略，尝试旧 API
             }
             if (!pet) {
-              pet = await window.electron.getPet(settings.defaultModelId);
+              pet = await bridge.getPet(settings.defaultModelId);
             }
             if (pet) {
               setFounctionModel(settings.defaultModelId);
@@ -322,7 +330,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
   useEffect(() => {
     if(firstCharacter!=null) {
-      window.electron?.sendCharacterId(firstCharacter);
+      bridge.sendCharacterId(firstCharacter);
     }
   
     // return () => {
@@ -337,16 +345,20 @@ export const ChatboxInputBox = ({ activePetId }) => {
       console.log("📩 Received character ID:", id);
       setCharacterId(id);
     };
-    window.electron?.onCharacterId(handleCharacterId);
+    const cleanup = bridge.onCharacterId(handleCharacterId);
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   useEffect(() => {
+    // Use stateReplyConversationId to ensure suggestions go to the correct conversation
+    const conversationId = stateReplyConversationId;
     const updateSuggestion = async() => {
-      // alert(thisModel)
       thisModel = stateThisModel;
       _userText = stateUserText;
       
-      if (!thisModel || !stateReply) return;
+      if (!thisModel || !stateReply || !conversationId) return;
 
       try {
         let suggestion = await promptSuggestion(
@@ -358,20 +370,19 @@ export const ChatboxInputBox = ({ activePetId }) => {
         )
         if (suggestion && typeof suggestion === 'string') {
             suggestion = suggestion.split("|")
-            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: suggestion });
+            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: suggestion, conversationId });
         } else {
-            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
+            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId });
         }
       } catch (error) {
         console.error("Error getting suggestions:", error);
-        dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
+        dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId });
       }
     };
-    if(stateReply != null) {
-      // alert(stateReply)
+    if(stateReply != null && stateReplyConversationId != null) {
       updateSuggestion();
     }
-  }, [stateReply]);
+  }, [stateReply, stateReplyConversationId]);
 
   // 加载角色信息，并清理或保留对话历史
   useEffect(() => {
@@ -380,19 +391,19 @@ export const ChatboxInputBox = ({ activePetId }) => {
     const fetchPetInfo = async () => {
       try {
         // 首先尝试从新的 Assistant API 获取
-        let assistant = await window.electron.getAssistant(characterId);
+        let assistant = await bridge.getAssistant(characterId);
         let modelConfig = null;
         
         if (assistant && assistant.modelConfigId) {
           // 新数据模型：从关联的 ModelConfig 获取 API 配置
-          modelConfig = await window.electron.getModelConfig(assistant.modelConfigId);
+          modelConfig = await bridge.getModelConfig(assistant.modelConfigId);
         }
 
         setActiveModelConfig(modelConfig);
         
         // 如果新 API 没有数据，回退到旧的 Pet API（向后兼容）
         if (!assistant) {
-          assistant = await window.electron.getPet(characterId);
+          assistant = await bridge.getPet(characterId);
         }
         
         if (assistant) {
@@ -429,7 +440,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
           }
 
           try {
-            const memoryJson = await window.electron.getPetUserMemory(characterId);
+            const memoryJson = await bridge.getPetUserMemory(characterId);
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
@@ -448,8 +459,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
           return;
         }
 
-        if (conversationIdRef.current && window.electron) {
-          const currentConv = await window.electron.getConversationById(conversationIdRef.current);
+        if (conversationIdRef.current && bridge) {
+          const currentConv = await bridge.getConversationById(conversationIdRef.current);
           if (!currentConv || currentConv.petId !== characterId) {
             dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
             conversationIdRef.current = null;
@@ -474,8 +485,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     // 注册监听器
     let cleanup;
-    if (window.electron && window.electron.onNewChatCreated) {
-      cleanup = window.electron.onNewChatCreated(handleNewChat);
+    if (bridge.onNewChatCreated) {
+      cleanup = bridge.onNewChatCreated(handleNewChat);
     }
 
     // 卸载时清理监听器，避免内存泄漏
@@ -486,9 +497,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
   // 接收会话 ID
   useEffect(() => {
-    const fetch = async (conversationId) => {
+    const fetchConv = async (conversationId) => {
       try {
-        const conv = await window.electron.getConversationById(conversationId);
+        const conv = await bridge.getConversationById(conversationId);
         setCharacterId(conv.petId)
         // alert(conv.petID);
       } catch (error) {
@@ -498,17 +509,26 @@ export const ChatboxInputBox = ({ activePetId }) => {
     };
 
     const handleConversationId = async(id) => {
-      await fetch(id);
+      await fetchConv(id);
       console.log("📥 Received conversation ID from Electron:", id);
 
 
       conversationIdRef.current = id;
     };
 
-    if (window.electron?.onConversationId) {
-      window.electron.onConversationId(handleConversationId);
+    let cleanup;
+    if (bridge.onConversationId) {
+      cleanup = bridge.onConversationId(handleConversationId);
     }
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
+
+  // Sync conversationIdRef with currentConversationId from global state
+  useEffect(() => {
+    conversationIdRef.current = currentConversationId;
+  }, [currentConversationId]);
 
   const handleChange = (e) => {
     setUserText(e.target.value);
@@ -535,8 +555,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }
   };
 
-  // 获取当前会话的表情
-  const currentMood = characterMoods?.[conversationIdRef.current] || characterMoods?.['global'] || 'normal';
+  // 获取当前会话的表情 - 使用 currentConversationId 确保切换 tab 后立即更新
+  const currentMood = characterMoods?.[currentConversationId] || 'normal';
 
   // 回车发送
   const handleKeyDown = (e) => {
@@ -557,11 +577,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
         conversationId: targetConversationId || conversationIdRef.current || 'global'
       });
     };
-    window.electron?.onMoodUpdated(moodUpdateHandler);
+    const cleanup = bridge.onMoodUpdated?.(moodUpdateHandler);
 
-    // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
+    // 组件卸载时移除监听
     return () => {
-      // window.electron?.removeMoodUpdated(moodUpdateHandler);
+      if (cleanup) cleanup();
     };
   }, [dispatch]);
 
@@ -572,6 +592,15 @@ export const ChatboxInputBox = ({ activePetId }) => {
     if (!characterId) {
       alert("Please select a character first!");
       return;
+    }
+    
+    // 重置 MCP 取消状态（开始新的对话）
+    try {
+      if (bridge.mcp?.resetCancellation) {
+        await bridge.mcp.resetCancellation();
+      }
+    } catch (err) {
+      console.warn('[handleSend] Failed to reset MCP cancellation:', err);
     }
 
     let isRunFromHere = false;
@@ -647,14 +676,25 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }
 
     setUserText("");
-    dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [] });
+    dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId: sendingConversationId });
 
-    // 仅当用户仍停留在当前对话时，才更新 UI
-    if (!isRunFromHere && sendingConversationId === conversationIdRef.current) {
+    // 更新 UI - 用户消息
+    console.log('[ChatboxInputBox] About to dispatch ADD_MESSAGE', {
+      isRunFromHere,
+      sendingConversationId,
+      conversationIdRef: conversationIdRef.current,
+      displayContent
+    });
+    // 修复：当 conversationIdRef.current 为 null 时（新对话），也应该添加消息
+    // 原条件 sendingConversationId === conversationIdRef.current 在新对话时会失败（"temp" !== null）
+    if (!isRunFromHere) {
+      console.log('[ChatboxInputBox] Dispatching ADD_MESSAGE');
       dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: displayContent} });
+    } else {
+      console.log('[ChatboxInputBox] Skipped ADD_MESSAGE dispatch (isRunFromHere)');
     }
 
-    window.electron?.sendMoodUpdate('thinking', initialConversationId);
+    bridge.sendMoodUpdate('thinking', initialConversationId);
 
     if (inputRef.current) {
       inputRef.current.value = "";
@@ -689,9 +729,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
           );
           let getUserMemory = "";
           if (index.isImportant === true) {
-            await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
-            window.electron.updateChatbodyStatus(index.key + ":" + index.value);
-            const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+            await bridge.updatePetUserMemory(petInfo._id, index.key, index.value);
+            bridge.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
+            const memoryJson = await bridge.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
@@ -725,9 +765,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
           );
           let getUserMemory = "";
           if (index.isImportant === true) {
-            await window.electron.updatePetUserMemory(petInfo._id, index.key, index.value);
-            window.electron.updateChatbodyStatus(index.key + ":" + index.value);
-            const memoryJson = await window.electron.getPetUserMemory(petInfo._id);
+            await bridge.updatePetUserMemory(petInfo._id, index.key, index.value);
+            bridge.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
+            const memoryJson = await bridge.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
@@ -900,7 +940,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     if (!sendingConversationId) {
       try {
-        const newConversation = await window.electron.createConversation({
+        const newConversation = await bridge.createConversation({
           petId: petInfo._id,
           title: _userText,
           history: [...userMessages, { role: "user", content: displayContent }, botReply],
@@ -933,7 +973,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
             updatePayload.title = newTitle;
         }
 
-        await window.electron.updateConversation(sendingConversationId, updatePayload);
+        await bridge.updateConversation(sendingConversationId, updatePayload);
         
         // 通知全局状态更新该会话的消息记录（无论是否当前激活）
         dispatch({
@@ -944,7 +984,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
         });
     }
 
-    if (reply) setStateReply(reply);
+    if (reply) {
+      setStateReply(reply);
+      setStateReplyConversationId(sendingConversationId); // Save the conversation ID with the reply
+    }
     if (thisModel) setStateThisModel(thisModel);
     if (_userText) setStateUserText(_userText);
     
@@ -956,7 +999,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       }
     } finally {
       // ✅ 确保无论如何都会重置 thinking 状态，避免卡住
-      window.electron?.sendMoodUpdate(reply?.mood || "normal", initialConversationId);
+      bridge.sendMoodUpdate(reply?.mood || "normal", initialConversationId);
       // 从生成中会话集合中移除（使用初始 ID）
       setGeneratingConversations(prev => {
         const newSet = new Set(prev);
@@ -965,7 +1008,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       });
       // 清理 AbortController
       abortControllersRef.current.delete(initialConversationId);
-      window.electron?.updateChatbodyStatus?.("");
+      bridge.updateChatbodyStatus?.("", initialConversationId);
     }
   };
 
@@ -1028,7 +1071,9 @@ const handleReplyOptionsEnter = () => {
   setShowReplyOptions(true);
 };
 
-const handleStop = () => {
+const handleStop = async () => {
+    console.log('[handleStop] Stopping generation and MCP tool calls');
+    
     // 取消当前会话的请求
     const currentConvId = conversationIdRef.current || 'temp';
     const controller = abortControllersRef.current.get(currentConvId);
@@ -1046,6 +1091,16 @@ const handleStop = () => {
         conversationId: currentConvId
       });
     }
+    
+    // 取消所有 MCP 工具调用
+    try {
+      if (bridge.mcp?.cancelAllToolCalls) {
+        await bridge.mcp.cancelAllToolCalls();
+        console.log('[handleStop] MCP tool calls cancelled');
+      }
+    } catch (err) {
+      console.error('[handleStop] Failed to cancel MCP tool calls:', err);
+    }
   };
 
   const [attachments, setAttachments] = useState([]);
@@ -1060,7 +1115,7 @@ const handleStop = () => {
         const base64Data = event.target.result;
         try {
           // Save to Electron
-          const result = await window.electron.saveFile({
+          const result = await bridge.saveFile({
             fileName: file.name,
             fileData: base64Data,
             mimeType: file.type
@@ -1146,10 +1201,10 @@ const handleStop = () => {
   };
 
   return (
-    <div className="relative w-full max-w-3xl mx-auto px-4 pb-4">
+    <div className="relative w-full max-w-3xl mx-auto px-4 pb-4 no-drag">
       {/* 主输入框容器：模仿图2的紧凑风格 */}
       <div 
-        className={`relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border transition-all ${
+        className={`relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border transition-all no-drag ${
           isDragging 
             ? 'border-blue-400 bg-blue-50' 
             : 'border-transparent focus-within:border-gray-200'
@@ -1198,18 +1253,17 @@ const handleStop = () => {
                 </div>
             ))}
         </div>
-        <textarea
+        <input
           ref={inputRef}
           value={userText}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
-          onInput={autoResize}
+          // onInput={autoResize}
           placeholder="Ask anything"
-          className="w-full bg-transparent outline-none resize-none text-gray-800 placeholder-gray-500 min-h-[24px] max-h-[200px] overflow-y-auto mb-8" 
+          className="w-full bg-transparent outline-none text-gray-800 placeholder-gray-500 mb-8 no-drag" 
           onChange={handleChange}
-          style={{ height: 'auto' }}
         />
 
 
@@ -1240,7 +1294,7 @@ const handleStop = () => {
                     }`}
                     title="Memory"
                 >
-                    <FaFile className="w-4 h-4" />
+                    <FaBrain className="w-4 h-4" />
                 </button>
                 
                 {/* MCP 工具栏 - 每个服务器单独的图标 */}

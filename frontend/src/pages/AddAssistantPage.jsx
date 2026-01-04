@@ -4,6 +4,7 @@ import { FaCheck, FaSpinner } from "react-icons/fa6";
 import { MdCancel } from "react-icons/md";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
 import TitleBar from "../components/UI/TitleBar";
+import * as bridge from "../utils/bridge";
 
 /**
  * 根据 apiFormat 获取默认图片名
@@ -40,7 +41,7 @@ const AddAssistantPage = () => {
     const loadModelConfigs = async () => {
       try {
         // 使用新的 API 获取 Model Configs
-        const configs = await window.electron?.getModelConfigs();
+        const configs = await bridge.getModelConfigs();
         if (Array.isArray(configs)) {
           setModelConfigs(configs);
           
@@ -117,13 +118,13 @@ const AddAssistantPage = () => {
         hasMood: assistantConfig.hasMood,
       };
 
-      const newAssistant = await window.electron?.createAssistant(submitData);
+      const newAssistant = await bridge.createAssistant(submitData);
       if (!newAssistant || !newAssistant._id) {
         throw new Error("Creation failed or no ID returned");
       }
       
-      window.electron?.sendCharacterId(newAssistant._id);
-      window.electron?.sendPetsUpdate(newAssistant);
+      bridge.sendCharacterId(newAssistant._id);
+      bridge.sendPetsUpdate(newAssistant);
       
       alert("Assistant created successfully!");
       navigate('/selectCharacter');

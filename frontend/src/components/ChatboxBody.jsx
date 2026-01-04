@@ -6,6 +6,7 @@ import { useStateValue } from '../context/StateProvider';
 import { actionType } from '../context/reducer';
 import { MdDelete } from 'react-icons/md';
 import ChatboxTabBar from './ChatboxTabBar';
+import * as bridge from '../utils/bridge';
 
 export const Chatbox = () => {
   const [{ userMessages, suggestText }, dispatch] = useStateValue();
@@ -16,7 +17,7 @@ export const Chatbox = () => {
   useEffect(() => {
     const fetchConversations = async () => {
       try {
-        const data = await window.electron.getConversations();
+        const data = await bridge.getConversations();
         setConversations(data);
       } catch (error) {
         console.error("Error fetching conversations:", error);
@@ -32,13 +33,11 @@ export const Chatbox = () => {
   useEffect(() => {
     const moodUpdateHandler = (chatbodyStatus) => {
       setCharacterMood(chatbodyStatus);
-      // alert(string(chatbodyStatus))
     };
-    window.electron?.onChatbodyStatusUpdated(moodUpdateHandler);
+    const cleanup = bridge.onChatbodyStatusUpdated(moodUpdateHandler);
 
-    // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
     return () => {
-      // window.electron?.removeMoodUpdated(moodUpdateHandler);
+      if (cleanup) cleanup();
     };
   }, []);
 
@@ -49,7 +48,7 @@ export const Chatbox = () => {
 
   const fetchConversationById = async (conversationId) => {
     try {
-      return await window.electron.getConversationById(conversationId);
+      return await bridge.getConversationById(conversationId);
     } catch (error) {
       console.error("Error fetching conversation:", error);
       throw error;
@@ -58,8 +57,8 @@ export const Chatbox = () => {
 
   const handleItemClick = async (conv) => {
     const conversation = await fetchConversationById(conv._id);
-    window.electron?.sendMoodUpdate('normal');
-    window.electron?.sendConversationId(conv._id);
+    bridge.sendMoodUpdate('normal');
+    bridge.sendConversationId(conv._id);
     dispatch({
       type: actionType.SET_MESSAGE,
       userMessages: conversation.history
@@ -71,7 +70,7 @@ export const Chatbox = () => {
     if (!confirmDelete) return;
 
     try {
-      await window.electron.deleteConversation(conversationId);
+      await bridge.deleteConversation(conversationId);
       setConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
       
       dispatch({

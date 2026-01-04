@@ -3,6 +3,7 @@ import { motion } from 'framer-motion';
 import { AiFillChrome, AiOutlinePlus, AiOutlineClose } from 'react-icons/ai';
 import { useStateValue } from '../context/StateProvider';
 import { actionType } from '../context/reducer';
+import * as bridge from '../utils/bridge';
 
 const ChatboxTabBar = () => {
   const [{ navBarChats }, dispatch] = useStateValue();
@@ -11,7 +12,7 @@ const ChatboxTabBar = () => {
 
   const fetchConversationById = async (conversationId) => {
     try {
-      return await window.electron.getConversationById(conversationId);
+      return await bridge.getConversationById(conversationId);
     } catch (error) {
       console.error("Error fetching conversation:", error);
       throw error;
@@ -27,8 +28,8 @@ const ChatboxTabBar = () => {
 
     setIsTabSwitching(true);
     const conversation = await fetchConversationById(clickedId);
-    window.electron?.sendMoodUpdate('normal');
-    window.electron?.sendConversationId(conversation._id);
+    bridge.sendMoodUpdate('normal');
+    bridge.sendConversationId(conversation._id);
     dispatch({
       type: actionType.SET_MESSAGE,
       userMessages: conversation.history,
@@ -45,8 +46,8 @@ const ChatboxTabBar = () => {
   const handleTabClickForce = async (clickedId) => {
 
     const conversation = await fetchConversationById(clickedId);
-    window.electron?.sendMoodUpdate('normal');
-    window.electron?.sendConversationId(conversation._id);
+    bridge.sendMoodUpdate('normal');
+    bridge.sendConversationId(conversation._id);
     dispatch({
       type: actionType.SET_MESSAGE,
       userMessages: conversation.history,
@@ -66,19 +67,22 @@ const ChatboxTabBar = () => {
         navBarChats: [...navBarChats, id],
       });
       const fetchCharacter = async () => {
-        const pet = await window.electron.getPet(id);
-        const newConversation = await window.electron.createConversation({
+        const pet = await bridge.getPet(id);
+        const newConversation = await bridge.createConversation({
           petId: pet._id,
           title: `${pet.name}`,
           history: [],
         });
-        window.electron.sendConversationId(newConversation._id);
+        bridge.sendConversationId(newConversation._id);
         handleAddTab(newConversation._id, pet.name, pet._id);
         handleTabClickForce(newConversation._id)
       };
       fetchCharacter();
     };
-    window.electron?.onCharacterId(handleCharacterId);
+    const cleanup = bridge.onCharacterId(handleCharacterId);
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, []);
 
   const handleAddTab = (_id, label, petId) => {
@@ -104,7 +108,7 @@ const ChatboxTabBar = () => {
 
   const handleAddTabClick = () => {
     const activeTab = tabs.find(tab => tab.isActive);
-    window.electron.sendCharacterId(activeTab.petId);
+    bridge.sendCharacterId(activeTab.petId);
   }
 
   const handleCloseTab = (e, closedId) => {

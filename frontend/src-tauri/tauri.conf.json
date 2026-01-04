@@ -1,0 +1,113 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "PetGPT",
+  "version": "0.4.0",
+  "identifier": "com.petgpt.app",
+  "build": {
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5173",
+    "beforeDevCommand": "npm run dev",
+    "beforeBuildCommand": "npm run build"
+  },
+  "app": {
+    "macOSPrivateApi": true,
+    "windows": [
+      {
+        "label": "character",
+        "title": "PetGPT Character",
+        "url": "/#/character",
+        "width": 180,
+        "height": 350,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "visibleOnAllWorkspaces": true
+      },
+      {
+        "label": "chat",
+        "title": "PetGPT Chat",
+        "url": "/#/",
+        "width": 420,
+        "height": 280,
+        "minWidth": 460,
+        "minHeight": 256,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": true,
+        "shadow": true,
+        "visible": false
+      },
+      {
+        "label": "settings",
+        "title": "Settings",
+        "url": "/#/settings",
+        "width": 500,
+        "height": 700,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false
+      },
+      {
+        "label": "add_character",
+        "title": "Add Character",
+        "url": "/#/addAssistant",
+        "width": 600,
+        "height": 600,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false
+      },
+      {
+        "label": "select_character",
+        "title": "Select Character",
+        "url": "/#/selectCharacter",
+        "width": 500,
+        "height": 350,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false
+      },
+      {
+        "label": "mcp",
+        "title": "MCP Settings",
+        "url": "/#/mcp",
+        "width": 550,
+        "height": 650,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": null
+    },
+    "trayIcon": {
+      "iconPath": "icons/icon.png",
+      "iconAsTemplate": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Productivity",
+    "shortDescription": "AI Desktop Pet Assistant",
+    "longDescription": "PetGPT - Your AI-powered desktop pet assistant with MCP tool integration"
+  }
+}

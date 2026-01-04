@@ -38,6 +38,7 @@ export const TitleBar = ({
         "bg-white/80 backdrop-blur-md border-b border-slate-200",
         className
       )}
+      data-tauri-drag-region
     >
       <div className="no-drag flex items-center gap-2 min-w-0 shrink-0">
         {left ? left : null}
