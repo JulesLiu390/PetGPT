@@ -723,6 +723,11 @@ fn open_mcp_window(app: AppHandle) -> Result<(), String> {
     toggle_window(&app, "mcp")
 }
 
+#[tauri::command]
+fn open_add_model_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "add_model")
+}
+
 // 隐藏窗口 (用于关闭按钮)
 #[tauri::command]
 fn hide_add_character_window(app: AppHandle) -> Result<(), String> {
@@ -751,6 +756,14 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn hide_mcp_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("mcp") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn hide_add_model_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("add_model") {
         window.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -854,6 +867,226 @@ fn toggle_sidebar(app: AppHandle, open: bool) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+// ============ Window Size Preset ============
+
+// 定义各窗口的基准尺寸（以 medium 为标准，与 Electron 一致）
+struct BaselineSize {
+    width: f64,
+    height: f64,
+}
+
+fn get_baseline_sizes() -> HashMap<&'static str, BaselineSize> {
+    let mut sizes = HashMap::new();
+    sizes.insert("character", BaselineSize { width: 200.0, height: 300.0 });
+    sizes.insert("chat", BaselineSize { width: 400.0, height: 350.0 });
+    sizes.insert("add-character", BaselineSize { width: 600.0, height: 600.0 });
+    sizes.insert("select-character", BaselineSize { width: 500.0, height: 350.0 });
+    sizes.insert("settings", BaselineSize { width: 500.0, height: 700.0 });
+    sizes.insert("mcp", BaselineSize { width: 550.0, height: 650.0 });
+    sizes
+}
+
+fn get_scale_factor_for_preset(preset: &str) -> f64 {
+    match preset {
+        "small" => 0.8,
+        "medium" => 1.0,
+        "large" => 1.2,
+        _ => 1.0,
+    }
+}
+
+#[tauri::command]
+fn update_window_size_preset(app: AppHandle, preset: String) -> Result<(), String> {
+    let scale = get_scale_factor_for_preset(&preset);
+    let baselines = get_baseline_sizes();
+    
+    // Get screen size
+    let screen_size = if let Some(window) = app.get_webview_window("character") {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            let size = monitor.size();
+            let sf = monitor.scale_factor();
+            (size.width as f64 / sf, size.height as f64 / sf)
+        } else {
+            (1920.0, 1080.0)
+        }
+    } else {
+        (1920.0, 1080.0)
+    };
+    
+    // Update character window - positioned at bottom-right
+    if let (Some(window), Some(baseline)) = (app.get_webview_window("character"), baselines.get("character")) {
+        let width = (baseline.width * scale).round();
+        let height = (baseline.height * scale).round();
+        let x = screen_size.0 - width - 20.0;
+        let y = screen_size.1 - height - 80.0; // Account for dock
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+    }
+    
+    // Update chat window - positioned to the left of character
+    if let (Some(chat), Some(character), Some(chat_baseline)) = 
+        (app.get_webview_window("chat"), app.get_webview_window("character"), baselines.get("chat")) {
+        let chat_width = (chat_baseline.width * scale).round();
+        let chat_height = (chat_baseline.height * scale).round();
+        
+        // Skip if sidebar is expanded - let the sidebar logic handle sizing
+        if !SIDEBAR_EXPANDED.load(Ordering::SeqCst) {
+            if let Ok(char_pos) = character.outer_position() {
+                let sf = character.scale_factor().unwrap_or(1.0);
+                let char_logical_x = char_pos.x as f64 / sf;
+                let char_logical_y = char_pos.y as f64 / sf;
+                
+                if let Ok(char_size) = character.outer_size() {
+                    let char_logical_height = char_size.height as f64 / sf;
+                    let x = char_logical_x - chat_width - 50.0;
+                    let y = char_logical_y - chat_height + char_logical_height;
+                    let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: chat_width, height: chat_height }));
+                    let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: x.max(0.0), y: y.max(0.0) }));
+                }
+            }
+        }
+    }
+    
+    // Update settings window
+    if let (Some(window), Some(baseline)) = (app.get_webview_window("settings"), baselines.get("settings")) {
+        let width = (baseline.width * scale).round();
+        let height = (baseline.height * scale).round();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    }
+    
+    // Update select-character window
+    if let (Some(window), Some(baseline)) = (app.get_webview_window("select-character"), baselines.get("select-character")) {
+        let width = (baseline.width * scale).round();
+        let height = (baseline.height * scale).round();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    }
+    
+    // Update add-character window
+    if let (Some(window), Some(baseline)) = (app.get_webview_window("add-character"), baselines.get("add-character")) {
+        let width = (baseline.width * scale).round();
+        let height = (baseline.height * scale).round();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    }
+    
+    // Update MCP window
+    if let (Some(window), Some(baseline)) = (app.get_webview_window("mcp"), baselines.get("mcp")) {
+        let width = (baseline.width * scale).round();
+        let height = (baseline.height * scale).round();
+        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+    }
+    
+    Ok(())
+}
+
+// ============ Global Shortcuts ============
+
+use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
+
+#[tauri::command]
+fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String) -> Result<serde_json::Value, String> {
+    // Unregister all existing shortcuts
+    let _ = app.global_shortcut().unregister_all();
+    
+    // Helper to convert cross-platform shortcut notation
+    // Electron uses: shift+space, shift+ctrl+space
+    // Tauri expects: Shift+Space, Control+Shift+Space
+    fn normalize_shortcut(shortcut: &str) -> String {
+        shortcut
+            .split('+')
+            .map(|part| {
+                let lowered = part.trim().to_lowercase();
+                match lowered.as_str() {
+                    "ctrl" | "control" => "Control".to_string(),
+                    "cmd" | "command" | "meta" => {
+                        #[cfg(target_os = "macos")]
+                        { "Command".to_string() }
+                        #[cfg(not(target_os = "macos"))]
+                        { "Control".to_string() }
+                    },
+                    "alt" | "option" => "Alt".to_string(),
+                    "shift" => "Shift".to_string(),
+                    "space" => "Space".to_string(),
+                    "escape" | "esc" => "Escape".to_string(),
+                    "enter" | "return" => "Enter".to_string(),
+                    "tab" => "Tab".to_string(),
+                    "backspace" => "Backspace".to_string(),
+                    "delete" | "del" => "Delete".to_string(),
+                    other => {
+                        // Capitalize first letter for regular keys
+                        let mut chars = other.chars();
+                        match chars.next() {
+                            Some(c) => c.to_uppercase().chain(chars).collect(),
+                            None => String::new(),
+                        }
+                    }
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+    
+    let normalized1 = normalize_shortcut(&shortcut1);
+    let normalized2 = normalize_shortcut(&shortcut2);
+    
+    log::info!("[Shortcuts] Registering: {} -> {}, {} -> {}", shortcut1, normalized1, shortcut2, normalized2);
+    
+    // Register shortcut1: toggle character window visibility
+    if !normalized1.is_empty() {
+        if let Ok(shortcut) = normalized1.parse::<Shortcut>() {
+            let app_handle = app.clone();
+            let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                // 只在按下时触发，忽略释放事件（避免触发两次）
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                log::info!("[Shortcuts] Shortcut1 triggered (character toggle)");
+                if let Some(window) = app_handle.get_webview_window("character") {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            });
+        } else {
+            log::warn!("[Shortcuts] Failed to parse shortcut1: {}", normalized1);
+        }
+    }
+    
+    // Register shortcut2: toggle chat window visibility
+    if !normalized2.is_empty() {
+        if let Ok(shortcut) = normalized2.parse::<Shortcut>() {
+            let app_handle = app.clone();
+            let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                // 只在按下时触发，忽略释放事件（避免触发两次）
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                log::info!("[Shortcuts] Shortcut2 triggered (chat toggle)");
+                if let Some(window) = app_handle.get_webview_window("chat") {
+                    if window.is_visible().unwrap_or(false) {
+                        let _ = window.hide();
+                    } else {
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }
+            });
+        } else {
+            log::warn!("[Shortcuts] Failed to parse shortcut2: {}", normalized2);
+        }
+    }
+    
+    Ok(serde_json::json!({
+        "success": true,
+        "shortcuts": {
+            "shortcut1": shortcut1,
+            "shortcut2": shortcut2
+        }
+    }))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1019,14 +1252,19 @@ pub fn run() {
             open_select_character_window,
             open_add_character_window,
             open_mcp_window,
+            open_add_model_window,
             // Hide window commands
             hide_add_character_window,
+            hide_add_model_window,
             hide_select_character_window,
             hide_settings_window,
             hide_mcp_window,
             // Chat window controls
             maximize_chat_window,
             toggle_sidebar,
+            // Window size and shortcuts
+            update_window_size_preset,
+            update_shortcuts,
             // Event broadcasting
             emit_to_all,
         ])

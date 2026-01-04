@@ -226,7 +226,7 @@ export const McpSettings = () => {
   }
   
   return (
-    <div className="p-4 space-y-4">
+    <div className="space-y-4">
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">MCP Servers</h2>

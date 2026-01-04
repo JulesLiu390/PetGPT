@@ -11,7 +11,7 @@ export const SelectCharacterTitleBar = () => {
 
   return (
     <TitleBar
-      title="PetGPT"
+      title="Select Assistant"
       left={
         <button
           type="button"

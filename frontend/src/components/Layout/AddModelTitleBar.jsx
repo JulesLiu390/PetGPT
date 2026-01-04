@@ -1,27 +1,27 @@
 import React from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { MdCancel } from "react-icons/md";
 import TitleBar from "../UI/TitleBar";
 import bridge from "../../utils/bridge";
 
 export const AddModelTitleBar = () => {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const isStandalone = searchParams.get('standalone') === 'true';
   
   const handleClose = () => {
-    // 检查是否有导航历史：如果 history.length > 1，说明是从其他页面导航过来的
-    // 在 HashRouter 中，初始加载时 history.length 通常是 1
-    if (window.history.length > 1) {
-      // 有导航历史，使用路由返回到 selectCharacter 页面
-      navigate('/selectCharacter');
+    if (isStandalone) {
+      // 独立窗口模式：隐藏窗口
+      bridge.hideAddModelWindow?.();
     } else {
-      // 没有导航历史，说明是独立窗口直接加载的，隐藏窗口
-      bridge.hideAddCharacterWindow?.();
+      // 路由导航模式：返回 selectCharacter 页面
+      navigate('/selectCharacter');
     }
   };
 
   return (
     <TitleBar
-      title="Add Model"
+      title="New Model"
       left={
         <button
           type="button"
@@ -33,7 +33,7 @@ export const AddModelTitleBar = () => {
         </button>
       }
       height="h-12"
-      className="bg-white/80"
+      className="bg-white/95 z-10"
     />
   );
 };

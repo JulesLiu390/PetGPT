@@ -322,7 +322,9 @@ const AddModelPage = () => {
   return (
     <PageLayout className="bg-white/95">
       <div className="h-screen flex flex-col overflow-hidden">
-        <AddModelTitleBar />
+        <div className="shrink-0">
+          <AddModelTitleBar />
+        </div>
         
         <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
           <Surface className="max-w-lg mx-auto p-5">

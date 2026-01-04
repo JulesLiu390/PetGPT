@@ -11,7 +11,7 @@ export const McpTitleBar = () => {
 
   return (
     <TitleBar
-      title="MCP Servers"
+      title="MCP Settings"
       left={
         <button
           type="button"

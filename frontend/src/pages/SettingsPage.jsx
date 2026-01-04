@@ -107,7 +107,7 @@ const SettingsPage = () => {
     <PageLayout className="bg-white/95">
       <div className="h-screen flex flex-col overflow-hidden">
         {/* 标题栏 */}
-        <div className="sticky top-0 z-10">
+        <div className="shrink-0">
           <SettingsTitleBar />
         </div>
         

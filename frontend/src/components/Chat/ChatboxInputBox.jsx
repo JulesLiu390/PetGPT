@@ -255,11 +255,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
     setSystem(window.navigator.platform);
     const loadDefaultCharacter = async () => {
       const settings = await bridge.getSettings();
+      let defaultAssistantFound = false;
+      
       try {
         if (settings && settings.defaultRoleId) {
-          
-          // console.log("📚 Loading default character ID from settings:", settings.defaultRoleId);
-          
           // 验证ID是否有效（优先尝试 getAssistant，然后回退到 getPet）
           try {
             let pet = null;
@@ -273,13 +272,38 @@ export const ChatboxInputBox = ({ activePetId }) => {
             }
             if (pet) {
               setFirstCharacter(settings.defaultRoleId);
-              // console.log("Default character ID validated successfully111ß");
+              defaultAssistantFound = true;
+              console.log("[ChatboxInputBox] Default assistant loaded:", pet.name);
             } else {
-              console.log("Default character ID not found in database, using null");
-              setCharacterId(null);
+              console.log("Default character ID not found in database, will use fallback");
             }
           } catch (petError) {
             console.error("Error finding pet with default ID:", petError);
+          }
+        }
+        
+        // 如果没有设置默认助手或者默认助手无效，使用第一个可用的助手
+        if (!defaultAssistantFound) {
+          try {
+            const assistants = await bridge.getAssistants();
+            if (assistants && assistants.length > 0) {
+              const firstAssistant = assistants[0];
+              setFirstCharacter(firstAssistant._id);
+              console.log("[ChatboxInputBox] Fallback to first assistant:", firstAssistant.name);
+            } else {
+              // 尝试获取 pets 作为后备
+              const pets = await bridge.getPets();
+              if (pets && pets.length > 0) {
+                const firstPet = pets[0];
+                setFirstCharacter(firstPet._id);
+                console.log("[ChatboxInputBox] Fallback to first pet:", firstPet.name);
+              } else {
+                console.log("[ChatboxInputBox] No assistants or pets available");
+                setCharacterId(null);
+              }
+            }
+          } catch (fallbackError) {
+            console.error("Error loading fallback assistant:", fallbackError);
             setCharacterId(null);
           }
         }
@@ -288,11 +312,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
         setCharacterId(null);
       }
 
+      // 加载默认功能模型
       try {
-        const settings = await bridge.getSettings();
         if (settings && settings.defaultModelId) {
-          // console.log("📚 Loading default character ID from settings:", settings.defaultModelId);
-          
           // 验证ID是否有效（优先尝试 getAssistant，然后回退到 getPet）
           try {
             let pet = null;
@@ -306,16 +328,16 @@ export const ChatboxInputBox = ({ activePetId }) => {
             }
             if (pet) {
               setFounctionModel(settings.defaultModelId);
-              console.log("Default character ID validated successfully");
+              console.log("[ChatboxInputBox] Default function model loaded:", pet.name);
               const { _id, name, modelName, modelApiKey, modelProvider, modelUrl, apiFormat } = pet;
               const systemInstruction = pet.systemInstruction || pet.personality || '';
               setFunctionModelInfo({ _id, name, modelName, systemInstruction, modelApiKey, modelProvider, modelUrl, apiFormat });
             } else {
-              console.log("Default character ID not found in database, using null");
+              console.log("Default model ID not found in database, using null");
               setFunctionModelInfo(null);
             }
           } catch (petError) {
-            console.error("Error finding pet with default ID:", petError);
+            console.error("Error finding pet with default model ID:", petError);
             setFunctionModelInfo(null);
           }
         }
@@ -547,13 +569,18 @@ export const ChatboxInputBox = ({ activePetId }) => {
   };
 
   // 自动调整 textarea 高度（最大200px）
-  const autoResize = () => {
+  const autoResize = useCallback(() => {
     if (inputRef.current) {
       inputRef.current.style.height = 'auto';
       const newHeight = Math.min(inputRef.current.scrollHeight, 200);
       inputRef.current.style.height = newHeight + 'px';
     }
-  };
+  }, []);
+
+  // 当 userText 变化时自动调整高度（特别是清空时重置高度）
+  useEffect(() => {
+    autoResize();
+  }, [userText, autoResize]);
 
   // 获取当前会话的表情 - 使用 currentConversationId 确保切换 tab 后立即更新
   const currentMood = characterMoods?.[currentConversationId] || 'normal';
@@ -1077,20 +1104,32 @@ const handleStop = async () => {
     // 取消当前会话的请求
     const currentConvId = conversationIdRef.current || 'temp';
     const controller = abortControllersRef.current.get(currentConvId);
+    
+    // 取消 AbortController（如果存在）
     if (controller) {
       controller.abort();
       abortControllersRef.current.delete(currentConvId);
-      setGeneratingConversations(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(currentConvId);
-        return newSet;
-      });
-      // 清除该会话的工具调用状态
-      dispatch({
-        type: actionType.CLEAR_TOOL_CALLS,
-        conversationId: currentConvId
-      });
     }
+    
+    // 始终清除生成状态（即使 controller 不存在）
+    setGeneratingConversations(prev => {
+      const newSet = new Set(prev);
+      newSet.delete(currentConvId);
+      newSet.delete('temp'); // 同时清除 temp 状态
+      return newSet;
+    });
+    
+    // 清除该会话的工具调用状态
+    dispatch({
+      type: actionType.CLEAR_TOOL_CALLS,
+      conversationId: currentConvId
+    });
+    
+    // 重置心情状态为正常
+    bridge.sendMoodUpdate('normal', currentConvId);
+    
+    // 清除聊天状态
+    bridge.updateChatbodyStatus?.('', currentConvId);
     
     // 取消所有 MCP 工具调用
     try {
@@ -1253,16 +1292,18 @@ const handleStop = async () => {
                 </div>
             ))}
         </div>
-        <input
+        <textarea
           ref={inputRef}
           value={userText}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
-          // onInput={autoResize}
+          onInput={autoResize}
           placeholder="Ask anything"
-          className="w-full bg-transparent outline-none text-gray-800 placeholder-gray-500 mb-8 no-drag" 
+          rows={1}
+          className="w-full bg-transparent outline-none text-gray-800 placeholder-gray-500 mb-8 no-drag resize-none overflow-y-auto" 
+          style={{ maxHeight: '200px', minHeight: '24px' }}
           onChange={handleChange}
         />
 

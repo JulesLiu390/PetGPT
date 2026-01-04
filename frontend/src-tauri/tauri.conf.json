@@ -25,7 +25,8 @@
         "alwaysOnTop": true,
         "shadow": false,
         "skipTaskbar": true,
-        "visibleOnAllWorkspaces": true
+        "visibleOnAllWorkspaces": true,
+        "acceptFirstMouse": true
       },
       {
         "label": "chat",
@@ -41,51 +42,73 @@
         "transparent": true,
         "alwaysOnTop": true,
         "shadow": true,
-        "visible": false
+        "visible": false,
+        "acceptFirstMouse": true
       },
       {
         "label": "settings",
         "title": "Settings",
         "url": "/#/settings",
-        "width": 500,
-        "height": 700,
+        "width": 560,
+        "height": 640,
         "resizable": false,
         "decorations": false,
         "transparent": true,
-        "visible": false
+        "visible": false,
+        "alwaysOnTop": true,
+        "acceptFirstMouse": true
       },
       {
         "label": "add_character",
         "title": "Add Character",
         "url": "/#/addAssistant",
-        "width": 600,
-        "height": 600,
+        "width": 560,
+        "height": 640,
         "resizable": false,
         "decorations": false,
         "transparent": true,
-        "visible": false
+        "visible": false,
+        "alwaysOnTop": true,
+        "acceptFirstMouse": true
       },
       {
         "label": "select_character",
-        "title": "Select Character",
+        "title": "Select Assistant",
         "url": "/#/selectCharacter",
-        "width": 500,
-        "height": 350,
+        "width": 560,
+        "height": 640,
         "resizable": false,
         "decorations": false,
         "transparent": true,
-        "visible": false
+        "visible": false,
+        "alwaysOnTop": true,
+        "acceptFirstMouse": true
       },
       {
         "label": "mcp",
         "title": "MCP Settings",
         "url": "/#/mcp",
-        "width": 550,
-        "height": 650,
+        "width": 560,
+        "height": 640,
         "resizable": false,
         "decorations": false,
         "transparent": true,
-        "visible": false
+        "visible": false,
+        "alwaysOnTop": true,
+        "acceptFirstMouse": true
+      },
+      {
+        "label": "add_model",
+        "title": "New Model",
+        "url": "/#/addCharacter?standalone=true",
+        "width": 560,
+        "height": 640,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "alwaysOnTop": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {

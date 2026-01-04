@@ -460,18 +460,24 @@ export const updatePetUserMemory = async (petId, key, value) => {
 
 // ==================== 窗口 & 快捷键接口 ====================
 
-export const updateWindowSizePreset = (size) => {
+export const updateWindowSizePreset = async (size) => {
   if (isElectron()) {
     return window.electron.updateWindowSizePreset(size);
   }
-  // Tauri 待实现
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    return invoke('update_window_size_preset', { preset: size });
+  }
 };
 
-export const updateShortcuts = (programHotkey, dialogHotkey) => {
+export const updateShortcuts = async (programHotkey, dialogHotkey) => {
   if (isElectron()) {
     return window.electron.updateShortcuts(programHotkey, dialogHotkey);
   }
-  // Tauri 待实现
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    return invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey });
+  }
 };
 
 export const openExternal = (url) => {
@@ -1386,6 +1392,16 @@ export const changeAddCharacterWindow = async () => {
   }
 };
 
+export const changeAddModelWindow = async () => {
+  if (isElectron()) {
+    window.electron?.changeAddModelWindow?.();
+  }
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    await invoke('open_add_model_window');
+  }
+};
+
 export const hideAddCharacterWindow = async () => {
   if (isElectron()) {
     window.electron?.hideAddCharacterWindow();
@@ -1393,6 +1409,16 @@ export const hideAddCharacterWindow = async () => {
   if (isTauri()) {
     const { invoke } = await getTauriApi();
     await invoke('hide_add_character_window');
+  }
+};
+
+export const hideAddModelWindow = async () => {
+  if (isElectron()) {
+    window.electron?.hideAddModelWindow?.();
+  }
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    await invoke('hide_add_model_window');
   }
 };
 
@@ -1747,6 +1773,7 @@ const bridge = {
   changeMcpWindow,
   changeAddCharacterWindow,
   hideAddCharacterWindow,
+  hideAddModelWindow,
   hideSelectCharacterWindow,
   hideSettingsWindow,
   hideMcpWindow,

@@ -26,28 +26,54 @@ export const Character = () => {
     const loadDefaultCharacter = async () => {
       try {
         const settings = await bridge.getSettings();
+        
+        // 注册快捷键
+        if (settings?.programHotkey || settings?.dialogHotkey) {
+          bridge.updateShortcuts(settings.programHotkey || '', settings.dialogHotkey || '');
+        }
+        
+        let foundPet = null;
+        
+        // 先尝试加载设置中的默认助手
         if (settings && settings.defaultRoleId) {
-          
           try {
-            bridge.updateShortcuts(settings.programHotkey, settings.dialogHotkey);
             // 优先尝试 getAssistant，失败则回退到 getPet
-            let pet = null;
             try {
-              pet = await bridge.getAssistant(settings.defaultRoleId);
+              foundPet = await bridge.getAssistant(settings.defaultRoleId);
             } catch (e) {
               // 忽略，尝试旧 API
             }
-            if (!pet) {
-              pet = await bridge.getPet(settings.defaultRoleId);
-            }
-            if (pet && pet.imageName) {
-              setImageName(pet.imageName);
-              console.log("Using default character image:", pet.imageName);
+            if (!foundPet) {
+              foundPet = await bridge.getPet(settings.defaultRoleId);
             }
           } catch (petError) {
             console.error("Error loading default pet details:", petError);
-            // 继续使用默认图片
           }
+        }
+        
+        // 如果没有找到默认助手，使用第一个可用的助手
+        if (!foundPet) {
+          try {
+            const assistants = await bridge.getAssistants();
+            if (assistants && assistants.length > 0) {
+              foundPet = assistants[0];
+              console.log("[CharacterPage] Fallback to first assistant:", foundPet.name);
+            } else {
+              const pets = await bridge.getPets();
+              if (pets && pets.length > 0) {
+                foundPet = pets[0];
+                console.log("[CharacterPage] Fallback to first pet:", foundPet.name);
+              }
+            }
+          } catch (e) {
+            console.error("Error loading fallback assistant:", e);
+          }
+        }
+        
+        // 设置角色图片
+        if (foundPet && foundPet.imageName) {
+          setImageName(foundPet.imageName);
+          console.log("[CharacterPage] Using character image:", foundPet.imageName);
         }
       } catch (error) {
         console.error("Error loading default character image from settings:", error);
@@ -193,8 +219,8 @@ export const Character = () => {
   const handleClick = () => {
     bridge.changeChatWindow();
   };
-  const handleClickAddCharacter = () => {
-    bridge.changeAddCharacterWindow();
+  const handleClickAddModel = () => {
+    bridge.changeAddModelWindow();
   };
   const handleClickSelectCharacter = () => {
     bridge.changeSelectCharacterWindow();
@@ -246,8 +272,8 @@ export const Character = () => {
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <CgAdd
-              title="Add new Chatbot"
-              onClick={handleClickAddCharacter}
+              title="Add new Model"
+              onClick={handleClickAddModel}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <GoMultiSelect

@@ -151,13 +151,16 @@ const AddMcpServerPage = () => {
   };
 
   return (
-    <PageLayout>
-      <TitleBar 
-        title="Add MCP Server" 
-        onBack={() => navigate('/mcp')} 
-      />
+    <PageLayout className="bg-white/95">
+      <div className="h-screen flex flex-col overflow-hidden">
+        <div className="shrink-0">
+          <TitleBar 
+            title="New MCP Server" 
+            backTo="/mcp"
+          />
+        </div>
       
-      <div className="max-w-3xl mx-auto p-6">
+        <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
         <Card>
           <form onSubmit={handleSubmit} className="space-y-6">
             <FormGroup label="Server Name *" help="A unique name for this server">
@@ -357,6 +360,7 @@ const AddMcpServerPage = () => {
             </div>
           </form>
         </Card>
+        </div>
       </div>
     </PageLayout>
   );

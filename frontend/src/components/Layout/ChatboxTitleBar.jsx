@@ -82,29 +82,30 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
 
 
   return (
-    <div className='draggable w-full h-9 flex items-center justify-between px-2 bg-slate-100 gap-2 relative z-30' data-tauri-drag-region>
-      {/* Window Close Button (Only visible when NOT large window/sidebar hidden) */}
-      {!isLargeWindow && (
+    <div className='draggable select-none cursor-default w-full h-9 flex items-center justify-between px-2 bg-slate-100 gap-2 relative z-30' data-tauri-drag-region>
+      {/* Left: Close Button (no-drag) + Title */}
+      <div className="flex items-center gap-2 flex-shrink-0 z-20 relative">
+        {/* Window Close Button */}
         <div 
-            className="no-drag flex-shrink-0 p-1 text-gray-400 hover:text-red-500 hover:bg-slate-200 rounded-md cursor-pointer transition-colors z-20 relative"
+            className="no-drag flex-shrink-0 p-1 text-gray-400 hover:text-red-500 hover:bg-slate-200 rounded-md cursor-pointer transition-colors"
             onClick={handleClose}
             title="Close Window"
         >
             <MdClose size={14} />
         </div>
-      )}
-
-      {/* Left: Title / Model Info (Only visible when large window/sidebar visible) */}
-      {isLargeWindow && (
-        <div className="flex items-center gap-1 text-xs font-medium text-gray-600 cursor-default pl-1 flex-shrink-0 max-w-[100px] z-20 relative">
-            <span className="truncate">{titleInfo.name}</span>
-            <span className="text-gray-300">|</span>
-            <span className="text-gray-400 truncate">{titleInfo.model}</span>
-        </div>
-      )}
+        
+        {/* Title / Model Info (Only visible when large window/sidebar visible) */}
+        {isLargeWindow && (
+          <div className="flex items-center gap-1 text-xs font-medium text-gray-600 cursor-default max-w-[100px]" data-tauri-drag-region>
+              <span className="truncate">{titleInfo.name}</span>
+              <span className="text-gray-300">|</span>
+              <span className="text-gray-400 truncate">{titleInfo.model}</span>
+          </div>
+        )}
+      </div>
 
       {/* Middle: Tabs */}
-      <div className="flex-1 w-0 min-w-0 h-full flex items-end mx-1 z-0">
+      <div className="flex-1 w-0 min-w-0 h-full flex items-end mx-1 z-0" data-tauri-drag-region>
         <ChatboxTabBar 
             tabs={tabs} 
             activeTabId={activeTabId} 
@@ -118,23 +119,27 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
       {/* Bottom white line that connects with active tab */}
       <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-white z-0"></div>
 
-      {/* Right: Share and Sidebar Actions */}
-      <div className="flex items-center gap-1.5 no-drag text-gray-500 flex-shrink-0 z-20 relative pl-1">
-        <HiOutlinePencilAlt
-            onClick={onAddTab}
-            className="cursor-pointer hover:text-gray-800 text-lg p-0.5"
-            title="New Chat"
-        />
-        <LuShare 
-            onClick={onShare}
-            className="cursor-pointer hover:text-gray-800 text-lg p-0.5" 
-            title="Share" 
-        />
+      {/* Right: Share and Sidebar Actions (no-drag for buttons only) */}
+      <div className="flex items-center gap-1.5 text-gray-500 flex-shrink-0 z-20 relative pl-1" data-tauri-drag-region>
+        <div className="no-drag">
+          <HiOutlinePencilAlt
+              onClick={onAddTab}
+              className="cursor-pointer hover:text-gray-800 text-lg p-0.5"
+              title="New Chat"
+          />
+        </div>
+        <div className="no-drag">
+          <LuShare 
+              onClick={onShare}
+              className="cursor-pointer hover:text-gray-800 text-lg p-0.5" 
+              title="Share" 
+          />
+        </div>
         {/* 侧边栏切换按钮 - 全屏时不显示关闭侧边栏选项 */}
         {!isMaximized && (
           <div
             onClick={onToggleSidebar}
-            className="cursor-pointer hover:text-gray-800 p-0.5"
+            className="no-drag cursor-pointer hover:text-gray-800 p-0.5"
             title={sidebarOpen ? "Close Sidebar" : "Open Sidebar"}
           >
             {sidebarOpen ? (
@@ -147,7 +152,7 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
         {/* 最大化/还原按钮 */}
         <div
           onClick={handleMax}
-          className="cursor-pointer hover:text-gray-800 p-0.5"
+          className="no-drag cursor-pointer hover:text-gray-800 p-0.5"
           title={isMaximized ? "Exit Full Screen" : "Full Screen"}
         >
           {isMaximized ? (

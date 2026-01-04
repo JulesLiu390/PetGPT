@@ -142,35 +142,40 @@ const SelectCharacterPage = () => {
   };
 
   return (
-    <PageLayout className="bg-[rgba(255,255,255,0.8)]">
-      <div className="flex flex-col h-screen w-full items-center">
-        <SelectCharacterTitleBar />
-        <div className="w-[92%] mt-3">
-          <div className="flex items-center justify-between gap-3">
-            <Tabs
-              tabs={[
-                { id: 'assistants', label: `Assistants (${assistants.length})` },
-                { id: 'models', label: `Models (${models.length})` },
-              ]}
-              active={activeTab}
-              onChange={setActiveTab}
-            />
+    <PageLayout className="bg-white/95">
+      <div className="flex flex-col h-screen w-full overflow-hidden">
+        <div className="shrink-0">
+          <SelectCharacterTitleBar />
+        </div>
+        
+        {/* 固定的 Tabs + Button 区域 */}
+        <div className="shrink-0 px-4 pt-4 pb-2 flex items-center justify-between gap-3">
+          <Tabs
+            tabs={[
+              { id: 'assistants', label: `Assistants (${assistants.length})` },
+              { id: 'models', label: `Models (${models.length})` },
+            ]}
+            active={activeTab}
+            onChange={setActiveTab}
+          />
 
-            {activeTab === 'assistants' ? (
-              <Button variant="primary" onClick={() => navigate('/addAssistant')}>
-                <FaPlus className="w-4 h-4" />
-                New Assistant
-              </Button>
-            ) : (
-              <Button variant="primary" onClick={() => navigate('/addCharacter')}>
-                <FaPlus className="w-4 h-4" />
-                New Model
-              </Button>
-            )}
-          </div>
+          {activeTab === 'assistants' ? (
+            <Button variant="primary" onClick={() => navigate('/addAssistant')}>
+              <FaPlus className="w-4 h-4" />
+              New Assistant
+            </Button>
+          ) : (
+            <Button variant="primary" onClick={() => navigate('/addCharacter')}>
+              <FaPlus className="w-4 h-4" />
+              New Model
+            </Button>
+          )}
+        </div>
 
-          <Surface className="mt-3 max-h-[calc(100vh-120px)] overflow-y-auto">
-            <div className="p-3">
+        {/* 内容区域 - 滚动在 Surface 内部 */}
+        <div className="flex-1 min-h-0 px-4 pb-4">
+          <Surface className="h-full flex flex-col overflow-hidden">
+            <div className="flex-1 overflow-y-auto p-4">
               {activeTab === 'assistants' && (
                 <Card
                   title="Select an Assistant"

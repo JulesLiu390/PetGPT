@@ -149,20 +149,22 @@ const AddAssistantPage = () => {
   return (
     <PageLayout className="bg-white/95">
       <div className="h-screen flex flex-col overflow-hidden">
-        <TitleBar
-          title="New Assistant"
-          left={
-            <button
-              type="button"
-              className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
-              onClick={() => navigate('/selectCharacter')}
-              title="Close"
-            >
-              <MdCancel className="w-5 h-5" />
-            </button>
-          }
-          height="h-12"
-        />
+        <div className="shrink-0">
+          <TitleBar
+            title="New Assistant"
+            left={
+              <button
+                type="button"
+                className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
+                onClick={() => navigate('/selectCharacter')}
+                title="Close"
+              >
+                <MdCancel className="w-5 h-5" />
+              </button>
+            }
+            height="h-12"
+          />
+        </div>
         
         <div className="flex-1 overflow-y-auto p-4 scrollbar-hide">
           <Surface className="max-w-lg mx-auto p-5">
