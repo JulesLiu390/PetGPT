@@ -195,7 +195,10 @@ export const McpSettings = () => {
     const serverToDelete = servers.find(s => s._id === id);
     const serverName = serverToDelete?.name || 'Unknown';
     
-    if (!confirm(`Are you sure you want to delete "${serverName}"?`)) return;
+    const confirmDelete = await bridge.confirm(`Are you sure you want to delete "${serverName}"?`, {
+      title: 'Delete MCP Server'
+    });
+    if (!confirmDelete) return;
     
     try {
       await bridge.mcp.deleteServer(id);

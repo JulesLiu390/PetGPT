@@ -128,4 +128,52 @@ impl Database {
         let rows = conn.execute("DELETE FROM conversations WHERE pet_id = ?", params![pet_id])?;
         Ok(rows)
     }
+
+    /// 获取孤儿对话（关联的 pet 已被删除）
+    pub fn get_orphan_conversations(&self) -> Result<Vec<Conversation>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.pet_id, c.title, c.created_at, c.updated_at, 
+                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count
+             FROM conversations c
+             LEFT JOIN pets p ON c.pet_id = p.id
+             WHERE p.id IS NULL OR p.is_deleted = 1
+             ORDER BY c.updated_at DESC"
+        )?;
+        
+        let conversations = stmt.query_map([], |row| {
+            Ok(Conversation {
+                id: row.get(0)?,
+                pet_id: row.get(1)?,
+                title: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                message_count: row.get(5)?,
+            })
+        })?.collect::<Result<Vec<_>>>()?;
+        
+        Ok(conversations)
+    }
+
+    /// 将对话转移给新的 pet（接管功能）
+    pub fn transfer_conversation(&self, conversation_id: &str, new_pet_id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE conversations SET pet_id = ?, updated_at = ? WHERE id = ?",
+            params![new_pet_id, now, conversation_id],
+        )?;
+        Ok(rows > 0)
+    }
+
+    /// 批量转移某个 pet 的所有对话到新 pet
+    pub fn transfer_all_conversations(&self, old_pet_id: &str, new_pet_id: &str) -> Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let now = Utc::now().to_rfc3339();
+        let rows = conn.execute(
+            "UPDATE conversations SET pet_id = ?, updated_at = ? WHERE pet_id = ?",
+            params![new_pet_id, now, old_pet_id],
+        )?;
+        Ok(rows)
+    }
 }

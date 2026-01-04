@@ -5,7 +5,7 @@ import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import bridge from '../../utils/bridge';
-import { MdDelete, MdAdd, MdSearch, MdClose } from 'react-icons/md';
+import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
 // import { AiFillChrome } from 'react-icons/ai';
@@ -16,7 +16,11 @@ export const Chatbox = () => {
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [conversations, setConversations] = useState([]);
+  const [orphanConversations, setOrphanConversations] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
+  const [showTransferModal, setShowTransferModal] = useState(false);
+  const [selectedOrphanConv, setSelectedOrphanConv] = useState(null);
+  const [availableAssistants, setAvailableAssistants] = useState([]);
   // Per-tab chatbody status for "Memory updating" display
   const [chatbodyStatuses, setChatbodyStatuses] = useState({}); // { conversationId: status }
   
@@ -45,7 +49,16 @@ export const Chatbox = () => {
       
       try {
         const settings = await bridge.getSettings();
-        const defaultAssistantId = settings?.defaultAssistant;
+        let defaultAssistantId = settings?.defaultAssistant;
+        
+        // If no default assistant is set, use the first available assistant
+        if (!defaultAssistantId) {
+          const assistants = await bridge.getAssistants();
+          if (assistants && assistants.length > 0) {
+            defaultAssistantId = assistants[0].id;
+            console.log('[ChatboxBody] No default assistant set, using first available:', defaultAssistantId);
+          }
+        }
         
         if (defaultAssistantId) {
           console.log('[ChatboxBody] Auto-loading default assistant:', defaultAssistantId);
@@ -75,9 +88,18 @@ export const Chatbox = () => {
             console.warn("getConversations returned non-array:", data);
             setConversations([]);
         }
+        
+        // Also fetch orphan conversations
+        const orphans = await bridge.getOrphanConversations();
+        if (Array.isArray(orphans)) {
+            const nonEmptyOrphans = orphans.filter(conv => conv.messageCount > 0);
+            setOrphanConversations(nonEmptyOrphans);
+            console.log('[ChatboxBody] setOrphanConversations with', nonEmptyOrphans.length, 'items');
+        }
       } catch (error) {
         console.error("Error fetching conversations:", error);
         setConversations([]);
+        setOrphanConversations([]);
       }
     };
     fetchConversations();
@@ -397,12 +419,15 @@ export const Chatbox = () => {
 
   const handleDelete = async (e, conversationId) => {
     e.stopPropagation();
-    const confirmDelete = window.confirm("Are you sure you want to delete this conversation?");
+    const confirmDelete = await bridge.confirm("Are you sure you want to delete this conversation?", {
+      title: 'Delete Conversation'
+    });
     if (!confirmDelete) return;
 
     try {
       await bridge.deleteConversation(conversationId);
       setConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
+      setOrphanConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
       
       // Also close tab if open
       if (tabs.some(t => t.id === conversationId)) {
@@ -412,6 +437,45 @@ export const Chatbox = () => {
     } catch (error) {
       console.error("Error deleting conversation:", error);
       alert("Failed to delete conversation.");
+    }
+  };
+
+  // Handle orphan conversation click - show transfer modal
+  const handleOrphanClick = async (conv) => {
+    setSelectedOrphanConv(conv);
+    try {
+      const assistants = await bridge.getAssistants();
+      setAvailableAssistants(assistants || []);
+      setShowTransferModal(true);
+    } catch (error) {
+      console.error("Error fetching assistants:", error);
+      alert("Failed to load assistants.");
+    }
+  };
+
+  // Handle transfer conversation to new assistant
+  const handleTransfer = async (newPetId) => {
+    if (!selectedOrphanConv || !newPetId) return;
+    
+    try {
+      await bridge.transferConversation(selectedOrphanConv._id, newPetId);
+      // Refresh conversations
+      const data = await bridge.getConversations();
+      if (Array.isArray(data)) {
+        const nonEmptyConversations = data.filter(conv => conv.messageCount > 0);
+        setConversations(nonEmptyConversations);
+      }
+      // Remove from orphans
+      setOrphanConversations(prev => prev.filter(c => c._id !== selectedOrphanConv._id));
+      setShowTransferModal(false);
+      setSelectedOrphanConv(null);
+      
+      // Optionally open the transferred conversation
+      const transferredConv = { ...selectedOrphanConv, petId: newPetId };
+      handleItemClick(transferredConv);
+    } catch (error) {
+      console.error("Error transferring conversation:", error);
+      alert("Failed to transfer conversation.");
     }
   };
 
@@ -476,6 +540,29 @@ export const Chatbox = () => {
               />
             </div>
           ))}
+          
+          {/* Orphan Conversations */}
+          {orphanConversations.length > 0 && (
+            <>
+              <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 mt-3 flex items-center gap-1">
+                <MdWarning className="text-amber-500" />
+                <span>Orphaned</span>
+              </div>
+              {orphanConversations.map((conv) => (
+                <div
+                  key={conv._id}
+                  onClick={() => handleOrphanClick(conv)}
+                  className="group flex items-center justify-between p-2 rounded-lg hover:bg-amber-50 cursor-pointer transition-colors text-sm text-gray-500 border-l-2 border-amber-400"
+                >
+                  <span className="truncate flex-1 pr-2">{conv.title}</span>
+                  <MdDelete 
+                    onClick={(e) => handleDelete(e, conv._id)}
+                    className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity text-lg" 
+                  />
+                </div>
+              ))}
+            </>
+          )}
         </div>
 
         {/* User Info */}
@@ -541,6 +628,58 @@ export const Chatbox = () => {
             />
         </div>
       </div>
+      
+      {/* Transfer Modal */}
+      {showTransferModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <div className="bg-white rounded-xl shadow-xl w-80 max-h-96 flex flex-col">
+            <div className="p-4 border-b border-gray-200">
+              <h3 className="font-semibold text-gray-800">Transfer Conversation</h3>
+              <p className="text-sm text-gray-500 mt-1">
+                Select an assistant to take over this conversation
+              </p>
+            </div>
+            <div className="flex-1 overflow-y-auto p-2">
+              {availableAssistants.length === 0 ? (
+                <div className="text-center text-gray-400 py-4">
+                  No assistants available
+                </div>
+              ) : (
+                availableAssistants.map((assistant) => (
+                  <div
+                    key={assistant._id}
+                    onClick={() => handleTransfer(assistant._id)}
+                    className="flex items-center gap-3 p-3 rounded-lg hover:bg-gray-100 cursor-pointer transition-colors"
+                  >
+                    <div className="w-10 h-10 rounded-full bg-blue-500 flex items-center justify-center text-white text-sm overflow-hidden">
+                      {assistant.icon ? (
+                        <img src={assistant.icon} alt="" className="w-full h-full object-cover" />
+                      ) : (
+                        assistant.name?.charAt(0) || '?'
+                      )}
+                    </div>
+                    <div className="flex-1">
+                      <div className="font-medium text-gray-800">{assistant.name}</div>
+                      <div className="text-xs text-gray-500 truncate">{assistant.model_id}</div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+            <div className="p-3 border-t border-gray-200">
+              <button
+                onClick={() => {
+                  setShowTransferModal(false);
+                  setSelectedOrphanConv(null);
+                }}
+                className="w-full py-2 text-gray-600 hover:text-gray-800 text-sm"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

@@ -19,6 +19,7 @@ export const isElectron = () => {
 let tauriInvoke = null;
 let tauriListen = null;
 let tauriEmit = null;
+let tauriDialog = null;
 
 const getTauriApi = async () => {
   if (!isTauri()) return null;
@@ -32,22 +33,71 @@ const getTauriApi = async () => {
     tauriListen = event.listen;
     tauriEmit = event.emit;
   }
+  if (!tauriDialog) {
+    const dialog = await import('@tauri-apps/plugin-dialog');
+    tauriDialog = dialog;
+  }
   
-  return { invoke: tauriInvoke, listen: tauriListen, emit: tauriEmit };
+  return { invoke: tauriInvoke, listen: tauriListen, emit: tauriEmit, dialog: tauriDialog };
+};
+
+// 辅助函数：获取 Tauri Event API (用于 onSettingsUpdated)
+const getTauriEventApi = async () => {
+  if (!isTauri()) return null;
+  if (!tauriListen) {
+    const event = await import('@tauri-apps/api/event');
+    tauriListen = event.listen;
+    tauriEmit = event.emit;
+  }
+  return { listen: tauriListen, emit: tauriEmit };
+};
+
+// 导出 confirm 对话框
+export const confirm = async (message, options = {}) => {
+  if (isElectron()) {
+    return window.confirm(message);
+  }
+  
+  if (isTauri()) {
+    try {
+      const { ask } = await import('@tauri-apps/plugin-dialog');
+      return await ask(message, {
+        title: options.title || 'PetGPT',
+        kind: 'warning',
+        okLabel: 'Yes',
+        cancelLabel: 'No',
+      });
+    } catch (err) {
+      console.error('[bridge.confirm] Dialog error:', err);
+      return window.confirm(message);
+    }
+  }
+  
+  return window.confirm(message);
 };
 
 // ==================== Settings 接口 ====================
 
+// 默认设置值
+const DEFAULT_SETTINGS = {
+  windowSize: 'medium',
+  defaultAssistant: '',
+  programHotkey: 'Shift + Space',
+  dialogHotkey: 'Alt + Space',
+  launchAtStartup: false,
+  theme: 'light',
+};
+
 export const getSettings = async () => {
-  if (isElectron()) {
-    return window.electron.getSettings();
-  }
+  let result = {};
   
-  if (isTauri()) {
+  if (isElectron()) {
+    result = await window.electron.getSettings() || {};
+  } else if (isTauri()) {
     const { invoke } = await getTauriApi();
     const settings = await invoke('get_all_settings');
     // 将设置数组转换为对象
-    return settings.reduce((acc, s) => {
+    result = settings.reduce((acc, s) => {
       try {
         acc[s.key] = JSON.parse(s.value);
       } catch {
@@ -57,7 +107,8 @@ export const getSettings = async () => {
     }, {});
   }
   
-  return {};
+  // 合并默认值（用户设置优先）
+  return { ...DEFAULT_SETTINGS, ...result };
 };
 
 export const updateSettings = async (data) => {
@@ -747,23 +798,6 @@ export const processImage = async (base64Image) => {
 };
 
 // ==================== 事件接口扩展 ====================
-
-// Tauri 事件监听器存储
-const tauriEventListeners = new Map();
-
-// 获取 Tauri 事件 API
-const getTauriEventApi = async () => {
-  if (isTauri()) {
-    try {
-      const eventModule = await import('@tauri-apps/api/event');
-      return eventModule;
-    } catch (e) {
-      console.warn('Failed to load Tauri event API:', e);
-    }
-  }
-  return null;
-};
-
 export const sendPetsUpdate = async (data) => {
   if (isElectron()) {
     window.electron?.sendPetsUpdate(data);
@@ -1144,6 +1178,51 @@ export const deleteConversation = async (id) => {
   }
   
   return false;
+};
+
+// 获取孤儿对话（关联的 assistant 已被删除）
+export const getOrphanConversations = async () => {
+  if (isElectron()) {
+    // Electron 不支持此功能
+    return [];
+  }
+  
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    return invoke('get_orphan_conversations');
+  }
+  
+  return [];
+};
+
+// 将对话转移给新的 assistant
+export const transferConversation = async (conversationId, newPetId) => {
+  if (isElectron()) {
+    // Electron 不支持此功能
+    return false;
+  }
+  
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    return invoke('transfer_conversation', { conversationId, newPetId });
+  }
+  
+  return false;
+};
+
+// 批量转移对话
+export const transferAllConversations = async (oldPetId, newPetId) => {
+  if (isElectron()) {
+    // Electron 不支持此功能
+    return 0;
+  }
+  
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    return invoke('transfer_all_conversations', { oldPetId, newPetId });
+  }
+  
+  return 0;
 };
 
 // ==================== Message 接口 ====================
@@ -1943,6 +2022,9 @@ const bridge = {
   isTauri,
   isElectron,
   
+  // Dialog
+  confirm,
+  
   // Settings
   getSettings,
   updateSettings,
@@ -1976,6 +2058,9 @@ const bridge = {
   createConversation,
   updateConversation,
   deleteConversation,
+  getOrphanConversations,
+  transferConversation,
+  transferAllConversations,
   
   // Messages
   getMessages,

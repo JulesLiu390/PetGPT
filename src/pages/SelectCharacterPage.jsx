@@ -76,20 +76,27 @@ const SelectCharacterPage = () => {
   const navigate = useNavigate();
 
   const fetchData = async () => {
+    // 规范化 id 字段（Tauri 返回 id，前端期望 _id）
+    const normalizeId = (item) => ({ ...item, _id: item._id || item.id });
+    
     try {
-      // 分别获取 Models 和 Assistants
       const modelData = await bridge.getModelConfigs();
-      const assistantData = await bridge.getAssistants();
-      
+      console.log('[SelectCharacterPage] modelData:', modelData);
       if (Array.isArray(modelData)) {
-        setModels(modelData);
-      }
-      if (Array.isArray(assistantData)) {
-        setAssistants(assistantData);
+        setModels(modelData.map(normalizeId));
       }
     } catch (error) {
-      console.error("读取数据失败:", error);
-      alert("读取数据失败: " + error.message);
+      console.error("读取 Models 失败:", error);
+    }
+    
+    try {
+      const assistantData = await bridge.getAssistants();
+      console.log('[SelectCharacterPage] assistantData:', assistantData);
+      if (Array.isArray(assistantData)) {
+        setAssistants(assistantData.map(normalizeId));
+      }
+    } catch (error) {
+      console.error("读取 Assistants 失败:", error);
     }
   };
 
@@ -122,22 +129,29 @@ const SelectCharacterPage = () => {
   };
 
   const handleDeleteModel = async (modelId) => {
-    if (!confirm("Are you sure you want to delete this model configuration?")) return;
+    const confirmed = await bridge.confirm("Are you sure you want to delete this model configuration?", { title: "Delete Model" });
+    if (!confirmed) return;
+    
     try {
       await bridge.deleteModelConfig(modelId);
       fetchData();
     } catch (error) {
-      alert("删除 Model 失败: " + error.message);
+      const msg = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
+      alert("删除 Model 失败: " + msg);
     }
   };
 
   const handleDeleteAssistant = async (assistantId) => {
-    if (!confirm("Are you sure you want to delete this assistant?")) return;
+    const confirmed = await bridge.confirm("Are you sure you want to delete this assistant?", { title: "Delete Assistant" });
+    if (!confirmed) return;
+    
     try {
       await bridge.deleteAssistant(assistantId);
       fetchData();
     } catch (error) {
-      alert("删除 Assistant 失败: " + error.message);
+      console.error("Delete failed:", error);
+      const msg = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
+      alert("删除 Assistant 失败: " + msg);
     }
   };
 

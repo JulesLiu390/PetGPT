@@ -7,7 +7,7 @@ use super::Database;
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Pet {
-    #[serde(rename = "_id")]
+    #[serde(rename(serialize = "_id", deserialize = "id"))]
     pub id: String,
     pub name: String,
     #[serde(rename = "type")]
@@ -71,7 +71,9 @@ impl Database {
             "SELECT id, name, type, model_name, model_url, model_api_key, model_config_id,
                     api_format, system_instruction, appearance, has_mood, icon, 
                     toolbar_order, created_at, updated_at 
-             FROM pets ORDER BY toolbar_order"
+             FROM pets 
+             WHERE is_deleted = 0 
+             ORDER BY toolbar_order"
         )?;
         
         let pets = stmt.query_map([], |row| {
@@ -253,7 +255,8 @@ impl Database {
 
     pub fn delete_pet(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
-        let rows = conn.execute("DELETE FROM pets WHERE id = ?", params![id])?;
+        // Soft delete: mark as deleted instead of removing
+        let rows = conn.execute("UPDATE pets SET is_deleted = 1 WHERE id = ?", params![id])?;
         Ok(rows > 0)
     }
 }

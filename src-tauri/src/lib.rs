@@ -91,6 +91,23 @@ fn delete_conversation(db: State<DbState>, id: String) -> Result<bool, String> {
     db.delete_conversation(&id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn get_orphan_conversations(db: State<DbState>) -> Result<Vec<conversations::Conversation>, String> {
+    db.get_orphan_conversations().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn transfer_conversation(db: State<DbState>, conversationId: String, newPetId: String) -> Result<bool, String> {
+    db.transfer_conversation(&conversationId, &newPetId).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+#[allow(non_snake_case)]
+fn transfer_all_conversations(db: State<DbState>, oldPetId: String, newPetId: String) -> Result<usize, String> {
+    db.transfer_all_conversations(&oldPetId, &newPetId).map_err(|e| e.to_string())
+}
+
 // ============ Message Commands ============
 
 #[tauri::command]
@@ -1205,6 +1222,9 @@ pub fn run() {
             create_conversation,
             update_conversation_title,
             delete_conversation,
+            get_orphan_conversations,
+            transfer_conversation,
+            transfer_all_conversations,
             // Message commands
             get_messages,
             create_message,

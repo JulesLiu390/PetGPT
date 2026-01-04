@@ -66,7 +66,9 @@ export const Chatbox = () => {
   };
 
   const handleDelete = async (conversationId) => {
-    const confirmDelete = window.confirm("Are you sure you want to delete this conversation?");
+    const confirmDelete = await bridge.confirm("Are you sure you want to delete this conversation?", {
+      title: 'Delete Conversation'
+    });
     if (!confirmDelete) return;
 
     try {

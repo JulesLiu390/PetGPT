@@ -115,6 +115,9 @@ impl Database {
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN url TEXT", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN api_key TEXT", []);
 
+        // Migration: add is_deleted to pets
+        let _ = conn.execute("ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0", []);
+
         Ok(())
     }
 }
