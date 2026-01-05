@@ -5,12 +5,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::RwLock;
+use tokio::time::{timeout, Duration};
 
 use super::client::McpClient;
 use super::http_client::McpHttpClient;
 use super::types::*;
 
+// Default timeout for tool calls via manager
+const MANAGER_TOOL_TIMEOUT_SECS: u64 = 300; // 5 minutes
+
 /// Unified client wrapper for both transport types
+#[derive(Clone)]
 pub enum McpClientWrapper {
     Stdio(Arc<McpClient>),
     Http(Arc<McpHttpClient>),
@@ -35,6 +40,30 @@ impl McpClientWrapper {
         match self {
             McpClientWrapper::Stdio(c) => c.disconnect(),
             McpClientWrapper::Http(c) => c.disconnect(),
+        }
+    }
+    
+    /// Cancel pending operations on this client
+    pub fn cancel(&self) {
+        match self {
+            McpClientWrapper::Stdio(c) => c.cancel(),
+            McpClientWrapper::Http(c) => c.cancel(),
+        }
+    }
+    
+    /// Reset cancellation state
+    pub fn reset_cancellation(&self) {
+        match self {
+            McpClientWrapper::Stdio(c) => c.reset_cancellation(),
+            McpClientWrapper::Http(c) => c.reset_cancellation(),
+        }
+    }
+    
+    /// Check if cancelled
+    pub fn is_cancelled(&self) -> bool {
+        match self {
+            McpClientWrapper::Stdio(c) => c.is_cancelled(),
+            McpClientWrapper::Http(c) => c.is_cancelled(),
         }
     }
 
@@ -67,15 +96,31 @@ impl McpManager {
         }
     }
     
-    /// Cancel all pending tool calls
-    pub fn cancel_all_tool_calls(&self) {
+    /// Cancel all pending tool calls across all clients
+    /// This will physically interrupt ongoing operations
+    pub async fn cancel_all_tool_calls(&self) {
         log::info!("[MCPManager] Cancelling all tool calls");
         self.cancelled.store(true, Ordering::SeqCst);
+        
+        // Cancel on all connected clients
+        let clients = self.clients.read().await;
+        for (server_id, client) in clients.iter() {
+            if client.is_connected() {
+                log::info!("[MCPManager] Cancelling operations on server: {}", server_id);
+                client.cancel();
+            }
+        }
     }
     
-    /// Reset the cancellation flag (call before starting new operations)
-    pub fn reset_cancellation(&self) {
+    /// Reset the cancellation flag on manager and all clients
+    /// Call this before starting new operations
+    pub async fn reset_cancellation(&self) {
         self.cancelled.store(false, Ordering::SeqCst);
+        
+        let clients = self.clients.read().await;
+        for client in clients.values() {
+            client.reset_cancellation();
+        }
     }
     
     /// Check if operations are cancelled
@@ -239,7 +284,7 @@ impl McpManager {
         tools
     }
 
-    /// Call a tool on a specific server
+    /// Call a tool on a specific server with timeout and cancellation support
     pub async fn call_tool(
         &self,
         server_id: &str,
@@ -251,27 +296,59 @@ impl McpManager {
             return Err("Tool call cancelled".to_string());
         }
         
-        let clients = self.clients.read().await;
-        let client = clients.get(server_id)
-            .ok_or_else(|| format!("Server {} not found or not running", server_id))?;
+        let client = {
+            let clients = self.clients.read().await;
+            clients.get(server_id)
+                .ok_or_else(|| format!("Server {} not found or not running", server_id))?
+                .clone()
+        };
+        
+        // Ensure client is not in cancelled state from previous operation
+        if client.is_cancelled() {
+            client.reset_cancellation();
+        }
+        
+        log::info!("[MCPManager] Calling tool {} on server {} (timeout: {}s)", 
+            tool_name, server_id, MANAGER_TOOL_TIMEOUT_SECS);
 
-        match client.call_tool(tool_name, arguments).await {
-            Ok(result) => {
+        // Execute with timeout
+        let result = timeout(
+            Duration::from_secs(MANAGER_TOOL_TIMEOUT_SECS),
+            client.call_tool(tool_name, arguments)
+        ).await;
+        
+        match result {
+            Ok(Ok(tool_result)) => {
                 // Check again after execution
                 if self.is_cancelled() {
                     return Err("Tool call cancelled".to_string());
                 }
                 Ok(CallToolResponse {
-                    success: !result.is_error,
-                    content: result.content,
+                    success: !tool_result.is_error,
+                    content: tool_result.content,
                     error: None,
                 })
             },
-            Err(e) => Ok(CallToolResponse {
-                success: false,
-                content: vec![],
-                error: Some(e),
-            }),
+            Ok(Err(e)) => {
+                // Check if error was due to cancellation
+                if e.contains("cancelled") || self.is_cancelled() {
+                    return Err("Tool call cancelled".to_string());
+                }
+                Ok(CallToolResponse {
+                    success: false,
+                    content: vec![],
+                    error: Some(e),
+                })
+            },
+            Err(_) => {
+                // Timeout occurred
+                log::warn!("[MCPManager] Tool call {} timed out after {}s", tool_name, MANAGER_TOOL_TIMEOUT_SECS);
+                Ok(CallToolResponse {
+                    success: false,
+                    content: vec![],
+                    error: Some(format!("Tool call timed out after {}s", MANAGER_TOOL_TIMEOUT_SECS)),
+                })
+            }
         }
     }
 

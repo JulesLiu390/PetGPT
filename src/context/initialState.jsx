@@ -7,4 +7,7 @@ export const initialState = {
     currentConversationId: null,
     updatedConversation: null, // 用于通知特定会话更新 { id, messages }
     liveToolCalls: {}, // { conversationId: [{ id, toolName, args, status, result, error }] }
+    // 时间注入管理：记录每个会话上次注入时间的时间戳
+    // { conversationId: timestamp }
+    lastTimeInjection: {},
 }

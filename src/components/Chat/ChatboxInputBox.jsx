@@ -11,6 +11,7 @@ import { useMcpTools } from '../../utils/mcp/useMcpTools';
 import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
 import * as bridge from '../../utils/bridge';
+import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
 
 /**
  * 获取模型的 API 格式
@@ -234,7 +235,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   console.log('[ChatboxInputBox] stateValue:', stateValue);
   const [state, dispatch] = stateValue || [{}, () => {}];
   console.log('[ChatboxInputBox] state:', state, 'dispatch:', dispatch);
-  const { userMessages = [], suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {} } = state;
+  const { userMessages = [], suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {} } = state;
   const suggestText = allSuggestTexts[currentConversationId] || [];
   console.log('[ChatboxInputBox] userMessages:', userMessages);
   // 将 userText 从全局状态中移除，改为本地状态管理
@@ -746,6 +747,21 @@ export const ChatboxInputBox = ({ activePetId }) => {
           setAttachments([]);
       }
 
+      // 检查是否需要注入时间信息
+      const lastInjectionTimestamp = lastTimeInjection[sendingConversationId];
+      const needTimeInjection = shouldInjectTime(lastInjectionTimestamp);
+      const timeContext = needTimeInjection ? buildTimeContext() : '';
+      
+      // 如果注入了时间，更新时间戳
+      if (needTimeInjection) {
+        console.log('[ChatboxInputBox] Injecting time context:', timeContext);
+        dispatch({
+          type: actionType.UPDATE_TIME_INJECTION,
+          conversationId: sendingConversationId,
+          timestamp: Date.now()
+        });
+      }
+
       if (!isDefaultPersonality) {
         if (memoryEnabled) {
           const index = await longTimeMemory(_userText, 
@@ -769,13 +785,15 @@ export const ChatboxInputBox = ({ activePetId }) => {
             );
             setUserMemory(getUserMemory);
           }
-          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n关于用户的信息设定如下:\n${userMemory}\n`;
+          let systemContent = timeContext ? `${timeContext}\n\n` : '';
+          systemContent += `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n关于用户的信息设定如下:\n${userMemory}\n`;
           systemContent += "请在回答中保持角色特点和用户设定。";
           const systemPrompt = { role: "system", content: systemContent };
           
           fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         } else {
-          let systemContent = `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n`;
+          let systemContent = timeContext ? `${timeContext}\n\n` : '';
+          systemContent += `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n`;
           systemContent += "请在回答中保持角色特点。";
           const systemPrompt = { role: "system", content: systemContent };
           
@@ -805,13 +823,15 @@ export const ChatboxInputBox = ({ activePetId }) => {
             );
             setUserMemory(getUserMemory);
           }
-          let systemContent = `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
+          let systemContent = timeContext ? `${timeContext}\n\n` : '';
+          systemContent += `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
           systemContent += "You are a helpful assisatant";
           const systemPrompt = { role: "system", content: systemContent };
           
           fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         } else {
-          let systemContent = `You are a helpful assisatant`;
+          let systemContent = timeContext ? `${timeContext}\n\n` : '';
+          systemContent += `You are a helpful assisatant`;
           const systemPrompt = { role: "system", content: systemContent };
           
           fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];

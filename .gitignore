@@ -30,4 +30,4 @@ release/
 # Build documentation and scripts
 documents/
 scripts/
-design/
+design/.DS_Store

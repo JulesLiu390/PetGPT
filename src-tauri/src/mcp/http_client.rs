@@ -2,16 +2,19 @@
 // Implements MCP protocol over Streamable HTTP (2025-03-26 spec)
 // See: https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::collections::HashMap;
 use tokio::sync::{oneshot, RwLock};
 use futures::StreamExt;
+use tokio::time::{timeout, Duration};
 
 use super::types::*;
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const REQUEST_TIMEOUT_SECS: u64 = 60;
+const SSE_STREAM_TIMEOUT_SECS: u64 = 300; // 5 minutes for long-running tool calls
+const SSE_CHUNK_TIMEOUT_SECS: u64 = 30; // Max time between chunks
 
 pub struct McpHttpClient {
     server_id: String,
@@ -36,6 +39,9 @@ pub struct McpHttpClient {
     server_info: Arc<Mutex<Option<ServerInfo>>>,
     tools: Arc<Mutex<Vec<McpTool>>>,
     resources: Arc<Mutex<Vec<McpResource>>>,
+    
+    // Cancellation support
+    cancelled: Arc<AtomicBool>,
 }
 
 impl McpHttpClient {
@@ -64,7 +70,24 @@ impl McpHttpClient {
             server_info: Arc::new(Mutex::new(None)),
             tools: Arc::new(Mutex::new(Vec::new())),
             resources: Arc::new(Mutex::new(Vec::new())),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
+    }
+    
+    /// Cancel pending operations
+    pub fn cancel(&self) {
+        log::info!("[MCP-HTTP][{}] Cancelling operations", self.server_name);
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+    
+    /// Reset cancellation flag
+    pub fn reset_cancellation(&self) {
+        self.cancelled.store(false, Ordering::SeqCst);
+    }
+    
+    /// Check if cancelled
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
     }
 
     /// Connect to the MCP server via Streamable HTTP
@@ -87,78 +110,169 @@ impl McpHttpClient {
     }
 
     /// Parse SSE stream response and extract JSON-RPC messages
+    /// Implements proper SSE parsing with timeout and cancellation support
     async fn parse_sse_response(&self, response: reqwest::Response) -> Result<serde_json::Value, String> {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut result: Option<serde_json::Value> = None;
+        let mut last_event_type: Option<String> = None;
+        let start_time = std::time::Instant::now();
 
-        while let Some(chunk) = stream.next().await {
-            match chunk {
-                Ok(bytes) => {
-                    let text = String::from_utf8_lossy(&bytes);
-                    buffer.push_str(&text);
-                    log::debug!("[MCP-HTTP][{}] SSE chunk: {:?}", self.server_name, text);
+        loop {
+            // Check cancellation
+            if self.is_cancelled() {
+                return Err("Operation cancelled".to_string());
+            }
+            
+            // Check overall timeout
+            if start_time.elapsed().as_secs() > SSE_STREAM_TIMEOUT_SECS {
+                return Err("SSE stream timeout".to_string());
+            }
+            
+            // Read next chunk with timeout
+            let chunk_result = timeout(
+                Duration::from_secs(SSE_CHUNK_TIMEOUT_SECS),
+                stream.next()
+            ).await;
+            
+            let chunk = match chunk_result {
+                Ok(Some(Ok(bytes))) => bytes,
+                Ok(Some(Err(e))) => {
+                    log::error!("[MCP-HTTP][{}] SSE stream error: {}", self.server_name, e);
+                    break;
+                }
+                Ok(None) => {
+                    // Stream ended normally
+                    log::debug!("[MCP-HTTP][{}] SSE stream ended", self.server_name);
+                    break;
+                }
+                Err(_) => {
+                    // Timeout between chunks
+                    log::warn!("[MCP-HTTP][{}] SSE chunk timeout", self.server_name);
+                    break;
+                }
+            };
+            
+            let text = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&text);
+            log::debug!("[MCP-HTTP][{}] SSE chunk ({} bytes): {:?}", self.server_name, chunk.len(), text);
 
-                    // Process complete events
-                    // SSE events are separated by blank lines, handle both \r\n\r\n and \n\n
-                    loop {
-                        // Find event boundary - try \r\n\r\n first (Windows/HTTP style), then \n\n (Unix style)
-                        let (pos, skip_len) = if let Some(p) = buffer.find("\r\n\r\n") {
-                            (p, 4)
-                        } else if let Some(p) = buffer.find("\n\n") {
-                            (p, 2)
-                        } else {
-                            break; // No complete event yet
-                        };
+            // Process complete events
+            // SSE events are separated by blank lines, handle both \r\n\r\n and \n\n
+            loop {
+                // Find event boundary - try \r\n\r\n first (Windows/HTTP style), then \n\n (Unix style)
+                let (pos, skip_len) = if let Some(p) = buffer.find("\r\n\r\n") {
+                    (p, 4)
+                } else if let Some(p) = buffer.find("\n\n") {
+                    (p, 2)
+                } else {
+                    break; // No complete event yet
+                };
 
-                        let event_data = buffer[..pos].to_string();
-                        buffer = buffer[pos + skip_len..].to_string();
+                let event_block = buffer[..pos].to_string();
+                buffer = buffer[pos + skip_len..].to_string();
 
-                        log::debug!("[MCP-HTTP][{}] SSE event: {:?}", self.server_name, event_data);
+                log::debug!("[MCP-HTTP][{}] SSE event block: {:?}", self.server_name, event_block);
 
-                        // Parse SSE event
-                        if let Some(data) = Self::parse_sse_event(&event_data) {
-                            log::debug!("[MCP-HTTP][{}] SSE data: {}", self.server_name, data);
-                            
+                // Parse SSE event (extract event type and data)
+                let (event_type, data) = Self::parse_sse_event_full(&event_block);
+                
+                if let Some(et) = event_type {
+                    last_event_type = Some(et);
+                }
+                
+                if let Some(data) = data {
+                    log::debug!("[MCP-HTTP][{}] SSE data (event={:?}): {}", 
+                        self.server_name, last_event_type, data);
+                    
+                    // Handle different event types per MCP spec
+                    match last_event_type.as_deref() {
+                        Some("error") => {
+                            // Server sent an error event
+                            return Err(format!("SSE error event: {}", data));
+                        }
+                        Some("endpoint") => {
+                            // Server is redirecting to a new endpoint (rare)
+                            log::info!("[MCP-HTTP][{}] Server sent endpoint redirect: {}", 
+                                self.server_name, data);
+                        }
+                        _ => {
+                            // Default: "message" event or no event type
                             // Try to parse as JSON-RPC response
                             if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data) {
                                 if let Some(error) = resp.error {
-                                    return Err(error.message);
+                                    return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
                                 }
                                 result = Some(resp.result.unwrap_or(serde_json::Value::Null));
                                 // Continue processing in case there are more events
                             }
                             // Handle notifications (log them but continue)
                             else if let Ok(notif) = serde_json::from_str::<JsonRpcNotification>(&data) {
-                                log::info!("[MCP-HTTP][{}] Server notification: {}", self.server_name, notif.method);
+                                log::info!("[MCP-HTTP][{}] Server notification: {}", 
+                                    self.server_name, notif.method);
+                            }
+                            // Could be a partial or malformed message
+                            else {
+                                log::debug!("[MCP-HTTP][{}] Non-JSON SSE data: {}", 
+                                    self.server_name, data);
                             }
                         }
                     }
+                    
+                    // Reset event type after processing
+                    last_event_type = None;
                 }
-                Err(e) => {
-                    log::error!("[MCP-HTTP][{}] SSE stream error: {}", self.server_name, e);
-                    break;
-                }
+            }
+            
+            // If we already have a result and the buffer is empty, we can return early
+            if result.is_some() && buffer.trim().is_empty() {
+                break;
             }
         }
 
         result.ok_or_else(|| "No response received from SSE stream".to_string())
     }
 
-    /// Parse SSE event data
-    fn parse_sse_event(event_str: &str) -> Option<String> {
+    /// Parse SSE event block and extract event type and data
+    /// Returns (event_type, data) tuple
+    fn parse_sse_event_full(event_str: &str) -> (Option<String>, Option<String>) {
+        let mut event_type: Option<String> = None;
         let mut data_lines = Vec::new();
+        
         for line in event_str.lines() {
-            if let Some(data) = line.strip_prefix("data:") {
+            let line = line.trim_start(); // SSE spec says leading spaces should be ignored
+            
+            if let Some(et) = line.strip_prefix("event:") {
+                event_type = Some(et.trim().to_string());
+            } else if let Some(data) = line.strip_prefix("data:") {
                 // Handle "data: value" or "data:value"
-                data_lines.push(data.trim_start().to_string());
+                // Per SSE spec, a single space after colon should be removed
+                let data = if data.starts_with(' ') {
+                    &data[1..]
+                } else {
+                    data
+                };
+                data_lines.push(data.to_string());
+            } else if line.starts_with("id:") || line.starts_with("retry:") {
+                // Ignore id and retry fields for now
+            } else if line.starts_with(':') {
+                // Comment line, ignore
             }
+            // Empty lines within an event block are ignored
         }
-        if data_lines.is_empty() {
+        
+        let data = if data_lines.is_empty() {
             None
         } else {
             Some(data_lines.join("\n"))
-        }
+        };
+        
+        (event_type, data)
+    }
+    
+    /// Legacy parse function for backward compatibility
+    fn parse_sse_event(event_str: &str) -> Option<String> {
+        Self::parse_sse_event_full(event_str).1
     }
 
     /// Send initialize request
@@ -231,10 +345,15 @@ impl McpHttpClient {
         Ok(())
     }
 
-    /// Call a tool
+    /// Call a tool with cancellation support
     pub async fn call_tool(&self, name: &str, arguments: Option<serde_json::Value>) -> Result<ToolCallResult, String> {
         if !*self.is_connected.lock().unwrap() {
             return Err("Not connected".to_string());
+        }
+        
+        // Check cancellation before starting
+        if self.is_cancelled() {
+            return Err("Operation cancelled".to_string());
         }
 
         log::info!("[MCP-HTTP][{}] Calling tool: {} with args: {:?}", self.server_name, name, arguments);
@@ -248,6 +367,11 @@ impl McpHttpClient {
             .send_request("tools/call", Some(serde_json::to_value(params).unwrap()))
             .await
             .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))?;
+        
+        // Check cancellation after completion
+        if self.is_cancelled() {
+            return Err("Operation cancelled".to_string());
+        }
 
         log::info!("[MCP-HTTP][{}] Tool result: {:?}", self.server_name, result);
         Ok(result)
@@ -395,7 +519,9 @@ impl McpHttpClient {
     /// Disconnect from the server
     pub fn disconnect(&self) {
         log::info!("[MCP-HTTP][{}] Disconnecting", self.server_name);
-
+        
+        // Set cancelled to interrupt any ongoing operations
+        self.cancelled.store(true, Ordering::SeqCst);
         *self.is_connected.lock().unwrap() = false;
 
         // Clear pending requests

@@ -20,6 +20,8 @@ export const actionType = {
     ADD_TOOL_CALL: "ADD_TOOL_CALL",           // 添加工具调用
     UPDATE_TOOL_CALL: "UPDATE_TOOL_CALL",     // 更新工具调用状态
     CLEAR_TOOL_CALLS: "CLEAR_TOOL_CALLS",     // 清除工具调用
+    // 时间注入管理
+    UPDATE_TIME_INJECTION: "UPDATE_TIME_INJECTION", // 更新会话的时间注入时间戳
 }
 
 const reducer = (state, action) => {
@@ -175,6 +177,14 @@ const reducer = (state, action) => {
                 characterMoods: {
                     ...state.characterMoods,
                     [action.conversationId || 'global']: action.characterMood
+                }
+            };
+        case actionType.UPDATE_TIME_INJECTION:
+            return {
+                ...state,
+                lastTimeInjection: {
+                    ...state.lastTimeInjection,
+                    [action.conversationId]: action.timestamp
                 }
             };
         default :

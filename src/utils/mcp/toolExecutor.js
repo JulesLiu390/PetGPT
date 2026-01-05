@@ -12,6 +12,10 @@ import bridge from '../bridge.js';
 // 最大工具调用轮次，防止无限循环
 const MAX_TOOL_ITERATIONS = 10;
 
+// 工具执行超时配置 (毫秒)
+const TOOL_EXECUTION_TIMEOUT_MS = 300000; // 5 minutes for individual tool call
+const DEFAULT_TOOL_TIMEOUT_MS = 60000; // 1 minute default
+
 /**
  * 获取所有可用的 MCP 工具
  * 
@@ -34,21 +38,57 @@ export const getMcpTools = async () => {
 };
 
 /**
- * 执行单个 MCP 工具调用
+ * 带超时的 Promise 包装器
+ * 
+ * @param {Promise} promise - 要包装的 Promise
+ * @param {number} timeoutMs - 超时时间（毫秒）
+ * @param {string} operationName - 操作名称（用于错误消息）
+ * @returns {Promise} 带超时的 Promise
+ */
+const withTimeout = (promise, timeoutMs, operationName = 'Operation') => {
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      reject(new Error(`${operationName} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    
+    promise
+      .then(result => {
+        clearTimeout(timeoutId);
+        resolve(result);
+      })
+      .catch(error => {
+        clearTimeout(timeoutId);
+        reject(error);
+      });
+  });
+};
+
+/**
+ * 执行单个 MCP 工具调用（带超时）
  * 
  * @param {string} serverName - MCP 服务器名称
  * @param {string} toolName - 工具名称
  * @param {Object} args - 工具参数
+ * @param {Object} options - 选项
+ * @param {number} options.timeout - 超时时间（毫秒），默认 60 秒
  * @returns {Promise<*>} 工具执行结果
  */
-export const executeMcpTool = async (serverName, toolName, args) => {
+export const executeMcpTool = async (serverName, toolName, args, options = {}) => {
+  const timeout = options.timeout || DEFAULT_TOOL_TIMEOUT_MS;
+  
   try {
     if (!bridge.mcp?.callTool) {
       throw new Error('MCP API not available');
     }
     
-    console.log(`[MCP] Executing tool: ${serverName}/${toolName}`, args);
-    const result = await bridge.mcp.callTool(serverName, toolName, args);
+    console.log(`[MCP] Executing tool: ${serverName}/${toolName} (timeout: ${timeout}ms)`, args);
+    
+    const result = await withTimeout(
+      bridge.mcp.callTool(serverName, toolName, args),
+      timeout,
+      `Tool ${serverName}/${toolName}`
+    );
+    
     console.log(`[MCP] Tool result:`, result);
     return result;
   } catch (error) {
@@ -58,20 +98,51 @@ export const executeMcpTool = async (serverName, toolName, args) => {
 };
 
 /**
- * 根据工具名称查找对应的服务器和执行工具
+ * 根据工具名称查找对应的服务器和执行工具（带超时）
  * 
  * @param {string} toolName - 工具全名 (格式: serverName__toolName 或 toolName)
  * @param {Object} args - 工具参数
+ * @param {Object} options - 选项
+ * @param {number} options.timeout - 超时时间（毫秒），默认 5 分钟
+ * @param {AbortSignal} options.abortSignal - 取消信号
  * @returns {Promise<*>} 执行结果
  */
-export const executeToolByName = async (toolName, args) => {
+export const executeToolByName = async (toolName, args, options = {}) => {
+  const timeout = options.timeout || TOOL_EXECUTION_TIMEOUT_MS;
+  
   try {
     if (!bridge.mcp?.callToolByName) {
       throw new Error('MCP API not available');
     }
     
-    console.log(`[MCP] Executing tool by name: ${toolName}`, args);
-    const result = await bridge.mcp.callToolByName(toolName, args);
+    // 检查是否已取消
+    if (options.abortSignal?.aborted) {
+      throw new Error('Tool execution cancelled');
+    }
+    
+    console.log(`[MCP] Executing tool by name: ${toolName} (timeout: ${timeout}ms)`, args);
+    
+    // 创建一个可以被取消的 Promise
+    const toolPromise = bridge.mcp.callToolByName(toolName, args);
+    
+    // 如果有 abortSignal，监听取消事件
+    if (options.abortSignal) {
+      const abortPromise = new Promise((_, reject) => {
+        options.abortSignal.addEventListener('abort', () => {
+          reject(new Error('Tool execution cancelled'));
+        }, { once: true });
+      });
+      
+      const result = await withTimeout(
+        Promise.race([toolPromise, abortPromise]),
+        timeout,
+        `Tool ${toolName}`
+      );
+      console.log(`[MCP] Tool result:`, result);
+      return result;
+    }
+    
+    const result = await withTimeout(toolPromise, timeout, `Tool ${toolName}`);
     console.log(`[MCP] Tool result:`, result);
     return result;
   } catch (error) {
