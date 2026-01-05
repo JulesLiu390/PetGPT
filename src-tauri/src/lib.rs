@@ -1,7 +1,7 @@
 mod database;
 mod mcp;
 
-use database::{Database, pets, conversations, messages, settings, mcp_servers};
+use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -151,6 +151,43 @@ fn set_setting(app: AppHandle, db: State<DbState>, key: String, value: String) -
 #[tauri::command]
 fn get_all_settings(db: State<DbState>) -> Result<Vec<settings::Setting>, String> {
     db.get_all_settings().map_err(|e| e.to_string())
+}
+
+// ============ API Provider Commands ============
+
+#[tauri::command]
+fn get_api_providers(db: State<DbState>) -> Result<Vec<api_providers::ApiProvider>, String> {
+    db.get_all_api_providers().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_api_provider(db: State<DbState>, id: String) -> Result<Option<api_providers::ApiProvider>, String> {
+    db.get_api_provider_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_api_provider(db: State<DbState>, data: api_providers::CreateApiProviderData) -> Result<api_providers::ApiProvider, String> {
+    db.create_api_provider(data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_api_provider(db: State<DbState>, id: String, data: api_providers::UpdateApiProviderData) -> Result<Option<api_providers::ApiProvider>, String> {
+    db.update_api_provider(&id, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_api_provider(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.delete_api_provider(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_api_provider_models(db: State<DbState>, id: String, models: String) -> Result<bool, String> {
+    db.update_api_provider_models(&id, &models).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn set_api_provider_validated(db: State<DbState>, id: String, validated: bool) -> Result<bool, String> {
+    db.set_api_provider_validated(&id, validated).map_err(|e| e.to_string())
 }
 
 // ============ MCP Server Commands ============
@@ -723,41 +760,52 @@ fn open_page_in_chat(app: AppHandle, route: String) -> Result<(), String> {
 
 #[tauri::command]
 fn open_settings_window(app: AppHandle) -> Result<(), String> {
-    toggle_window(&app, "settings")
+    // 兼容旧调用：打开 manage 窗口的 ui tab
+    open_manage_window_with_tab(app, "ui".to_string())
 }
 
 #[tauri::command]
-fn open_select_character_window(app: AppHandle) -> Result<(), String> {
-    toggle_window(&app, "select_character")
+fn open_manage_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "manage")
 }
 
 #[tauri::command]
-fn open_add_character_window(app: AppHandle) -> Result<(), String> {
-    toggle_window(&app, "add_character")
-}
-
-#[tauri::command]
-fn open_mcp_window(app: AppHandle) -> Result<(), String> {
-    toggle_window(&app, "mcp")
-}
-
-#[tauri::command]
-fn open_add_model_window(app: AppHandle) -> Result<(), String> {
-    toggle_window(&app, "add_model")
-}
-
-// 隐藏窗口 (用于关闭按钮)
-#[tauri::command]
-fn hide_add_character_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("add_character") {
-        window.hide().map_err(|e| e.to_string())?;
+fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("manage") {
+        if window.is_visible().unwrap_or(false) {
+            // 窗口已可见，通过 JS 检查当前 tab 并决定是隐藏还是切换
+            // 向前端发送事件，让前端处理 toggle 逻辑
+            let _ = window.eval(&format!(
+                r#"
+                (function() {{
+                    const urlParams = new URLSearchParams(window.location.hash.split('?')[1] || '');
+                    const currentTab = urlParams.get('tab') || 'assistants';
+                    const targetTab = '{}';
+                    if (currentTab === targetTab) {{
+                        // 同一个 tab，通知 Rust 隐藏窗口
+                        window.__TAURI__.core.invoke('hide_manage_window');
+                    }} else {{
+                        // 不同 tab，切换到目标 tab
+                        window.location.hash = '/manage?tab=' + targetTab;
+                    }}
+                }})();
+                "#,
+                tab
+            ));
+        } else {
+            // 窗口不可见，显示并导航到指定 tab
+            let _ = window.eval(&format!("window.location.hash = '/manage?tab={}'", tab));
+            window.show().map_err(|e| e.to_string())?;
+            window.set_focus().map_err(|e| e.to_string())?;
+        }
     }
     Ok(())
 }
 
+// 隐藏窗口 (用于关闭按钮)
 #[tauri::command]
-fn hide_select_character_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("select_character") {
+fn hide_manage_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("manage") {
         window.hide().map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -765,27 +813,13 @@ fn hide_select_character_window(app: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn hide_settings_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("settings") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    // 兼容旧调用：隐藏 manage 窗口
+    hide_manage_window(app)
 }
 
-#[tauri::command]
-fn hide_mcp_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("mcp") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
 
-#[tauri::command]
-fn hide_add_model_window(app: AppHandle) -> Result<(), String> {
-    if let Some(window) = app.get_webview_window("add_model") {
-        window.hide().map_err(|e| e.to_string())?;
-    }
-    Ok(())
-}
+
+
 
 // 最大化/还原聊天窗口
 #[tauri::command]
@@ -899,10 +933,7 @@ fn get_baseline_sizes() -> HashMap<&'static str, BaselineSize> {
     let mut sizes = HashMap::new();
     sizes.insert("character", BaselineSize { width: 200.0, height: 300.0 });
     sizes.insert("chat", BaselineSize { width: 400.0, height: 350.0 });
-    sizes.insert("add-character", BaselineSize { width: 600.0, height: 600.0 });
-    sizes.insert("select-character", BaselineSize { width: 500.0, height: 350.0 });
-    sizes.insert("settings", BaselineSize { width: 500.0, height: 700.0 });
-    sizes.insert("mcp", BaselineSize { width: 550.0, height: 650.0 });
+    sizes.insert("manage", BaselineSize { width: 640.0, height: 680.0 });
     sizes
 }
 
@@ -967,29 +998,8 @@ fn update_window_size_preset(app: AppHandle, preset: String) -> Result<(), Strin
         }
     }
     
-    // Update settings window
-    if let (Some(window), Some(baseline)) = (app.get_webview_window("settings"), baselines.get("settings")) {
-        let width = (baseline.width * scale).round();
-        let height = (baseline.height * scale).round();
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
-    }
-    
-    // Update select-character window
-    if let (Some(window), Some(baseline)) = (app.get_webview_window("select-character"), baselines.get("select-character")) {
-        let width = (baseline.width * scale).round();
-        let height = (baseline.height * scale).round();
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
-    }
-    
-    // Update add-character window
-    if let (Some(window), Some(baseline)) = (app.get_webview_window("add-character"), baselines.get("add-character")) {
-        let width = (baseline.width * scale).round();
-        let height = (baseline.height * scale).round();
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
-    }
-    
-    // Update MCP window
-    if let (Some(window), Some(baseline)) = (app.get_webview_window("mcp"), baselines.get("mcp")) {
+    // Update manage window (unified settings window)
+    if let (Some(window), Some(baseline)) = (app.get_webview_window("manage"), baselines.get("manage")) {
         let width = (baseline.width * scale).round();
         let height = (baseline.height * scale).round();
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
@@ -1133,34 +1143,85 @@ pub fn run() {
             // Position character window at bottom-right
             position_character_window(app.handle());
             
-            // Listen for character window move events to sync chat window position
+            // Listen for character window move events to sync chat window position and bounce back if out of bounds
             let app_handle = app.handle().clone();
             if let Some(character) = app.get_webview_window("character") {
                 character.on_window_event(move |event| {
                     if let tauri::WindowEvent::Moved(_) = event {
-                        // Skip if sidebar is expanded
-                        if SIDEBAR_EXPANDED.load(Ordering::SeqCst) {
-                            return;
-                        }
-                        
                         if let Some(character) = app_handle.get_webview_window("character") {
-                            if let Some(chat) = app_handle.get_webview_window("chat") {
-                                // Skip if chat window is not visible
-                                if !chat.is_visible().unwrap_or(false) {
-                                    return;
-                                }
+                            // Get monitor info for boundary checking
+                            if let Some(monitor) = character.current_monitor().ok().flatten() {
+                                let screen_size = monitor.size();
+                                let screen_position = monitor.position();
+                                let scale_factor = monitor.scale_factor();
                                 
-                                // Get character window position and size
-                                if let (Ok(char_pos), Ok(char_size), Ok(chat_size)) = 
-                                    (character.outer_position(), character.outer_size(), chat.outer_size()) {
-                                    // Calculate new chat position (to the left of character, bottom-aligned with offset)
-                                    let char_bottom = char_pos.y + char_size.height as i32;
-                                    let new_x = char_pos.x - chat_size.width as i32 - 20; // 20px gap
-                                    let new_y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
+                                if let (Ok(char_pos), Ok(char_size)) = (character.outer_position(), character.outer_size()) {
+                                    let mut new_x = char_pos.x;
+                                    let mut new_y = char_pos.y;
+                                    let mut needs_reposition = false;
                                     
-                                    let _ = chat.set_position(tauri::Position::Physical(
-                                        tauri::PhysicalPosition { x: new_x.max(0), y: new_y.max(0) }
-                                    ));
+                                    // Calculate screen boundaries (with some margin for visibility)
+                                    let min_visible = (50.0 * scale_factor) as i32; // At least 50 logical pixels visible
+                                    let menu_bar_height = (25.0 * scale_factor) as i32; // macOS menu bar
+                                    let dock_height = (70.0 * scale_factor) as i32; // Approximate dock height
+                                    
+                                    let screen_left = screen_position.x;
+                                    let screen_top = screen_position.y + menu_bar_height;
+                                    let screen_right = screen_position.x + screen_size.width as i32;
+                                    let screen_bottom = screen_position.y + screen_size.height as i32 - dock_height;
+                                    
+                                    // Check left boundary - ensure at least min_visible pixels are on screen
+                                    if char_pos.x + (char_size.width as i32) < screen_left + min_visible {
+                                        new_x = screen_left;
+                                        needs_reposition = true;
+                                    }
+                                    // Check right boundary
+                                    if char_pos.x > screen_right - min_visible {
+                                        new_x = screen_right - (char_size.width as i32);
+                                        needs_reposition = true;
+                                    }
+                                    // Check top boundary
+                                    if char_pos.y < screen_top {
+                                        new_y = screen_top;
+                                        needs_reposition = true;
+                                    }
+                                    // Check bottom boundary
+                                    if char_pos.y + (char_size.height as i32) > screen_bottom + min_visible {
+                                        new_y = screen_bottom - (char_size.height as i32);
+                                        needs_reposition = true;
+                                    }
+                                    
+                                    // Reposition if out of bounds
+                                    if needs_reposition {
+                                        let _ = character.set_position(tauri::Position::Physical(
+                                            tauri::PhysicalPosition { x: new_x, y: new_y }
+                                        ));
+                                    }
+                                    
+                                    // Sync chat window position (skip if sidebar is expanded)
+                                    if !SIDEBAR_EXPANDED.load(Ordering::SeqCst) {
+                                        if let Some(chat) = app_handle.get_webview_window("chat") {
+                                            // Skip if chat window is not visible
+                                            if !chat.is_visible().unwrap_or(false) {
+                                                return;
+                                            }
+                                            
+                                            if let Ok(chat_size) = chat.outer_size() {
+                                                // Use the corrected position
+                                                let final_x = if needs_reposition { new_x } else { char_pos.x };
+                                                let final_y = if needs_reposition { new_y } else { char_pos.y };
+                                                
+                                                // Calculate new chat position (to the left of character, bottom-aligned with offset)
+                                                let char_bottom = final_y + char_size.height as i32;
+                                                let chat_x = final_x - chat_size.width as i32 - 20; // 20px gap
+                                                let chat_y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
+                                                
+                                                let _ = chat.set_position(tauri::Position::Physical(
+                                                    tauri::PhysicalPosition { x: chat_x.max(0), y: chat_y.max(0) }
+                                                ));
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -1233,6 +1294,14 @@ pub fn run() {
             get_setting,
             set_setting,
             get_all_settings,
+            // API Provider commands
+            get_api_providers,
+            get_api_provider,
+            create_api_provider,
+            update_api_provider,
+            delete_api_provider,
+            update_api_provider_models,
+            set_api_provider_validated,
             // MCP Server commands (database)
             get_mcp_servers,
             get_mcp_server,
@@ -1274,16 +1343,11 @@ pub fn run() {
             // Page navigation commands
             open_page_in_chat,
             open_settings_window,
-            open_select_character_window,
-            open_add_character_window,
-            open_mcp_window,
-            open_add_model_window,
+            open_manage_window,
+            open_manage_window_with_tab,
             // Hide window commands
-            hide_add_character_window,
-            hide_add_model_window,
-            hide_select_character_window,
+            hide_manage_window,
             hide_settings_window,
-            hide_mcp_window,
             // Chat window controls
             maximize_chat_window,
             toggle_sidebar,

@@ -196,8 +196,8 @@ const EditMcpServerPage = () => {
       // 显示成功提示
       alert(`MCP Server "${config.name}" updated successfully!`);
       
-      // 返回上一页
-      navigate('/mcp');
+      // 返回管理页面
+      navigate('/manage?tab=mcp');
     } catch (err) {
       setError(err.message);
     }
@@ -230,7 +230,7 @@ const EditMcpServerPage = () => {
       <PageLayout className="bg-white/95">
         <div className="h-screen flex flex-col overflow-hidden">
           <div className="shrink-0">
-            <TitleBar title="Edit MCP Server" backTo="/mcp" />
+            <TitleBar title="Edit MCP Server" backTo="/manage?tab=mcp" />
           </div>
           <div className="flex-1 flex items-center justify-center">
             <FiRefreshCw className="w-8 h-8 text-gray-400 animate-spin" />
@@ -246,7 +246,7 @@ const EditMcpServerPage = () => {
         <div className="shrink-0">
           <TitleBar 
             title="Edit MCP Server" 
-            backTo="/mcp"
+            backTo="/manage?tab=mcp"
           />
         </div>
       
@@ -420,7 +420,7 @@ const EditMcpServerPage = () => {
             <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
               <Button
                 variant="secondary"
-                onClick={() => navigate('/mcp')}
+                onClick={() => navigate('/manage?tab=mcp')}
                 type="button"
               >
                 Cancel

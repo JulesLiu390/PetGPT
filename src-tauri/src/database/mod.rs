@@ -3,6 +3,7 @@ pub mod conversations;
 pub mod messages;
 pub mod settings;
 pub mod mcp_servers;
+pub mod api_providers;
 
 use rusqlite::{Connection, Result};
 use std::sync::Mutex;
@@ -117,6 +118,22 @@ impl Database {
 
         // Migration: add is_deleted to pets
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0", []);
+
+        // API Providers table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS api_providers (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                base_url TEXT NOT NULL,
+                api_key TEXT NOT NULL,
+                api_format TEXT NOT NULL DEFAULT 'openai_compatible',
+                is_validated INTEGER DEFAULT 0,
+                cached_models TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
 
         Ok(())
     }

@@ -1,9 +1,8 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'framer-motion';
-import { FaRocketchat } from "react-icons/fa";
+import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
 import { FaPlug } from "react-icons/fa6";
-import { CgAdd, CgHello } from "react-icons/cg";
-import { GoMultiSelect } from "react-icons/go";
+import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as bridge from '../utils/bridge';
 
@@ -219,17 +218,17 @@ export const Character = () => {
   const handleClick = () => {
     bridge.changeChatWindow();
   };
-  const handleClickAddModel = () => {
-    bridge.changeAddModelWindow();
+  const handleClickApi = () => {
+    bridge.changeManageWindow('api');
   };
   const handleClickSelectCharacter = () => {
-    bridge.changeSelectCharacterWindow();
+    bridge.changeManageWindow('assistants');
   };
   const handleClickSettings = () => {
     bridge.changeSettingsWindow();
   };
   const handleClickMcp = () => {
-    bridge.changeMcpWindow();
+    bridge.changeManageWindow('mcp');
   };
 
   useEffect(() => {
@@ -271,13 +270,13 @@ export const Character = () => {
               onClick={handleClick}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
-            <CgAdd
-              title="Add new Model"
-              onClick={handleClickAddModel}
+            <FaKey
+              title="API Management"
+              onClick={handleClickApi}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
-            <GoMultiSelect
-              title="Chatbot Library"
+            <FaRobot
+              title="Assistants"
               onClick={handleClickSelectCharacter}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />

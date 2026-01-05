@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { FaCheck, FaSpinner } from "react-icons/fa6";
+import { FaCheck, FaSpinner, FaPlus } from "react-icons/fa6";
 import { MdCancel } from "react-icons/md";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Checkbox, Badge } from "../components/UI/ui";
 import TitleBar from "../components/UI/TitleBar";
@@ -13,7 +13,6 @@ const getDefaultImageForApi = (apiFormat) => {
   const mapping = {
     'openai_compatible': 'Opai',
     'gemini_official': 'Gemina',
-    // 兼容旧值
     'openai': 'Opai',
     'gemini': 'Gemina',
     'grok': 'Grocka',
@@ -24,67 +23,102 @@ const getDefaultImageForApi = (apiFormat) => {
 
 const AddAssistantPage = () => {
   const navigate = useNavigate();
-  const [modelConfigs, setModelConfigs] = useState([]);
+  const [apiProviders, setApiProviders] = useState([]);
+  const [selectedProviderId, setSelectedProviderId] = useState("");
+  const [availableModels, setAvailableModels] = useState([]);
   const [loading, setLoading] = useState(true);
   
   const [assistantConfig, setAssistantConfig] = useState({
     name: "",
     systemInstruction: "You are a helpful assistant.",
     appearance: "",
-    selectedModelId: "",
     imageName: "default",
-    hasMood: true, // 是否启用情绪表情
+    hasMood: true,
+    // 直接存储模型配置
+    modelName: "",
+    modelUrl: "",
+    modelApiKey: "",
+    apiFormat: "",
   });
 
-  // 加载可用的 Model Configurations
+  // 加载可用的 API Providers
   useEffect(() => {
-    const loadModelConfigs = async () => {
+    const loadApiProviders = async () => {
       try {
-        // 使用新的 API 获取 Model Configs
-        const configs = await bridge.getModelConfigs();
-        if (Array.isArray(configs)) {
-          setModelConfigs(configs);
+        const providers = await bridge.apiProviders.getAll();
+        if (Array.isArray(providers)) {
+          setApiProviders(providers);
           
-          // 如果有配置，默认选第一个
-          if (configs.length > 0) {
-            setAssistantConfig(prev => ({
-              ...prev,
-              selectedModelId: configs[0]._id,
-              imageName: getDefaultImageForApi(configs[0].apiFormat)
-            }));
+          // 如果有 Provider，默认选第一个
+          if (providers.length > 0) {
+            handleProviderChange(providers[0].id, providers);
           }
         }
       } catch (error) {
-        console.error("Failed to load model configs:", error);
+        console.error("Failed to load API providers:", error);
       } finally {
         setLoading(false);
       }
     };
-    loadModelConfigs();
+    loadApiProviders();
   }, []);
+
+  // 当选择的 Provider 改变时
+  const handleProviderChange = (providerId, providerList = apiProviders) => {
+    setSelectedProviderId(providerId);
+    
+    if (!providerId) {
+      setAvailableModels([]);
+      setAssistantConfig(prev => ({
+        ...prev,
+        modelName: "",
+        modelUrl: "",
+        modelApiKey: "",
+        apiFormat: "",
+      }));
+      return;
+    }
+    
+    const provider = providerList.find(p => p.id === providerId);
+    if (provider) {
+      // 解析 available_models JSON
+      const models = provider.cachedModels 
+        ? (typeof provider.cachedModels === 'string' 
+            ? JSON.parse(provider.cachedModels) 
+            : provider.cachedModels)
+        : [];
+      setAvailableModels(models);
+      
+      // 更新 assistant 配置
+      const firstModel = models.length > 0 ? models[0] : "";
+      setAssistantConfig(prev => ({
+        ...prev,
+        modelUrl: provider.baseUrl || "",
+        modelApiKey: provider.apiKey || "",
+        apiFormat: provider.apiFormat || "",
+        modelName: firstModel,
+        imageName: getDefaultImageForApi(provider.apiFormat),
+      }));
+    }
+  };
+
+  // 当选择模型时
+  const handleModelChange = (modelName) => {
+    setAssistantConfig(prev => ({
+      ...prev,
+      modelName: modelName,
+    }));
+  };
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
     
-    // 处理 checkbox
     if (type === 'checkbox') {
       setAssistantConfig(prev => ({ ...prev, [name]: checked }));
       return;
     }
     
     setAssistantConfig(prev => ({ ...prev, [name]: value }));
-    
-    // 如果切换了 Model，更新默认图片
-    if (name === 'selectedModelId') {
-      const selectedModel = modelConfigs.find(m => m._id === value);
-      if (selectedModel) {
-        setAssistantConfig(prev => ({
-          ...prev,
-          [name]: value,
-          imageName: getDefaultImageForApi(selectedModel.apiFormat)
-        }));
-      }
-    }
   };
 
   const handleSubmit = async (e) => {
@@ -95,27 +129,24 @@ const AddAssistantPage = () => {
       return;
     }
     
-    if (!assistantConfig.selectedModelId) {
-      alert("Please select a model configuration. Create one first if you haven't.");
+    if (!assistantConfig.modelName || !assistantConfig.modelUrl || !assistantConfig.apiFormat) {
+      alert("Please select an API Provider and Model.");
       return;
     }
 
     try {
-      // 获取选中的 Model 配置
-      const selectedModel = modelConfigs.find(m => m._id === assistantConfig.selectedModelId);
-      if (!selectedModel) {
-        alert("Selected model not found.");
-        return;
-      }
-
-      // 创建 Assistant（使用新的 API，关联 Model Config）
+      // 创建 Assistant（直接存储模型配置到 pets 表）
       const submitData = {
         name: assistantConfig.name,
         systemInstruction: assistantConfig.systemInstruction,
         appearance: assistantConfig.appearance,
         imageName: assistantConfig.imageName,
-        modelConfigId: assistantConfig.selectedModelId, // 关联到 Model Config
         hasMood: assistantConfig.hasMood,
+        // 直接存储模型配置
+        modelName: assistantConfig.modelName,
+        modelUrl: assistantConfig.modelUrl,
+        modelApiKey: assistantConfig.modelApiKey,
+        apiFormat: assistantConfig.apiFormat,
       };
 
       const newAssistant = await bridge.createAssistant(submitData);
@@ -127,7 +158,7 @@ const AddAssistantPage = () => {
       bridge.sendPetsUpdate(newAssistant);
       
       alert("Assistant created successfully!");
-      navigate('/selectCharacter');
+      navigate('/manage?tab=assistants');
       
     } catch (error) {
       console.error("Error creating assistant:", error);
@@ -156,7 +187,7 @@ const AddAssistantPage = () => {
               <button
                 type="button"
                 className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
-                onClick={() => navigate('/selectCharacter')}
+                onClick={() => navigate('/manage?tab=assistants')}
                 title="Close"
               >
                 <MdCancel className="w-5 h-5" />
@@ -175,16 +206,16 @@ const AddAssistantPage = () => {
                 Configure a new AI assistant with a system instruction and link it to a model.
               </Alert>
 
-              {modelConfigs.length === 0 && (
+              {apiProviders.length === 0 && (
                 <Alert tone="yellow">
-                  <strong>No Model Configurations Found</strong><br/>
-                  Please add a model configuration first before creating an assistant.
+                  <strong>No API Providers Found</strong><br/>
+                  Please add an API provider first before creating an assistant.
                   <button
                     type="button"
-                    onClick={() => navigate('/addCharacter')}
+                    onClick={() => navigate('/manage?tab=api')}
                     className="mt-2 block text-blue-600 hover:underline font-medium"
                   >
-                    → Add Model Configuration
+                    → Add API Provider
                   </button>
                 </Alert>
               )}
@@ -199,31 +230,75 @@ const AddAssistantPage = () => {
                 />
               </FormGroup>
 
-              <Card title="Model Configuration" description="Select the LLM backend for this assistant" className="bg-slate-50/50">
-                <Select
-                  name="selectedModelId"
-                  value={assistantConfig.selectedModelId}
-                  onChange={handleChange}
-                  disabled={modelConfigs.length === 0}
-                >
-                  {modelConfigs.length === 0 ? (
-                    <option value="">No models available</option>
-                  ) : (
-                    modelConfigs.map(config => (
-                      <option key={config._id} value={config._id}>
-                        {config.name} ({config.modelName})
-                      </option>
-                    ))
+              {/* API Provider & Model Selection */}
+              <Card title="API Configuration" description="Select the API provider and model for this assistant" className="bg-slate-50/50">
+                <div className="space-y-4">
+                  {/* API Provider 选择 */}
+                  <FormGroup label="API Provider" required>
+                    <div className="flex gap-2">
+                      <Select
+                        value={selectedProviderId}
+                        onChange={(e) => handleProviderChange(e.target.value)}
+                        className="flex-1"
+                        disabled={apiProviders.length === 0}
+                      >
+                        {apiProviders.length === 0 ? (
+                          <option value="">No providers available</option>
+                        ) : (
+                          <>
+                            <option value="">-- Select API Provider --</option>
+                            {apiProviders.map(provider => (
+                              <option key={provider.id} value={provider.id}>
+                                {provider.name} ({provider.apiFormat})
+                              </option>
+                            ))}
+                          </>
+                        )}
+                      </Select>
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        onClick={() => navigate('/manage?tab=api')}
+                        className="shrink-0"
+                        title="Manage API Providers"
+                      >
+                        <FaPlus className="w-4 h-4" />
+                      </Button>
+                    </div>
+                  </FormGroup>
+
+                  {/* Model 选择 */}
+                  <FormGroup label="Model" required>
+                    <Select
+                      value={assistantConfig.modelName}
+                      onChange={(e) => handleModelChange(e.target.value)}
+                      disabled={!selectedProviderId || availableModels.length === 0}
+                    >
+                      {availableModels.length === 0 ? (
+                        <option value="">No models available</option>
+                      ) : (
+                        availableModels.map(model => (
+                          <option key={model} value={model}>
+                            {model}
+                          </option>
+                        ))
+                      )}
+                    </Select>
+                    {availableModels.length === 0 && selectedProviderId && (
+                      <div className="mt-2 text-xs text-amber-600">
+                        No models configured. Add models in API Provider settings.
+                      </div>
+                    )}
+                  </FormGroup>
+
+                  {/* 当前配置显示 */}
+                  {assistantConfig.modelName && (
+                    <div className="flex items-center gap-2 text-xs text-slate-500 pt-1">
+                      <Badge tone="blue">{assistantConfig.apiFormat}</Badge>
+                      <span>{assistantConfig.modelName}</span>
+                    </div>
                   )}
-                </Select>
-                {modelConfigs.length > 0 && (
-                  <div className="mt-3 flex items-center gap-2 text-xs text-slate-500">
-                    <Badge tone="blue">
-                      {modelConfigs.find(m => m._id === assistantConfig.selectedModelId)?.apiFormat || 'Unknown'}
-                    </Badge>
-                    <span>will power this assistant</span>
-                  </div>
-                )}
+                </div>
               </Card>
 
               <FormGroup label="System Instruction">
@@ -271,7 +346,7 @@ const AddAssistantPage = () => {
                 <Button
                   type="submit"
                   variant="primary"
-                  disabled={modelConfigs.length === 0}
+                  disabled={apiProviders.length === 0 || !assistantConfig.modelName}
                   className="w-full py-3"
                 >
                   Create Assistant

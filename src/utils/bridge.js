@@ -1263,6 +1263,151 @@ export const createMessage = async (data) => {
   return null;
 };
 
+// ==================== API Provider 接口 ====================
+
+export const getApiProviders = async () => {
+  if (isElectron()) {
+    // Electron 暂不支持，返回空数组
+    return [];
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      const result = await invoke('get_api_providers');
+      return result || [];
+    } catch (err) {
+      console.error('[bridge.getApiProviders] Error:', err);
+      return [];
+    }
+  }
+  
+  return [];
+};
+
+export const getApiProvider = async (id) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('get_api_provider', { id });
+    } catch (err) {
+      console.error('[bridge.getApiProvider] Error:', err);
+      return null;
+    }
+  }
+  
+  return null;
+};
+
+export const createApiProvider = async (data) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      const result = await invoke('create_api_provider', { data });
+      return result;
+    } catch (err) {
+      console.error('[bridge.createApiProvider] Error:', err);
+      throw err;
+    }
+  }
+  
+  return null;
+};
+
+export const updateApiProvider = async (id, data) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      const result = await invoke('update_api_provider', { id, data });
+      return result;
+    } catch (err) {
+      console.error('[bridge.updateApiProvider] Error:', err);
+      throw err;
+    }
+  }
+  
+  return null;
+};
+
+export const deleteApiProvider = async (id) => {
+  if (isElectron()) {
+    return false;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('delete_api_provider', { id });
+    } catch (err) {
+      console.error('[bridge.deleteApiProvider] Error:', err);
+      return false;
+    }
+  }
+  
+  return false;
+};
+
+export const updateApiProviderModels = async (id, models) => {
+  if (isElectron()) {
+    return false;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      // models 应该是 JSON 字符串
+      const modelsStr = typeof models === 'string' ? models : JSON.stringify(models);
+      return await invoke('update_api_provider_models', { id, models: modelsStr });
+    } catch (err) {
+      console.error('[bridge.updateApiProviderModels] Error:', err);
+      return false;
+    }
+  }
+  
+  return false;
+};
+
+export const setApiProviderValidated = async (id, validated) => {
+  if (isElectron()) {
+    return false;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('set_api_provider_validated', { id, validated });
+    } catch (err) {
+      console.error('[bridge.setApiProviderValidated] Error:', err);
+      return false;
+    }
+  }
+  
+  return false;
+};
+
+// API Provider 便捷对象
+export const apiProviders = {
+  getAll: getApiProviders,
+  get: getApiProvider,
+  create: createApiProvider,
+  update: updateApiProvider,
+  delete: deleteApiProvider,
+  updateModels: updateApiProviderModels,
+  setValidated: setApiProviderValidated,
+};
+
 // ==================== MCP Server 接口 ====================
 
 export const getMcpServers = async () => {
@@ -1660,104 +1805,69 @@ export const hideChatWindow = async () => {
   }
 };
 
-export const changeSelectCharacterWindow = async () => {
+// ==================== Manage Window (统一的管理窗口) ====================
+
+export const changeManageWindow = async (tab = 'assistants') => {
   if (isElectron()) {
-    window.electron?.changeSelectCharacterWindow();
+    // Electron 兼容：根据 tab 调用对应的旧函数
+    if (tab === 'assistants') {
+      window.electron?.changeSelectCharacterWindow?.();
+    } else if (tab === 'api') {
+      window.electron?.changeApiWindow?.();
+    } else if (tab === 'mcp') {
+      window.electron?.changeMcpWindow?.();
+    } else if (tab === 'ui' || tab === 'models' || tab === 'hotkeys') {
+      window.electron?.changeSettingsWindow?.();
+    }
   }
   if (isTauri()) {
     const { invoke } = await getTauriApi();
-    await invoke('open_select_character_window');
+    await invoke('open_manage_window_with_tab', { tab });
   }
 };
 
+export const hideManageWindow = async () => {
+  if (isElectron()) {
+    // Electron 没有统一窗口，暂不处理
+  }
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    await invoke('hide_manage_window');
+  }
+};
+
+// 兼容旧的设置窗口函数
 export const changeSettingsWindow = async () => {
-  if (isElectron()) {
-    window.electron?.changeSettingsWindow();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('open_settings_window');
-  }
-};
-
-export const changeMcpWindow = async () => {
-  if (isElectron()) {
-    window.electron?.changeMcpWindow();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('open_mcp_window');
-  }
-};
-
-export const changeAddCharacterWindow = async () => {
-  if (isElectron()) {
-    window.electron?.changeAddCharacterWindow();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('open_add_character_window');
-  }
-};
-
-export const changeAddModelWindow = async () => {
-  if (isElectron()) {
-    window.electron?.changeAddModelWindow?.();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('open_add_model_window');
-  }
-};
-
-export const hideAddCharacterWindow = async () => {
-  if (isElectron()) {
-    window.electron?.hideAddCharacterWindow();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('hide_add_character_window');
-  }
-};
-
-export const hideAddModelWindow = async () => {
-  if (isElectron()) {
-    window.electron?.hideAddModelWindow?.();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('hide_add_model_window');
-  }
-};
-
-export const hideSelectCharacterWindow = async () => {
-  if (isElectron()) {
-    window.electron?.hideSelectCharacterWindow();
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('hide_select_character_window');
-  }
+  await changeManageWindow('ui');
 };
 
 export const hideSettingsWindow = async () => {
-  if (isElectron()) {
-    window.electron?.changeSettingsWindow?.(); // Electron 用 toggle
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('hide_settings_window');
-  }
+  await hideManageWindow();
+};
+
+// 兼容旧的函数名
+export const changeSelectCharacterWindow = async () => {
+  await changeManageWindow('assistants');
+};
+
+export const changeMcpWindow = async () => {
+  await changeManageWindow('mcp');
+};
+
+export const changeApiWindow = async () => {
+  await changeManageWindow('api');
+};
+
+export const hideSelectCharacterWindow = async () => {
+  await hideManageWindow();
+};
+
+export const hideApiWindow = async () => {
+  await hideManageWindow();
 };
 
 export const hideMcpWindow = async () => {
-  if (isElectron()) {
-    window.electron?.changeMcpWindow?.(); // Electron 用 toggle
-  }
-  if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    await invoke('hide_mcp_window');
-  }
+  await hideManageWindow();
 };
 
 export const maximizeChatWindow = async () => {
@@ -2066,6 +2176,16 @@ const bridge = {
   getMessages,
   createMessage,
   
+  // API Providers
+  apiProviders,
+  getApiProviders,
+  getApiProvider,
+  createApiProvider,
+  updateApiProvider,
+  deleteApiProvider,
+  updateApiProviderModels,
+  setApiProviderValidated,
+  
   // MCP
   mcp,
   
@@ -2085,9 +2205,8 @@ const bridge = {
   changeSelectCharacterWindow,
   changeSettingsWindow,
   changeMcpWindow,
-  changeAddCharacterWindow,
-  hideAddCharacterWindow,
-  hideAddModelWindow,
+  changeApiWindow,
+  hideApiWindow,
   hideSelectCharacterWindow,
   hideSettingsWindow,
   hideMcpWindow,

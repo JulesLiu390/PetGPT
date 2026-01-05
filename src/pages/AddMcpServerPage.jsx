@@ -142,8 +142,8 @@ const AddMcpServerPage = () => {
       // 显示成功提示
       alert(`MCP Server "${config.name}" added successfully!`);
       
-      // 返回上一页
-      navigate('/mcp');
+      // 返回管理页面
+      navigate('/manage?tab=mcp');
     } catch (err) {
       console.error('[AddMcpServer] Create error:', err);
       setError(err.message || err.toString() || 'Unknown error');
@@ -156,7 +156,7 @@ const AddMcpServerPage = () => {
         <div className="shrink-0">
           <TitleBar 
             title="New MCP Server" 
-            backTo="/mcp"
+            backTo="/manage?tab=mcp"
           />
         </div>
       
@@ -330,7 +330,7 @@ const AddMcpServerPage = () => {
             <div className="flex justify-end gap-3 pt-4 border-t border-gray-100">
               <Button
                 variant="secondary"
-                onClick={() => navigate('/mcp')}
+                onClick={() => navigate('/manage?tab=mcp')}
                 type="button"
               >
                 Cancel

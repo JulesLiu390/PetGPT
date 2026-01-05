@@ -2,8 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import SelectCharacterTitleBar from '../components/Layout/SelectCharacterTitleBar';
 import { FaPlus, FaPen } from 'react-icons/fa6';
-import { FaRobot, FaCogs } from 'react-icons/fa';
-import { PageLayout, Surface, Card, Tabs, Button, EmptyState, Badge } from '../components/UI/ui';
+import { FaRobot } from 'react-icons/fa';
+import { PageLayout, Button, Badge } from '../components/UI/ui';
 import * as bridge from '../utils/bridge';
 
 const CustomImage = ({ imageName }) => {
@@ -70,24 +70,12 @@ const TruncatedText = ({ label, text }) => {
 };
 
 const SelectCharacterPage = () => {
-  const [models, setModels] = useState([]);
   const [assistants, setAssistants] = useState([]);
-  const [activeTab, setActiveTab] = useState('assistants'); // 'assistants' or 'models'
   const navigate = useNavigate();
 
   const fetchData = async () => {
     // 规范化 id 字段（Tauri 返回 id，前端期望 _id）
     const normalizeId = (item) => ({ ...item, _id: item._id || item.id });
-    
-    try {
-      const modelData = await bridge.getModelConfigs();
-      console.log('[SelectCharacterPage] modelData:', modelData);
-      if (Array.isArray(modelData)) {
-        setModels(modelData.map(normalizeId));
-      }
-    } catch (error) {
-      console.error("读取 Models 失败:", error);
-    }
     
     try {
       const assistantData = await bridge.getAssistants();
@@ -96,7 +84,7 @@ const SelectCharacterPage = () => {
         setAssistants(assistantData.map(normalizeId));
       }
     } catch (error) {
-      console.error("读取 Assistants 失败:", error);
+      console.error("Failed to load assistants:", error);
     }
   };
 
@@ -128,19 +116,6 @@ const SelectCharacterPage = () => {
     console.log('[SelectCharacterPage] showChatWindow done');
   };
 
-  const handleDeleteModel = async (modelId) => {
-    const confirmed = await bridge.confirm("Are you sure you want to delete this model configuration?", { title: "Delete Model" });
-    if (!confirmed) return;
-    
-    try {
-      await bridge.deleteModelConfig(modelId);
-      fetchData();
-    } catch (error) {
-      const msg = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
-      alert("删除 Model 失败: " + msg);
-    }
-  };
-
   const handleDeleteAssistant = async (assistantId) => {
     const confirmed = await bridge.confirm("Are you sure you want to delete this assistant?", { title: "Delete Assistant" });
     if (!confirmed) return;
@@ -151,206 +126,91 @@ const SelectCharacterPage = () => {
     } catch (error) {
       console.error("Delete failed:", error);
       const msg = error.message || (typeof error === 'string' ? error : JSON.stringify(error));
-      alert("删除 Assistant 失败: " + msg);
+      alert("Failed to delete assistant: " + msg);
     }
   };
 
   return (
     <PageLayout className="bg-white/95">
-      <div className="flex flex-col h-screen w-full overflow-hidden">
+      <div className="flex flex-col h-screen w-full">
+        {/* Fixed header area */}
         <div className="shrink-0">
           <SelectCharacterTitleBar />
-        </div>
-        
-        {/* 固定的 Tabs + Button 区域 */}
-        <div className="shrink-0 px-4 pt-4 pb-2 flex items-center justify-between gap-3">
-          <Tabs
-            tabs={[
-              { id: 'assistants', label: `Assistants (${assistants.length})` },
-              { id: 'models', label: `Models (${models.length})` },
-            ]}
-            active={activeTab}
-            onChange={setActiveTab}
-          />
-
-          {activeTab === 'assistants' ? (
+          {/* Title + New button */}
+          <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+            <div className="text-base font-semibold text-slate-800">
+              Assistants ({assistants.length})
+            </div>
             <Button variant="primary" onClick={() => navigate('/addAssistant')}>
               <FaPlus className="w-4 h-4" />
-              New Assistant
+              New
             </Button>
-          ) : (
-            <Button variant="primary" onClick={() => navigate('/addCharacter')}>
-              <FaPlus className="w-4 h-4" />
-              New Model
-            </Button>
-          )}
+          </div>
         </div>
 
-        {/* 内容区域 - 滚动在 Surface 内部 */}
-        <div className="flex-1 min-h-0 px-4 pb-4">
-          <Surface className="h-full flex flex-col overflow-hidden">
-            <div className="flex-1 overflow-y-auto p-4">
-              {activeTab === 'assistants' && (
-                <Card
-                  title="Select an Assistant"
-                  description="Choose an assistant to start chatting."
-                  className="bg-transparent border-transparent shadow-none"
-                >
-                  <div className="grid grid-cols-1 gap-3">
-                    {assistants.length === 0 ? (
-                      <EmptyState
-                        title="No assistants yet"
-                        description="Create one to get started."
-                        icon={<FaRobot className="w-9 h-9" />}
-                        action={
-                          <Button variant="primary" onClick={() => navigate('/addAssistant')}>
-                            <FaPlus className="w-4 h-4" />
-                            New Assistant
-                          </Button>
-                        }
-                      />
-                    ) : (
-                      assistants.map((assistant) => {
-                        const linkedModel = models.find((m) => m._id === assistant.modelConfigId);
-                        return (
-                          <div
-                            key={assistant._id}
-                            className="bg-white border border-slate-200 shadow-sm rounded-xl p-4 flex items-start gap-4"
-                          >
-                            <CustomImage imageName={assistant.imageName} />
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-start justify-between gap-3">
-                                <div className="min-w-0">
-                                  <div className="text-sm font-semibold text-slate-900 truncate">
-                                    {assistant.name}
-                                  </div>
-                                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                                    <Badge tone="blue">
-                                      <FaRobot className="w-3 h-3" />
-                                      Assistant
-                                    </Badge>
-                                    {linkedModel ? (
-                                      <Badge tone="purple">
-                                        <FaCogs className="w-3 h-3" />
-                                        {linkedModel.name}
-                                      </Badge>
-                                    ) : (
-                                      <Badge tone="red">Model not set</Badge>
-                                    )}
-                                  </div>
-                                </div>
-                                <div className="shrink-0 flex items-center gap-2">
-                                  <Button variant="primary" onClick={() => handleSelect(assistant)}>
-                                    Select
-                                  </Button>
-                                  <Button
-                                    variant="secondary"
-                                    onClick={() => navigate(`/editAssistant?id=${assistant._id}`)}
-                                    title="Edit Assistant"
-                                  >
-                                    <FaPen className="w-4 h-4" />
-                                  </Button>
-                                  <Button
-                                    variant="danger"
-                                    onClick={() => handleDeleteAssistant(assistant._id)}
-                                  >
-                                    Delete
-                                  </Button>
-                                </div>
-                              </div>
-
-                              <div className="mt-3 space-y-2">
-                                <TruncatedText
-                                  label="System Instruction"
-                                  text={assistant.systemInstruction}
-                                />
-                                <TruncatedText label="Appearance" text={assistant.appearance} />
-                                <div className="text-sm text-gray-600">
-                                  <span className="font-medium">Model:</span>{' '}
-                                  {linkedModel ? `${linkedModel.name} (${linkedModel.modelName})` : 'Not configured'}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-                </Card>
-              )}
-
-              {activeTab === 'models' && (
-                <Card
-                  title="Model Configurations"
-                  description="Manage your model endpoints and credentials."
-                  className="bg-transparent border-transparent shadow-none"
-                >
-                  <div className="grid grid-cols-1 gap-3">
-                    {models.length === 0 ? (
-                      <EmptyState
-                        title="No model configurations yet"
-                        description="Add a model configuration to start creating assistants."
-                        icon={<FaCogs className="w-9 h-9" />}
-                        action={
-                          <Button variant="primary" onClick={() => navigate('/addCharacter')}>
-                            <FaPlus className="w-4 h-4" />
-                            New Model
-                          </Button>
-                        }
-                      />
-                    ) : (
-                      models.map((model) => (
-                        <div
-                          key={model._id}
-                          className="bg-white border border-slate-200 shadow-sm rounded-xl p-4 flex items-start gap-4"
-                        >
-                          <div className="w-12 h-12 rounded-xl bg-purple-50 border border-purple-100 flex items-center justify-center shrink-0">
-                            <FaCogs className="w-5 h-5 text-purple-700" />
-                          </div>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="text-sm font-semibold text-slate-900 truncate">
-                                  {model.name}
-                                </div>
-                                <div className="mt-2 space-y-1 text-xs text-slate-600">
-                                  <div>
-                                    <span className="font-semibold text-slate-700">Model:</span>{' '}
-                                    {model.modelName || 'N/A'}
-                                  </div>
-                                  <div>
-                                    <span className="font-semibold text-slate-700">API Format:</span>{' '}
-                                    {model.apiFormat || model.modelProvider || 'N/A'}
-                                  </div>
-                                  <div className="truncate">
-                                    <span className="font-semibold text-slate-700">URL:</span>{' '}
-                                    {model.modelUrl === 'default' ? 'Default' : (model.modelUrl || 'N/A')}
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="shrink-0 flex items-center gap-2">
-                                <Button
-                                  variant="secondary"
-                                  onClick={() => navigate(`/editModel?id=${model._id}`)}
-                                  title="Edit Model"
-                                >
-                                  <FaPen className="w-4 h-4" />
-                                </Button>
-                                <Button variant="danger" onClick={() => handleDeleteModel(model._id)}>
-                                  Delete
-                                </Button>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </Card>
-              )}
+        {/* Scrollable content */}
+        <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+          {assistants.length === 0 ? (
+            <div className="flex flex-col items-center justify-center h-full text-center py-12">
+              <FaRobot className="w-12 h-12 text-slate-300 mb-4" />
+              <div className="text-slate-600 font-medium">No assistants yet</div>
+              <div className="text-slate-400 text-sm mb-4">Create one to get started</div>
+              <Button variant="primary" onClick={() => navigate('/addAssistant')}>
+                <FaPlus className="w-4 h-4" />
+                New Assistant
+              </Button>
             </div>
-          </Surface>
+          ) : (
+            assistants.map((assistant) => (
+              <div
+                key={assistant._id}
+                className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex items-start gap-3"
+              >
+                <CustomImage imageName={assistant.imageName} />
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="min-w-0">
+                      <div className="font-semibold text-slate-900 truncate">
+                        {assistant.name}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                        {assistant.modelName ? (
+                          <Badge tone="purple">{assistant.modelName}</Badge>
+                        ) : (
+                          <Badge tone="red">No model</Badge>
+                        )}
+                      </div>
+                    </div>
+                    <div className="shrink-0 flex items-center gap-1.5">
+                      <Button variant="primary" onClick={() => handleSelect(assistant)}>
+                        Select
+                      </Button>
+                      <Button
+                        variant="secondary"
+                        onClick={() => navigate(`/editAssistant?id=${assistant._id}`)}
+                        title="Edit"
+                      >
+                        <FaPen className="w-3.5 h-3.5" />
+                      </Button>
+                      <Button
+                        variant="danger"
+                        onClick={() => handleDeleteAssistant(assistant._id)}
+                        title="Delete"
+                      >
+                        Delete
+                      </Button>
+                    </div>
+                  </div>
+
+                  {(assistant.systemInstruction || assistant.appearance) && (
+                    <div className="mt-2 space-y-1">
+                      <TruncatedText label="Instruction" text={assistant.systemInstruction} />
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))
+          )}
         </div>
       </div>
     </PageLayout>
