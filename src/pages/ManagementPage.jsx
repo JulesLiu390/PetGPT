@@ -1,10 +1,12 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { MdCancel } from "react-icons/md";
 import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
+import { MdClose } from "react-icons/md";
+import { LuMaximize2 } from "react-icons/lu";
 import TitleBar from "../components/UI/TitleBar";
-import { PageLayout, Surface, Card, FormGroup, Input, Select, Button, Alert, Label, Badge } from "../components/UI/ui";
+import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Label, Badge, Checkbox } from "../components/UI/ui";
+import { IconSelectorTrigger } from "../components/UI/IconSelector";
 import { fetchModels, callOpenAILib } from "../utils/openai";
 import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl } from "../utils/llm/presets";
 import * as bridge from "../utils/bridge";
@@ -78,9 +80,286 @@ const TruncatedText = ({ label, text }) => {
 
 // ==================== Assistants Panel ====================
 
+/**
+ * 根据 apiFormat 获取默认图片名
+ */
+const getDefaultImageForApi = (apiFormat) => {
+  const mapping = {
+    'openai_compatible': 'Opai',
+    'gemini_official': 'Gemina',
+    'openai': 'Opai',
+    'gemini': 'Gemina',
+    'grok': 'Grocka',
+    'anthropic': 'Claudia',
+  };
+  return mapping[apiFormat] || 'default';
+};
+
+/**
+ * Assistant 编辑/创建表单
+ */
+const AssistantForm = ({ assistant, onSave, onCancel }) => {
+  const [apiProviders, setApiProviders] = useState([]);
+  const [selectedProviderId, setSelectedProviderId] = useState("");
+  const [availableModels, setAvailableModels] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  
+  const [formData, setFormData] = useState({
+    name: assistant?.name || "",
+    systemInstruction: assistant?.systemInstruction || "You are a helpful assistant.",
+    appearance: assistant?.appearance || "",
+    imageName: assistant?.imageName || "default",
+    hasMood: assistant?.hasMood !== false,
+    modelName: assistant?.modelName || "",
+    modelUrl: assistant?.modelUrl || "",
+    modelApiKey: assistant?.modelApiKey || "",
+    apiFormat: assistant?.apiFormat || "",
+  });
+
+  // 加载可用的 API Providers
+  useEffect(() => {
+    const loadApiProviders = async () => {
+      try {
+        const providers = await bridge.apiProviders.getAll();
+        if (Array.isArray(providers)) {
+          setApiProviders(providers);
+          
+          // 如果是编辑模式，匹配现有的 provider
+          if (assistant && assistant.modelUrl && assistant.modelApiKey) {
+            const matchedProvider = providers.find(p => 
+              p.baseUrl === assistant.modelUrl && 
+              p.apiKey === assistant.modelApiKey
+            );
+            if (matchedProvider) {
+              setSelectedProviderId(matchedProvider.id);
+              const models = matchedProvider.cachedModels 
+                ? (typeof matchedProvider.cachedModels === 'string' 
+                    ? JSON.parse(matchedProvider.cachedModels) 
+                    : matchedProvider.cachedModels)
+                : [];
+              setAvailableModels(models);
+            }
+          } else if (!assistant && providers.length > 0) {
+            // 新建模式，默认选第一个
+            handleProviderChange(providers[0].id, providers);
+          }
+        }
+      } catch (error) {
+        console.error("Failed to load API providers:", error);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadApiProviders();
+  }, [assistant]);
+
+  const handleProviderChange = (providerId, providerList = apiProviders) => {
+    setSelectedProviderId(providerId);
+    
+    if (!providerId) {
+      setAvailableModels([]);
+      setFormData(prev => ({
+        ...prev,
+        modelName: "",
+        modelUrl: "",
+        modelApiKey: "",
+        apiFormat: "",
+      }));
+      return;
+    }
+    
+    const provider = providerList.find(p => p.id === providerId);
+    if (provider) {
+      const models = provider.cachedModels 
+        ? (typeof provider.cachedModels === 'string' 
+            ? JSON.parse(provider.cachedModels) 
+            : provider.cachedModels)
+        : [];
+      setAvailableModels(models);
+      
+      const firstModel = models.length > 0 ? models[0] : "";
+      setFormData(prev => ({
+        ...prev,
+        modelUrl: provider.baseUrl || "",
+        modelApiKey: provider.apiKey || "",
+        apiFormat: provider.apiFormat || "",
+        modelName: assistant ? prev.modelName : firstModel,
+        imageName: assistant ? prev.imageName : getDefaultImageForApi(provider.apiFormat),
+      }));
+    }
+  };
+
+  const handleChange = (e) => {
+    const { name, value, type, checked } = e.target;
+    setFormData(prev => ({ 
+      ...prev, 
+      [name]: type === 'checkbox' ? checked : value 
+    }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    
+    if (!formData.name.trim()) {
+      alert("Please enter an assistant name.");
+      return;
+    }
+    
+    if (!formData.modelName || !formData.modelUrl || !formData.apiFormat) {
+      alert("Please select an API Provider and Model.");
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await onSave(formData);
+    } catch (error) {
+      console.error("Save failed:", error);
+      alert("Failed to save: " + (error.message || error));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-8">
+        <FaSpinner className="animate-spin text-xl text-blue-500" />
+      </div>
+    );
+  }
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      {apiProviders.length === 0 && (
+        <Alert variant="warning">
+          <strong>No API Providers Found</strong><br/>
+          Please add an API provider first before creating an assistant.
+        </Alert>
+      )}
+
+      <FormGroup>
+        <Label required>Assistant Name</Label>
+        <Input
+          name="name"
+          placeholder="e.g. My Helper, Code Assistant..."
+          value={formData.name}
+          onChange={handleChange}
+          required
+        />
+      </FormGroup>
+
+      {/* API Provider & Model Selection */}
+      <div className="p-3 bg-slate-50 rounded-lg space-y-3">
+        <div className="text-sm font-medium text-slate-700">API Configuration</div>
+        
+        <FormGroup>
+          <Label required>API Provider</Label>
+          <Select
+            value={selectedProviderId}
+            onChange={(e) => handleProviderChange(e.target.value)}
+            disabled={apiProviders.length === 0}
+          >
+            {apiProviders.length === 0 ? (
+              <option value="">No providers available</option>
+            ) : (
+              <>
+                <option value="">-- Select API Provider --</option>
+                {apiProviders.map(provider => (
+                  <option key={provider.id} value={provider.id}>
+                    {provider.name} ({provider.apiFormat})
+                  </option>
+                ))}
+              </>
+            )}
+          </Select>
+        </FormGroup>
+
+        <FormGroup>
+          <Label required>Model</Label>
+          <Select
+            value={formData.modelName}
+            onChange={(e) => setFormData(prev => ({ ...prev, modelName: e.target.value }))}
+            disabled={!selectedProviderId || availableModels.length === 0}
+          >
+            {availableModels.length === 0 ? (
+              <option value="">No models available</option>
+            ) : (
+              <>
+                <option value="">-- Select Model --</option>
+                {availableModels.map(model => (
+                  <option key={model} value={model}>{model}</option>
+                ))}
+              </>
+            )}
+          </Select>
+        </FormGroup>
+
+        {formData.modelName && (
+          <div className="flex items-center gap-2 text-xs text-slate-500">
+            <Badge tone="blue">{formData.apiFormat}</Badge>
+            <span>{formData.modelName}</span>
+          </div>
+        )}
+      </div>
+
+      <FormGroup>
+        <Label>System Instruction</Label>
+        <Textarea
+          name="systemInstruction"
+          placeholder="Describe how the assistant should behave..."
+          value={formData.systemInstruction}
+          onChange={handleChange}
+          rows={3}
+        />
+      </FormGroup>
+
+      <FormGroup>
+        <Label>Avatar Style</Label>
+        <Select
+          name="imageName"
+          value={formData.imageName}
+          onChange={handleChange}
+        >
+          <option value="default">Default</option>
+          <option value="Opai">Opai (OpenAI style)</option>
+          <option value="Gemina">Gemina (Gemini style)</option>
+          <option value="Claudia">Claudia (Claude style)</option>
+          <option value="Grocka">Grocka (Grok style)</option>
+        </Select>
+      </FormGroup>
+
+      <Checkbox
+        name="hasMood"
+        label="Enable mood expressions"
+        checked={formData.hasMood}
+        onChange={handleChange}
+      />
+
+      {/* Actions */}
+      <div className="flex items-center gap-2 pt-2">
+        <div className="flex-1" />
+        <Button type="button" variant="secondary" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button 
+          type="submit" 
+          variant="primary"
+          disabled={saving || apiProviders.length === 0 || !formData.modelName}
+        >
+          {saving ? <FaSpinner className="w-4 h-4 animate-spin" /> : null}
+          {assistant ? 'Save Changes' : 'Create'}
+        </Button>
+      </div>
+    </form>
+  );
+};
+
 const AssistantsPanel = ({ onNavigate }) => {
   const [assistants, setAssistants] = useState([]);
-  const navigate = useNavigate();
+  const [isCreating, setIsCreating] = useState(false);
+  const [editingAssistant, setEditingAssistant] = useState(null);
 
   const fetchData = async () => {
     const normalizeId = (item) => ({ ...item, _id: item._id || item.id });
@@ -130,27 +409,72 @@ const AssistantsPanel = ({ onNavigate }) => {
     }
   };
 
+  const handleSave = async (formData) => {
+    if (editingAssistant) {
+      // Update existing
+      const updatedAssistant = await bridge.updateAssistant(editingAssistant._id, formData);
+      bridge.sendPetsUpdate(updatedAssistant);
+      bridge.sendCharacterId(editingAssistant._id);
+    } else {
+      // Create new
+      const newAssistant = await bridge.createAssistant(formData);
+      if (!newAssistant || !newAssistant._id) {
+        throw new Error("Creation failed or no ID returned");
+      }
+      bridge.sendCharacterId(newAssistant._id);
+      bridge.sendPetsUpdate(newAssistant);
+    }
+    setIsCreating(false);
+    setEditingAssistant(null);
+    fetchData();
+  };
+
+  const handleEdit = (assistant) => {
+    setEditingAssistant(assistant);
+    setIsCreating(false);
+  };
+
+  const handleCancel = () => {
+    setIsCreating(false);
+    setEditingAssistant(null);
+  };
+
+  const showForm = isCreating || editingAssistant;
+
   return (
     <>
       {/* Title + New button */}
-      <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
-        <div className="text-base font-semibold text-slate-800">
-          Assistants ({assistants.length})
+      {!showForm && (
+        <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+          <div className="text-base font-semibold text-slate-800">
+            Assistants ({assistants.length})
+          </div>
+          <Button variant="primary" onClick={() => setIsCreating(true)}>
+            <FaPlus className="w-4 h-4" />
+            New
+          </Button>
         </div>
-        <Button variant="primary" onClick={() => navigate('/addAssistant')}>
-          <FaPlus className="w-4 h-4" />
-          New
-        </Button>
-      </div>
+      )}
 
       {/* Scrollable content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
-        {assistants.length === 0 ? (
+        {showForm ? (
+          <Card
+            title={editingAssistant ? `Edit: ${editingAssistant.name}` : "New Assistant"}
+            description="Configure your AI assistant"
+          >
+            <AssistantForm
+              assistant={editingAssistant}
+              onSave={handleSave}
+              onCancel={handleCancel}
+            />
+          </Card>
+        ) : assistants.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <FaRobot className="w-12 h-12 text-slate-300 mb-4" />
             <div className="text-slate-600 font-medium">No assistants yet</div>
             <div className="text-slate-400 text-sm mb-4">Create one to get started</div>
-            <Button variant="primary" onClick={() => navigate('/addAssistant')}>
+            <Button variant="primary" onClick={() => setIsCreating(true)}>
               <FaPlus className="w-4 h-4" />
               New Assistant
             </Button>
@@ -182,7 +506,7 @@ const AssistantsPanel = ({ onNavigate }) => {
                     </Button>
                     <Button
                       variant="secondary"
-                      onClick={() => navigate(`/editAssistant?id=${assistant._id}`)}
+                      onClick={() => handleEdit(assistant)}
                       title="Edit"
                     >
                       <FaPen className="w-3.5 h-3.5" />
@@ -767,6 +1091,362 @@ const ApiProvidersPanel = () => {
 
 // ==================== MCP Servers Panel ====================
 
+/**
+ * MCP Server 编辑/创建表单
+ */
+const McpServerForm = ({ server, onSave, onCancel }) => {
+  const [name, setName] = useState(server?.name || '');
+  const [transport, setTransport] = useState(server?.transport || 'stdio');
+  const [command, setCommand] = useState(server?.command || '');
+  const [args, setArgs] = useState(server?.args?.join(', ') || '');
+  const [envVars, setEnvVars] = useState(
+    server?.env ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''
+  );
+  const [url, setUrl] = useState(server?.url || '');
+  const [apiKey, setApiKey] = useState(server?.apiKey || '');
+  const [autoStart, setAutoStart] = useState(server?.autoStart || false);
+  const [icon, setIcon] = useState(server?.icon || '🔧');
+  const [showInToolbar, setShowInToolbar] = useState(server?.showInToolbar !== false);
+  
+  const [error, setError] = useState('');
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  // 构建配置对象
+  const buildConfig = () => {
+    const config = {
+      name: name.trim(),
+      transport,
+      autoStart,
+      icon,
+      showInToolbar
+    };
+    
+    if (server?._id) {
+      config._id = server._id;
+    }
+    
+    if (transport === 'stdio') {
+      const env = {};
+      if (envVars.trim()) {
+        envVars.split('\n').forEach(line => {
+          const [key, ...valueParts] = line.split('=');
+          if (key && valueParts.length > 0) {
+            env[key.trim()] = valueParts.join('=').trim();
+          }
+        });
+      }
+      config.command = command.trim();
+      config.args = args.trim() ? args.trim().split(/,|\s+/).filter(Boolean) : [];
+      config.env = env;
+    } else {
+      config.url = url.trim();
+      if (apiKey.trim()) {
+        config.apiKey = apiKey.trim();
+      }
+    }
+    
+    return config;
+  };
+
+  const isValid = () => {
+    if (!name.trim()) return false;
+    if (transport === 'stdio') {
+      return !!command.trim();
+    } else {
+      return !!url.trim();
+    }
+  };
+
+  const handleTest = async () => {
+    setError('');
+    setTestResult(null);
+    
+    if (!isValid()) {
+      setError(transport === 'stdio' 
+        ? 'Name and command are required' 
+        : 'Name and URL are required');
+      return;
+    }
+    
+    setTesting(true);
+    
+    try {
+      const config = buildConfig();
+      const result = await bridge.mcp.testServer(config);
+      
+      if (result) {
+        const formattedResult = {
+          success: result.isRunning !== undefined ? result.isRunning : result.success,
+          toolCount: result.tools?.length || result.toolCount || 0,
+          resourceCount: result.resources?.length || result.resourceCount || 0,
+          tools: result.tools || [],
+          message: result.error || result.message,
+        };
+        setTestResult(formattedResult);
+        if (!formattedResult.success) {
+          setError(formattedResult.message || 'Test failed');
+        }
+      } else {
+        setError('No response from server');
+        setTestResult({ success: false, message: 'No response from server' });
+      }
+    } catch (err) {
+      const errorMessage = err.message || err.toString() || 'Test failed';
+      setError(errorMessage);
+      setTestResult({ success: false, message: errorMessage });
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  // 检查配置是否变化（用于编辑模式）
+  const checkConfigChanged = () => {
+    if (!server) return true;
+    
+    if (transport !== (server.transport || 'stdio')) return true;
+    if (name !== server.name) return true;
+    if (autoStart !== (server.autoStart || false)) return true;
+    
+    if (transport === 'stdio') {
+      if (command !== (server.command || '')) return true;
+      if (args !== (server.args?.join(', ') || '')) return true;
+      const originalEnvStr = server.env 
+        ? Object.entries(server.env).map(([k, v]) => `${k}=${v}`).join('\n') 
+        : '';
+      if (envVars !== originalEnvStr) return true;
+    } else {
+      if (url !== (server.url || '')) return true;
+      if (apiKey !== (server.apiKey || '')) return true;
+    }
+    
+    return false;
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setError('');
+    
+    if (!isValid()) {
+      setError(transport === 'stdio' 
+        ? 'Name and command are required' 
+        : 'Name and URL are required');
+      return;
+    }
+    
+    // 新建模式必须测试成功
+    if (!server && !testResult?.success) {
+      setError('Please test the server connection first');
+      return;
+    }
+    
+    // 编辑模式：配置变了需要重新测试
+    if (server && checkConfigChanged() && !testResult?.success) {
+      setError('Configuration changed. Please test the connection first.');
+      return;
+    }
+    
+    setSaving(true);
+    try {
+      const config = buildConfig();
+      await onSave(config);
+    } catch (err) {
+      setError(err.message || 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      <FormGroup>
+        <Label required>Server Name</Label>
+        <Input
+          value={name}
+          onChange={(e) => { setName(e.target.value); setTestResult(null); }}
+          placeholder="e.g., tavily, filesystem"
+          required
+        />
+      </FormGroup>
+      
+      <FormGroup>
+        <Label>Transport Type</Label>
+        <div className="flex gap-4">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="transport"
+              value="stdio"
+              checked={transport === 'stdio'}
+              onChange={(e) => { setTransport(e.target.value); setTestResult(null); }}
+              className="w-4 h-4 text-blue-600"
+            />
+            <span className="text-sm">
+              <span className="font-medium">Stdio</span>
+              <span className="text-gray-500 ml-1">(Local)</span>
+            </span>
+          </label>
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="radio"
+              name="transport"
+              value="http"
+              checked={transport === 'http'}
+              onChange={(e) => { setTransport(e.target.value); setTestResult(null); }}
+              className="w-4 h-4 text-blue-600"
+            />
+            <span className="text-sm">
+              <span className="font-medium">HTTP/SSE</span>
+              <span className="text-gray-500 ml-1">(Remote)</span>
+            </span>
+          </label>
+        </div>
+      </FormGroup>
+      
+      {transport === 'stdio' ? (
+        <>
+          <FormGroup>
+            <Label required>Command</Label>
+            <Input
+              value={command}
+              onChange={(e) => { setCommand(e.target.value); setTestResult(null); }}
+              placeholder="e.g., npx"
+              required
+            />
+          </FormGroup>
+          
+          <FormGroup>
+            <Label>Arguments</Label>
+            <Input
+              value={args}
+              onChange={(e) => { setArgs(e.target.value); setTestResult(null); }}
+              placeholder="e.g., -y, @modelcontextprotocol/server-filesystem"
+            />
+          </FormGroup>
+          
+          <FormGroup>
+            <Label>Environment Variables</Label>
+            <Textarea
+              value={envVars}
+              onChange={(e) => { setEnvVars(e.target.value); setTestResult(null); }}
+              placeholder="KEY=value (one per line)"
+              rows={2}
+              className="font-mono text-sm"
+            />
+          </FormGroup>
+        </>
+      ) : (
+        <>
+          <FormGroup>
+            <Label required>Server URL</Label>
+            <Input
+              value={url}
+              onChange={(e) => { setUrl(e.target.value); setTestResult(null); }}
+              placeholder="e.g., https://api.example.com/mcp"
+              required
+            />
+          </FormGroup>
+          
+          <FormGroup>
+            <Label>API Key</Label>
+            <Input
+              type="password"
+              value={apiKey}
+              onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
+              placeholder="Optional authentication key"
+            />
+          </FormGroup>
+        </>
+      )}
+      
+      <FormGroup>
+        <Label>Icon</Label>
+        <div className="flex items-center gap-3">
+          <IconSelectorTrigger value={icon} onChange={setIcon} />
+          <span className="text-sm text-gray-500">Click to select</span>
+        </div>
+      </FormGroup>
+      
+      <div className="flex flex-col gap-2">
+        <Checkbox
+          checked={autoStart}
+          onChange={(e) => setAutoStart(e.target.checked)}
+          label="Auto-start when PetGPT opens"
+        />
+        <Checkbox
+          checked={showInToolbar}
+          onChange={(e) => setShowInToolbar(e.target.checked)}
+          label="Show in toolbar"
+        />
+      </div>
+      
+      {/* Test Result */}
+      {(testResult || error) && (
+        <div className="mt-2">
+          {error && !testResult && (
+            <Alert variant="error">{error}</Alert>
+          )}
+          {testResult && (
+            <div className={`p-3 rounded-lg border text-sm ${
+              testResult.success 
+                ? 'bg-green-50 border-green-200 text-green-800' 
+                : 'bg-red-50 border-red-200 text-red-800'
+            }`}>
+              <div className="font-medium">
+                {testResult.success ? '✓ Connection Successful' : '✗ Connection Failed'}
+              </div>
+              {testResult.success && (
+                <div className="mt-1">
+                  Found {testResult.toolCount || 0} tool(s)
+                  {testResult.tools?.length > 0 && (
+                    <div className="flex flex-wrap gap-1 mt-1">
+                      {testResult.tools.slice(0, 3).map((tool, i) => (
+                        <Badge key={i} tone="green">{tool.name}</Badge>
+                      ))}
+                      {testResult.tools.length > 3 && (
+                        <Badge tone="gray">+{testResult.tools.length - 3}</Badge>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+              {!testResult.success && testResult.message && (
+                <div className="mt-1 opacity-90">{testResult.message}</div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      
+      {/* Actions */}
+      <div className="flex items-center gap-2 pt-2">
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={handleTest}
+          disabled={testing || !isValid()}
+        >
+          {testing ? <FiRefreshCw className="w-4 h-4 animate-spin" /> : <FaCheck className="w-4 h-4" />}
+          Test
+        </Button>
+        <div className="flex-1" />
+        <Button type="button" variant="secondary" onClick={onCancel}>
+          Cancel
+        </Button>
+        <Button 
+          type="submit" 
+          variant="primary"
+          disabled={saving || (!server && !testResult?.success)}
+        >
+          {saving ? <FaSpinner className="w-4 h-4 animate-spin" /> : null}
+          {server ? 'Save' : 'Add Server'}
+        </Button>
+      </div>
+    </form>
+  );
+};
+
 const McpServerCard = ({ server, onDelete, onEdit }) => {
   const [expanded, setExpanded] = useState(false);
   const [tools, setTools] = useState([]);
@@ -889,10 +1569,11 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
 };
 
 const McpServersPanel = () => {
-  const navigate = useNavigate();
   const [servers, setServers] = useState([]);
   const [serverStatuses, setServerStatuses] = useState({});
   const [loading, setLoading] = useState(true);
+  const [isCreating, setIsCreating] = useState(false);
+  const [editingServer, setEditingServer] = useState(null);
   
   const loadServers = useCallback(async () => {
     try {
@@ -949,26 +1630,60 @@ const McpServersPanel = () => {
     }
   };
   
-  const handleEditServer = (server) => {
-    navigate(`/editMcpServer?id=${server._id}`);
+  const handleSave = async (config) => {
+    if (editingServer) {
+      await bridge.mcp.updateServer(config._id, config);
+      await bridge.mcp.emitServersUpdated({ action: 'updated', serverName: config.name });
+    } else {
+      await bridge.mcp.createServer(config);
+      await bridge.mcp.emitServersUpdated({ action: 'created', serverName: config.name });
+    }
+    setIsCreating(false);
+    setEditingServer(null);
+    loadServers();
   };
+
+  const handleEdit = (server) => {
+    setEditingServer(server);
+    setIsCreating(false);
+  };
+
+  const handleCancel = () => {
+    setIsCreating(false);
+    setEditingServer(null);
+  };
+
+  const showForm = isCreating || editingServer;
 
   return (
     <>
       {/* Title + New button */}
-      <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
-        <div className="text-base font-semibold text-slate-800">
-          MCP Servers ({servers.length})
+      {!showForm && (
+        <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+          <div className="text-base font-semibold text-slate-800">
+            MCP Servers ({servers.length})
+          </div>
+          <Button variant="primary" onClick={() => setIsCreating(true)}>
+            <FaPlus className="w-4 h-4" />
+            New
+          </Button>
         </div>
-        <Button variant="primary" onClick={() => navigate('/addMcpServer')}>
-          <FaPlus className="w-4 h-4" />
-          New
-        </Button>
-      </div>
+      )}
 
       {/* Scrollable content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
-        {loading ? (
+        {showForm ? (
+          <Card
+            title={editingServer ? `Edit: ${editingServer.name}` : "New MCP Server"}
+            description="Configure an MCP server for tool integration"
+          >
+            <McpServerForm
+              server={editingServer}
+              onSave={handleSave}
+              onCancel={handleCancel}
+            />
+          </Card>
+        ) : loading ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <FiRefreshCw className="w-8 h-8 animate-spin text-slate-300 mb-4" />
             <div className="text-slate-400 text-sm">Loading...</div>
@@ -978,7 +1693,7 @@ const McpServersPanel = () => {
             <FaPlug className="w-12 h-12 text-slate-300 mb-4" />
             <div className="text-slate-600 font-medium">No MCP servers yet</div>
             <div className="text-slate-400 text-sm mb-4">Add one to enable tool integration</div>
-            <Button variant="primary" onClick={() => navigate('/addMcpServer')}>
+            <Button variant="primary" onClick={() => setIsCreating(true)}>
               <FaPlus className="w-4 h-4" />
               Add Server
             </Button>
@@ -992,7 +1707,7 @@ const McpServersPanel = () => {
                 status: serverStatuses[server._id] || (server.isRunning ? 'running' : 'stopped')
               }}
               onDelete={handleDeleteServer}
-              onEdit={handleEditServer}
+              onEdit={handleEdit}
             />
           ))
         )}
@@ -1222,9 +1937,39 @@ const tabGroups = [
 
 const allTabs = tabGroups.flatMap(g => g.tabs.map(t => t.id));
 
-const Sidebar = ({ activeTab, onTabChange }) => {
+const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
   return (
-    <div className="w-32 bg-slate-50 border-r border-slate-200 flex flex-col py-2 gap-0 shrink-0 overflow-y-auto">
+    <div className="w-32 bg-slate-50 border-r border-slate-200 flex flex-col shrink-0 overflow-y-auto">
+      {/* Window Controls - macOS Style */}
+      <div className="draggable flex items-center gap-2 px-3 py-3" data-tauri-drag-region>
+        {/* 红色：关闭 */}
+        <div 
+          onClick={onClose} 
+          className="no-drag w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 cursor-pointer flex items-center justify-center group"
+          title="关闭"
+        >
+          <MdClose className="text-white text-[8px] opacity-0 group-hover:opacity-100" />
+        </div>
+        {/* 黄色：最小化（隐藏窗口） */}
+        <div 
+          onClick={onClose} 
+          className="no-drag w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-600 cursor-pointer flex items-center justify-center group"
+          title="隐藏"
+        >
+          <span className="text-white text-[8px] font-bold opacity-0 group-hover:opacity-100">−</span>
+        </div>
+        {/* 绿色：最大化/还原 */}
+        <div 
+          onClick={onMaximize} 
+          className="no-drag w-3 h-3 rounded-full bg-green-500 hover:bg-green-600 cursor-pointer flex items-center justify-center group"
+          title="全屏"
+        >
+          <LuMaximize2 className="text-white text-[8px] opacity-0 group-hover:opacity-100" />
+        </div>
+      </div>
+      
+      {/* Tab Groups */}
+      <div className="flex flex-col py-2 gap-0">
       {tabGroups.map((group, groupIndex) => (
         <div key={group.title}>
           {/* Group title */}
@@ -1263,6 +2008,7 @@ const Sidebar = ({ activeTab, onTabChange }) => {
           )}
         </div>
       ))}
+      </div>
     </div>
   );
 };
@@ -1328,7 +2074,57 @@ const ManagementPage = () => {
       setActiveTab(tab);
     }
   }, [location.search]);
-  
+
+  // 使用 ref 来存储当前 activeTab，避免闭包问题
+  const activeTabRef = React.useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  }, [activeTab]);
+
+  // 监听来自 Rust 的 check_current_tab 事件，处理切换/隐藏逻辑
+  useEffect(() => {
+    let unlisten = null;
+    let cancelled = false;
+    
+    const setupListener = async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        if (cancelled) return;
+        
+        console.log('[ManagementPage] Setting up check_current_tab listener');
+        unlisten = await listen('check_current_tab', (event) => {
+          const targetTab = event.payload;
+          const currentTab = activeTabRef.current;
+          
+          console.log('[ManagementPage] check_current_tab event:', { targetTab, currentTab });
+          
+          if (currentTab === targetTab) {
+            // 同一个 tab，隐藏窗口
+            console.log('[ManagementPage] Same tab, hiding window');
+            bridge.hideManageWindow?.();
+          } else {
+            // 不同 tab，切换到目标 tab
+            console.log('[ManagementPage] Different tab, switching to:', targetTab);
+            setActiveTab(targetTab);
+            window.history.replaceState(null, '', `#/manage?tab=${targetTab}`);
+          }
+        });
+        console.log('[ManagementPage] Listener setup complete');
+      } catch (err) {
+        console.error('[ManagementPage] Failed to setup listener:', err);
+      }
+    };
+    
+    setupListener();
+    
+    return () => {
+      cancelled = true;
+      if (unlisten) {
+        unlisten();
+      }
+    };
+  }, []);
+
   const handleTabChange = (tab) => {
     setActiveTab(tab);
     // 更新 URL 但不触发导航
@@ -1338,6 +2134,10 @@ const ManagementPage = () => {
   
   const handleClose = () => {
     bridge.hideManageWindow?.();
+  };
+
+  const handleMaximize = () => {
+    bridge.maximizeWindow?.('manage');
   };
   
   // Settings 相关处理函数
@@ -1376,7 +2176,12 @@ const ManagementPage = () => {
     <PageLayout className="bg-white/95">
       <div className="flex h-screen w-full">
         {/* Sidebar */}
-        <Sidebar activeTab={activeTab} onTabChange={handleTabChange} />
+        <Sidebar 
+          activeTab={activeTab} 
+          onTabChange={handleTabChange}
+          onClose={handleClose}
+          onMaximize={handleMaximize}
+        />
         
         {/* Main content */}
         <div className="flex-1 flex flex-col min-w-0">
@@ -1384,16 +2189,6 @@ const ManagementPage = () => {
           <div className="shrink-0">
             <TitleBar
               title={getTitle()}
-              left={
-                <button
-                  type="button"
-                  className="no-drag inline-flex items-center justify-center rounded-xl p-2 text-slate-500 hover:text-slate-900 hover:bg-slate-100"
-                  onClick={handleClose}
-                  title="Close"
-                >
-                  <MdCancel className="w-5 h-5" />
-                </button>
-              }
               height="h-12"
             />
           </div>

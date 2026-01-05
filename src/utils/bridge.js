@@ -1896,6 +1896,19 @@ export const toggleSidebar = async (open) => {
 
 // Tauri 窗口控制扩展
 
+// 开始拖动窗口 (用于自定义拖动区域)
+export const startDragging = async (label = 'character') => {
+  if (isTauri()) {
+    try {
+      const { getCurrentWindow } = await import('@tauri-apps/api/window');
+      const win = getCurrentWindow();
+      await win.startDragging();
+    } catch (err) {
+      console.error('[bridge.startDragging] Error:', err);
+    }
+  }
+};
+
 export const minimizeWindow = async (label = 'chat') => {
   if (isElectron()) {
     window.electron?.minimizeWindow?.();
@@ -2244,6 +2257,13 @@ const bridge = {
   onNewChatCreated,
   onChatbodyStatusUpdated,
   updateChatbodyStatus,
+  
+  // 获取 Tauri listen 函数（用于监听来自 Rust 的事件）
+  getTauriListen: async () => {
+    if (!isTauri()) return null;
+    const api = await getTauriApi();
+    return api?.listen;
+  },
   
   // 兼容层 - 如果是 Electron，直接透传原始 API
   get electron() {

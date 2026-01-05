@@ -1,10 +1,14 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
 import { FaPlug } from "react-icons/fa6";
 import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as bridge from '../utils/bridge';
+
+// 拖动检测配置
+const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
+const CLICK_TIME_THRESHOLD = 200; // 200ms 内释放视为点击
 
 
 
@@ -231,6 +235,83 @@ export const Character = () => {
     bridge.changeManageWindow('mcp');
   };
 
+  // ========== 混合拖动方案 ==========
+  const dragState = useRef({
+    isMouseDown: false,
+    startX: 0,
+    startY: 0,
+    startTime: 0,
+    isDragging: false,
+  });
+
+  const handleCharacterMouseDown = useCallback((e) => {
+    // 忽略右键和中键
+    if (e.button !== 0) return;
+    
+    dragState.current = {
+      isMouseDown: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      startTime: Date.now(),
+      isDragging: false,
+    };
+    
+    // 添加全局事件监听
+    document.addEventListener('mousemove', handleCharacterMouseMove);
+    document.addEventListener('mouseup', handleCharacterMouseUp);
+  }, []);
+
+  const handleCharacterMouseMove = useCallback((e) => {
+    if (!dragState.current.isMouseDown) return;
+    
+    const dx = e.clientX - dragState.current.startX;
+    const dy = e.clientY - dragState.current.startY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    // 如果移动超过阈值且还没开始拖动，则开始拖动
+    if (distance > DRAG_THRESHOLD && !dragState.current.isDragging) {
+      dragState.current.isDragging = true;
+      // 调用 Tauri 的窗口拖动 API
+      bridge.startDragging();
+      
+      // 清理事件监听（拖动由系统接管）
+      document.removeEventListener('mousemove', handleCharacterMouseMove);
+      document.removeEventListener('mouseup', handleCharacterMouseUp);
+      dragState.current.isMouseDown = false;
+    }
+  }, []);
+
+  const handleCharacterMouseUp = useCallback((e) => {
+    if (!dragState.current.isMouseDown) return;
+    
+    const elapsed = Date.now() - dragState.current.startTime;
+    const dx = e.clientX - dragState.current.startX;
+    const dy = e.clientY - dragState.current.startY;
+    const distance = Math.sqrt(dx * dx + dy * dy);
+    
+    // 清理事件监听
+    document.removeEventListener('mousemove', handleCharacterMouseMove);
+    document.removeEventListener('mouseup', handleCharacterMouseUp);
+    
+    // 如果是快速点击且移动距离小，视为点击
+    if (elapsed < CLICK_TIME_THRESHOLD && distance < DRAG_THRESHOLD) {
+      // 这是一个点击，打开聊天窗口
+      handleClick();
+    }
+    
+    dragState.current.isMouseDown = false;
+    dragState.current.isDragging = false;
+  }, []);
+
+  // 清理函数
+  useEffect(() => {
+    return () => {
+      document.removeEventListener('mousemove', handleCharacterMouseMove);
+      document.removeEventListener('mouseup', handleCharacterMouseUp);
+    };
+  }, []);
+  // ========== 拖动方案结束 ==========
+
   useEffect(() => {
     let windowSize = "medium";
     const getWindowSize = async() => {
@@ -294,25 +375,23 @@ export const Character = () => {
         )}
       </div>
 
-      {/* 角色图片 */}
-      <img
-        src={imgSrc || ""}
-        draggable="false"
-        alt=" "
-        className="w-full pointer-events-none
-            will-change-transform
-    transform
-    translate-z-0
-    bg-transparent
-    transition-none
-    select-none
-        "
-      />
-
-      {/* 底部可拖拽区域 - 增加点击热区 */}
-      <div className="w-full h-[60px] flex justify-center items-center cursor-move draggable group" data-tauri-drag-region>
-        <div 
-          className="w-[140px] h-[14px] rounded-full bg-gray-400 opacity-70 shadow-sm group-hover:opacity-100 transition-opacity pointer-events-none" 
+      {/* 角色图片 - 可拖动区域 */}
+      <div 
+        className="flex-1 w-full flex items-center justify-center cursor-grab active:cursor-grabbing"
+        onMouseDown={handleCharacterMouseDown}
+      >
+        <img
+          src={imgSrc || ""}
+          draggable="false"
+          alt=" "
+          className="w-full pointer-events-none
+              will-change-transform
+      transform
+      translate-z-0
+      bg-transparent
+      transition-none
+      select-none
+          "
         />
       </div>
     </div>

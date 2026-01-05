@@ -761,7 +761,7 @@ fn open_page_in_chat(app: AppHandle, route: String) -> Result<(), String> {
 #[tauri::command]
 fn open_settings_window(app: AppHandle) -> Result<(), String> {
     // 兼容旧调用：打开 manage 窗口的 ui tab
-    open_manage_window_with_tab(app, "ui".to_string())
+    open_manage_window_with_tab(app, "ui".to_string()).map(|_| ())
 }
 
 #[tauri::command]
@@ -770,36 +770,32 @@ fn open_manage_window(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<(), String> {
+fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<String, String> {
+    println!("[open_manage_window_with_tab] Called with tab: {}", tab);
     if let Some(window) = app.get_webview_window("manage") {
-        if window.is_visible().unwrap_or(false) {
-            // 窗口已可见，通过 JS 检查当前 tab 并决定是隐藏还是切换
-            // 向前端发送事件，让前端处理 toggle 逻辑
-            let _ = window.eval(&format!(
-                r#"
-                (function() {{
-                    const urlParams = new URLSearchParams(window.location.hash.split('?')[1] || '');
-                    const currentTab = urlParams.get('tab') || 'assistants';
-                    const targetTab = '{}';
-                    if (currentTab === targetTab) {{
-                        // 同一个 tab，通知 Rust 隐藏窗口
-                        window.__TAURI__.core.invoke('hide_manage_window');
-                    }} else {{
-                        // 不同 tab，切换到目标 tab
-                        window.location.hash = '/manage?tab=' + targetTab;
-                    }}
-                }})();
-                "#,
-                tab
-            ));
+        let is_visible = window.is_visible().unwrap_or(false);
+        println!("[open_manage_window_with_tab] Window found, is_visible: {}", is_visible);
+        
+        if is_visible {
+            // 窗口已可见，发送事件让前端决定是隐藏还是切换
+            println!("[open_manage_window_with_tab] Emitting check_current_tab event with tab: {}", tab);
+            match window.emit("check_current_tab", &tab) {
+                Ok(_) => println!("[open_manage_window_with_tab] Event emitted successfully"),
+                Err(e) => println!("[open_manage_window_with_tab] Failed to emit event: {}", e),
+            }
+            Ok("visible".to_string())
         } else {
             // 窗口不可见，显示并导航到指定 tab
+            println!("[open_manage_window_with_tab] Window not visible, showing and navigating to tab: {}", tab);
             let _ = window.eval(&format!("window.location.hash = '/manage?tab={}'", tab));
             window.show().map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
+            Ok("shown".to_string())
         }
+    } else {
+        println!("[open_manage_window_with_tab] Window not found!");
+        Err("manage window not found".to_string())
     }
-    Ok(())
 }
 
 // 隐藏窗口 (用于关闭按钮)
