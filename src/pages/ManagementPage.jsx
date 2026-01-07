@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders } from "react-icons/fa6";
+import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
 import { MdClose } from "react-icons/md";
 import { LuMaximize2 } from "react-icons/lu";
@@ -9,11 +9,24 @@ import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, 
 import { IconSelectorTrigger } from "../components/UI/IconSelector";
 import { fetchModels, callOpenAILib } from "../utils/openai";
 import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl, getDetectionCandidates } from "../utils/llm/presets";
-import * as bridge from "../utils/bridge";
+import * as tauri from "../utils/tauri";
 import { useSettings } from "../utils/useSettings";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
 import { useStateValue } from "../context/StateProvider";
 import { actionType } from "../context/reducer";
+
+// 预加载所有内置皮肤图片
+import JulesNormal from "../assets/Jules-normal.png";
+import MaodieNormal from "../assets/Maodie-normal.png";
+import LittlePonyNormal from "../assets/LittlePony-normal.png";
+
+// 内置皮肤图片映射
+const BUILTIN_SKIN_IMAGES = {
+  'Jules': JulesNormal,
+  'default': JulesNormal,
+  'Maodie': MaodieNormal,
+  'LittlePony': LittlePonyNormal,
+};
 
 // ==================== Shared Components ====================
 
@@ -23,31 +36,49 @@ const CustomImage = ({ imageName }) => {
   useEffect(() => {
     const loadImage = async () => {
       try {
-        if (imageName === "default") {
-          const module = await import(`../assets/default-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Opai") {
-          const module = await import(`../assets/Opai-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Claudia") {
-          const module = await import(`../assets/Claudia-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Grocka") {
-          const module = await import(`../assets/Grocka-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Gemina") {
-          const module = await import(`../assets/Gemina-normal.png`);
-          setImgSrc(module.default);
-        } else if (imageName.startsWith("custom:")) {
-          const skinId = imageName.split(":")[1];
-          const base64Image = await bridge.readSkinImage(skinId, "normal");
-          setImgSrc(base64Image);
-        } else {
-          const base64Image = await bridge.readPetImage(`${imageName}-normal.png`);
-          setImgSrc(base64Image);
+        const skinName = imageName === "default" ? "Jules" : imageName;
+        
+        // 处理 custom: 前缀的自定义皮肤
+        if (skinName && skinName.startsWith("custom:")) {
+          const skinId = skinName.split(":")[1];
+          try {
+            const base64Image = await tauri.readSkinImage(skinId, "normal");
+            if (base64Image) {
+              setImgSrc(base64Image);
+              return;
+            }
+          } catch (e) {
+            console.warn("Custom skin not found, falling back to default:", e);
+          }
+          // 回退到默认皮肤
+          setImgSrc(BUILTIN_SKIN_IMAGES['Jules']);
+          return;
         }
+        
+        // 检查是否是预加载的内置皮肤
+        if (BUILTIN_SKIN_IMAGES[skinName]) {
+          setImgSrc(BUILTIN_SKIN_IMAGES[skinName]);
+          return;
+        }
+        
+        // 尝试从旧的 readPetImage 加载（兼容旧数据）
+        if (skinName) {
+          try {
+            const base64Image = await tauri.readPetImage(`${skinName}-normal.png`);
+            if (base64Image) {
+              setImgSrc(base64Image);
+              return;
+            }
+          } catch (e) {
+            // ignore
+          }
+        }
+        
+        // 最终回退到默认 Jules
+        setImgSrc(BUILTIN_SKIN_IMAGES['Jules']);
       } catch (error) {
         console.error("Error loading image:", error);
+        setImgSrc(BUILTIN_SKIN_IMAGES['Jules']);
       }
     };
     loadImage();
@@ -90,15 +121,8 @@ const TruncatedText = ({ label, text }) => {
  * 根据 apiFormat 获取默认图片名
  */
 const getDefaultImageForApi = (apiFormat) => {
-  const mapping = {
-    'openai_compatible': 'Opai',
-    'gemini_official': 'Gemina',
-    'openai': 'Opai',
-    'gemini': 'Gemina',
-    'grok': 'Grocka',
-    'anthropic': 'Claudia',
-  };
-  return mapping[apiFormat] || 'default';
+  // 新的内置皮肤只有 Jules 和 Maodie，默认使用 Jules
+  return 'Jules';
 };
 
 /**
@@ -108,6 +132,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [apiProviders, setApiProviders] = useState([]);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [availableModels, setAvailableModels] = useState([]);
+  const [builtinSkins, setBuiltinSkins] = useState([]);
   const [customSkins, setCustomSkins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -125,26 +150,30 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     modelConfigId: "", // Clear legacy config ID to ensure local settings take precedence
   });
   
-  // 加载自定义皮肤列表
-  const loadCustomSkins = async () => {
+  // 加载皮肤列表（区分内置和自定义）
+  const loadSkins = async () => {
     try {
-      const skins = await bridge.getSkins();
+      const skins = await tauri.getSkins();
       const skinsList = Array.isArray(skins) ? skins : [];
-      setCustomSkins(skinsList);
+      // 分离内置皮肤和自定义皮肤
+      const builtin = skinsList.filter(s => s.isBuiltin);
+      const custom = skinsList.filter(s => !s.isBuiltin);
+      setBuiltinSkins(builtin);
+      setCustomSkins(custom);
     } catch (err) {
       console.error('[AssistantForm] Failed to load skins:', err);
     }
   };
   
   useEffect(() => {
-    loadCustomSkins();
+    loadSkins();
   }, []);
   
   // 监听皮肤更新事件
   useEffect(() => {
-    const cleanup = bridge.onSkinsUpdated?.(() => {
+    const cleanup = tauri.onSkinsUpdated?.(() => {
       console.log('[AssistantForm] Skins updated, refreshing list...');
-      loadCustomSkins();
+      loadSkins();
     });
     return () => {
       if (cleanup) cleanup();
@@ -155,7 +184,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   useEffect(() => {
     const loadApiProviders = async () => {
       try {
-        const rawProviders = await bridge.apiProviders.getAll();
+        const rawProviders = await tauri.apiProviders.getAll();
         if (Array.isArray(rawProviders)) {
           // Normalize providers: ensure id exists and cachedModels is parsed
           const providers = rawProviders.map(p => ({
@@ -194,8 +223,8 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     // Listen for provider updates
     let unlistenFn;
     const setupListener = async () => {
-      if (bridge.listen) {
-        unlistenFn = await bridge.listen("api-providers-updated", (event) => {
+      if (tauri.listen) {
+        unlistenFn = await tauri.listen("api-providers-updated", (event) => {
           console.log("API Providers updated, refreshing list...");
           loadApiProviders();
         });
@@ -369,33 +398,41 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
 
       <FormGroup>
         <Label>Avatar Style</Label>
-        <Select
-          name="imageName"
-          value={formData.imageName}
-          onChange={handleChange}
-        >
-          <optgroup label="Built-in">
-            <option value="default">Default</option>
-            <option value="Opai">Opai (OpenAI style)</option>
-            <option value="Gemina">Gemina (Gemini style)</option>
-            <option value="Claudia">Claudia (Claude style)</option>
-            <option value="Grocka">Grocka (Grok style)</option>
-          </optgroup>
-          {customSkins.length > 0 && (
-            <optgroup label="Custom Skins">
-              {customSkins.map(skin => (
-                <option key={skin.id} value={`custom:${skin.id}`}>
-                  {skin.name}{skin.author ? ` (by ${skin.author})` : ''}
-                </option>
-              ))}
-            </optgroup>
-          )}
-        </Select>
-        {customSkins.length === 0 && (
-          <div className="text-xs text-slate-400 mt-1">
-            No custom skins. Import one in the Skins tab.
+        <div className="flex items-start gap-3">
+          {/* 实时预览 */}
+          <CustomImage imageName={formData.imageName} />
+          <div className="flex-1">
+            <Select
+              name="imageName"
+              value={formData.imageName}
+              onChange={handleChange}
+            >
+              {builtinSkins.length > 0 && (
+                <optgroup label="Built-in">
+                  {builtinSkins.map(skin => (
+                    <option key={skin.id} value={skin.name}>
+                      {skin.name}{skin.name === 'Jules' ? ' (Default)' : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+              {customSkins.length > 0 && (
+                <optgroup label="Custom Skins">
+                  {customSkins.map(skin => (
+                    <option key={skin.id} value={`custom:${skin.id}`}>
+                      {skin.name}{skin.author ? ` (by ${skin.author})` : ''}
+                    </option>
+                  ))}
+                </optgroup>
+              )}
+            </Select>
+            {builtinSkins.length === 0 && customSkins.length === 0 && (
+              <div className="text-xs text-slate-400 mt-1">
+                No skins available.
+              </div>
+            )}
           </div>
-        )}
+        </div>
       </FormGroup>
 
       <Checkbox
@@ -433,7 +470,7 @@ const AssistantsPanel = ({ onNavigate }) => {
     const normalizeId = (item) => ({ ...item, _id: item._id || item.id });
     
     try {
-      const assistantData = await bridge.getAssistants();
+      const assistantData = await tauri.getAssistants();
       if (Array.isArray(assistantData)) {
         setAssistants(assistantData.map(normalizeId));
       }
@@ -451,24 +488,41 @@ const AssistantsPanel = ({ onNavigate }) => {
       fetchData();
     };
 
-    const cleanup = bridge.onPetsUpdated(petsUpdateHandler);
+    const cleanup = tauri.onPetsUpdated(petsUpdateHandler);
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
+
+  // 监听皮肤更新事件，刷新助手列表（因为助手预览图可能依赖皮肤）
+  useEffect(() => {
+    const skinsUpdateHandler = () => {
+      console.log('[AssistantsPanel] Skins updated, refreshing...');
+      fetchData();
+    };
+
+    const cleanup = tauri.onSkinsUpdated?.(skinsUpdateHandler);
     return () => {
       if (cleanup) cleanup();
     };
   }, []);
 
   const handleSelect = async (assistant) => {
-    await bridge.sendCharacterId(assistant._id);
-    await bridge.hideManageWindow();
-    await bridge.showChatWindow();
+    // 先隐藏 manage 窗口，显示 chat 窗口
+    await tauri.hideManageWindow();
+    await tauri.showChatWindow();
+    // 等待 chat 窗口加载完成（给 React 组件时间挂载和设置事件监听器）
+    await new Promise(resolve => setTimeout(resolve, 200));
+    // 然后发送 character-id 事件
+    await tauri.sendCharacterId(assistant._id);
   };
 
   const handleDeleteAssistant = async (assistantId) => {
-    const confirmed = await bridge.confirm("Are you sure you want to delete this assistant?", { title: "Delete Assistant" });
+    const confirmed = await tauri.confirm("Are you sure you want to delete this assistant?", { title: "Delete Assistant" });
     if (!confirmed) return;
     
     try {
-      await bridge.deleteAssistant(assistantId);
+      await tauri.deleteAssistant(assistantId);
       fetchData();
     } catch (error) {
       console.error("Delete failed:", error);
@@ -480,24 +534,24 @@ const AssistantsPanel = ({ onNavigate }) => {
   const handleSave = async (formData) => {
     if (editingAssistant) {
       // Update existing
-      const updatedAssistant = await bridge.updateAssistant(editingAssistant._id, formData);
+      const updatedAssistant = await tauri.updateAssistant(editingAssistant._id, formData);
       // 发送包含 id 的更新事件，确保聊天窗口能匹配到
-      bridge.sendPetsUpdate({ 
+      tauri.sendPetsUpdate({ 
         action: 'update', 
         type: 'assistant', 
         id: editingAssistant._id,
         _id: editingAssistant._id,
         data: updatedAssistant 
       });
-      bridge.sendCharacterId(editingAssistant._id);
+      tauri.sendCharacterId(editingAssistant._id);
     } else {
       // Create new
-      const newAssistant = await bridge.createAssistant(formData);
+      const newAssistant = await tauri.createAssistant(formData);
       if (!newAssistant || !newAssistant._id) {
         throw new Error("Creation failed or no ID returned");
       }
-      bridge.sendCharacterId(newAssistant._id);
-      bridge.sendPetsUpdate({ 
+      tauri.sendCharacterId(newAssistant._id);
+      tauri.sendPetsUpdate({ 
         action: 'create', 
         type: 'assistant', 
         id: newAssistant._id,
@@ -1152,7 +1206,7 @@ const ApiProvidersPanel = () => {
   
   const loadProviders = useCallback(async () => {
     try {
-      const data = await bridge.getApiProviders();
+      const data = await tauri.getApiProviders();
       const normalized = (data || []).map(p => ({ 
         ...p, 
         _id: p._id || p.id,
@@ -1174,9 +1228,9 @@ const ApiProvidersPanel = () => {
   const handleSave = async (formData) => {
     try {
       if (editingProvider) {
-        await bridge.updateApiProvider(editingProvider._id, formData);
+        await tauri.updateApiProvider(editingProvider._id, formData);
       } else {
-        await bridge.createApiProvider(formData);
+        await tauri.createApiProvider(formData);
       }
       setIsCreating(false);
       setEditingProvider(null);
@@ -1193,11 +1247,11 @@ const ApiProvidersPanel = () => {
   };
   
   const handleDelete = async (id) => {
-    const confirmed = await bridge.confirm("Are you sure you want to delete this API provider?", { title: "Delete API Provider" });
+    const confirmed = await tauri.confirm("Are you sure you want to delete this API provider?", { title: "Delete API Provider" });
     if (!confirmed) return;
     
     try {
-      await bridge.deleteApiProvider(id);
+      await tauri.deleteApiProvider(id);
       loadProviders();
     } catch (error) {
       console.error("Delete failed:", error);
@@ -1359,7 +1413,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
     
     try {
       const config = buildConfig();
-      const result = await bridge.mcp.testServer(config);
+      const result = await tauri.mcp.testServer(config);
       
       if (result) {
         const formattedResult = {
@@ -1676,7 +1730,7 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
     }
     
     try {
-      const allTools = await bridge.mcp.getAllTools();
+      const allTools = await tauri.mcp.getAllTools();
       const serverTools = (allTools || []).filter(t => t.serverId === server._id);
       setTools(serverTools);
     } catch (error) {
@@ -1795,7 +1849,7 @@ const ModelsPanel = () => {
 
   const loadProviders = useCallback(async () => {
     try {
-      const data = await bridge.getApiProviders();
+      const data = await tauri.getApiProviders();
       const normalized = (data || []).map(p => ({ 
         ...p, 
         _id: p._id || p.id,
@@ -1822,12 +1876,12 @@ const ModelsPanel = () => {
         ? hiddenModels.filter(m => m !== modelName)
         : [...hiddenModels, modelName];
 
-      await bridge.updateApiProvider(provider._id, {
+      await tauri.updateApiProvider(provider._id, {
         hiddenModels: JSON.stringify(newHiddenModels)
       });
 
       // 重新拉取完整的 providers 数据
-      const updatedProviders = await bridge.getApiProviders();
+      const updatedProviders = await tauri.getApiProviders();
       if (updatedProviders) {
         const normalizedProviders = updatedProviders.map(p => ({
           ...p,
@@ -1849,7 +1903,7 @@ const ModelsPanel = () => {
         });
         
         // 发送跨窗口事件通知其他窗口更新
-        await bridge.sendApiProvidersUpdate(normalizedProviders);
+        await tauri.sendApiProvidersUpdate(normalizedProviders);
       }
     } catch (error) {
       console.error("Failed to toggle model visibility:", error);
@@ -2001,13 +2055,13 @@ const McpServersPanel = () => {
   
   const loadServers = useCallback(async () => {
     try {
-      const serverList = await bridge.mcp.getServers();
+      const serverList = await tauri.mcp.getServers();
       setServers(serverList || []);
       
       const statuses = {};
       for (const server of serverList || []) {
         try {
-          const status = await bridge.mcp.getServerStatus(server._id);
+          const status = await tauri.mcp.getServerStatus(server._id);
           statuses[server._id] = status;
         } catch {
           statuses[server._id] = 'unknown';
@@ -2026,9 +2080,9 @@ const McpServersPanel = () => {
   }, [loadServers]);
   
   useEffect(() => {
-    if (!bridge.mcp.onServersUpdated) return;
+    if (!tauri.mcp.onServersUpdated) return;
     
-    const cleanup = bridge.mcp.onServersUpdated(() => {
+    const cleanup = tauri.mcp.onServersUpdated(() => {
       loadServers();
     });
     
@@ -2039,14 +2093,14 @@ const McpServersPanel = () => {
     const serverToDelete = servers.find(s => s._id === id);
     const serverName = serverToDelete?.name || 'Unknown';
     
-    const confirmDelete = await bridge.confirm(`Are you sure you want to delete "${serverName}"?`, {
+    const confirmDelete = await tauri.confirm(`Are you sure you want to delete "${serverName}"?`, {
       title: 'Delete MCP Server'
     });
     if (!confirmDelete) return;
     
     try {
-      await bridge.mcp.deleteServer(id);
-      await bridge.mcp.emitServersUpdated({ action: 'deleted', serverName });
+      await tauri.mcp.deleteServer(id);
+      await tauri.mcp.emitServersUpdated({ action: 'deleted', serverName });
       await loadServers();
     } catch (err) {
       console.error('Failed to delete server:', err);
@@ -2056,11 +2110,11 @@ const McpServersPanel = () => {
   
   const handleSave = async (config) => {
     if (editingServer) {
-      await bridge.mcp.updateServer(config._id, config);
-      await bridge.mcp.emitServersUpdated({ action: 'updated', serverName: config.name });
+      await tauri.mcp.updateServer(config._id, config);
+      await tauri.mcp.emitServersUpdated({ action: 'updated', serverName: config.name });
     } else {
-      await bridge.mcp.createServer(config);
-      await bridge.mcp.emitServersUpdated({ action: 'created', serverName: config.name });
+      await tauri.mcp.createServer(config);
+      await tauri.mcp.emitServersUpdated({ action: 'created', serverName: config.name });
     }
     setIsCreating(false);
     setEditingServer(null);
@@ -2347,16 +2401,27 @@ const SkinForm = ({ skin, onSave, onCancel }) => {
 };
 
 /**
- * 皮肤预览图组件 - 从后端加载 normal 表情
+ * 皮肤预览图组件 - 先尝试从 assets 加载，失败后从自定义目录加载
  */
-const SkinPreview = ({ skinId, skinName }) => {
+const SkinPreview = ({ skinId, skinName, isBuiltin }) => {
   const [imageUrl, setImageUrl] = useState(null);
   const [loading, setLoading] = useState(true);
   
   useEffect(() => {
     const loadImage = async () => {
       try {
-        const url = await bridge.readSkinImage(skinId, 'normal');
+        const assetName = skinName === 'default' ? 'Jules' : skinName;
+        // 先尝试从 assets 加载
+        try {
+          const module = await import(`../assets/${assetName}-normal.png`);
+          setImageUrl(module.default);
+          setLoading(false);
+          return;
+        } catch {
+          // assets 中没有，从自定义目录加载
+        }
+        // 从自定义目录加载
+        const url = await tauri.readSkinImage(skinId, 'normal');
         setImageUrl(url);
       } catch (err) {
         console.error('Failed to load skin preview:', err);
@@ -2365,7 +2430,7 @@ const SkinPreview = ({ skinId, skinName }) => {
       }
     };
     loadImage();
-  }, [skinId]);
+  }, [skinId, skinName, isBuiltin]);
   
   if (loading) {
     return (
@@ -2393,17 +2458,76 @@ const SkinPreview = ({ skinId, skinName }) => {
 };
 
 /**
+ * 皮肤状态预览组件 - 显示四种心情状态
+ */
+const SkinMoodPreview = ({ skinId, skinName, isBuiltin }) => {
+  const moods = ['normal', 'smile', 'angry', 'thinking'];
+  const moodLabels = { normal: 'Normal', smile: 'Happy', angry: 'Angry', thinking: 'Thinking' };
+  const [images, setImages] = useState({});
+  
+  useEffect(() => {
+    const loadImages = async () => {
+      const loaded = {};
+      const assetName = skinName === 'default' ? 'Jules' : skinName;
+      for (const mood of moods) {
+        try {
+          // 先尝试从 assets 加载
+          try {
+            const module = await import(`../assets/${assetName}-${mood}.png`);
+            loaded[mood] = module.default;
+            continue;
+          } catch {
+            // assets 中没有，从自定义目录加载
+          }
+          // 从自定义目录加载
+          const url = await tauri.readSkinImage(skinId, mood);
+          loaded[mood] = url;
+        } catch (err) {
+          console.error(`Failed to load ${mood} image:`, err);
+        }
+      }
+      setImages(loaded);
+    };
+    loadImages();
+  }, [skinId, skinName, isBuiltin]);
+  
+  return (
+    <div className="grid grid-cols-4 gap-3 p-3 bg-slate-50 rounded-lg">
+      {moods.map(mood => (
+        <div key={mood} className="flex flex-col items-center gap-1">
+          <div className="w-16 h-16 rounded-lg overflow-hidden bg-white border border-slate-200 shadow-sm">
+            {images[mood] ? (
+              <img src={images[mood]} alt={mood} className="w-full h-full object-cover" />
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <FaSpinner className="w-4 h-4 text-slate-300 animate-spin" />
+              </div>
+            )}
+          </div>
+          <span className="text-xs text-slate-500">{moodLabels[mood]}</span>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+/**
  * Skins Panel - 模仿 AssistantsPanel 布局
  */
 const SkinsPanel = () => {
   const [skins, setSkins] = useState([]);
   const [isCreating, setIsCreating] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [showHidden, setShowHidden] = useState(false);
+  const [selectedSkinId, setSelectedSkinId] = useState(null);
   
   // 从后端加载皮肤数据
   const fetchSkins = async () => {
     try {
-      const data = await bridge.getSkins();
+      // 根据 showHidden 状态选择 API
+      const data = showHidden 
+        ? await tauri.getSkinsWithHidden()
+        : await tauri.getSkins();
       const skinsList = Array.isArray(data) ? data : [];
       setSkins(skinsList);
     } catch (err) {
@@ -2416,28 +2540,28 @@ const SkinsPanel = () => {
   // 初始化加载
   useEffect(() => {
     fetchSkins();
-  }, []);
+  }, [showHidden]);
   
   // 监听 skins-updated 事件，实现数据同步
   useEffect(() => {
-    const cleanup = bridge.onSkinsUpdated?.(() => {
+    const cleanup = tauri.onSkinsUpdated?.(() => {
       console.log('[SkinsPanel] Received skins-updated event, refreshing...');
       fetchSkins();
     });
     return () => {
       if (cleanup) cleanup();
     };
-  }, []);
+  }, [showHidden]);
   
   const handleSave = async (data) => {
     try {
       console.log("Importing skin:", data.name);
       
       // 调用 Rust API 导入皮肤（保存到数据库 + 文件系统）
-      await bridge.importSkin(data.name, data.author || null, data.imageData);
+      await tauri.importSkin(data.name, data.author || null, data.imageData);
       
       // 发送更新事件，通知其他窗口刷新
-      await bridge.sendSkinsUpdate?.({ action: 'create' });
+      await tauri.sendSkinsUpdate?.({ action: 'create' });
       
       setIsCreating(false);
       fetchSkins();
@@ -2447,21 +2571,45 @@ const SkinsPanel = () => {
     }
   };
   
-  const handleDelete = async (skinId) => {
-    const confirmed = await bridge.confirm?.("Are you sure you want to delete this skin?", { title: "Delete Skin" }) ?? window.confirm("Are you sure you want to delete this skin?");
+  const handleDelete = async (skin) => {
+    // 对于内置皮肤，提示是隐藏而不是删除
+    const message = skin.isBuiltin 
+      ? "This is a built-in skin. It will be hidden but can be restored later. Continue?"
+      : "Are you sure you want to delete this skin? This cannot be undone.";
+    
+    const confirmed = await tauri.confirm?.(message, { title: skin.isBuiltin ? "Hide Skin" : "Delete Skin" }) ?? window.confirm(message);
     if (!confirmed) return;
     
     try {
-      // 调用 Rust API 删除皮肤（删除数据库记录 + 图片文件）
-      await bridge.deleteSkin(skinId);
+      if (skin.isBuiltin) {
+        // 内置皮肤只是隐藏
+        await tauri.hideSkin(skin.id);
+      } else {
+        // 用户皮肤真正删除
+        await tauri.deleteSkin(skin.id);
+      }
       
       // 发送更新事件
-      await bridge.sendSkinsUpdate?.({ action: 'delete', skinId });
+      await tauri.sendSkinsUpdate?.({ action: skin.isBuiltin ? 'hide' : 'delete', skinId: skin.id });
       
       fetchSkins();
     } catch (err) {
-      console.error("Failed to delete skin:", err);
+      console.error("Failed to delete/hide skin:", err);
       alert("Failed to delete skin: " + (err.message || err));
+    }
+  };
+  
+  const handleRestore = async (skinId) => {
+    try {
+      await tauri.restoreSkin(skinId);
+      
+      // 发送更新事件
+      await tauri.sendSkinsUpdate?.({ action: 'restore', skinId });
+      
+      fetchSkins();
+    } catch (err) {
+      console.error("Failed to restore skin:", err);
+      alert("Failed to restore skin: " + (err.message || err));
     }
   };
 
@@ -2469,18 +2617,33 @@ const SkinsPanel = () => {
     setIsCreating(false);
   };
   
+  // 分离可见和隐藏的皮肤
+  const visibleSkins = skins.filter(s => !s.isHidden);
+  const hiddenSkins = skins.filter(s => s.isHidden);
+  
   return (
     <>
       {/* Title + Import button */}
       {!isCreating && (
         <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
           <div className="text-base font-semibold text-slate-800">
-            Skins ({skins.length})
+            Skins ({visibleSkins.length})
           </div>
-          <Button variant="primary" onClick={() => setIsCreating(true)}>
-            <FaPlus className="w-4 h-4" />
-            Import
-          </Button>
+          <div className="flex items-center gap-2">
+            <label className="flex items-center gap-1.5 text-sm text-slate-600 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={showHidden}
+                onChange={(e) => setShowHidden(e.target.checked)}
+                className="rounded border-slate-300"
+              />
+              Show hidden
+            </label>
+            <Button variant="primary" onClick={() => setIsCreating(true)}>
+              <FaPlus className="w-4 h-4" />
+              Import
+            </Button>
+          </div>
         </div>
       )}
       
@@ -2501,7 +2664,7 @@ const SkinsPanel = () => {
             <FaSpinner className="w-8 h-8 text-slate-400 animate-spin mb-4" />
             <div className="text-slate-500">Loading skins...</div>
           </div>
-        ) : skins.length === 0 ? (
+        ) : visibleSkins.length === 0 && hiddenSkins.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <FaShirt className="w-12 h-12 text-slate-300 mb-4" />
             <div className="text-slate-600 font-medium">No custom skins yet</div>
@@ -2512,39 +2675,111 @@ const SkinsPanel = () => {
             </Button>
           </div>
         ) : (
-          // Skin list - 模仿 Assistants 的列表布局
-          skins.map((skin) => (
-            <div
-              key={skin.id}
-              className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex items-start gap-3"
-            >
-              <SkinPreview skinId={skin.id} skinName={skin.name} />
-              <div className="min-w-0 flex-1">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="font-semibold text-slate-900 truncate">
-                      {skin.name}
+          <>
+            {/* Visible skins list */}
+            {visibleSkins.map((skin) => (
+              <div key={skin.id} className="space-y-2">
+                <div
+                  onClick={() => setSelectedSkinId(selectedSkinId === skin.id ? null : skin.id)}
+                  className={`bg-white border shadow-sm rounded-xl p-3 flex items-start gap-3 cursor-pointer transition-all ${
+                    selectedSkinId === skin.id 
+                      ? 'border-blue-400 ring-2 ring-blue-100' 
+                      : 'border-slate-200 hover:border-slate-300'
+                  }`}
+                >
+                  <SkinPreview skinId={skin.id} skinName={skin.name} isBuiltin={skin.isBuiltin} />
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="min-w-0">
+                        <div className="font-semibold text-slate-900 truncate">
+                          {skin.name}
+                        </div>
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                          {skin.author && (
+                            <Badge tone="blue">by {skin.author}</Badge>
+                          )}
+                          {skin.isBuiltin ? (
+                            <Badge tone="green">Built-in</Badge>
+                          ) : (
+                            <Badge tone="slate">Custom</Badge>
+                          )}
+                        </div>
+                      </div>
+                      <div className="shrink-0 flex items-center gap-1.5">
+                        <Button
+                          variant="danger"
+                          onClick={(e) => { e.stopPropagation(); handleDelete(skin); }}
+                          title={skin.isBuiltin ? "Hide" : "Delete"}
+                        >
+                          {skin.isBuiltin ? (
+                            <FaEyeSlash className="w-3.5 h-3.5" />
+                          ) : (
+                            <FaTrash className="w-3.5 h-3.5" />
+                          )}
+                        </Button>
+                      </div>
                     </div>
-                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
-                      {skin.author && (
-                        <Badge tone="blue">by {skin.author}</Badge>
-                      )}
-                      <Badge tone="slate">Custom</Badge>
-                    </div>
-                  </div>
-                  <div className="shrink-0 flex items-center gap-1.5">
-                    <Button
-                      variant="danger"
-                      onClick={() => handleDelete(skin.id)}
-                      title="Delete"
-                    >
-                      <FaTrash className="w-3.5 h-3.5" />
-                    </Button>
                   </div>
                 </div>
+                {/* 展开的预览面板 */}
+                {selectedSkinId === skin.id && (
+                  <SkinMoodPreview skinId={skin.id} skinName={skin.name} isBuiltin={skin.isBuiltin} />
+                )}
               </div>
-            </div>
-          ))
+            ))}
+            
+            {/* Hidden skins section (only shown when showHidden is true) */}
+            {showHidden && hiddenSkins.length > 0 && (
+              <>
+                <div className="pt-4 pb-2">
+                  <div className="text-sm font-medium text-slate-500">
+                    Hidden Skins ({hiddenSkins.length})
+                  </div>
+                </div>
+                {hiddenSkins.map((skin) => (
+                  <div
+                    key={skin.id}
+                    onClick={() => setSelectedSkinId(selectedSkinId === skin.id ? null : skin.id)}
+                    className={`bg-slate-50 border shadow-sm rounded-xl p-3 flex items-start gap-3 opacity-60 cursor-pointer ${
+                      selectedSkinId === skin.id 
+                        ? 'border-blue-400' 
+                        : 'border-slate-200'
+                    }`}
+                  >
+                    <SkinPreview skinId={skin.id} skinName={skin.name} isBuiltin={skin.isBuiltin} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-semibold text-slate-900 truncate">
+                            {skin.name}
+                          </div>
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                            {skin.author && (
+                              <Badge tone="blue">by {skin.author}</Badge>
+                            )}
+                            <Badge tone="amber">Hidden</Badge>
+                            {skin.isBuiltin && (
+                              <Badge tone="green">Built-in</Badge>
+                            )}
+                          </div>
+                        </div>
+                        <div className="shrink-0 flex items-center gap-1.5">
+                          <Button
+                            variant="secondary"
+                            onClick={(e) => { e.stopPropagation(); handleRestore(skin.id); }}
+                            title="Restore"
+                          >
+                            <FaEye className="w-3.5 h-3.5" />
+                            Restore
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </>
+            )}
+          </>
         )}
       </div>
     </>
@@ -3040,9 +3275,9 @@ const ManagementPage = () => {
     const fetchData = async () => {
       try {
         const [assistantData, modelData, providerData] = await Promise.all([
-          bridge.getAssistants(),
-          bridge.getModelConfigs(),
-          bridge.getApiProviders()
+          tauri.getAssistants(),
+          tauri.getModelConfigs(),
+          tauri.getApiProviders()
         ]);
         if (Array.isArray(assistantData)) {
           setAssistants(assistantData);
@@ -3117,7 +3352,7 @@ const ManagementPage = () => {
           if (currentTab === targetTab) {
             // 同一个 tab，隐藏窗口
             console.log('[ManagementPage] Same tab, hiding window');
-            bridge.hideManageWindow?.();
+            tauri.hideManageWindow?.();
           } else {
             // 不同 tab，切换到目标 tab
             console.log('[ManagementPage] Different tab, switching to:', targetTab);
@@ -3149,11 +3384,11 @@ const ManagementPage = () => {
   };
   
   const handleClose = () => {
-    bridge.hideManageWindow?.();
+    tauri.hideManageWindow?.();
   };
 
   const handleMaximize = () => {
-    bridge.maximizeWindow?.('manage');
+    tauri.maximizeWindow?.('manage');
   };
   
   // Settings 相关处理函数
@@ -3166,12 +3401,12 @@ const ManagementPage = () => {
     setSaving(true);
     try {
       await saveSettingsHook(localSettings);
-      bridge.updateWindowSizePreset(localSettings.windowSize);
-      bridge.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey);
+      tauri.updateWindowSizePreset(localSettings.windowSize);
+      tauri.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey);
       
       // 同步偏好设置到 Rust 后端
       if (localSettings.chatFollowsCharacter !== undefined) {
-        await bridge.updatePreferences({ 
+        await tauri.updatePreferences({ 
           chatFollowsCharacter: localSettings.chatFollowsCharacter !== false 
         });
       }

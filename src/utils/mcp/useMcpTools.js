@@ -5,9 +5,9 @@
  * 支持每个服务器独立的启用状态
  */
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { getMcpTools, convertToolsForLLM, executeToolByName, formatToolResult } from './toolExecutor.js';
-import bridge from '../bridge.js';
+import tauri from '../tauri';
 
 /**
  * 用于管理 MCP 工具状态的 React Hook
@@ -25,16 +25,20 @@ export const useMcpTools = ({ enabledServers = new Set(), apiFormat = 'openai_co
   const [error, setError] = useState(null);
   const [toolCallHistory, setToolCallHistory] = useState([]);
   
+  // 用于追踪上一次的 enabledServers 内容，避免引用变化导致不必要的重新加载
+  const prevEnabledServersRef = useRef(null);
+  const prevApiFormatRef = useRef(apiFormat);
+  
   // 加载服务器列表
   const loadServers = useCallback(async () => {
     try {
-      if (!bridge.mcp?.listServers) {
+      if (!tauri.mcp?.listServers) {
         console.warn('[useMcpTools] MCP API (listServers) not available');
         return [];
       }
-      console.log('[useMcpTools] Loading servers...');
-      const servers = await bridge.mcp.listServers();
-      console.log('[useMcpTools] Loaded servers:', servers?.length, servers?.map(s => ({ name: s.name, id: s._id })));
+      // console.log('[useMcpTools] Loading servers...');
+      const servers = await tauri.mcp.listServers();
+      // console.log('[useMcpTools] Loaded servers:', servers?.length, servers?.map(s => ({ name: s.name, id: s._id })));
       setMcpServers(servers || []);
       return servers || [];
     } catch (err) {
@@ -59,8 +63,8 @@ export const useMcpTools = ({ enabledServers = new Set(), apiFormat = 'openai_co
     try {
       const tools = await getMcpTools();
       
-      console.log('[useMcpTools] Raw tools from backend:', tools.map(t => ({ name: t.name, serverName: t.serverName })));
-      console.log('[useMcpTools] enabledServers:', Array.from(enabledServers));
+      // console.log('[useMcpTools] Raw tools from backend:', tools.map(t => ({ name: t.name, serverName: t.serverName })));
+      // console.log('[useMcpTools] enabledServers:', Array.from(enabledServers));
       
       // 过滤只保留已启用服务器的工具
       const filteredTools = tools.filter(tool => {
@@ -68,7 +72,7 @@ export const useMcpTools = ({ enabledServers = new Set(), apiFormat = 'openai_co
         return enabledServers.has(tool.serverName);
       });
       
-      console.log('[useMcpTools] Filtered tools:', filteredTools.length);
+      // console.log('[useMcpTools] Filtered tools:', filteredTools.length);
       setMcpTools(filteredTools);
       
       // 转换为 LLM 格式
@@ -86,21 +90,33 @@ export const useMcpTools = ({ enabledServers = new Set(), apiFormat = 'openai_co
     }
   }, [enabledServers, apiFormat]);
   
-  // 初始加载服务器列表
+  // 初始加载服务器列表（只执行一次）
   useEffect(() => {
     loadServers();
-  }, [loadServers]);
+  }, []); // 移除 loadServers 依赖，只在挂载时执行一次
   
   // 当启用的服务器变化时，重新加载工具
+  // 使用内容比较而不是引用比较
   useEffect(() => {
-    loadTools();
-  }, [loadTools]);
+    // 将当前 Set 转换为排序后的数组字符串，用于比较
+    const currentServersKey = Array.from(enabledServers).sort().join(',');
+    const prevServersKey = prevEnabledServersRef.current;
+    const currentApiFormat = apiFormat;
+    const prevApiFormat = prevApiFormatRef.current;
+    
+    // 只有当内容真正改变时才重新加载
+    if (currentServersKey !== prevServersKey || currentApiFormat !== prevApiFormat) {
+      prevEnabledServersRef.current = currentServersKey;
+      prevApiFormatRef.current = currentApiFormat;
+      loadTools();
+    }
+  }, [enabledServers, apiFormat, loadTools]);
   
   // 监听 MCP 服务器更新事件
   useEffect(() => {
-    if (!bridge.mcp?.onServersUpdated) return;
+    if (!tauri.mcp?.onServersUpdated) return;
     
-    const cleanup = bridge.mcp.onServersUpdated(() => {
+    const cleanup = tauri.mcp.onServersUpdated(() => {
       console.log('[useMcpTools] Received servers updated event, reloading...');
       loadServers();
     });

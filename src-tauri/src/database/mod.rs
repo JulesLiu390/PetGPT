@@ -149,11 +149,17 @@ impl Database {
                 name TEXT NOT NULL,
                 author TEXT,
                 description TEXT,
+                is_builtin INTEGER DEFAULT 0,
+                is_hidden INTEGER DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
             [],
         )?;
+
+        // Migration: add is_builtin and is_hidden columns if not exists
+        let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_builtin INTEGER DEFAULT 0", []);
+        let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_hidden INTEGER DEFAULT 0", []);
 
         Ok(())
     }

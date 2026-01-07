@@ -1,17 +1,26 @@
 mod database;
 mod mcp;
+mod message_cache;
+mod tab_state;
+mod llm;
 
 use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
+use message_cache::TabMessageCache;
+use tab_state::TabState;
+use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::HashMap;
 use tauri::{State, Manager, AppHandle, LogicalPosition, LogicalSize, Emitter};
-use tauri::menu::{Menu, MenuItem};
+use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::image::Image;
 use serde_json::Value as JsonValue;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+
+// Type alias for LLM client state
+type LlmState = Arc<LlmClient>;
 
 // Type alias for MCP manager state
 type McpState = Arc<tokio::sync::RwLock<McpManager>>;
@@ -24,16 +33,65 @@ type DbState = Arc<Database>;
 
 // ============ Event Broadcasting ============
 
+// 用于存储待处理的 character-id（当 chat 窗口还没准备好时）
+use std::sync::Mutex;
+lazy_static::lazy_static! {
+    static ref PENDING_CHARACTER_ID: Mutex<Option<String>> = Mutex::new(None);
+}
+
 /// 广播事件到所有窗口
 #[tauri::command]
 fn emit_to_all(app: AppHandle, event: String, payload: JsonValue) -> Result<(), String> {
-    println!("[Rust] emit_to_all called: event={}, payload={:?}", event, payload);
-    let result = app.emit(&event, payload.clone());
-    match &result {
-        Ok(_) => println!("[Rust] Event emitted successfully"),
-        Err(e) => println!("[Rust] Failed to emit event: {:?}", e),
+    // println!("[Rust] emit_to_all called: event={}, payload={:?}", event, payload);
+    
+    // 如果是 character-id 事件，存储到 pending
+    if event == "character-id" {
+        if let Some(id) = payload.as_str() {
+            let mut pending = PENDING_CHARACTER_ID.lock().unwrap();
+            *pending = Some(id.to_string());
+            // println!("[Rust] Stored pending character-id: {}", id);
+        }
     }
-    result.map_err(|e| e.to_string())
+    
+    // 尝试发送到每个已知窗口
+    let windows = ["chat", "character", "manage"];
+    for label in windows {
+        if let Some(window) = app.get_webview_window(label) {
+            if let Err(e) = window.emit(&event, payload.clone()) {
+                println!("[Rust] Failed to emit to {}: {:?}", label, e);
+            }
+        }
+    }
+    
+    // 也用 app.emit 广播一次
+    app.emit(&event, payload.clone()).map_err(|e| e.to_string())
+}
+
+/// 获取并清除待处理的 character-id
+#[tauri::command]
+fn get_pending_character_id() -> Option<String> {
+    let mut pending = PENDING_CHARACTER_ID.lock().unwrap();
+    pending.take()
+}
+
+// ============ LLM Commands ============
+
+/// 非流式调用 LLM
+#[tauri::command]
+async fn llm_call(
+    llm_client: State<'_, LlmState>,
+    request: LlmRequest,
+) -> Result<LlmResponse, String> {
+    llm_client.call(&request).await
+}
+
+/// 流式调用 LLM - 通过 Tauri 事件推送块
+#[tauri::command]
+async fn llm_stream(
+    app: AppHandle,
+    request: LlmRequest,
+) -> Result<LlmResponse, String> {
+    llm::stream_chat(app, request).await
 }
 
 // ============ Pet Commands ============
@@ -213,6 +271,11 @@ fn get_skins(db: State<DbState>) -> Result<Vec<skins::Skin>, String> {
 }
 
 #[tauri::command]
+fn get_skins_with_hidden(db: State<DbState>) -> Result<Vec<skins::Skin>, String> {
+    db.get_all_skins_with_hidden().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn get_skin(db: State<DbState>, id: String) -> Result<Option<skins::Skin>, String> {
     db.get_skin_by_id(&id).map_err(|e| e.to_string())
 }
@@ -232,6 +295,16 @@ fn delete_skin(db: State<DbState>, id: String) -> Result<bool, String> {
     db.delete_skin(&id).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+fn hide_skin(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.hide_skin(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn restore_skin(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.restore_skin(&id).map_err(|e| e.to_string())
+}
+
 /// 导入皮肤：保存元数据到数据库，图片到文件系统
 #[tauri::command]
 #[allow(non_snake_case)]
@@ -242,11 +315,12 @@ fn import_skin(
     author: Option<String>,
     imageData: String,  // Base64 编码的 2x2 sprite sheet
 ) -> Result<skins::Skin, String> {
-    // 1. 创建数据库记录
+    // 1. 创建数据库记录（用户导入的皮肤不是内置皮肤）
     let skin = db.create_skin(skins::CreateSkinData {
         name: name.clone(),
         author,
         description: None,
+        is_builtin: false,
     }).map_err(|e| e.to_string())?;
     
     // 2. 创建皮肤图片目录
@@ -360,6 +434,46 @@ fn get_skins_dir(app: &AppHandle) -> Result<PathBuf, String> {
     }
     
     Ok(skins_dir)
+}
+
+/// 内置皮肤定义 - 这些皮肤的图片在前端 src/assets 中，不需要复制到文件系统
+struct BuiltinSkin {
+    name: &'static str,
+    author: &'static str,
+}
+
+/// 初始化内置皮肤数据库记录（图片由前端处理，这里只创建数据库记录）
+fn initialize_builtin_skins(db: &Database) {
+    let builtin_skins = vec![
+        BuiltinSkin { name: "Jules", author: "PetGPT Team" },
+        BuiltinSkin { name: "Maodie", author: "PetGPT Team" },
+        BuiltinSkin { name: "LittlePony", author: "JulesLiu390" },
+    ];
+    
+    // 获取数据库中所有皮肤（包括隐藏的）
+    let existing_skins = db.get_all_skins_with_hidden().unwrap_or_default();
+    
+    for builtin in &builtin_skins {
+        // 检查是否已存在同名的内置皮肤
+        let exists = existing_skins.iter().any(|s| s.name == builtin.name && s.is_builtin);
+        
+        if !exists {
+            // 创建内置皮肤记录（不需要图片文件，前端会从 assets 加载）
+            match db.create_skin(skins::CreateSkinData {
+                name: builtin.name.to_string(),
+                author: Some(builtin.author.to_string()),
+                description: Some(format!("Built-in {} skin", builtin.name)),
+                is_builtin: true,
+            }) {
+                Ok(skin) => {
+                    println!("[Skins] Created builtin skin: {} (id: {})", builtin.name, skin.id);
+                }
+                Err(e) => {
+                    eprintln!("[Skins] Failed to create builtin skin {}: {}", builtin.name, e);
+                }
+            }
+        }
+    }
 }
 
 // ============ MCP Server Commands ============
@@ -535,7 +649,7 @@ async fn mcp_cancel_all_tool_calls(
     mcp: State<'_, McpState>,
 ) -> Result<(), String> {
     let manager = mcp.read().await;
-    manager.cancel_all_tool_calls();
+    manager.cancel_all_tool_calls().await;
     Ok(())
 }
 
@@ -544,7 +658,7 @@ async fn mcp_reset_cancellation(
     mcp: State<'_, McpState>,
 ) -> Result<(), String> {
     let manager = mcp.read().await;
-    manager.reset_cancellation();
+    manager.reset_cancellation().await;
     Ok(())
 }
 
@@ -1301,11 +1415,25 @@ pub fn run() {
             let db_path = app_data_dir.join("petgpt.db");
             
             let db = Database::new(db_path).expect("Failed to initialize database");
+            
+            // Initialize built-in skins if they don't exist
+            initialize_builtin_skins(&db);
+            
             app.manage(Arc::new(db));
 
             // Initialize MCP manager
             let mcp_manager = Arc::new(tokio::sync::RwLock::new(McpManager::new()));
             app.manage(mcp_manager);
+
+            // Initialize LLM client
+            let llm_client: LlmState = Arc::new(LlmClient::new());
+            app.manage(llm_client);
+
+            // Initialize tab message cache for in-memory message management (legacy)
+            app.manage(TabMessageCache::new());
+            
+            // Initialize new tab state manager (Rust-owned state)
+            app.manage(TabState::new());
 
             // Position character window at bottom-right
             position_character_window(app.handle());
@@ -1397,9 +1525,22 @@ pub fn run() {
             }
 
             // Setup tray menu
-            let show_item = MenuItem::with_id(app, "show", "显示 PetGPT", true, None::<&str>)?;
-            let quit_item = MenuItem::with_id(app, "quit", "退出", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show_item, &quit_item])?;
+            let chat_item = MenuItem::with_id(app, "chat", "Chat Window", true, None::<&str>)?;
+            let api_item = MenuItem::with_id(app, "api", "API Management", true, None::<&str>)?;
+            let assistants_item = MenuItem::with_id(app, "assistants", "Assistants", true, None::<&str>)?;
+            let mcp_item = MenuItem::with_id(app, "mcp", "MCP Servers", true, None::<&str>)?;
+            let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+            let separator = PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[
+                &chat_item,
+                &api_item,
+                &assistants_item,
+                &mcp_item,
+                &settings_item,
+                &separator,
+                &quit_item
+            ])?;
 
             // Load dedicated tray icon (44x44, optimized for menu bar)
             let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
@@ -1410,14 +1551,43 @@ pub fn run() {
                 .menu(&menu)
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
-                        "show" => {
-                            if let Some(window) = app.get_webview_window("character") {
-                                let _ = window.show();
-                                let _ = window.set_focus();
-                            }
+                        "chat" => {
+                            // Open chat window
                             if let Some(chat) = app.get_webview_window("chat") {
                                 let _ = chat.show();
                                 let _ = chat.set_focus();
+                            }
+                        }
+                        "api" => {
+                            // Open API management (manage window with api tab)
+                            if let Some(manage) = app.get_webview_window("manage") {
+                                let _ = manage.eval("window.location.hash = '#/manage?tab=api'");
+                                let _ = manage.show();
+                                let _ = manage.set_focus();
+                            }
+                        }
+                        "assistants" => {
+                            // Open assistants selection (manage window with assistants tab)
+                            if let Some(manage) = app.get_webview_window("manage") {
+                                let _ = manage.eval("window.location.hash = '#/manage?tab=assistants'");
+                                let _ = manage.show();
+                                let _ = manage.set_focus();
+                            }
+                        }
+                        "mcp" => {
+                            // Open MCP servers (manage window with mcp tab)
+                            if let Some(manage) = app.get_webview_window("manage") {
+                                let _ = manage.eval("window.location.hash = '#/manage?tab=mcp'");
+                                let _ = manage.show();
+                                let _ = manage.set_focus();
+                            }
+                        }
+                        "settings" => {
+                            // Open settings (manage window with settings tab)
+                            if let Some(manage) = app.get_webview_window("manage") {
+                                let _ = manage.eval("window.location.hash = '#/manage?tab=settings'");
+                                let _ = manage.show();
+                                let _ = manage.set_focus();
                             }
                         }
                         "quit" => {
@@ -1469,10 +1639,13 @@ pub fn run() {
             delete_api_provider,
             // Skin commands
             get_skins,
+            get_skins_with_hidden,
             get_skin,
             create_skin,
             update_skin,
             delete_skin,
+            hide_skin,
+            restore_skin,
             import_skin,
             get_skin_image_path,
             read_skin_image,
@@ -1532,6 +1705,27 @@ pub fn run() {
             update_shortcuts,
             // Event broadcasting
             emit_to_all,
+            get_pending_character_id,
+            // Tab message cache commands (legacy)
+            message_cache::get_tab_messages,
+            message_cache::set_tab_messages,
+            message_cache::add_tab_message,
+            message_cache::update_tab_message,
+            message_cache::delete_tab_message,
+            message_cache::clear_tab_messages,
+            message_cache::get_tab_messages_count,
+            // New Tab State commands (Rust-owned)
+            tab_state::get_tab_state,
+            tab_state::init_tab_messages,
+            tab_state::set_tab_state_messages,
+            tab_state::push_tab_message,
+            tab_state::update_tab_state_message,
+            tab_state::delete_tab_state_message,
+            tab_state::set_tab_thinking,
+            tab_state::clear_tab_state,
+            // LLM commands
+            llm_call,
+            llm_stream,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

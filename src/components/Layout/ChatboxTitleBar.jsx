@@ -4,7 +4,7 @@ import { HiOutlinePencilAlt } from "react-icons/hi";
 import { MdClose } from "react-icons/md";
 import { TbArrowsMaximize, TbArrowsMinimize } from "react-icons/tb";
 import ChatboxTabBar from '../Chat/ChatboxTabBar';
-import bridge from '../../utils/bridge';
+import tauri from '../../utils/tauri';
 
 
 export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, onCloseTab, onAddTab, onShare, sidebarOpen, onToggleSidebar }) => {
@@ -35,8 +35,8 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
     const handleMaximized = () => setIsMaximized(true);
     const handleUnmaximized = () => setIsMaximized(false);
     
-    bridge.onWindowMaximized?.(handleMaximized);
-    bridge.onWindowUnmaximized?.(handleUnmaximized);
+    tauri.onWindowMaximized?.(handleMaximized);
+    tauri.onWindowUnmaximized?.(handleUnmaximized);
     
     return () => {};
   }, []);
@@ -48,12 +48,12 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
         // 优先尝试 getAssistant，失败则回退到 getPet
         let pet = null;
         try {
-          pet = await bridge.getAssistant(activePetId);
+          pet = await tauri.getAssistant(activePetId);
         } catch (e) {
           // 忽略，尝试旧 API
         }
         if (!pet) {
-          pet = await bridge.getPet(activePetId);
+          pet = await tauri.getPet(activePetId);
         }
         if (pet) {
           setTitleInfo({
@@ -71,13 +71,13 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
 
   // Title bar component
   const handleClose = () => {
-    bridge.hideChatWindow?.();
+    tauri.hideChatWindow?.();
   };
   const handleMax = () => {
-    bridge.maxmizeChatWindow?.();
+    tauri.maxmizeChatWindow?.();
   };
   const handleNew = () => {
-    bridge.createNewChat?.();
+    tauri.createNewChat?.();
   };
 
 

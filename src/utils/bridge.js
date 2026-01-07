@@ -1378,6 +1378,226 @@ export const transferConversation = async (conversationId, newPetId) => {
   return false;
 };
 
+// ============ Tab Message Cache API (Rust 内存缓存) ============
+
+/**
+ * 获取指定会话的缓存消息
+ * @param {string} conversationId - 会话 ID
+ * @returns {Promise<Array>} 消息数组
+ */
+export const getTabMessages = async (conversationId) => {
+  if (!isTauri()) return [];
+  
+  const { invoke } = await getTauriApi();
+  return invoke('get_tab_messages', { conversationId });
+};
+
+/**
+ * 设置指定会话的消息（完全替换）
+ * @param {string} conversationId - 会话 ID
+ * @param {Array} messages - 消息数组
+ */
+export const setTabMessages = async (conversationId, messages) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('set_tab_messages', { conversationId, messages });
+};
+
+/**
+ * 添加一条消息到指定会话
+ * @param {string} conversationId - 会话 ID
+ * @param {Object} message - 消息对象 { role, content, toolCallHistory? }
+ */
+export const addTabMessage = async (conversationId, message) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('add_tab_message', { conversationId, message });
+};
+
+/**
+ * 更新指定位置的消息
+ * @param {string} conversationId - 会话 ID
+ * @param {number} index - 消息索引
+ * @param {Object} message - 新消息内容
+ * @returns {Promise<boolean>} 是否更新成功
+ */
+export const updateTabMessage = async (conversationId, index, message) => {
+  if (!isTauri()) return false;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('update_tab_message', { conversationId, index, message });
+};
+
+/**
+ * 删除指定位置的消息
+ * @param {string} conversationId - 会话 ID
+ * @param {number} index - 消息索引
+ * @returns {Promise<boolean>} 是否删除成功
+ */
+export const deleteTabMessage = async (conversationId, index) => {
+  if (!isTauri()) return false;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('delete_tab_message', { conversationId, index });
+};
+
+/**
+ * 清空指定会话的消息
+ * @param {string} conversationId - 会话 ID
+ */
+export const clearTabMessages = async (conversationId) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('clear_tab_messages', { conversationId });
+};
+
+/**
+ * 获取消息数量
+ * @param {string} conversationId - 会话 ID
+ * @returns {Promise<number>} 消息数量
+ */
+export const getTabMessagesCount = async (conversationId) => {
+  if (!isTauri()) return 0;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('get_tab_messages_count', { conversationId });
+};
+
+/**
+ * 监听消息更新事件
+ * @param {Function} callback - 回调函数，参数为 conversationId
+ * @returns {Promise<Function>} 取消监听的函数
+ */
+export const onTabMessagesUpdated = async (callback) => {
+  if (!isTauri()) return () => {};
+  
+  const { listen } = await getTauriApi();
+  const unlisten = await listen('tab-messages-updated', (event) => {
+    callback(event.payload);
+  });
+  return unlisten;
+};
+
+// ============ Tab State API (新的 Rust-owned 状态管理) ============
+
+/**
+ * 获取指定会话的完整状态（用于初始加载）
+ * @param {string} conversationId - 会话 ID
+ * @returns {Promise<{messages: Array, is_thinking: boolean}>} Tab 状态快照
+ */
+export const getTabState = async (conversationId) => {
+  if (!isTauri()) return { messages: [], is_thinking: false };
+  
+  const { invoke } = await getTauriApi();
+  return invoke('get_tab_state', { conversationId });
+};
+
+/**
+ * 初始化 tab 消息（只在缓存为空时设置）
+ * @param {string} conversationId - 会话 ID
+ * @param {Array} messages - 消息数组
+ */
+export const initTabMessages = async (conversationId, messages) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('init_tab_messages', { conversationId, messages });
+};
+
+/**
+ * 设置指定会话的消息（完全替换） - 新 API
+ * @param {string} conversationId - 会话 ID
+ * @param {Array} messages - 消息数组
+ */
+export const setTabStateMessages = async (conversationId, messages) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('set_tab_state_messages', { conversationId, messages });
+};
+
+/**
+ * 添加一条消息（Rust 会自动推送更新）
+ * @param {string} conversationId - 会话 ID
+ * @param {Object} message - 消息对象 { role, content, tool_call_history? }
+ */
+export const pushTabMessage = async (conversationId, message) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('push_tab_message', { conversationId, message });
+};
+
+/**
+ * 更新指定位置的消息 - 新 API
+ * @param {string} conversationId - 会话 ID
+ * @param {number} index - 消息索引
+ * @param {Object} message - 新消息内容
+ * @returns {Promise<boolean>} 是否更新成功
+ */
+export const updateTabStateMessage = async (conversationId, index, message) => {
+  if (!isTauri()) return false;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('update_tab_state_message', { conversationId, index, message });
+};
+
+/**
+ * 删除指定位置的消息 - 新 API
+ * @param {string} conversationId - 会话 ID
+ * @param {number} index - 消息索引
+ * @returns {Promise<boolean>} 是否删除成功
+ */
+export const deleteTabStateMessage = async (conversationId, index) => {
+  if (!isTauri()) return false;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('delete_tab_state_message', { conversationId, index });
+};
+
+/**
+ * 设置思考状态（Rust 会自动推送更新）
+ * @param {string} conversationId - 会话 ID
+ * @param {boolean} isThinking - 是否在思考中
+ */
+export const setTabThinking = async (conversationId, isThinking) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('set_tab_thinking', { conversationId, isThinking });
+};
+
+/**
+ * 清空指定会话的所有状态
+ * @param {string} conversationId - 会话 ID
+ */
+export const clearTabState = async (conversationId) => {
+  if (!isTauri()) return;
+  
+  const { invoke } = await getTauriApi();
+  return invoke('clear_tab_state', { conversationId });
+};
+
+/**
+ * 订阅指定会话的状态更新
+ * @param {string} conversationId - 会话 ID
+ * @param {Function} callback - 回调函数，参数为 { messages, is_thinking }
+ * @returns {Promise<Function>} 取消订阅的函数
+ */
+export const subscribeTabState = async (conversationId, callback) => {
+  if (!isTauri()) return () => {};
+  
+  const { listen } = await getTauriApi();
+  const eventName = `tab-state:${conversationId}`;
+  const unlisten = await listen(eventName, (event) => {
+    callback(event.payload);
+  });
+  return unlisten;
+};
+
 // 批量转移对话
 export const transferAllConversations = async (oldPetId, newPetId) => {
   if (isElectron()) {
@@ -1597,6 +1817,25 @@ export const getSkins = async () => {
   return [];
 };
 
+export const getSkinsWithHidden = async () => {
+  if (isElectron()) {
+    return [];
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      const result = await invoke('get_skins_with_hidden');
+      return result || [];
+    } catch (err) {
+      console.error('[bridge.getSkinsWithHidden] Error:', err);
+      return [];
+    }
+  }
+  
+  return [];
+};
+
 export const getSkin = async (id) => {
   if (isElectron()) {
     return null;
@@ -1645,6 +1884,42 @@ export const deleteSkin = async (id) => {
       return await invoke('delete_skin_with_files', { id });
     } catch (err) {
       console.error('[bridge.deleteSkin] Error:', err);
+      return false;
+    }
+  }
+  
+  return false;
+};
+
+export const hideSkin = async (id) => {
+  if (isElectron()) {
+    return false;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('hide_skin', { id });
+    } catch (err) {
+      console.error('[bridge.hideSkin] Error:', err);
+      return false;
+    }
+  }
+  
+  return false;
+};
+
+export const restoreSkin = async (id) => {
+  if (isElectron()) {
+    return false;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('restore_skin', { id });
+    } catch (err) {
+      console.error('[bridge.restoreSkin] Error:', err);
       return false;
     }
   }
@@ -1717,9 +1992,12 @@ export const readSkinImage = async (skinId, mood) => {
 // Skins 便捷对象
 export const skinsApi = {
   getAll: getSkins,
+  getAllWithHidden: getSkinsWithHidden,
   get: getSkin,
   import: importSkin,
   delete: deleteSkin,
+  hide: hideSkin,
+  restore: restoreSkin,
   readImage: readSkinImage,
 };
 
@@ -2464,16 +2742,26 @@ export const onMoodUpdated = (callback) => {
   if (isTauri()) {
     // Tauri 使用事件系统监听 mood 更新
     let unlisten = null;
+    let cancelled = false;
+    
     getTauriApi().then(({ listen }) => {
+      if (cancelled) return;
       listen('character-mood-updated', (event) => {
         const { mood, conversationId } = event.payload;
+        console.log('[bridge] onMoodUpdated received:', mood, conversationId);
         // Electron callback 格式: (event, mood, conversationId)
         callback(null, mood, conversationId);
       }).then(fn => {
-        unlisten = fn;
+        if (cancelled) {
+          fn(); // 立即取消
+        } else {
+          unlisten = fn;
+        }
       });
     });
+    
     return () => {
+      cancelled = true;
       if (unlisten) unlisten();
     };
   }
@@ -2522,6 +2810,33 @@ const bridge = {
   getConversations,
   getConversationsByPet,
   getConversationById,
+  createConversation,
+  updateConversation,
+  deleteConversation,
+  getOrphanConversations,
+  transferConversation,
+  
+  // Tab Message Cache (Rust 内存缓存) - legacy API
+  getTabMessages,
+  setTabMessages,
+  addTabMessage,
+  updateTabMessage,
+  deleteTabMessage,
+  clearTabMessages,
+  getTabMessagesCount,
+  onTabMessagesUpdated,
+  
+  // Tab State (新的 Rust-owned 状态管理)
+  getTabState,
+  initTabMessages,
+  setTabStateMessages,
+  pushTabMessage,
+  updateTabStateMessage,
+  deleteTabStateMessage,
+  setTabThinking,
+  clearTabState,
+  subscribeTabState,
+  
   createConversation,
   updateConversation,
   deleteConversation,

@@ -3368,6 +3368,7 @@ dependencies = [
  "dirs 5.0.1",
  "futures",
  "image",
+ "lazy_static",
  "log",
  "reqwest",
  "rusqlite",

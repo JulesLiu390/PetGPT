@@ -66,6 +66,30 @@ export const cleanHistoryForGemini = (messages, isCurrentToolLoop = false) => {
       }
     }
     
+    // 检查内部格式的消息是否包含工具调用相关内容
+    // 这些消息可能来自数据库，content 字段可能包含 OpenAI 格式的工具调用或错误信息
+    if (msg.content && typeof msg.content === 'string') {
+      // 检测错误消息（包含 thought_signature 错误）
+      if (msg.content.includes('thought_signature') || 
+          msg.content.includes('functionCall') ||
+          msg.content.includes('function_call')) {
+        console.log('[Gemini] Skipping message with tool call reference in content');
+        continue;
+      }
+    }
+    
+    // 检查 OpenAI 格式的工具调用消息
+    if (msg.role === 'assistant' && msg.tool_calls) {
+      console.log('[Gemini] Skipping OpenAI format tool_calls message');
+      continue;
+    }
+    
+    // 检查 OpenAI 格式的工具结果消息
+    if (msg.role === 'tool') {
+      console.log('[Gemini] Skipping OpenAI format tool result message');
+      continue;
+    }
+    
     // 检查内部格式的消息是否有 toolCallHistory（来自数据库的历史消息标记）
     // 这些消息的 content 已经是工具调用后的总结文本，可以直接使用
     if (msg.toolCallHistory && msg.role === 'assistant') {

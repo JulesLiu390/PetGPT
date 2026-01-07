@@ -6,7 +6,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import bridge from '../../utils/bridge';
+import tauri from '../../utils/tauri';
 import { FaPlus, FaTrash, FaChevronDown, FaChevronUp, FaPen } from 'react-icons/fa6';
 import { FiRefreshCw } from 'react-icons/fi';
 
@@ -27,7 +27,7 @@ const McpServerCard = ({ server, onDelete, onEdit, onUpdate }) => {
     
     try {
       // 获取所有工具，然后筛选出属于此服务器的
-      const allTools = await bridge.mcp.getAllTools();
+      const allTools = await tauri.mcp.getAllTools();
       // 工具列表包含 serverId，筛选当前服务器的工具
       const serverTools = (allTools || []).filter(t => t.serverId === server._id);
       setTools(serverTools);
@@ -152,14 +152,14 @@ export const McpSettings = () => {
   // 加载服务器列表
   const loadServers = useCallback(async () => {
     try {
-      const serverList = await bridge.mcp.getServers();
+      const serverList = await tauri.mcp.getServers();
       setServers(serverList || []);
       
       // 获取状态
       const statuses = {};
       for (const server of serverList || []) {
         try {
-          const status = await bridge.mcp.getServerStatus(server._id);
+          const status = await tauri.mcp.getServerStatus(server._id);
           statuses[server._id] = status;
         } catch {
           statuses[server._id] = 'unknown';
@@ -180,9 +180,9 @@ export const McpSettings = () => {
   
   // 监听 MCP 服务器更新事件（从其他窗口触发的更新）
   useEffect(() => {
-    if (!bridge.mcp.onServersUpdated) return;
+    if (!tauri.mcp.onServersUpdated) return;
     
-    const cleanup = bridge.mcp.onServersUpdated(() => {
+    const cleanup = tauri.mcp.onServersUpdated(() => {
       console.log('[McpSettings] Received servers updated event, reloading...');
       loadServers();
     });
@@ -195,16 +195,16 @@ export const McpSettings = () => {
     const serverToDelete = servers.find(s => s._id === id);
     const serverName = serverToDelete?.name || 'Unknown';
     
-    const confirmDelete = await bridge.confirm(`Are you sure you want to delete "${serverName}"?`, {
+    const confirmDelete = await tauri.confirm(`Are you sure you want to delete "${serverName}"?`, {
       title: 'Delete MCP Server'
     });
     if (!confirmDelete) return;
     
     try {
-      await bridge.mcp.deleteServer(id);
+      await tauri.mcp.deleteServer(id);
       
       // 通知其他窗口（如 chatbox）更新 MCP 服务器列表
-      await bridge.mcp.emitServersUpdated({ action: 'deleted', serverName });
+      await tauri.mcp.emitServersUpdated({ action: 'deleted', serverName });
       
       await loadServers();
       alert(`MCP Server "${serverName}" deleted successfully!`);
@@ -218,7 +218,7 @@ export const McpSettings = () => {
     navigate(`/editMcpServer?id=${server._id}`);
   };
   
-  if (!bridge.mcp) {
+  if (!tauri.mcp) {
     return (
       <div className="p-4">
         <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-4 text-yellow-800">

@@ -19,6 +19,7 @@ pub struct Conversation {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationData {
+    #[serde(alias = "petId")]
     pub pet_id: String,
     pub title: Option<String>,
 }

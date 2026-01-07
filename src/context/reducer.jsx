@@ -3,11 +3,18 @@
 export const actionType = {
 
     SET_SUGGEST_TEXT:"SET_SUGGEST_TEXT",
-    ADD_MESSAGE: "ADD_MESSAGE",         // 添加新消息
+    // Tab-based message management (方案 B)
+    SET_TAB_MESSAGES: "SET_TAB_MESSAGES",       // 设置特定 tab 的消息
+    ADD_TAB_MESSAGE: "ADD_TAB_MESSAGE",         // 添加消息到特定 tab
+    UPDATE_TAB_MESSAGE: "UPDATE_TAB_MESSAGE",   // 更新特定 tab 的消息
+    DELETE_TAB_MESSAGE: "DELETE_TAB_MESSAGE",   // 删除特定 tab 的消息
+    CLEAR_TAB_MESSAGES: "CLEAR_TAB_MESSAGES",   // 清空特定 tab 的消息
+    // Legacy (保留向后兼容，但内部会转发到 tab-based)
+    ADD_MESSAGE: "ADD_MESSAGE",
     SET_MESSAGE: "SET_MESSAGE",
-    UPDATE_MESSAGE: "UPDATE_MESSAGE",   // 更新特定消息
-    DELETE_MESSAGE: "DELETE_MESSAGE",   // 删除特定消息
-    CLEAR_MESSAGES: "CLEAR_MESSAGES",   // 清空消息
+    UPDATE_MESSAGE: "UPDATE_MESSAGE",
+    DELETE_MESSAGE: "DELETE_MESSAGE",
+    CLEAR_MESSAGES: "CLEAR_MESSAGES",
     SET_CHARACTER_MOOD: "SET_CHARACTER_MOOD",
     ADD_STREAMING_REPLY: "ADD_STREAMING_REPLY",
     CLEAR_STREAMING_REPLY: "CLEAR_STREAMING_REPLY",
@@ -15,18 +22,18 @@ export const actionType = {
     SET_CURRENT_CONVERSATION_ID: "SET_CURRENT_CONVERSATION_ID",
     SWITCH_CONVERSATION: "SWITCH_CONVERSATION",
     UPDATE_CONVERSATION_MESSAGES: "UPDATE_CONVERSATION_MESSAGES",
-    TRIGGER_RUN_FROM_HERE: "TRIGGER_RUN_FROM_HERE", // New action
+    TRIGGER_RUN_FROM_HERE: "TRIGGER_RUN_FROM_HERE",
     // MCP Tool Call Actions
-    ADD_TOOL_CALL: "ADD_TOOL_CALL",           // 添加工具调用
-    UPDATE_TOOL_CALL: "UPDATE_TOOL_CALL",     // 更新工具调用状态
-    CLEAR_TOOL_CALLS: "CLEAR_TOOL_CALLS",     // 清除工具调用
+    ADD_TOOL_CALL: "ADD_TOOL_CALL",
+    UPDATE_TOOL_CALL: "UPDATE_TOOL_CALL",
+    CLEAR_TOOL_CALLS: "CLEAR_TOOL_CALLS",
     // 时间注入管理
-    UPDATE_TIME_INJECTION: "UPDATE_TIME_INJECTION", // 更新会话的时间注入时间戳
-    SET_API_PROVIDERS: "SET_API_PROVIDERS", // 设置全局 API 服务商列表
+    UPDATE_TIME_INJECTION: "UPDATE_TIME_INJECTION",
+    SET_API_PROVIDERS: "SET_API_PROVIDERS",
 }
 
 const reducer = (state, action) => {
-    console.log(action);
+    // console.log(action); // Disabled to reduce noise
 
     switch(action.type) {
         case actionType.SET_API_PROVIDERS:
@@ -50,10 +57,15 @@ const reducer = (state, action) => {
                 }
             };
         case actionType.SWITCH_CONVERSATION:
+            console.log('[Reducer] SWITCH_CONVERSATION:', action.id);
+            // 方案 B: 只更新 currentConversationId 和 tabMessages[id]
             return {
                 ...state,
-                userMessages: action.userMessages,
                 currentConversationId: action.id,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [action.id]: action.userMessages || state.tabMessages[action.id] || []
+                }
             };
         case actionType.SET_CURRENT_CONVERSATION_ID:
             return {
@@ -138,44 +150,131 @@ const reducer = (state, action) => {
                     [action.conversationId]: action.suggestText
                 }
             };
-        case actionType.ADD_MESSAGE:
-            console.log('[Reducer] ADD_MESSAGE called, current userMessages:', state.userMessages, 'new message:', action.message);
-            const newUserMessages = [...(state.userMessages || []), action.message];
-            console.log('[Reducer] New userMessages:', newUserMessages);
+        // ============ Tab-based Message Management (方案 B) ============
+        case actionType.SET_TAB_MESSAGES:
             return {
                 ...state,
-                userMessages: newUserMessages, // 👈 推入新项
+                tabMessages: {
+                    ...state.tabMessages,
+                    [action.tabId]: action.messages || []
+                }
             };
-        case actionType.SET_MESSAGE:
+        case actionType.ADD_TAB_MESSAGE: {
+            const tabId = action.tabId;
+            const currentMessages = state.tabMessages[tabId] || [];
             return {
                 ...state,
-                userMessages: action.userMessages || [],
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: [...currentMessages, action.message]
+                }
             };
-
-        case actionType.UPDATE_MESSAGE:
-            const updatedMessages = [...(state.userMessages || [])];
-            if (action.index >= 0 && action.index < updatedMessages.length) {
-                updatedMessages[action.index] = {
-                    ...updatedMessages[action.index],
-                    ...action.message
-                };
+        }
+        case actionType.UPDATE_TAB_MESSAGE: {
+            const tabId = action.tabId;
+            const msgs = [...(state.tabMessages[tabId] || [])];
+            if (action.index >= 0 && action.index < msgs.length) {
+                msgs[action.index] = { ...msgs[action.index], ...action.message };
             }
             return {
                 ...state,
-                userMessages: updatedMessages,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: msgs
+                }
             };
-
-        case actionType.DELETE_MESSAGE:
+        }
+        case actionType.DELETE_TAB_MESSAGE: {
+            const tabId = action.tabId;
+            const filtered = (state.tabMessages[tabId] || []).filter((_, i) => i !== action.index);
             return {
                 ...state,
-                userMessages: (state.userMessages || []).filter((_, i) => i !== action.index),
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: filtered
+                }
             };
-
-        case actionType.CLEAR_MESSAGES:
+        }
+        case actionType.CLEAR_TAB_MESSAGES: {
+            const tabId = action.tabId;
             return {
                 ...state,
-                userMessages: [], // 👈 清空数组
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: []
+                }
             };
+        }
+        // ============ Legacy Actions (转发到 tab-based) ============
+        case actionType.ADD_MESSAGE: {
+            // 使用 currentConversationId 作为 tabId
+            const tabId = state.currentConversationId;
+            if (!tabId) {
+                console.warn('[Reducer] ADD_MESSAGE without currentConversationId');
+                return state;
+            }
+            const currentMessages = state.tabMessages[tabId] || [];
+            console.log('[Reducer] ADD_MESSAGE to tab:', tabId, 'message:', action.message);
+            return {
+                ...state,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: [...currentMessages, action.message]
+                }
+            };
+        }
+        case actionType.SET_MESSAGE: {
+            // 使用 currentConversationId 或 action.tabId
+            const tabId = action.tabId || state.currentConversationId;
+            if (!tabId) {
+                // 静默返回，不输出警告（初始化时这是正常的）
+                return state;
+            }
+            return {
+                ...state,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: action.userMessages || []
+                }
+            };
+        }
+        case actionType.UPDATE_MESSAGE: {
+            const tabId = action.tabId || state.currentConversationId;
+            if (!tabId) return state;
+            const msgs = [...(state.tabMessages[tabId] || [])];
+            if (action.index >= 0 && action.index < msgs.length) {
+                msgs[action.index] = { ...msgs[action.index], ...action.message };
+            }
+            return {
+                ...state,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: msgs
+                }
+            };
+        }
+        case actionType.DELETE_MESSAGE: {
+            const tabId = action.tabId || state.currentConversationId;
+            if (!tabId) return state;
+            return {
+                ...state,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: (state.tabMessages[tabId] || []).filter((_, i) => i !== action.index)
+                }
+            };
+        }
+        case actionType.CLEAR_MESSAGES: {
+            const tabId = action.tabId || state.currentConversationId;
+            if (!tabId) return state;
+            return {
+                ...state,
+                tabMessages: {
+                    ...state.tabMessages,
+                    [tabId]: []
+                }
+            };
+        }
 
         case actionType.SET_CHARACTER_MOOD:
             return {

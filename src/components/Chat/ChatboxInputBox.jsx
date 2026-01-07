@@ -10,7 +10,7 @@ import { SiQuicktype } from "react-icons/si";
 import { useMcpTools } from '../../utils/mcp/useMcpTools';
 import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
-import * as bridge from '../../utils/bridge';
+import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
 
 // ===== 模块级别全局变量 =====
@@ -72,10 +72,6 @@ export const ChatboxInputBox = ({ activePetId }) => {
   // 按会话管理 AbortController，支持独立取消
   const abortControllersRef = useRef(new Map()); // Map<conversationId, AbortController>
   
-  // 兼容性：当前会话是否在生成
-  const isGenerating = generatingConversations.has(conversationIdRef.current) || 
-                       generatingConversations.has('temp');
-  
   // Per-Conversation 工具栏状态
   // 记忆功能开关状态 { [conversationId]: boolean }
   const [memoryEnabledByConversation, setMemoryEnabledByConversation] = useState({});
@@ -120,8 +116,14 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }));
   };
   
+  // 稳定的空 Set 引用，避免每次渲染创建新对象导致无限循环
+  const emptySetRef = useRef(new Set());
+  
   // 获取当前会话的 MCP 服务器启用状态
-  const enabledMcpServers = enabledMcpServersByConversation[currentConvId] ?? new Set();
+  // 使用 useMemo 来稳定引用
+  const enabledMcpServers = useMemo(() => {
+    return enabledMcpServersByConversation[currentConvId] ?? emptySetRef.current;
+  }, [enabledMcpServersByConversation, currentConvId]);
   
   // 设置当前会话的 MCP 服务器启用状态
   const setEnabledMcpServers = (value) => {
@@ -184,7 +186,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       if (!server.isRunning && server._id) {
         try {
           console.log(`[MCP] 服务器 "${serverName}" 未运行，正在自动启动...`);
-          await bridge.mcp.startServer(server._id);
+          await tauri.mcp.startServer(server._id);
           // 刷新服务器列表以获取最新状态
           await refreshServers();
           console.log(`[MCP] 服务器 "${serverName}" 已自动启动`);
@@ -212,11 +214,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
   // 更新 MCP 服务器配置 (按名称)
   const updateMcpServer = useCallback(async (serverName, updates) => {
     try {
-      if (!bridge.mcp.updateServer) {
+      if (!tauri.mcp.updateServer) {
         console.error('[MCP] updateServerByName API not available');
         return;
       }
-      await bridge.mcp.updateServer(serverName, updates);
+      await tauri.mcp.updateServer(serverName, updates);
       await refreshServers();
       console.log(`[MCP] 服务器 "${serverName}" 配置已更新:`, updates);
     } catch (err) {
@@ -229,8 +231,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     // orderList: [{ name: 'xxx', toolbarOrder: 0 }, ...]
     try {
       for (const item of orderList) {
-        if (bridge.mcp.updateServer) {
-          await bridge.mcp.updateServer(item.name, { toolbarOrder: item.toolbarOrder });
+        if (tauri.mcp.updateServer) {
+          await tauri.mcp.updateServer(item.name, { toolbarOrder: item.toolbarOrder });
         }
       }
       await refreshServers();
@@ -243,7 +245,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   // 删除 MCP 服务器 (按名称)
   const deleteMcpServer = useCallback(async (serverName) => {
     try {
-      if (!bridge.mcp.deleteServer) {
+      if (!tauri.mcp.deleteServer) {
         console.error('[MCP] deleteServerByName API not available');
         return;
       }
@@ -253,7 +255,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         newSet.delete(serverName);
         return newSet;
       });
-      await bridge.mcp.deleteServer(serverName);
+      await tauri.mcp.deleteServer(serverName);
       await refreshServers();
       console.log(`[MCP] 服务器 "${serverName}" 已删除`);
     } catch (err) {
@@ -266,7 +268,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
     // TODO: 打开图标选择器或跳转到设置页面
     console.log('[MCP] Edit icon for server:', server.name);
     // 可以通过 IPC 打开 MCP 设置窗口
-    bridge.openMcpSettings();
+    tauri.openMcpSettings();
   }, []);
 
   // 修改后的：点击按钮时复制对话内容
@@ -289,11 +291,64 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
   const inputRef = useRef(null);
   const stateValue = useStateValue();
-  console.log('[ChatboxInputBox] stateValue:', stateValue);
   const [state, dispatch] = stateValue || [{}, () => {}];
-  console.log('[ChatboxInputBox] state:', state, 'dispatch:', dispatch);
-  const { userMessages = [], suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {}, apiProviders = [] } = state;
+  // 新方案: 使用 Rust TabState
+  const { suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {}, apiProviders = [] } = state;
+  
+  // 兼容性：当前会话是否在生成
+  // 使用 currentConversationId（来自 state）而不是 conversationIdRef.current
+  // 这样当 Tab 切换时，isGenerating 会随着 currentConversationId 的变化而重新计算
+  const isGenerating = generatingConversations.has(currentConversationId) || 
+                       generatingConversations.has('temp');
+  
+  // 本地消息状态 - 从 Rust TabState 加载
+  const [userMessages, setUserMessages] = useState([]);
+  
   const suggestText = allSuggestTexts[currentConversationId] || [];
+  
+  // 新方案: 使用 Rust TabState 订阅
+  useEffect(() => {
+    if (!currentConversationId) {
+      setUserMessages([]);
+      return;
+    }
+    
+    let unlisten = null;
+    let isMounted = true;
+    
+    const setup = async () => {
+      // 获取初始状态
+      const initialState = await tauri.getTabState(currentConversationId);
+      
+      // 如果 Rust 缓存为空，从数据库加载并初始化
+      if (!initialState.messages || initialState.messages.length === 0) {
+        console.log('[ChatboxInputBox] Cache empty, loading from database:', currentConversationId);
+        const conversation = await tauri.getConversationWithHistory(currentConversationId);
+        if (conversation && conversation.history && conversation.history.length > 0) {
+          // 初始化 Rust TabState
+          await tauri.initTabMessages(currentConversationId, conversation.history);
+        } else if (isMounted) {
+          setUserMessages([]);
+        }
+      } else if (isMounted) {
+        setUserMessages(initialState.messages);
+      }
+      
+      // 订阅状态更新
+      unlisten = await tauri.subscribeTabState(currentConversationId, (newState) => {
+        if (isMounted) {
+          setUserMessages(newState.messages || []);
+        }
+      });
+    };
+    
+    setup();
+    
+    return () => {
+      isMounted = false;
+      if (unlisten) unlisten();
+    };
+  }, [currentConversationId]);
   
   // 临时覆盖模型（仅当前会话有效，不保存到数据库）
   const [overrideModel, setOverrideModel] = useState(null);
@@ -302,7 +357,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   
   // 监听跨窗口的 API providers 更新事件
   useEffect(() => {
-    const unlisten = bridge.onApiProvidersUpdated((updatedProviders) => {
+    const unlisten = tauri.onApiProvidersUpdated((updatedProviders) => {
       console.log('[ChatboxInputBox] Received api-providers-updated event:', updatedProviders);
       if (Array.isArray(updatedProviders) && dispatch) {
         dispatch({
@@ -318,7 +373,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   
   // 监听设置更新事件，当 Preferences 保存时更新默认值（仅影响之后新建的 Tab）
   useEffect(() => {
-    const unlisten = bridge.onSettingsUpdated((payload) => {
+    const unlisten = tauri.onSettingsUpdated((payload) => {
       console.log('[ChatboxInputBox] Settings updated:', payload);
       if (payload?.key === 'memoryEnabledByDefault') {
         const newDefault = payload.value !== false && payload.value !== "false";
@@ -329,7 +384,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       }
       if (payload?.key === 'chatFollowsCharacter') {
         const chatFollows = payload.value !== false && payload.value !== "false";
-        bridge.updatePreferences({ chatFollowsCharacter: chatFollows });
+        tauri.updatePreferences({ chatFollowsCharacter: chatFollows });
       }
     });
     return () => {
@@ -359,7 +414,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }).filter(p => p.visibleModels.length > 0);
   }, [apiProviders]);
 
-  console.log('[ChatboxInputBox] userMessages:', userMessages);
+  // console.log('[ChatboxInputBox] userMessages:', userMessages);
   // 将 userText 从全局状态中移除，改为本地状态管理
   const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
@@ -377,7 +432,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   useEffect(() => {
     setSystem(window.navigator.platform);
     const loadDefaultCharacter = async () => {
-      const settings = await bridge.getSettings();
+      const settings = await tauri.getSettings();
       console.log("[ChatboxInputBox] All settings loaded:", settings);
       let defaultAssistantFound = false;
       
@@ -391,7 +446,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         
         // 同步 chatFollowsCharacter 到 Rust 后端
         const chatFollows = settings.chatFollowsCharacter !== false && settings.chatFollowsCharacter !== "false";
-        bridge.updatePreferences({ chatFollowsCharacter: chatFollows });
+        tauri.updatePreferences({ chatFollowsCharacter: chatFollows });
       }
       
       try {
@@ -400,12 +455,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
           try {
             let pet = null;
             try {
-              pet = await bridge.getAssistant(settings.defaultRoleId);
+              pet = await tauri.getAssistant(settings.defaultRoleId);
             } catch (e) {
               // 忽略，尝试旧 API
             }
             if (!pet) {
-              pet = await bridge.getPet(settings.defaultRoleId);
+              pet = await tauri.getPet(settings.defaultRoleId);
             }
             if (pet) {
               setFirstCharacter(settings.defaultRoleId);
@@ -422,14 +477,14 @@ export const ChatboxInputBox = ({ activePetId }) => {
         // 如果没有设置默认助手或者默认助手无效，使用第一个可用的助手
         if (!defaultAssistantFound) {
           try {
-            const assistants = await bridge.getAssistants();
+            const assistants = await tauri.getAssistants();
             if (assistants && assistants.length > 0) {
               const firstAssistant = assistants[0];
               setFirstCharacter(firstAssistant._id);
               console.log("[ChatboxInputBox] Fallback to first assistant:", firstAssistant.name);
             } else {
               // 尝试获取 pets 作为后备
-              const pets = await bridge.getPets();
+              const pets = await tauri.getPets();
               if (pets && pets.length > 0) {
                 const firstPet = pets[0];
                 setFirstCharacter(firstPet._id);
@@ -453,7 +508,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       try {
         if (settings && settings.functionModelProviderId && settings.functionModelName) {
           // 从 API providers 中获取配置
-          const providers = await bridge.getApiProviders();
+          const providers = await tauri.getApiProviders();
           if (Array.isArray(providers)) {
             const provider = providers.find(p => p._id === settings.functionModelProviderId);
             if (provider) {
@@ -476,12 +531,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
           try {
             let pet = null;
             try {
-              pet = await bridge.getAssistant(settings.defaultModelId);
+              pet = await tauri.getAssistant(settings.defaultModelId);
             } catch (e) {
               // 忽略，尝试旧 API
             }
             if (!pet) {
-              pet = await bridge.getPet(settings.defaultModelId);
+              pet = await tauri.getPet(settings.defaultModelId);
             }
             if (pet) {
               setFounctionModel(settings.defaultModelId);
@@ -507,15 +562,14 @@ export const ChatboxInputBox = ({ activePetId }) => {
     loadDefaultCharacter();
   }, []); // 只在组件加载时执行一次
 
+  // 当 firstCharacter 改变时，直接设置 characterId，不发送事件
+  // 事件发送由 ChatboxBody 负责
   useEffect(() => {
-    if(firstCharacter!=null) {
-      bridge.sendCharacterId(firstCharacter);
+    if (firstCharacter != null) {
+      // 直接设置本地状态，不发送事件避免循环
+      setCharacterId(firstCharacter);
     }
-  
-    // return () => {
-    //   second
-    // }
-  }, [firstCharacter])
+  }, [firstCharacter]);
   
 
   // 监听角色 ID
@@ -524,7 +578,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       console.log("📩 Received character ID:", id);
       setCharacterId(id);
     };
-    const cleanup = bridge.onCharacterId(handleCharacterId);
+    const cleanup = tauri.onCharacterId(handleCharacterId);
     return () => {
       if (cleanup) cleanup();
     };
@@ -570,19 +624,19 @@ export const ChatboxInputBox = ({ activePetId }) => {
     const fetchPetInfo = async () => {
       try {
         // 首先尝试从新的 Assistant API 获取
-        let assistant = await bridge.getAssistant(characterId);
+        let assistant = await tauri.getAssistant(characterId);
         let modelConfig = null;
         
         if (assistant && assistant.modelConfigId) {
           // 新数据模型：从关联的 ModelConfig 获取 API 配置
-          modelConfig = await bridge.getModelConfig(assistant.modelConfigId);
+          modelConfig = await tauri.getModelConfig(assistant.modelConfigId);
         }
 
         setActiveModelConfig(modelConfig);
         
         // 如果新 API 没有数据，回退到旧的 Pet API（向后兼容）
         if (!assistant) {
-          assistant = await bridge.getPet(characterId);
+          assistant = await tauri.getPet(characterId);
         }
         
         if (assistant) {
@@ -619,7 +673,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
           }
 
           try {
-            const memoryJson = await bridge.getPetUserMemory(characterId);
+            const memoryJson = await tauri.getPetUserMemory(characterId);
             const memory = JSON.stringify(memoryJson);
             const getUserMemory = await processMemory(
               memory,
@@ -638,18 +692,22 @@ export const ChatboxInputBox = ({ activePetId }) => {
           return;
         }
 
-        if (conversationIdRef.current && bridge) {
-          const currentConv = await bridge.getConversationById(conversationIdRef.current);
+        if (conversationIdRef.current && tauri) {
+          const currentConv = await tauri.getConversationById(conversationIdRef.current);
           if (!currentConv || currentConv.petId !== characterId) {
-            dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
+            // 不再触发 dispatch，因为这可能导致不必要的重新渲染
+            // dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
             conversationIdRef.current = null;
           }
-        } else {
-          dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
         }
+        // 移除这个 else 分支，避免不必要的 dispatch
+        // else {
+        //   dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
+        // }
       } catch (error) {
         console.error("Error fetching pet info:", error);
-        setCharacterId(null);
+        // 不要在错误时设置 characterId 为 null，这可能导致循环
+        // setCharacterId(null);
       }
     };
 
@@ -669,17 +727,17 @@ export const ChatboxInputBox = ({ activePetId }) => {
         console.log("[ChatboxInputBox] Current assistant updated, reloading petInfo...");
         
         try {
-          let assistant = await bridge.getAssistant(characterId);
+          let assistant = await tauri.getAssistant(characterId);
           let modelConfig = null;
           
           if (assistant && assistant.modelConfigId) {
-            modelConfig = await bridge.getModelConfig(assistant.modelConfigId);
+            modelConfig = await tauri.getModelConfig(assistant.modelConfigId);
           }
           
           setActiveModelConfig(modelConfig);
           
           if (!assistant) {
-            assistant = await bridge.getPet(characterId);
+            assistant = await tauri.getPet(characterId);
           }
           
           if (assistant) {
@@ -712,8 +770,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     };
 
     let cleanup;
-    if (bridge.onPetsUpdated) {
-      cleanup = bridge.onPetsUpdated(handlePetsUpdate);
+    if (tauri.onPetsUpdated) {
+      cleanup = tauri.onPetsUpdated(handlePetsUpdate);
     }
 
     return () => {
@@ -729,8 +787,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     // 注册监听器
     let cleanup;
-    if (bridge.onNewChatCreated) {
-      cleanup = bridge.onNewChatCreated(handleNewChat);
+    if (tauri.onNewChatCreated) {
+      cleanup = tauri.onNewChatCreated(handleNewChat);
     }
 
     // 卸载时清理监听器，避免内存泄漏
@@ -743,7 +801,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
   useEffect(() => {
     const fetchConv = async (conversationId) => {
       try {
-        const conv = await bridge.getConversationById(conversationId);
+        const conv = await tauri.getConversationById(conversationId);
         setCharacterId(conv.petId)
         // alert(conv.petID);
       } catch (error) {
@@ -761,8 +819,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     };
 
     let cleanup;
-    if (bridge.onConversationId) {
-      cleanup = bridge.onConversationId(handleConversationId);
+    if (tauri.onConversationId) {
+      cleanup = tauri.onConversationId(handleConversationId);
     }
     return () => {
       if (cleanup) cleanup();
@@ -826,7 +884,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         conversationId: targetConversationId || conversationIdRef.current || 'global'
       });
     };
-    const cleanup = bridge.onMoodUpdated?.(moodUpdateHandler);
+    const cleanup = tauri.onMoodUpdated?.(moodUpdateHandler);
 
     // 组件卸载时移除监听
     return () => {
@@ -845,8 +903,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     
     // 重置 MCP 取消状态（开始新的对话）
     try {
-      if (bridge.mcp?.resetCancellation) {
-        await bridge.mcp.resetCancellation();
+      if (tauri.mcp?.resetCancellation) {
+        await tauri.mcp.resetCancellation();
       }
     } catch (err) {
       console.warn('[handleSend] Failed to reset MCP cancellation:', err);
@@ -927,23 +985,19 @@ export const ChatboxInputBox = ({ activePetId }) => {
     setUserText("");
     dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId: sendingConversationId });
 
-    // 更新 UI - 用户消息
-    console.log('[ChatboxInputBox] About to dispatch ADD_MESSAGE', {
-      isRunFromHere,
-      sendingConversationId,
-      conversationIdRef: conversationIdRef.current,
-      displayContent
-    });
-    // 修复：当 conversationIdRef.current 为 null 时（新对话），也应该添加消息
-    // 原条件 sendingConversationId === conversationIdRef.current 在新对话时会失败（"temp" !== null）
-    if (!isRunFromHere) {
-      console.log('[ChatboxInputBox] Dispatching ADD_MESSAGE');
-      dispatch({ type: actionType.ADD_MESSAGE, message: { role: "user", content: displayContent} });
-    } else {
-      console.log('[ChatboxInputBox] Skipped ADD_MESSAGE dispatch (isRunFromHere)');
+    // 新方案: 使用 Rust TabState 添加用户消息
+    const userMsg = { role: "user", content: displayContent };
+    if (!isRunFromHere && sendingConversationId) {
+      console.log('[ChatboxInputBox] Adding user message to Rust TabState');
+      await tauri.pushTabMessage(sendingConversationId, userMsg);
     }
 
-    bridge.sendMoodUpdate('thinking', initialConversationId);
+    // 新方案: 使用 TabState 设置思考状态
+    if (sendingConversationId) {
+      await tauri.setTabThinking(sendingConversationId, true);
+    }
+    // 同时更新角色窗口的 mood 动画
+    tauri.sendMoodUpdate('thinking', initialConversationId);
 
     if (inputRef.current) {
       inputRef.current.value = "";
@@ -956,7 +1010,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
       (petInfo.systemInstruction.trim().toLowerCase() === "default model (english)" ||
        petInfo.systemInstruction.trim().toLowerCase() === "default");
 
-    const historyMessages = isRunFromHere ? userMessages.slice(0, -1) : userMessages;
+    // 新方案: 从 Rust TabState 获取最新消息
+    const tabState = await tauri.getTabState(sendingConversationId);
+    const latestMessages = tabState.messages || [];
+    const historyMessages = isRunFromHere ? latestMessages.slice(0, -1) : latestMessages;
 
     // 确定使用哪个模型：优先级 overrideModel > (isDefaultPersonality ? functionModelInfo : petInfo)
     if (overrideModel) {
@@ -999,9 +1056,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
           );
           let getUserMemory = "";
           if (index.isImportant === true) {
-            await bridge.updatePetUserMemory(petInfo._id, index.key, index.value);
-            bridge.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
-            const memoryJson = await bridge.getPetUserMemory(petInfo._id);
+            await tauri.updatePetUserMemory(petInfo._id, index.key, index.value);
+            tauri.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
+            const memoryJson = await tauri.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
@@ -1036,9 +1093,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
           );
           let getUserMemory = "";
           if (index.isImportant === true) {
-            await bridge.updatePetUserMemory(petInfo._id, index.key, index.value);
-            bridge.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
-            const memoryJson = await bridge.getPetUserMemory(petInfo._id);
+            await tauri.updatePetUserMemory(petInfo._id, index.key, index.value);
+            tauri.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
+            const memoryJson = await tauri.getPetUserMemory(petInfo._id);
             const memory = JSON.stringify(memoryJson);
             getUserMemory = await processMemory(
               memory,
@@ -1183,7 +1240,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
             });
         },
         controller.signal, // Pass the signal
-        { hasMood: petInfo.hasMood !== false } // 传递 hasMood 选项
+        { hasMood: petInfo.hasMood !== false, conversationId: sendingConversationId } // 传递 hasMood 和 conversationId 选项
       );
       
       console.log('[ChatboxInputBox] callOpenAILibStream returned:', reply);
@@ -1206,20 +1263,32 @@ export const ChatboxInputBox = ({ activePetId }) => {
       ...(reply.toolCallHistory && reply.toolCallHistory.length > 0 && { toolCallHistory: reply.toolCallHistory })
     };
 
-    // 只在 AI 回复后插入机器人消息，且仅当用户仍停留在当前对话时
-    if (sendingConversationId === conversationIdRef.current) {
-      dispatch({ type: actionType.ADD_MESSAGE, message: botReply });
+    // 新方案: 无论用户是否在当前 tab，都要将 bot 回复添加到 Rust TabState
+    // 这样即使用户切换了 tab，消息也会被正确保存到数据库
+    if (sendingConversationId) {
+      await tauri.pushTabMessage(sendingConversationId, botReply);
+    }
+    
+    // 新方案: 清除思考状态
+    if (sendingConversationId && sendingConversationId !== 'temp') {
+      await tauri.setTabThinking(sendingConversationId, false);
     }
 
-    if (!sendingConversationId) {
+    // 如果是新对话（没有真实的 conversationId），创建新对话
+    if (!sendingConversationId || sendingConversationId === 'temp') {
       try {
-        const newConversation = await bridge.createConversation({
+        // 新方案: 新对话时从 Rust TabState 获取最新消息
+        const currentState = await tauri.getTabState(sendingConversationId || 'temp');
+        const currentMsgs = currentState.messages || [];
+        const newConversation = await tauri.createConversation({
           petId: petInfo._id,
           title: _userText,
-          history: [...userMessages, { role: "user", content: displayContent }, botReply],
+          history: [...currentMsgs, botReply],
         });
         if (newConversation) {
             sendingConversationId = newConversation._id;
+            // 初始化 Rust TabState
+            await tauri.setTabStateMessages(sendingConversationId, [...currentMsgs, botReply]);
             // 如果用户还在当前页面，更新 ref
             if (!conversationIdRef.current) {
                 conversationIdRef.current = newConversation._id;
@@ -1231,11 +1300,14 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }
 
     // 使用 sendingConversationId 更新数据库，确保写入正确的对话
-    if (sendingConversationId) {
-        const newHistory = [...historyMessages, { role: "user", content: displayContent }, botReply];
+    // 只有当 conversationId 是有效的（不是 'temp'）时才更新数据库
+    if (sendingConversationId && sendingConversationId !== 'temp') {
+        // 新方案: 从 Rust TabState 获取最新完整历史
+        const finalState = await tauri.getTabState(sendingConversationId);
+        const newHistory = finalState.messages || [];
         
         // Only update title if it's the first message
-        const isFirstMessage = userMessages.length === 0;
+        const isFirstMessage = historyMessages.length === 0;
         const newTitle = isFirstMessage ? _userText : undefined;
 
         const updatePayload = {
@@ -1246,9 +1318,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
             updatePayload.title = newTitle;
         }
 
-        await bridge.updateConversation(sendingConversationId, updatePayload);
+        await tauri.updateConversation(sendingConversationId, updatePayload);
         
-        // 通知全局状态更新该会话的消息记录（无论是否当前激活）
+        // 通知全局状态更新该会话的消息记录（用于侧边栏等）
         dispatch({
             type: actionType.UPDATE_CONVERSATION_MESSAGES,
             id: sendingConversationId,
@@ -1272,7 +1344,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
       }
     } finally {
       // ✅ 确保无论如何都会重置 thinking 状态，避免卡住
-      bridge.sendMoodUpdate(reply?.mood || "normal", initialConversationId);
+      // 更新 TabState 的 thinking 状态
+      if (initialConversationId) {
+        tauri.setTabThinking(initialConversationId, false);
+      }
+      // 更新角色窗口的 mood 动画
+      tauri.sendMoodUpdate(reply?.mood || "normal", initialConversationId);
       // 从生成中会话集合中移除（使用初始 ID）
       setGeneratingConversations(prev => {
         const newSet = new Set(prev);
@@ -1281,7 +1358,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       });
       // 清理 AbortController
       abortControllersRef.current.delete(initialConversationId);
-      bridge.updateChatbodyStatus?.("", initialConversationId);
+      tauri.updateChatbodyStatus?.("", initialConversationId);
     }
   };
 
@@ -1371,16 +1448,20 @@ const handleStop = async () => {
       conversationId: currentConvId
     });
     
-    // 重置心情状态为正常
-    bridge.sendMoodUpdate('normal', currentConvId);
+    // 重置 TabState 的 thinking 状态
+    if (currentConvId) {
+      tauri.setTabThinking(currentConvId, false);
+    }
+    // 重置心情状态为正常（角色窗口动画）
+    tauri.sendMoodUpdate('normal', currentConvId);
     
     // 清除聊天状态
-    bridge.updateChatbodyStatus?.('', currentConvId);
+    tauri.updateChatbodyStatus?.('', currentConvId);
     
     // 取消所有 MCP 工具调用
     try {
-      if (bridge.mcp?.cancelAllToolCalls) {
-        await bridge.mcp.cancelAllToolCalls();
+      if (tauri.mcp?.cancelAllToolCalls) {
+        await tauri.mcp.cancelAllToolCalls();
         console.log('[handleStop] MCP tool calls cancelled');
       }
     } catch (err) {
@@ -1400,7 +1481,7 @@ const handleStop = async () => {
         const base64Data = event.target.result;
         try {
           // Save to Electron
-          const result = await bridge.saveFile({
+          const result = await tauri.saveFile({
             fileName: file.name,
             fileData: base64Data,
             mimeType: file.type

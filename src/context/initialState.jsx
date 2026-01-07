@@ -2,7 +2,7 @@ export const initialState = {
     suggestText: {}, // { conversationId: [] } 按会话管理建议回复
     navBarChats: [],
     characterMoods: {}, // { conversationId: mood } 按会话管理表情状态
-    userMessages: [],
+    tabMessages: {}, // { conversationId: Message[] } 按 tab 管理消息，替代全局 userMessages
     streamingReplies: {}, // 用于保存流式传输生成的部分回复，key 为 conversationId
     currentConversationId: null,
     updatedConversation: null, // 用于通知特定会话更新 { id, messages }

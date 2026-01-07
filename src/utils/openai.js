@@ -50,34 +50,16 @@ const MoodSchema = z.object({
 // 定义不支持结构化输出的模型列表
 const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "claude-3-7-sonnet-20250219", "deepseek-r1-searching","huihui_ai/gemma3-abliterated:4b"];
 
+// 检查是否是 Gemini API 格式（需要通过 Rust 后端调用以绕过 CORS）
+const isGeminiFormat = (apiFormat) => {
+  return apiFormat === 'gemini_official' || apiFormat === 'gemini';
+};
+
 // 独立的情绪判断函数 - 基于用户问题判断情绪
 const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL) => {
   console.log('[detectMood] Starting mood detection based on user question');
   
-  // 构造一个新的 client 实例，避免干扰
-  let url = baseURL;
-  if (url === "default") {
-    url = getDefaultUrl(apiFormat);
-  } else {
-    // 只有当 URL 不包含 /v1 时才添加
-    if (!url.includes('/v1')) {
-      if(url.slice(-1) == "/") {
-        url += 'v1';
-      } else {
-        url += '/v1';
-      }
-    }
-  }
-  
-  console.log('[detectMood] Using URL:', url);
-
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: url,
-    dangerouslyAllowBrowser: true,
-  });
-
-  // 基于用户问题判断情绪
+  // 基于用户问题判断情绪的消息
   const moodMessages = [
     { 
       role: "system", 
@@ -90,6 +72,48 @@ const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL) => {
   ];
 
   try {
+    // 对于 Gemini API，使用 Rust 后端调用以绕过浏览器 CORS 限制
+    if (isGeminiFormat(apiFormat)) {
+      console.log('[detectMood] Using Rust backend for Gemini API');
+      const result = await callLLM({
+        messages: moodMessages,
+        apiFormat,
+        apiKey,
+        model,
+        baseUrl: baseURL === "default" ? undefined : baseURL,
+        options: { temperature: 0.1 }
+      });
+      
+      const content = (result.content || "").toLowerCase();
+      console.log('[detectMood] Gemini response:', content);
+      if (content.includes("angry")) return "angry";
+      if (content.includes("smile")) return "smile";
+      return "normal";
+    }
+    
+    // 对于其他 API，使用 OpenAI SDK（支持结构化输出）
+    let url = baseURL;
+    if (url === "default") {
+      url = getDefaultUrl(apiFormat);
+    } else {
+      // 只有当 URL 不包含 /v1 时才添加
+      if (!url.includes('/v1')) {
+        if(url.slice(-1) == "/") {
+          url += 'v1';
+        } else {
+          url += '/v1';
+        }
+      }
+    }
+    
+    console.log('[detectMood] Using URL:', url);
+
+    const openai = new OpenAI({
+      apiKey: apiKey,
+      baseURL: url,
+      dangerouslyAllowBrowser: true,
+    });
+
     if (notSupportedModels.includes(model)) {
       console.log('[detectMood] Using non-structured output path for model:', model);
       // 不支持结构化输出，使用普通对话并解析
@@ -168,7 +192,7 @@ export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL,
 };
 
 export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, baseURL, onChunk, abortSignal, options = {}) => {
-  const { hasMood = true, enableSearch = false } = options;
+  const { hasMood = true, enableSearch = false, conversationId = 'default' } = options;
   
   console.log('[callOpenAILibStream] hasMood option:', hasMood, 'enableSearch:', enableSearch, 'options:', options);
   
@@ -206,7 +230,8 @@ export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, ba
       // 传增量 deltaText，因为 reducer 是 append 模式
       if (onChunk) onChunk(deltaText);
     },
-    abortSignal
+    abortSignal,
+    conversationId // 传递 conversationId 用于 Rust 后端流式隔离
   });
 
   // 等待情绪判断完成
@@ -225,12 +250,20 @@ export const callCommand = async (messages, apiFormat, apiKey, model, baseURL) =
   if (baseURL === "default") {
     baseURL = getDefaultUrl(apiFormat);
   } else {
-    // 只有当 URL 不包含 /v1 时才添加
-    if (!baseURL.includes('/v1')) {
-      if(baseURL.slice(-1) == "/") {
-        baseURL += 'v1';
-      } else {
-        baseURL += '/v1';
+    // 对于 gemini_official，需要特殊处理 URL
+    if (apiFormat === 'gemini_official' || apiFormat === 'gemini') {
+      if (!baseURL.includes('/v1beta/openai')) {
+        baseURL = baseURL.replace(/\/+$/, '');
+        baseURL += '/v1beta/openai';
+      }
+    } else {
+      // 其他格式：只有当 URL 不包含 /v1 时才添加
+      if (!baseURL.includes('/v1')) {
+        if(baseURL.slice(-1) == "/") {
+          baseURL += 'v1';
+        } else {
+          baseURL += '/v1';
+        }
       }
     }
   }
@@ -295,38 +328,63 @@ const LongTermMemoryResponseSchema = z.object({
 });
 
 export const longTimeMemory = async (message, apiFormat, apiKey, model, baseURL) => {
-  if (baseURL === "default") {
-    baseURL = getDefaultUrl(apiFormat);
-  } else {
-    // 只有当 URL 不包含 /v1 时才添加
-    if (!baseURL.includes('/v1')) {
-      if(baseURL.slice(-1) == "/") {
-        baseURL += 'v1';
-      } else {
-        baseURL += '/v1';
-      }
-    }
-  }
+  const systemContent = "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息（姓名、职业、学校、公司等）），或者用户想让你（记住）的事情。";
+  const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n"${message}"\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx, "key":"Name（sample）", "value":"Jules(sample)" }`;
 
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: baseURL,
-    dangerouslyAllowBrowser: true,
-  });
-
-  const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
-
-  const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n“${message}”\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx, "key":"Name（sample）", "value":"Jules(sample)" }`;
+  const memoryMessages = [
+    { role: "system", content: systemContent },
+    { role: "user", content: prompt },
+  ];
 
   try {
+    // 对于 Gemini API，使用 Rust 后端调用以绕过浏览器 CORS 限制
+    if (isGeminiFormat(apiFormat)) {
+      console.log('[longTimeMemory] Using Rust backend for Gemini API');
+      const result = await callLLM({
+        messages: memoryMessages,
+        apiFormat,
+        apiKey,
+        model,
+        baseUrl: baseURL === "default" ? undefined : baseURL,
+        options: { temperature: 0.1 }
+      });
+      
+      const raw = result.content || "";
+      try {
+        return JSON.parse(raw);
+      } catch (e) {
+        console.error("解析 JSON 出错：", e);
+        return { isImportant: false, score: 0.0, raw };
+      }
+    }
+    
+    // 对于其他 API，使用 OpenAI SDK
+    let url = baseURL;
+    if (url === "default") {
+      url = getDefaultUrl(apiFormat);
+    } else {
+      if (!url.includes('/v1')) {
+        if(url.slice(-1) == "/") {
+          url += 'v1';
+        } else {
+          url += '/v1';
+        }
+      }
+    }
+
+    const openai = new OpenAI({
+      apiKey: apiKey,
+      baseURL: url,
+      dangerouslyAllowBrowser: true,
+    });
+
+    const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
+
     if (notSupportedModels.includes(model)) {
       // 不支持结构化输出，使用普通方式
       const chatCompletion = await openai.chat.completions.create({
         model: model,
-        messages: [
-          { role: "system", content: "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息（姓名、职业、学校、公司等）），或者用户想让你（记住）的事情。" },
-          { role: "user", content: prompt },
-        ],
+        messages: memoryMessages,
         temperature: 0.1
       });
 
@@ -358,25 +416,6 @@ export const longTimeMemory = async (message, apiFormat, apiKey, model, baseURL)
 };
 
 export const processMemory = async (configStr, apiFormat, apiKey, model, baseURL) => {
-  if (baseURL === "default") {
-    baseURL = getDefaultUrl(apiFormat);
-  } else {
-    // 只有当 URL 不包含 /v1 时才添加
-    if (!baseURL.includes('/v1')) {
-      if(baseURL.slice(-1) == "/") {
-        baseURL += 'v1';
-      } else {
-        baseURL += '/v1';
-      }
-    }
-  }
-  
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: baseURL,
-    dangerouslyAllowBrowser: true,
-  });
-  
   // 解析配置
   let config;
   try {
@@ -385,16 +424,53 @@ export const processMemory = async (configStr, apiFormat, apiKey, model, baseURL
     console.error("解析配置数据出错：", e);
     return { error: "配置数据格式错误" };
   }
-  
-  const notSupportedModels = ["gpt-3.5-turbo", "gpt-4-turbo", "grok-2-latest", "grok-vision-beta", "grok-2-1212"];
+
+  const systemContent = "你是一个用户记忆生成助手，根据用户的配置信息生成对用户的理解和记忆。对于用户，你应当使用第三人称单数，（他｜她）是XXX，（他｜她）的爱好是XXX，（他｜她）和你之间的关系是XXX";
   const prompt = `分析这个用户配置并生成关于用户的记忆：\n\n${JSON.stringify(config, null, 2)}\n\n返回一段描述用户偏好和设置的文本。`;
-  
+
   try {
-    // 所有模型使用同一种方式调用
+    // 对于 Gemini API，使用 Rust 后端调用以绕过浏览器 CORS 限制
+    if (isGeminiFormat(apiFormat)) {
+      console.log('[processMemory] Using Rust backend for Gemini API');
+      const result = await callLLM({
+        messages: [
+          { role: "system", content: systemContent },
+          { role: "user", content: prompt },
+        ],
+        apiFormat,
+        apiKey,
+        model,
+        baseUrl: baseURL === "default" ? undefined : baseURL,
+        options: { temperature: 0.1 }
+      });
+      
+      return result.content || "";
+    }
+    
+    // 对于其他 API，使用 OpenAI SDK
+    let url = baseURL;
+    if (url === "default") {
+      url = getDefaultUrl(apiFormat);
+    } else {
+      if (!url.includes('/v1')) {
+        if(url.slice(-1) == "/") {
+          url += 'v1';
+        } else {
+          url += '/v1';
+        }
+      }
+    }
+
+    const openai = new OpenAI({
+      apiKey: apiKey,
+      baseURL: url,
+      dangerouslyAllowBrowser: true,
+    });
+
     const chatCompletion = await openai.chat.completions.create({
       model: model,
       messages: [
-        { role: "system", content: "你是一个用户记忆生成助手，根据用户的配置信息生成对用户的理解和记忆。对于用户，你应当使用第三人称单数，（他｜她）是XXX，（他｜她）的爱好是XXX，（他｜她）和你之间的关系是XXX" },
+        { role: "system", content: systemContent },
         { role: "user", content: prompt },
       ],
       temperature: 0.1
@@ -408,48 +484,34 @@ export const processMemory = async (configStr, apiFormat, apiKey, model, baseURL
 };
 
 export const promptSuggestion = async (messages, apiFormat, apiKey, model, baseURL) => {
-  if (baseURL === "default") {
-    baseURL = getDefaultUrl(apiFormat);
-  } else {
-    // 只有当 URL 不包含 /v1 时才添加
-    if (!baseURL.includes('/v1')) {
-      if(baseURL.slice(-1) == "/") {
-        baseURL += 'v1';
-      } else {
-        baseURL += '/v1';
-      }
-    }
-  }
-
-  const openai = new OpenAI({
-    apiKey: apiKey,
-    baseURL: baseURL,
-    dangerouslyAllowBrowser: true,
-  });
-
-  const prompt = `User：\n“${messages.user}”\nAssistant：\n”${messages.assistant}“`;
+  // 使用统一 LLM 层支持所有 API 格式（包括 Gemini）
+  const prompt = `User：\n"${messages.user}"\nAssistant：\n"${messages.assistant}"`;
+  const systemPrompt = "你是一个prompt生成机器人，根据用户提供的内容生成1到3个不同的启发性提示，每个提示为一句话，并用\"|\"符号分隔。请直接返回提示文本，不要包含其他内容或任何解释说明也不要包含双引号。回复时请根据用户输入的语言自动选择回复语言，不要固定为中文或其他特定语言。";
 
   try {
-      const chatCompletion = await openai.chat.completions.create({
-        model: model,
-        messages: [
-          { role: "system", content: "你是一个prompt生成机器人，根据用户提供的内容生成1到3个不同的启发性提示，每个提示为一句话，并用“|”符号分隔。请直接返回提示文本，不要包含其他内容或任何解释说明也不要包含双引号。回复时请根据用户输入的语言自动选择回复语言，不要固定为中文或其他特定语言。" },
-          { role: "user", content: prompt },
-        ],
-        temperature: 0.7
-      });
+    const result = await callLLM({
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: prompt },
+      ],
+      apiFormat: apiFormat,
+      apiKey: apiKey,
+      model: model,
+      baseUrl: baseURL === "default" ? undefined : baseURL,
+      options: { temperature: 0.7 }
+    });
 
-      try {
-        return chatCompletion.choices[0].message.content
-      } catch (e) {
-        return e;
-      }
+    if (result.error) {
+      console.error("QuickReply 请求出错：", result.content);
+      return null;
+    }
+
+    return result.content;
   } catch (error) {
-    console.error("OpenAI 请求出错：", error);
-    return error;
+    console.error("QuickReply 请求出错：", error);
+    return null;
   }
 };
-
 export const fetchModels = async (baseURL, apiKey, apiFormat) => {
   // 使用统一的 LLM 适配层
   // Note: Arguments are received in order (baseURL, apiKey, apiFormat) to match usages in ManagementPage.jsx

@@ -4,7 +4,8 @@ import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import bridge from '../../utils/bridge';
+import * as tauri from '../../utils/tauri';
+import { listen } from '@tauri-apps/api/event';
 import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
@@ -12,7 +13,8 @@ import { LuMaximize2 } from "react-icons/lu";
 // import ChatboxTabBar from './ChatboxTabBar';
 
 export const Chatbox = () => {
-  const [{ userMessages, navBarChats, updatedConversation, streamingReplies, characterMoods }, dispatch] = useStateValue();
+  // 方案 C: 使用 Rust 内存缓存管理消息
+  const [{ navBarChats, updatedConversation, streamingReplies, characterMoods }, dispatch] = useStateValue();
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [conversations, setConversations] = useState([]);
@@ -31,14 +33,12 @@ export const Chatbox = () => {
   
   // chatbodyStatus is for "Memory updating" display - use activeTabId state for immediate reactivity
   const chatbodyStatus = activeTabId ? (chatbodyStatuses[activeTabId] || '') : '';
-
-  console.log('[ChatboxBody] Render, testCount:', testCount);
   
   // 切换侧边栏时调整窗口大小
   const handleToggleSidebar = () => {
     const newState = !sidebarOpen;
     setSidebarOpen(newState);
-    bridge.toggleSidebar?.(newState);
+    tauri.toggleSidebar?.(newState);
   };
 
   // Track if default assistant has been loaded
@@ -54,7 +54,7 @@ export const Chatbox = () => {
     const fetchConversations = async () => {
       console.log('[ChatboxBody] fetchConversations called');
       try {
-        const data = await bridge.getConversations();
+        const data = await tauri.getConversations();
         console.log('[ChatboxBody] getConversations returned:', data);
         if (Array.isArray(data)) {
             // Filter out empty conversations (no messages)
@@ -67,7 +67,7 @@ export const Chatbox = () => {
         }
         
         // Also fetch orphan conversations
-        const orphans = await bridge.getOrphanConversations();
+        const orphans = await tauri.getOrphanConversations();
         if (Array.isArray(orphans)) {
             const nonEmptyOrphans = orphans.filter(conv => conv.messageCount > 0);
             setOrphanConversations(nonEmptyOrphans);
@@ -80,35 +80,18 @@ export const Chatbox = () => {
       }
     };
     fetchConversations();
-  }, [userMessages]); // Refresh list when messages change (e.g. new chat created)
-
-  // Sync global userMessages to active tab
-  useEffect(() => {
-    console.log('[ChatboxBody] userMessages changed:', userMessages, 'activeTabId:', activeTabId);
-    if (activeTabId && userMessages) {
-        console.log('[ChatboxBody] Syncing userMessages to tab:', activeTabId);
-        setTabs(prevTabs => {
-            const newTabs = prevTabs.map(tab => {
-                if (tab.id === activeTabId) {
-                    console.log('[ChatboxBody] Updated tab messages:', userMessages);
-                    return { ...tab, messages: userMessages };
-                }
-                return tab;
-            });
-            console.log('[ChatboxBody] New tabs state:', newTabs);
-            return newTabs;
-        });
-    }
-  }, [userMessages, activeTabId]);
+  }, []); // 新方案: 不再依赖 tabMessages
 
   // 监听后台更新的会话消息（处理非激活 Tab 的更新）
   useEffect(() => {
     if (updatedConversation) {
+        // 新方案: 使用 Rust TabState 更新
+        tauri.setTabStateMessages(updatedConversation.id, updatedConversation.messages);
+        // 同时更新 tab label
         setTabs(prevTabs => prevTabs.map(tab => {
             if (tab.id === updatedConversation.id) {
                 return { 
                     ...tab, 
-                    messages: updatedConversation.messages,
                     label: updatedConversation.title ? updatedConversation.title : tab.label 
                 };
             }
@@ -128,7 +111,7 @@ export const Chatbox = () => {
         }));
       }
     };
-    const cleanup = bridge.onChatbodyStatusUpdated?.(chatbodyStatusHandler);
+    const cleanup = tauri.onChatbodyStatusUpdated?.(chatbodyStatusHandler);
     return () => {
       if (cleanup) cleanup();
     };
@@ -144,41 +127,75 @@ export const Chatbox = () => {
 
   // Handle New Tab from Character ID (moved from ChatboxTabBar)
   // This also handles auto-loading the default assistant on first mount
+  // 追踪正在处理的 character-id，防止重复处理
+  const processingCharacterIdsRef = useRef(new Set());
+
   useEffect(() => {
     console.log('[ChatboxBody] Setting up character-id listener');
+    let unlisten = null;
+    let isMounted = true;
     
-    const handleCharacterId = (id) => {
-      console.log('[ChatboxBody] Received character-id:', id);
-      // Use ref to get the latest navBarChats value
-      dispatch({
-        type: actionType.SET_NAVBAR_CHAT,
-        navBarChats: [...(navBarChatsRef.current || []), id],
-      });
-      const fetchCharacter = async () => {
-        console.log('[ChatboxBody] Fetching character for id:', id);
+    const handleCharacterId = async (id) => {
+      console.log('[ChatboxBody] ★★★ Received character-id:', id);
+      if (!isMounted) {
+        console.log('[ChatboxBody] ★★★ Component not mounted, skipping');
+        return;
+      }
+      
+      // 防止重复处理同一个 id
+      if (processingCharacterIdsRef.current.has(id)) {
+        console.log('[ChatboxBody] ★★★ Already processing this id, skipping');
+        return;
+      }
+      processingCharacterIdsRef.current.add(id);
+      
+      try {
+        // 只有当 id 不在 navBarChats 中时才添加
+        if (!navBarChatsRef.current?.includes(id)) {
+          dispatch({
+            type: actionType.SET_NAVBAR_CHAT,
+            navBarChats: [...(navBarChatsRef.current || []), id],
+          });
+        }
+        
+        console.log('[ChatboxBody] ★★★ Fetching character for id:', id);
         // 优先尝试新的 Assistant API，失败则回退到旧的 Pet API
         let pet = null;
         try {
-          pet = await bridge.getAssistant(id);
-          console.log('[ChatboxBody] Got assistant:', pet);
+          pet = await tauri.getAssistant(id);
+          console.log('[ChatboxBody] ★★★ Got assistant:', pet);
         } catch (e) {
-          console.log('[ChatboxBody] getAssistant failed, trying getPet');
+          console.log('[ChatboxBody] ★★★ getAssistant failed:', e, ', trying getPet');
           // 回退到旧 API
         }
         if (!pet) {
-          pet = await bridge.getPet(id);
-          console.log('[ChatboxBody] Got pet:', pet);
+          try {
+            pet = await tauri.getPet(id);
+            console.log('[ChatboxBody] ★★★ Got pet:', pet);
+          } catch (e) {
+            console.error('[ChatboxBody] ★★★ getPet also failed:', e);
+          }
         }
         if (!pet) {
-          console.error("Could not find assistant or pet with id:", id);
+          console.error("[ChatboxBody] ★★★ Could not find assistant or pet with id:", id);
           return;
         }
-        const newConversation = await bridge.createConversation({
-          petId: pet._id,
-          title: "New Chat",
-          history: [],
-        });
-        bridge.sendConversationId?.(newConversation._id);
+        
+        console.log('[ChatboxBody] ★★★ Creating conversation for pet:', pet._id);
+        let newConversation;
+        try {
+          newConversation = await tauri.createConversation({
+            petId: pet._id,
+            title: "New Chat",
+            history: [],
+          });
+          console.log('[ChatboxBody] ★★★ Created conversation:', newConversation);
+        } catch (e) {
+          console.error('[ChatboxBody] ★★★ Failed to create conversation:', e);
+          return;
+        }
+        
+        tauri.sendConversationId?.(newConversation._id);
         
         const newTab = {
             id: newConversation._id,
@@ -187,6 +204,14 @@ export const Chatbox = () => {
             messages: [],
             isActive: true
         };
+        
+        console.log('[ChatboxBody] ★★★ Initializing tab messages');
+        // 新方案: 初始化 Rust TabState
+        try {
+          await tauri.initTabMessages(newConversation._id, []);
+        } catch (e) {
+          console.error('[ChatboxBody] ★★★ initTabMessages failed:', e);
+        }
         
         // Initialize mood and suggestText for new conversation
         dispatch({
@@ -200,52 +225,87 @@ export const Chatbox = () => {
             conversationId: newConversation._id
         });
         
+        if (!isMounted) {
+          console.log('[ChatboxBody] ★★★ Component unmounted during async, skipping setTabs');
+          return;
+        }
+        
+        console.log('[ChatboxBody] ★★★ Setting tabs with new tab:', newTab);
         setTabs(prev => {
-            if (prev.some(t => t.id === newTab.id)) return prev;
-            return [...prev.map(t => ({...t, isActive: false})), newTab];
+            console.log('[ChatboxBody] ★★★ setTabs prev:', prev);
+            if (prev.some(t => t.id === newTab.id)) {
+              console.log('[ChatboxBody] ★★★ Tab already exists');
+              return prev;
+            }
+            const newTabs = [...prev.map(t => ({...t, isActive: false})), newTab];
+            console.log('[ChatboxBody] ★★★ setTabs newTabs:', newTabs);
+            return newTabs;
         });
         
+        console.log('[ChatboxBody] ★★★ Calling handleTabClick:', newConversation._id);
         handleTabClick(newConversation._id);
-      };
-      fetchCharacter();
+      } finally {
+        // 处理完成后移除标志
+        processingCharacterIdsRef.current.delete(id);
+      }
     };
     
-    const cleanup = bridge.onCharacterId?.(handleCharacterId);
-    
-    // Auto-load default assistant after listener is ready
-    const loadDefaultAssistant = async () => {
-      // Wait for listener to be ready before sending character-id
-      if (cleanup?.ready) {
-        await cleanup.ready;
+    // 直接使用 Tauri listen API
+    const setup = async () => {
+      console.log('[ChatboxBody] Setting up listen for character-id...');
+      unlisten = await listen('character-id', (event) => {
+        console.log('[ChatboxBody] ★★★ Raw event received:', event);
+        handleCharacterId(event.payload);
+      });
+      console.log('[ChatboxBody] ★★★ character-id listener is READY, unlisten:', unlisten);
+      
+      // 检查是否有待处理的 character-id (在 listener ready 之前发送的)
+      try {
+        const pendingId = await tauri.getPendingCharacterId();
+        console.log('[ChatboxBody] ★★★ Checking pending character-id:', pendingId);
+        if (pendingId && isMounted) {
+          console.log('[ChatboxBody] ★★★ Found pending character-id, processing:', pendingId);
+          handleCharacterId(pendingId);
+          return; // 已经处理了待处理的 ID，不需要加载默认助手
+        }
+      } catch (error) {
+        console.error('[ChatboxBody] Error checking pending character-id:', error);
       }
       
+      // Auto-load default assistant after listener is ready
       // Only run once on first mount when no tabs exist
-      if (defaultAssistantLoadedRef.current) return;
-      defaultAssistantLoadedRef.current = true;
-      
-      // Skip if tabs already exist
-      if (tabs.length > 0) {
-        console.log('[ChatboxBody] Tabs already exist, skipping default assistant load');
+      // 使用 closure 变量而不是 ref，避免 StrictMode 重复渲染问题
+      if (!isMounted) {
+        console.log('[ChatboxBody] Component not mounted before default assistant load, skipping');
         return;
       }
       
+      // 使用 ref 防止重复加载（即使在 StrictMode 下）
+      if (defaultAssistantLoadedRef.current) {
+        console.log('[ChatboxBody] Default assistant already loaded, skipping');
+        return;
+      }
+      defaultAssistantLoadedRef.current = true;
+      
+      // Skip if tabs already exist
+      // Note: tabs.length check here captures initial value, which should be 0
       try {
-        const settings = await bridge.getSettings();
+        const settings = await tauri.getSettings();
+        console.log('[ChatboxBody] Settings loaded for default assistant:', settings?.defaultRoleId);
         let defaultAssistantId = settings?.defaultRoleId;
         
         // If no default assistant is set, use the first available assistant
         if (!defaultAssistantId) {
-          const assistants = await bridge.getAssistants();
+          const assistants = await tauri.getAssistants();
           if (assistants && assistants.length > 0) {
             defaultAssistantId = assistants[0]._id;
             console.log('[ChatboxBody] No default assistant set, using first available:', defaultAssistantId);
           }
         }
         
-        if (defaultAssistantId) {
+        if (defaultAssistantId && isMounted) {
           console.log('[ChatboxBody] Auto-loading default assistant:', defaultAssistantId);
           // 直接调用 handler，而不是通过事件系统
-          // 这样可以避免竞态条件，因为不需要等待事件传递
           handleCharacterId(defaultAssistantId);
         }
       } catch (error) {
@@ -253,16 +313,22 @@ export const Chatbox = () => {
       }
     };
     
-    loadDefaultAssistant();
+    setup();
     
     return () => {
-      if (cleanup) cleanup();
+      isMounted = false;
+      // 在 StrictMode 下，组件卸载时重置 ref，允许重新挂载时重新加载
+      defaultAssistantLoadedRef.current = false;
+      if (unlisten) {
+        console.log('[ChatboxBody] Cleaning up character-id listener');
+        unlisten();
+      }
     };
-  }, []); // Run only once on mount - handler will use latest navBarChats via closure
+  }, []); // Run only once on mount
 
   const fetchConversationById = async (conversationId) => {
     try {
-      return await bridge.getConversationById(conversationId);
+      return await tauri.getConversationWithHistory(conversationId);
     } catch (error) {
       console.error("Error fetching conversation:", error);
       throw error;
@@ -279,16 +345,17 @@ export const Chatbox = () => {
     
     setTabs(prev => prev.map(t => ({...t, isActive: t.id === clickedId})));
 
-    // Find tab data
-    const tab = tabs.find(t => t.id === clickedId);
-    let messages = tab?.messages || [];
+    // 新方案: 检查 Rust TabState 是否有消息
+    const tabState = await tauri.getTabState(clickedId);
+    let messages = tabState.messages || [];
 
-    // If messages empty, fetch
+    // If messages empty, fetch from backend and initialize Rust TabState
     if (messages.length === 0) {
          try {
             const conversation = await fetchConversationById(clickedId);
-            messages = conversation.history;
-            setTabs(prev => prev.map(t => t.id === clickedId ? { ...t, messages } : t));
+            messages = conversation.history || [];
+            // 新方案: 初始化 Rust TabState
+            await tauri.initTabMessages(clickedId, messages);
          } catch (e) {
              console.error(e);
          }
@@ -296,13 +363,9 @@ export const Chatbox = () => {
 
     // Sync global - send the mood of the clicked tab to update character display
     const tabMood = characterMoods[clickedId] || 'normal';
-    bridge.sendMoodUpdate?.(tabMood, clickedId);
-    bridge.sendConversationId?.(clickedId);
+    tauri.sendMoodUpdate?.(tabMood, clickedId);
+    tauri.sendConversationId?.(clickedId);
     
-    dispatch({
-      type: actionType.SET_MESSAGE,
-      userMessages: messages,
-    });
     dispatch({
         type: actionType.SET_CURRENT_CONVERSATION_ID,
         id: clickedId,
@@ -332,7 +395,7 @@ export const Chatbox = () => {
     } else if (!nextActiveId) {
         setActiveTabId(null);
         activeTabIdRef.current = null;
-        dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
+        // 方案 B: 不再需要清空全局消息
         dispatch({ type: actionType.SET_CURRENT_CONVERSATION_ID, id: null });
     }
   };
@@ -363,6 +426,9 @@ export const Chatbox = () => {
     setActiveTabId(conv._id);
     activeTabIdRef.current = conv._id;
     
+    // 新方案: 初始化 Rust TabState
+    await tauri.initTabMessages(conv._id, conversation.history);
+    
     // Initialize mood and suggestText for new tab
     dispatch({
         type: actionType.SET_CHARACTER_MOOD,
@@ -375,11 +441,7 @@ export const Chatbox = () => {
         conversationId: conv._id
     });
 
-    bridge.sendConversationId?.(conv._id);
-    dispatch({
-      type: actionType.SET_MESSAGE,
-      userMessages: conversation.history
-    });
+    tauri.sendConversationId?.(conv._id);
     dispatch({
         type: actionType.SET_CURRENT_CONVERSATION_ID,
         id: conv._id,
@@ -390,13 +452,13 @@ export const Chatbox = () => {
     const activeTab = tabs.find(tab => tab.id === activeTabId);
     if (activeTab) {
         // 如果有活跃的 Tab，使用其 petId 创建新对话
-        bridge.sendCharacterId?.(activeTab.petId);
+        tauri.sendCharacterId?.(activeTab.petId);
     } else if (tabs.length > 0) {
         // 如果有其他 Tab，使用第一个 Tab 的 petId
-        bridge.sendCharacterId?.(tabs[0].petId);
+        tauri.sendCharacterId?.(tabs[0].petId);
     } else {
         // 没有任何 Tab，打开角色选择窗口
-        bridge.changeSelectCharacterWindow?.();
+        tauri.changeSelectCharacterWindow?.();
     }
   };
 
@@ -410,9 +472,9 @@ export const Chatbox = () => {
     // 获取角色信息用于显示名称
     let petName = "Assistant";
     try {
-      let pet = await bridge.getAssistant(activeTab.petId);
+      let pet = await tauri.getAssistant(activeTab.petId);
       if (!pet) {
-        pet = await bridge.getPet(activeTab.petId);
+        pet = await tauri.getPet(activeTab.petId);
       }
       if (pet && pet.name) {
         petName = pet.name;
@@ -444,13 +506,13 @@ export const Chatbox = () => {
 
   const handleDelete = async (e, conversationId) => {
     e.stopPropagation();
-    const confirmDelete = await bridge.confirm("Are you sure you want to delete this conversation?", {
+    const confirmDelete = await tauri.confirm("Are you sure you want to delete this conversation?", {
       title: 'Delete Conversation'
     });
     if (!confirmDelete) return;
 
     try {
-      await bridge.deleteConversation(conversationId);
+      await tauri.deleteConversation(conversationId);
       setConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
       setOrphanConversations((prevConvs) => prevConvs.filter((conv) => conv._id !== conversationId));
       
@@ -469,7 +531,7 @@ export const Chatbox = () => {
   const handleOrphanClick = async (conv) => {
     setSelectedOrphanConv(conv);
     try {
-      const assistants = await bridge.getAssistants();
+      const assistants = await tauri.getAssistants();
       setAvailableAssistants(assistants || []);
       setShowTransferModal(true);
     } catch (error) {
@@ -483,9 +545,9 @@ export const Chatbox = () => {
     if (!selectedOrphanConv || !newPetId) return;
     
     try {
-      await bridge.transferConversation(selectedOrphanConv._id, newPetId);
+      await tauri.transferConversation(selectedOrphanConv._id, newPetId);
       // Refresh conversations
-      const data = await bridge.getConversations();
+      const data = await tauri.getConversations();
       if (Array.isArray(data)) {
         const nonEmptyConversations = data.filter(conv => conv.messageCount > 0);
         setConversations(nonEmptyConversations);
@@ -505,10 +567,10 @@ export const Chatbox = () => {
   };
 
   const handleClose = () => {
-    bridge.hideChatWindow?.();
+    tauri.hideChatWindow?.();
   };
   const handleMax = () => {
-    bridge.maxmizeChatWindow?.();
+    tauri.maxmizeChatWindow?.();
   };
 
   return (
@@ -623,7 +685,7 @@ export const Chatbox = () => {
                 <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
                     <span>No active conversations</span>
                     <button 
-                        onClick={() => bridge.changeSelectCharacterWindow?.()}
+                        onClick={() => tauri.changeSelectCharacterWindow?.()}
                         className="px-4 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors text-sm"
                     >
                         Select an Assistant
@@ -637,7 +699,7 @@ export const Chatbox = () => {
                         className="flex-1 flex flex-col h-full"
                     >
                         <ChatboxMessageArea 
-                            messages={tab.messages} 
+                            conversationId={tab.id}
                             streamingContent={streamingReplies ? streamingReplies[tab.id] : null} 
                             isActive={tab.id === activeTabId} 
                         />

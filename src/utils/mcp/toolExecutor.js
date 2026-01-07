@@ -7,7 +7,7 @@
 import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
-import bridge from '../bridge.js';
+import tauri from '../tauri';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -20,7 +20,7 @@ let cachedServerConfigs = new Map();
  */
 export const refreshServerConfigsCache = async () => {
   try {
-    const servers = await bridge.mcp.getServers();
+    const servers = await tauri.mcp.getServers();
     cachedServerConfigs = new Map();
     for (const server of servers || []) {
       cachedServerConfigs.set(server.name, server);
@@ -50,8 +50,8 @@ export const getServerMaxIterations = (serverName) => {
 refreshServerConfigsCache();
 
 // 监听服务器更新事件
-if (bridge.mcp?.onServersUpdated) {
-  bridge.mcp.onServersUpdated(() => {
+if (tauri.mcp?.onServersUpdated) {
+  tauri.mcp.onServersUpdated(() => {
     refreshServerConfigsCache();
   });
 }
@@ -61,18 +61,30 @@ const TOOL_EXECUTION_TIMEOUT_MS = 300000; // 5 minutes for individual tool call
 const DEFAULT_TOOL_TIMEOUT_MS = 60000; // 1 minute default
 
 /**
- * 获取所有可用的 MCP 工具
+ * 获取可用的 MCP 工具列表
  * 
  * @returns {Promise<Array>} MCP 工具数组
  */
 export const getMcpTools = async () => {
   try {
-    if (!bridge.mcp?.getAllTools) {
+    if (!tauri.mcp?.getAllTools) {
       console.log('[MCP] MCP API not available');
       return [];
     }
     
-    const tools = await bridge.mcp.getAllTools();
+    const rawTools = await tauri.mcp.getAllTools();
+    
+    // 扁平化 Rust 返回的嵌套结构
+    // Rust 返回: { serverId, serverName, tool: { name, description, inputSchema } }
+    // 前端需要: { serverId, serverName, name, description, inputSchema }
+    const tools = rawTools.map(item => ({
+      serverId: item.serverId,
+      serverName: item.serverName,
+      name: item.tool?.name,
+      description: item.tool?.description,
+      inputSchema: item.tool?.inputSchema
+    })).filter(tool => tool.name); // 过滤掉没有 name 的工具
+    
     console.log('[MCP] Available tools:', tools.length);
     return tools;
   } catch (error) {
@@ -121,14 +133,14 @@ export const executeMcpTool = async (serverName, toolName, args, options = {}) =
   const timeout = options.timeout || DEFAULT_TOOL_TIMEOUT_MS;
   
   try {
-    if (!bridge.mcp?.callTool) {
+    if (!tauri.mcp?.callTool) {
       throw new Error('MCP API not available');
     }
     
     console.log(`[MCP] Executing tool: ${serverName}/${toolName} (timeout: ${timeout}ms)`, args);
     
     const result = await withTimeout(
-      bridge.mcp.callTool(serverName, toolName, args),
+      tauri.mcp.callTool(serverName, toolName, args),
       timeout,
       `Tool ${serverName}/${toolName}`
     );
@@ -155,7 +167,7 @@ export const executeToolByName = async (toolName, args, options = {}) => {
   const timeout = options.timeout || TOOL_EXECUTION_TIMEOUT_MS;
   
   try {
-    if (!bridge.mcp?.callToolByName) {
+    if (!tauri.mcp?.callToolByName) {
       throw new Error('MCP API not available');
     }
     
@@ -167,7 +179,7 @@ export const executeToolByName = async (toolName, args, options = {}) => {
     console.log(`[MCP] Executing tool by name: ${toolName} (timeout: ${timeout}ms)`, args);
     
     // 创建一个可以被取消的 Promise
-    const toolPromise = bridge.mcp.callToolByName(toolName, args);
+    const toolPromise = tauri.mcp.callToolByName(toolName, args);
     
     // 如果有 abortSignal，监听取消事件
     if (options.abortSignal) {
@@ -355,8 +367,16 @@ export const callLLMWithTools = async ({
     });
     
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error?.message || `API Error: ${response.statusText}`);
+      const errorText = await response.text().catch(() => '');
+      let errorMessage = `API Error ${response.status}`;
+      try {
+        const errorData = JSON.parse(errorText);
+        errorMessage = errorData.error?.message || errorData.message || errorText || errorMessage;
+      } catch {
+        errorMessage = errorText || errorMessage;
+      }
+      console.error('[MCP] API Error:', response.status, errorMessage);
+      throw new Error(errorMessage);
     }
     
     const data = await response.json();
@@ -544,8 +564,16 @@ export const callLLMStreamWithTools = async ({
     });
     
     if (!response.ok) {
-      const errorData = await response.json().catch(() => ({}));
-      throw new Error(errorData.error?.message || `API Error: ${response.statusText}`);
+      const errorText = await response.text().catch(() => '');
+      let errorMessage = `API Error ${response.status}`;
+      try {
+        const errorData = JSON.parse(errorText);
+        errorMessage = errorData.error?.message || errorData.message || errorText || errorMessage;
+      } catch {
+        errorMessage = errorText || errorMessage;
+      }
+      console.error('[MCP] API Error:', response.status, errorMessage);
+      throw new Error(errorMessage);
     }
     
     // 处理流式响应

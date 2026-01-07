@@ -1,12 +1,12 @@
 import React from "react";
 import { MdCancel } from "react-icons/md";
 import TitleBar from "../UI/TitleBar";
-import bridge from "../../utils/bridge";
+import tauri from "../../utils/tauri";
 
 export const SettingsTitleBar = () => {
   const handleClose = () => {
     // 直接隐藏窗口（不是 toggle）
-    bridge.hideSettingsWindow?.();
+    tauri.hideSettingsWindow?.();
   };
 
   return (

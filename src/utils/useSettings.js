@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import bridge from './bridge';
+import tauri from './tauri';
 
 /**
  * 用于管理设置状态的 React Hook
@@ -22,7 +22,7 @@ export const useSettings = () => {
   const loadSettings = useCallback(async () => {
     try {
       setLoading(true);
-      const data = await bridge.getSettings();
+      const data = await tauri.getSettings();
       console.log('[useSettings] Loaded settings:', Object.keys(data));
       setSettings(data);
       setError(null);
@@ -37,7 +37,7 @@ export const useSettings = () => {
   // 更新单个设置
   const updateSetting = useCallback(async (key, value) => {
     try {
-      await bridge.updateSettings({ [key]: value });
+      await tauri.updateSettings({ [key]: value });
       // 本地立即更新（事件监听器也会更新，但这样更快）
       setSettings(prev => ({ ...prev, [key]: value }));
     } catch (err) {
@@ -49,7 +49,7 @@ export const useSettings = () => {
   // 批量更新设置
   const updateSettings = useCallback(async (updates) => {
     try {
-      await bridge.updateSettings(updates);
+      await tauri.updateSettings(updates);
       // 本地立即更新
       setSettings(prev => ({ ...prev, ...updates }));
     } catch (err) {
@@ -70,7 +70,7 @@ export const useSettings = () => {
 
   // 监听设置更新事件
   useEffect(() => {
-    const cleanup = bridge.onSettingsUpdated((payload) => {
+    const cleanup = tauri.onSettingsUpdated((payload) => {
       console.log('[useSettings] Settings updated:', payload);
       if (payload?.key && payload?.value !== undefined) {
         // 单个设置更新

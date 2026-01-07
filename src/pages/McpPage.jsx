@@ -5,7 +5,7 @@ import { FaPlus, FaTrash, FaChevronDown, FaChevronUp, FaPen, FaServer } from 're
 import { FiRefreshCw } from 'react-icons/fi';
 import TitleBar from "../components/UI/TitleBar";
 import { PageLayout, Button, Badge } from "../components/UI/ui";
-import bridge from "../utils/bridge";
+import tauri from "../utils/tauri";
 
 /**
  * 单个 MCP 服务器卡片
@@ -23,7 +23,7 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
     }
     
     try {
-      const allTools = await bridge.mcp.getAllTools();
+      const allTools = await tauri.mcp.getAllTools();
       const serverTools = (allTools || []).filter(t => t.serverId === server._id);
       setTools(serverTools);
     } catch (error) {
@@ -145,20 +145,20 @@ const McpPage = () => {
   
   // 关闭窗口
   const handleClose = () => {
-    bridge.hideMcpWindow?.();
+    tauri.hideMcpWindow?.();
   };
   
   // 加载服务器列表
   const loadServers = useCallback(async () => {
     try {
-      const serverList = await bridge.mcp.getServers();
+      const serverList = await tauri.mcp.getServers();
       setServers(serverList || []);
       
       // 获取状态
       const statuses = {};
       for (const server of serverList || []) {
         try {
-          const status = await bridge.mcp.getServerStatus(server._id);
+          const status = await tauri.mcp.getServerStatus(server._id);
           statuses[server._id] = status;
         } catch {
           statuses[server._id] = 'unknown';
@@ -178,9 +178,9 @@ const McpPage = () => {
   
   // 监听 MCP 服务器更新事件
   useEffect(() => {
-    if (!bridge.mcp.onServersUpdated) return;
+    if (!tauri.mcp.onServersUpdated) return;
     
-    const cleanup = bridge.mcp.onServersUpdated(() => {
+    const cleanup = tauri.mcp.onServersUpdated(() => {
       console.log('[McpPage] Received servers updated event, reloading...');
       loadServers();
     });
@@ -192,14 +192,14 @@ const McpPage = () => {
     const serverToDelete = servers.find(s => s._id === id);
     const serverName = serverToDelete?.name || 'Unknown';
     
-    const confirmDelete = await bridge.confirm(`Are you sure you want to delete "${serverName}"?`, {
+    const confirmDelete = await tauri.confirm(`Are you sure you want to delete "${serverName}"?`, {
       title: 'Delete MCP Server'
     });
     if (!confirmDelete) return;
     
     try {
-      await bridge.mcp.deleteServer(id);
-      await bridge.mcp.emitServersUpdated({ action: 'deleted', serverName });
+      await tauri.mcp.deleteServer(id);
+      await tauri.mcp.emitServersUpdated({ action: 'deleted', serverName });
       await loadServers();
     } catch (err) {
       console.error('Failed to delete server:', err);

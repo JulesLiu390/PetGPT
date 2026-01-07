@@ -4,7 +4,7 @@
  * 将外部格式（OpenAI style content array）转换为内部统一格式，
  * 以及将内部格式转为各 provider 需要的格式
  */
-import bridge from '../bridge.js';
+import tauri from '../tauri';
 
 /**
  * 从 MIME 类型判断媒体类别
@@ -161,13 +161,13 @@ export const expandDocumentPartsToText = async (messages, options = {}) => {
       }
 
       const fileName = part.url?.split('/').pop();
-      if (!fileName || !bridge?.extractDocumentText) {
+      if (!fileName || !tauri.extractDocumentText) {
         newParts.push(part);
         continue;
       }
 
       try {
-        const text = await bridge.extractDocumentText(fileName);
+        const text = await tauri.extractDocumentText(fileName);
         const clipped = (text || '').slice(0, maxChars);
         if (includeOriginalAttachmentTag) {
           newParts.push({ type: 'text', text: `[Attachment: ${part.name || fileName} (${mime || 'unknown'})]` });

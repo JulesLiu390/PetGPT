@@ -4,7 +4,7 @@ import SelectCharacterTitleBar from '../components/Layout/SelectCharacterTitleBa
 import { FaPlus, FaPen } from 'react-icons/fa6';
 import { FaRobot } from 'react-icons/fa';
 import { PageLayout, Button, Badge } from '../components/UI/ui';
-import * as bridge from '../utils/bridge';
+import * as tauri from '../utils/tauri';
 
 const CustomImage = ({ imageName }) => {
   const [imgSrc, setImgSrc] = useState("");
@@ -12,23 +12,19 @@ const CustomImage = ({ imageName }) => {
   useEffect(() => {
     const loadImage = async () => {
       try {
-        if (imageName === "default") {
-          const module = await import(`../assets/default-normal.png`);
+        // 内置皮肤：Jules (default)、Maodie、LittlePony
+        if (imageName === "default" || imageName === "Jules") {
+          const module = await import(`../assets/Jules-normal.png`);
           setImgSrc(module.default);
-        } else if(imageName === "Opai") {
-          const module = await import(`../assets/Opai-normal.png`);
+        } else if(imageName === "Maodie") {
+          const module = await import(`../assets/Maodie-normal.png`);
           setImgSrc(module.default);
-        } else if(imageName === "Claudia") {
-          const module = await import(`../assets/Claudia-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Grocka") {
-          const module = await import(`../assets/Grocka-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Gemina") {
-          const module = await import(`../assets/Gemina-normal.png`);
+        } else if(imageName === "LittlePony") {
+          const module = await import(`../assets/LittlePony-normal.png`);
           setImgSrc(module.default);
         } else {
-          const base64Image = await bridge.readPetImage(`${imageName}-normal.png`);
+          // 其他皮肤从文件系统加载
+          const base64Image = await tauri.readPetImage(`${imageName}-normal.png`);
           setImgSrc(base64Image);
         }
       } catch (error) {
@@ -78,7 +74,7 @@ const SelectCharacterPage = () => {
     const normalizeId = (item) => ({ ...item, _id: item._id || item.id });
     
     try {
-      const assistantData = await bridge.getAssistants();
+      const assistantData = await tauri.getAssistants();
       console.log('[SelectCharacterPage] assistantData:', assistantData);
       if (Array.isArray(assistantData)) {
         setAssistants(assistantData.map(normalizeId));
@@ -98,7 +94,7 @@ const SelectCharacterPage = () => {
       fetchData();
     };
 
-    const cleanup = bridge.onPetsUpdated(petsUpdateHandler);
+    const cleanup = tauri.onPetsUpdated(petsUpdateHandler);
     return () => {
       if (cleanup) cleanup();
     };
@@ -106,22 +102,24 @@ const SelectCharacterPage = () => {
 
   const handleSelect = async (assistant) => {
     console.log('[SelectCharacterPage] handleSelect called with:', assistant);
-    // 发送 assistant ID (兼容旧的 character-id)
-    await bridge.sendCharacterId(assistant._id);
-    console.log('[SelectCharacterPage] sendCharacterId done');
-    // 隐藏选择窗口，显示 chat 窗口
-    await bridge.hideSelectCharacterWindow();
+    // 先隐藏选择窗口，显示 chat 窗口
+    await tauri.hideSelectCharacterWindow();
     console.log('[SelectCharacterPage] hideSelectCharacterWindow done');
-    await bridge.showChatWindow();
+    await tauri.showChatWindow();
     console.log('[SelectCharacterPage] showChatWindow done');
+    // 等待 chat 窗口加载完成（给 React 组件时间挂载和设置事件监听器）
+    await new Promise(resolve => setTimeout(resolve, 200));
+    // 然后发送 assistant ID (兼容旧的 character-id)
+    await tauri.sendCharacterId(assistant._id);
+    console.log('[SelectCharacterPage] sendCharacterId done');
   };
 
   const handleDeleteAssistant = async (assistantId) => {
-    const confirmed = await bridge.confirm("Are you sure you want to delete this assistant?", { title: "Delete Assistant" });
+    const confirmed = await tauri.confirm("Are you sure you want to delete this assistant?", { title: "Delete Assistant" });
     if (!confirmed) return;
     
     try {
-      await bridge.deleteAssistant(assistantId);
+      await tauri.deleteAssistant(assistantId);
       fetchData();
     } catch (error) {
       console.error("Delete failed:", error);

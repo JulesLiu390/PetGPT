@@ -266,6 +266,7 @@ pub struct McpToolInfo {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
+#[allow(dead_code)]
 pub struct CallToolRequest {
     pub server_id: String,
     pub tool_name: String,

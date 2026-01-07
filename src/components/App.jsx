@@ -5,7 +5,7 @@ import CharacterPage from '../pages/CharacterPage';
 import ManagementPage from '../pages/ManagementPage';
 import { useStateValue } from '../context/StateProvider';
 import { actionType } from '../context/reducer';
-import * as bridge from '../utils/bridge';
+import * as tauri from '../utils/tauri';
 
 
 function App() {
@@ -14,7 +14,7 @@ function App() {
   useEffect(() => {
     const fetchGlobalData = async () => {
       try {
-        const providers = await bridge.getApiProviders();
+        const providers = await tauri.getApiProviders();
         if (providers) {
           // 解析 cachedModels 和 hiddenModels JSON 字符串为数组
           const normalizedProviders = providers.map(p => ({

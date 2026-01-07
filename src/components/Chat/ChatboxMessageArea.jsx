@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useState } from 'react';
 import { useStateValue } from '../../context/StateProvider';
-import bridge from '../../utils/bridge';
+import * as tauri from '../../utils/tauri';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
@@ -180,7 +180,7 @@ const MessagePartContent = ({ part, isUser }) => {
       setIsLoading(true);
       try {
         const fileName = url.split('/').pop();
-        const data = await bridge.readUpload(fileName);
+        const data = await tauri.readUpload(fileName);
         setMediaSrc(data);
       } catch (err) {
         console.error('Failed to load media:', err);
@@ -206,7 +206,7 @@ const MessagePartContent = ({ part, isUser }) => {
   const handleOpenFile = () => {
     const url = part.file_url?.url;
     if (url) {
-      bridge.openFileExternal?.(url) || bridge.openExternal?.(`file://${url}`);
+      tauri.openFileExternal?.(url) || tauri.openExternal?.(`file://${url}`);
     }
   };
 
@@ -336,18 +336,25 @@ const MessagePartContent = ({ part, isUser }) => {
   return null;
 };
 
-const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
+const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
   const stateValue = useStateValue();
   const [state, dispatch] = stateValue || [{}, () => {}];
-  const { currentConversationId, userMessages = [], liveToolCalls = {} } = state;
+  const { currentConversationId, liveToolCalls = {} } = state;
+  
+  // 新方案: 使用 Rust-owned TabState（包含 messages 和 is_thinking）
+  const [tabState, setTabState] = useState({ messages: [], is_thinking: false });
+  const messages = tabState.messages;
+  const isThinking = tabState.is_thinking;
+  
+  // 使用传入的 conversationId 或回退到全局 currentConversationId
+  const activeConvId = conversationId || currentConversationId;
   
   // Get tool calls for current conversation
-  const activeToolCalls = liveToolCalls[currentConversationId] || [];
+  const activeToolCalls = liveToolCalls[activeConvId] || [];
   const messageEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
   const shouldAutoScrollRef = useRef(true);
   const prevConversationIdRef = useRef(null);
-  const [isThinking, setIsThinking] = useState(false);
   const [firstTime, setFirstTime] = useState(true);
   const [Chatlength, setChatlength] = useState(0)
   const [hoveredMessageIndex, setHoveredMessageIndex] = useState(null);
@@ -356,6 +363,60 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
   const [editContent, setEditContent] = useState("");
   const [copiedIndex, setCopiedIndex] = useState(null);
 
+  // 新方案: 订阅 Rust TabState 更新
+  useEffect(() => {
+    if (!activeConvId) {
+      setTabState({ messages: [], is_thinking: false });
+      return;
+    }
+    
+    let unlisten = null;
+    let isMounted = true;
+    
+    const setup = async () => {
+      // 1. 获取初始状态
+      const initialState = await tauri.getTabState(activeConvId);
+      
+      // 2. 如果 Rust 缓存为空，从数据库加载并初始化
+      if (!initialState.messages || initialState.messages.length === 0) {
+        console.log('[ChatboxMessageArea] Cache empty, loading from database:', activeConvId);
+        const conversation = await tauri.getConversationWithHistory(activeConvId);
+        if (conversation && conversation.history && conversation.history.length > 0) {
+          // 初始化 Rust 缓存（这会触发事件推送）
+          await tauri.initTabMessages(activeConvId, conversation.history);
+          // 初始状态会通过订阅事件更新，所以这里不需要手动设置
+        } else {
+          // 没有历史记录，设置空状态
+          if (isMounted) {
+            setTabState({ messages: [], is_thinking: false });
+          }
+        }
+      } else {
+        // 使用缓存状态
+        if (isMounted) {
+          setTabState(initialState);
+        }
+      }
+      
+      // 3. 订阅状态更新（Rust 会自动推送任何变化）
+      unlisten = await tauri.subscribeTabState(activeConvId, (newState) => {
+        if (isMounted) {
+          console.log('[ChatboxMessageArea] TabState updated from Rust:', {
+            messagesCount: newState.messages?.length,
+            isThinking: newState.is_thinking
+          });
+          setTabState(newState);
+        }
+      });
+    };
+    
+    setup();
+    
+    return () => {
+      isMounted = false;
+      if (unlisten) unlisten();
+    };
+  }, [activeConvId]);
   const handleCopyPart = (part, key) => {
     let text = "";
     if (part.type === 'text') {
@@ -394,14 +455,15 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
         newContent = editContent;
     }
 
-    dispatch({ type: actionType.UPDATE_MESSAGE, index: msgIndex, message: { content: newContent } });
-
+    const updatedMsg = { ...msg, content: newContent };
     const newMessages = [...messages];
-    newMessages[msgIndex] = { ...msg, content: newContent };
+    newMessages[msgIndex] = updatedMsg;
 
-    if (currentConversationId) {
+    // 新方案: 使用 Rust TabState 更新
+    if (activeConvId) {
         try {
-            await bridge.updateConversation(currentConversationId, { history: newMessages });
+            await tauri.updateTabStateMessage(activeConvId, msgIndex, updatedMsg);
+            await tauri.updateConversation(activeConvId, { history: newMessages });
         } catch (error) {
             console.error("Failed to save edit:", error);
         }
@@ -418,9 +480,11 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
         // If only one part, delete the whole message
         dispatch({ type: actionType.DELETE_MESSAGE, index: msgIndex });
         const newMessages = messages.filter((_, i) => i !== msgIndex);
-        if (currentConversationId) {
+        if (activeConvId) {
             try {
-                await bridge.updateConversation(currentConversationId, { history: newMessages });
+                // 新方案: 使用 Rust TabState 删除消息
+                await tauri.deleteTabStateMessage(activeConvId, msgIndex);
+                await tauri.updateConversation(activeConvId, { history: newMessages });
             } catch (error) {
                 console.error("Failed to delete message:", error);
             }
@@ -432,11 +496,11 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     const newMessages = [...messages];
     newMessages[msgIndex] = { ...msg, content: newContent };
 
-    dispatch({ type: actionType.UPDATE_MESSAGE, index: msgIndex, message: { content: newContent } });
-
-    if (currentConversationId) {
+    // 新方案: 使用 Rust TabState 更新消息
+    if (activeConvId) {
         try {
-            await bridge.updateConversation(currentConversationId, { history: newMessages });
+            await tauri.updateTabStateMessage(activeConvId, msgIndex, { ...msg, content: newContent });
+            await tauri.updateConversation(activeConvId, { history: newMessages });
         } catch (error) {
             console.error("Failed to delete part:", error);
         }
@@ -478,16 +542,12 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
         return;
     }
     
-    if (currentConversationId) {
+    if (activeConvId) {
         try {
-            await bridge.updateConversation(currentConversationId, {
+            // 新方案: 更新 Rust TabState 和后端
+            await tauri.setTabStateMessages(activeConvId, newMessages);
+            await tauri.updateConversation(activeConvId, {
                 history: newMessages
-            });
-            
-            dispatch({
-                type: actionType.SWITCH_CONVERSATION,
-                id: currentConversationId,
-                userMessages: newMessages
             });
 
             setTimeout(() => {
@@ -501,22 +561,18 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
   };
 
   const handleDelete = async (index) => {
-    // 1. Update local state
-    dispatch({ type: actionType.DELETE_MESSAGE, index });
-
-    // 2. Calculate new messages array for backend update
-    // Note: We use messages prop here, but for consistency we should filter the current messages
+    // 新方案: 直接通过 Rust TabState 删除
     const newMessages = messages.filter((_, i) => i !== index);
 
-    // 3. Update backend
-    if (currentConversationId) {
+    if (activeConvId) {
         try {
-            await bridge.updateConversation(currentConversationId, {
+            // 新方案: 使用 Rust TabState 删除
+            await tauri.deleteTabStateMessage(activeConvId, index);
+            await tauri.updateConversation(activeConvId, {
                 history: newMessages
             });
         } catch (error) {
             console.error("Failed to delete message:", error);
-            // Optionally revert state here if needed
         }
     }
   };
@@ -530,24 +586,21 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     shouldAutoScrollRef.current = isAtBottom;
   };
 
-  // ✅ 添加思考状态监听
-  useEffect(() => {
-    const handler = (event, updatedMood) => {
-      setIsThinking(updatedMood == 'thinking');
-    };
-    bridge.onMoodUpdated?.(handler);
-  }, []);
+  // 注意：思考状态(isThinking)现在通过 TabState 订阅自动更新，不再需要单独的 onMoodUpdated 监听
 
   useEffect(() => {
     const handleCharacterId = () => {
-      setIsThinking(false);
+      // Reset thinking state via Rust when character changes
+      if (activeConvId) {
+        tauri.setTabThinking(activeConvId, false);
+      }
       setFirstTime(false);
     };
-    const cleanup = bridge.onCharacterId?.(handleCharacterId);
+    const cleanup = tauri.onCharacterId?.(handleCharacterId);
     return () => {
       if (cleanup) cleanup();
     };
-  }, []);
+  }, [activeConvId]);
 
   // 处理 Tab 切换时的滚动 (瞬间到底)
   useEffect(() => {
@@ -566,7 +619,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     if (!isActive) return;
 
     if(firstTime) {
-      setIsThinking(true);
+      // Note: thinking state is now managed by Rust via setTabThinking
       setFirstTime(false);
     } 
 
@@ -595,12 +648,30 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
     }
   }, [streamingContent, isActive]);
 
+  // 🔍 DEBUG: 监控渲染状态 (注释掉以减少日志刷新)
+  // useEffect(() => {
+  //   console.log('[MessageArea DEBUG]', {
+  //     messagesLength: messages?.length,
+  //     isArray: Array.isArray(messages),
+  //     streamingContent: streamingContent ? `${streamingContent.substring(0, 50)}...` : null,
+  //     isThinking,
+  //     isActive,
+  //     lastMessageRole: messages?.length > 0 ? messages[messages.length - 1]?.role : null
+  //   });
+  // }, [messages, streamingContent, isThinking, isActive]);
+
   return (
     <div 
         ref={scrollContainerRef}
         onScroll={handleScroll}
         className="flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh]"
     >
+      {/* 🔍 DEBUG: 显示状态 (已注释) */}
+      {/* {process.env.NODE_ENV === 'development' && (
+        <div className="text-xs text-gray-400 mb-2 p-1 bg-gray-100 rounded">
+          msgs: {messages?.length || 0} | streaming: {streamingContent ? 'yes' : 'no'} | thinking: {isThinking ? 'yes' : 'no'}
+        </div>
+      )} */}
       {Array.isArray(messages) && messages.map((msg, index) => {
         if (!msg) return null; // Skip null/undefined messages
         const isUser = msg.role === 'user';
@@ -727,7 +798,7 @@ const ChatboxMessageArea = ({ messages, streamingContent, isActive }) => {
       )}
 
       {/* ✅ 额外渲染：不属于 userMessages，仅根据 isThinking */}
-      {isThinking && !streamingContent && messages?.length > 0 && Chatlength == messages.length && messages[messages.length - 1].role === "user" && (
+      {isThinking && !streamingContent && messages?.length > 0 && messages[messages.length - 1].role === "user" && (
         <div className="flex mb-4 justify-start">
           <div className="rounded-2xl px-4 py-2 whitespace-pre-wrap bg-transparent text-left text-sm animate-pulse italic text-gray-400">
             Thinking……
