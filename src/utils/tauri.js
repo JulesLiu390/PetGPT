@@ -344,7 +344,7 @@ export const hideSettingsWindow = () => invoke('hide_settings_window');
 // Shortcuts
 export const updateWindowSizePreset = (preset) => invoke('update_window_size_preset', { preset });
 export const updateShortcuts = (programHotkey, dialogHotkey) => 
-  invoke('update_shortcuts', { programHotkey, dialogHotkey });
+  invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey });
 
 // Preferences
 export const updatePreferences = (preferences) => invoke('update_preferences', { preferences });

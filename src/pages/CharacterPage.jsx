@@ -289,7 +289,7 @@ export const Character = () => {
 
   // 各种点击事件
   const handleClick = () => {
-    tauri.changeChatWindow();
+    tauri.toggleChatWindow();
   };
   const handleClickApi = () => {
     tauri.changeManageWindow('api');

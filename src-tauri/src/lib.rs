@@ -1135,10 +1135,17 @@ static ORIGINAL_WIDTH: AtomicU32 = AtomicU32::new(0);
 // 聊天窗口是否跟随角色移动
 static CHAT_FOLLOWS_CHARACTER: AtomicBool = AtomicBool::new(true);
 
+/// 偏好设置结构体
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct Preferences {
+    chat_follows_character: Option<bool>,
+}
+
 /// 更新偏好设置的全局状态
 #[tauri::command]
-fn update_preferences(chat_follows_character: Option<bool>) -> Result<(), String> {
-    if let Some(value) = chat_follows_character {
+fn update_preferences(preferences: Preferences) -> Result<(), String> {
+    if let Some(value) = preferences.chat_follows_character {
         CHAT_FOLLOWS_CHARACTER.store(value, Ordering::SeqCst);
         println!("[Rust] CHAT_FOLLOWS_CHARACTER updated to: {}", value);
     }
@@ -1146,14 +1153,19 @@ fn update_preferences(chat_follows_character: Option<bool>) -> Result<(), String
 }
 
 #[tauri::command]
-fn toggle_sidebar(app: AppHandle, open: bool) -> Result<(), String> {
+fn toggle_sidebar(app: AppHandle, expanded: bool) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
-        // 如果是最大化状态，不处理
+        // 如果是最大化状态，不处理窗口大小
         if chat.is_maximized().unwrap_or(false) {
             return Ok(());
         }
         
         let sidebar_expanded = SIDEBAR_EXPANDED.load(Ordering::SeqCst);
+        
+        // 如果状态没有变化，不做任何操作
+        if expanded == sidebar_expanded {
+            return Ok(());
+        }
         
         // 获取缩放因子
         let scale_factor = chat.scale_factor().unwrap_or(1.0);
@@ -1165,36 +1177,41 @@ fn toggle_sidebar(app: AppHandle, open: bool) -> Result<(), String> {
             let logical_width = size.width as f64 / scale_factor;
             let logical_height = size.height as f64 / scale_factor;
             
-            if open && !sidebar_expanded {
-                // 保存展开前的原始宽度
+            if expanded && !sidebar_expanded {
+                // 保存展开前的原始宽度（主体区域宽度）
                 ORIGINAL_WIDTH.store(logical_width as u32, Ordering::SeqCst);
                 
-                // 展开侧边栏：向左扩展窗口
+                // 展开侧边栏：窗口向左扩展，主体区域位置保持不变
+                // 新窗口左边界 = 当前左边界 - 侧边栏宽度
+                // 新窗口宽度 = 当前宽度 + 侧边栏宽度
                 let new_x = logical_x - SIDEBAR_WIDTH;
                 let new_width = logical_width + SIDEBAR_WIDTH;
                 
-                // 展开时：先移动位置，再增加宽度（窗口向左扩展）
+                // 同时设置位置和大小，减少闪烁
                 let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: new_x, y: logical_y }));
                 let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: new_width, height: logical_height }));
                 
                 SIDEBAR_EXPANDED.store(true, Ordering::SeqCst);
                 
-                // 变为普通窗口（不置顶）
+                // 展开后变为普通窗口（不置顶）
                 let _ = chat.set_always_on_top(false);
-            } else if !open && sidebar_expanded {
+            } else if !expanded && sidebar_expanded {
                 // 收起侧边栏：恢复到展开前的原始宽度
                 let original_width = ORIGINAL_WIDTH.load(Ordering::SeqCst) as f64;
-                // 如果没有保存过原始宽度，则使用当前宽度减去侧边栏宽度
+                // 如果没有保存过原始宽度（不应该发生），使用当前宽度减去侧边栏宽度
                 let new_width = if original_width > 0.0 { original_width } else { logical_width - SIDEBAR_WIDTH };
+                
+                // 收起时：主体区域右边界保持不变
+                // 新窗口左边界 = 当前左边界 + 侧边栏宽度
                 let new_x = logical_x + SIDEBAR_WIDTH;
                 
-                // 收起时：先缩小宽度，再移动位置（保持主体区域不动）
+                // 同时设置位置和大小
                 let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: new_width, height: logical_height }));
                 let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: new_x, y: logical_y }));
                 
                 SIDEBAR_EXPANDED.store(false, Ordering::SeqCst);
                 
-                // 恢复置顶
+                // 收起后恢复置顶
                 let _ = chat.set_always_on_top(true);
             }
         }

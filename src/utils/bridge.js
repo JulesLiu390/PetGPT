@@ -2483,7 +2483,7 @@ export const toggleSidebar = async (open) => {
   }
   if (isTauri()) {
     const { invoke } = await getTauriApi();
-    await invoke('toggle_sidebar', { open });
+    await invoke('toggle_sidebar', { expanded: open });
   }
 };
 
