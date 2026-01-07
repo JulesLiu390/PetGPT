@@ -4,6 +4,7 @@ pub mod messages;
 pub mod settings;
 pub mod mcp_servers;
 pub mod api_providers;
+pub mod skins;
 
 use rusqlite::{Connection, Result};
 use std::sync::Mutex;
@@ -129,6 +130,23 @@ impl Database {
                 api_format TEXT NOT NULL DEFAULT 'openai_compatible',
                 is_validated INTEGER DEFAULT 0,
                 cached_models TEXT,
+                hidden_models TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )",
+            [],
+        )?;
+        
+        // Migration: add hidden_models column if not exists
+        let _ = conn.execute("ALTER TABLE api_providers ADD COLUMN hidden_models TEXT", []);
+
+        // Skins table
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS skins (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                author TEXT,
+                description TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",

@@ -22,71 +22,142 @@ export const Character = () => {
   const [imgSrc, setImgSrc] = useState(null);
   // 控制是否显示顶部按钮
   const [isShowOptions, setIsShowOptions] = useState(false);
+  // 控制 Settings/Manage 窗口是否打开
+  const [isManageVisible, setIsManageVisible] = useState(false);
   const [imageName, setImageName] = useState("default");
+  const [currentPetId, setCurrentPetId] = useState(null);
 
-  // 启动时加载默认角色的图片
-  useEffect(() => {
-    const loadDefaultCharacter = async () => {
-      try {
-        const settings = await bridge.getSettings();
-        
-        // 注册快捷键
-        if (settings?.programHotkey || settings?.dialogHotkey) {
-          bridge.updateShortcuts(settings.programHotkey || '', settings.dialogHotkey || '');
-        }
-        
-        let foundPet = null;
-        
-        // 先尝试加载设置中的默认助手
-        if (settings && settings.defaultRoleId) {
+  const loadCharacter = useCallback(async (targetId = null) => {
+    try {
+      const settings = await bridge.getSettings();
+      
+      // 注册快捷键
+      if (settings?.programHotkey || settings?.dialogHotkey) {
+        bridge.updateShortcuts(settings.programHotkey || '', settings.dialogHotkey || '');
+      }
+      
+      let foundPet = null;
+      let petIdToLoad = targetId || settings?.defaultRoleId;
+
+      // 如果有指定 ID 或默认设置中的 ID，尝试加载
+      if (petIdToLoad) {
+        try {
+          // 优先尝试 getAssistant，失败则回退到 getPet
           try {
-            // 优先尝试 getAssistant，失败则回退到 getPet
-            try {
-              foundPet = await bridge.getAssistant(settings.defaultRoleId);
-            } catch (e) {
-              // 忽略，尝试旧 API
-            }
-            if (!foundPet) {
-              foundPet = await bridge.getPet(settings.defaultRoleId);
-            }
-          } catch (petError) {
-            console.error("Error loading default pet details:", petError);
-          }
-        }
-        
-        // 如果没有找到默认助手，使用第一个可用的助手
-        if (!foundPet) {
-          try {
-            const assistants = await bridge.getAssistants();
-            if (assistants && assistants.length > 0) {
-              foundPet = assistants[0];
-              console.log("[CharacterPage] Fallback to first assistant:", foundPet.name);
-            } else {
-              const pets = await bridge.getPets();
-              if (pets && pets.length > 0) {
-                foundPet = pets[0];
-                console.log("[CharacterPage] Fallback to first pet:", foundPet.name);
-              }
-            }
+            foundPet = await bridge.getAssistant(petIdToLoad);
           } catch (e) {
-            console.error("Error loading fallback assistant:", e);
+            // 忽略，尝试旧 API
           }
+          if (!foundPet) {
+            foundPet = await bridge.getPet(petIdToLoad);
+          }
+        } catch (petError) {
+          console.error("Error loading pet details:", petError);
         }
-        
-        // 设置角色图片
-        if (foundPet && foundPet.imageName) {
+      }
+      
+      // 如果没有找到助手，使用第一个可用的作为回退
+      if (!foundPet) {
+        try {
+          const assistants = await bridge.getAssistants();
+          if (assistants && assistants.length > 0) {
+            foundPet = assistants[0];
+            console.log("[CharacterPage] Fallback to first assistant:", foundPet.name);
+          } else {
+            const pets = await bridge.getPets();
+            if (pets && pets.length > 0) {
+              foundPet = pets[0];
+              console.log("[CharacterPage] Fallback to first pet:", foundPet.name);
+            }
+          }
+        } catch (e) {
+          console.error("Error loading fallback assistant:", e);
+        }
+      }
+      
+      // 设置角色图片和 ID
+      if (foundPet) {
+        setCurrentPetId(foundPet.id || foundPet._id);
+        if (foundPet.imageName) {
           setImageName(foundPet.imageName);
           console.log("[CharacterPage] Using character image:", foundPet.imageName);
         }
-      } catch (error) {
-        console.error("Error loading default character image from settings:", error);
-        // 如果加载失败，默认值 "default" 会被使用
+      }
+    } catch (error) {
+      console.error("Error loading character:", error);
+    }
+  }, []);
+
+  // 启动时加载
+  useEffect(() => {
+    loadCharacter();
+  }, [loadCharacter]);
+
+  // 监听宠物/助手更新事件
+  useEffect(() => {
+    const handlePetsUpdate = async (event) => {
+      // event structure: { action: 'update'|'create', type: 'assistant'|'pet', id, data }
+      console.log("Received pets update:", event);
+      
+      // 如果更新的是当前角色，或者当前没有加载角色，则刷新
+      if (event.action === 'update' && (event.id === currentPetId || !currentPetId)) {
+        console.log("Current character updated, reloading...");
+        loadCharacter(event.id);
+      } else if (event.action === 'delete' && event.id === currentPetId) {
+        // 如果当前角色被删除，重新加载默认（传 null 触发 fallback）
+        loadCharacter(null);
       }
     };
     
-    loadDefaultCharacter();
+    // 如果 bridge.onPetsUpdated 存在，则注册
+    let cleanup;
+    if (bridge.onPetsUpdated) {
+      cleanup = bridge.onPetsUpdated(handlePetsUpdate);
+    } else {
+      // Fallback using general listener if specific one not available
+      // Not implemented here, assuming onPetsUpdated exists as per bridge.js inspection
+    }
+
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, [currentPetId, loadCharacter]);
+
+  // 监听 settings/manage 窗口可见性
+  useEffect(() => {
+    const handleManageVisibility = (payload) => {
+        console.log("Manage window visibility changed:", payload);
+        if (payload && typeof payload.visible === 'boolean') {
+            setIsManageVisible(payload.visible);
+        }
+    };
+
+    let cleanup;
+    if (bridge.onManageWindowVisibilityChanged) {
+        cleanup = bridge.onManageWindowVisibilityChanged(handleManageVisibility);
+    }
     
-  }, []); // 只在组件加载时执行一次
+    return () => {
+        if (cleanup) cleanup();
+    }
+  }, []);
+
+  // 监听设置更新
+  useEffect(() => {
+    const handleSettingsUpdate = (payload) => {
+      console.log("Settings updated:", payload);
+      // 如果更新了默认角色 ID，重新加载
+      // 注意：Tauri 中 key 可能是 'defaultRoleId'，Electron 中可能是 'defaultAssistant'，根据实际 key 调整
+      if (payload.key === 'defaultRoleId' || payload.key === 'defaultAssistant') {
+         loadCharacter();
+      }
+    };
+    
+    const cleanup = bridge.onSettingsUpdated(handleSettingsUpdate);
+    return () => {
+        if(cleanup) cleanup();
+    }
+  }, [loadCharacter]);
 
   // 注册监听主进程发来的 'character-mood-updated' 消息
   useEffect(() => {
@@ -182,6 +253,10 @@ export const Character = () => {
         } else if(imageName == "Gemina") {
           const module = await import(`../assets/Gemina-${characterMood}.png`);
           setImgSrc(module.default);
+        } else if (imageName.startsWith("custom:")) {
+          const skinId = imageName.split(":")[1];
+          const base64Image = await bridge.readSkinImage(skinId, characterMood);
+          setImgSrc(base64Image);
         } else {
           const base64Image = await bridge.readPetImage(`${imageName}-${characterMood}.png`);
           setImgSrc(base64Image);
@@ -206,6 +281,10 @@ export const Character = () => {
           } else if(imageName == "Gemina") {
             const module = await import(`../assets/Gemina-normal.png`);
             setImgSrc(module.default);
+          } else if (imageName.startsWith("custom:")) {
+            const skinId = imageName.split(":")[1];
+            const base64Image = await bridge.readSkinImage(skinId, "normal");
+            setImgSrc(base64Image);
           } else {
             const base64Image = await bridge.readPetImage(`${imageName}-normal.png`);
             setImgSrc(base64Image);
@@ -338,7 +417,7 @@ export const Character = () => {
     >
       {/* 顶部按钮区 */}
       <div className="h-[50px] w-full">
-        {isShowOptions && (
+        {(isShowOptions || isManageVisible) && (
           <motion.div
             className="flex justify-evenly items-center gap-2 py-2 bg-black/30 rounded-lg p-2"
             initial={{ opacity: 0, y: -10 }}

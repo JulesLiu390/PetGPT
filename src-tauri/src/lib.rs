@@ -1,7 +1,7 @@
 mod database;
 mod mcp;
 
-use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers};
+use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
@@ -166,28 +166,200 @@ fn get_api_provider(db: State<DbState>, id: String) -> Result<Option<api_provide
 }
 
 #[tauri::command]
-fn create_api_provider(db: State<DbState>, data: api_providers::CreateApiProviderData) -> Result<api_providers::ApiProvider, String> {
-    db.create_api_provider(data).map_err(|e| e.to_string())
+fn update_api_provider(app: AppHandle, db: State<DbState>, id: String, data: api_providers::UpdateApiProviderData) -> Result<Option<api_providers::ApiProvider>, String> {
+    let result = db.update_api_provider(&id, data).map_err(|e| e.to_string())?;
+    
+    // Broadcast update event
+    let payload = serde_json::json!({
+        "action": "update",
+        "provider": result
+    });
+    let _ = app.emit("api-providers-updated", payload);
+    
+    Ok(result)
 }
 
 #[tauri::command]
-fn update_api_provider(db: State<DbState>, id: String, data: api_providers::UpdateApiProviderData) -> Result<Option<api_providers::ApiProvider>, String> {
-    db.update_api_provider(&id, data).map_err(|e| e.to_string())
+fn create_api_provider(app: AppHandle, db: State<DbState>, data: api_providers::CreateApiProviderData) -> Result<api_providers::ApiProvider, String> {
+    let result = db.create_api_provider(data).map_err(|e| e.to_string())?;
+    
+    // Broadcast update event
+    let payload = serde_json::json!({
+        "action": "create",
+        "provider": result
+    });
+    let _ = app.emit("api-providers-updated", payload);
+    
+    Ok(result)
 }
 
 #[tauri::command]
-fn delete_api_provider(db: State<DbState>, id: String) -> Result<bool, String> {
-    db.delete_api_provider(&id).map_err(|e| e.to_string())
+fn delete_api_provider(app: AppHandle, db: State<DbState>, id: String) -> Result<bool, String> {
+    let result = db.delete_api_provider(&id).map_err(|e| e.to_string())?;
+    
+    // Broadcast update event
+    let payload = serde_json::json!({
+        "action": "delete",
+        "id": id
+    });
+    let _ = app.emit("api-providers-updated", payload);
+    
+    Ok(result)
 }
 
 #[tauri::command]
-fn update_api_provider_models(db: State<DbState>, id: String, models: String) -> Result<bool, String> {
-    db.update_api_provider_models(&id, &models).map_err(|e| e.to_string())
+fn get_skins(db: State<DbState>) -> Result<Vec<skins::Skin>, String> {
+    db.get_all_skins().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-fn set_api_provider_validated(db: State<DbState>, id: String, validated: bool) -> Result<bool, String> {
-    db.set_api_provider_validated(&id, validated).map_err(|e| e.to_string())
+fn get_skin(db: State<DbState>, id: String) -> Result<Option<skins::Skin>, String> {
+    db.get_skin_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn create_skin(db: State<DbState>, data: skins::CreateSkinData) -> Result<skins::Skin, String> {
+    db.create_skin(data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn update_skin(db: State<DbState>, id: String, data: skins::UpdateSkinData) -> Result<Option<skins::Skin>, String> {
+    db.update_skin(&id, data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_skin(db: State<DbState>, id: String) -> Result<bool, String> {
+    db.delete_skin(&id).map_err(|e| e.to_string())
+}
+
+/// 导入皮肤：保存元数据到数据库，图片到文件系统
+#[tauri::command]
+#[allow(non_snake_case)]
+fn import_skin(
+    app: AppHandle,
+    db: State<DbState>,
+    name: String,
+    author: Option<String>,
+    imageData: String,  // Base64 编码的 2x2 sprite sheet
+) -> Result<skins::Skin, String> {
+    // 1. 创建数据库记录
+    let skin = db.create_skin(skins::CreateSkinData {
+        name: name.clone(),
+        author,
+        description: None,
+    }).map_err(|e| e.to_string())?;
+    
+    // 2. 创建皮肤图片目录
+    let skins_dir = get_skins_dir(&app)?;
+    let skin_dir = skins_dir.join(&skin.id);
+    fs::create_dir_all(&skin_dir)
+        .map_err(|e| format!("Failed to create skin dir: {}", e))?;
+    
+    // 3. 解码并分割图片
+    let base64_data = if imageData.contains(",") {
+        imageData.split(",").nth(1).unwrap_or(&imageData)
+    } else {
+        &imageData
+    };
+    
+    let decoded = BASE64.decode(base64_data)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+    
+    // 使用 image crate 分割图片
+    let img = image::load_from_memory(&decoded)
+        .map_err(|e| format!("Failed to load image: {}", e))?;
+    
+    let width = img.width();
+    let height = img.height();
+    let piece_w = width / 2;
+    let piece_h = height / 2;
+    
+    // 表情名称映射 (2x2 grid: 左上、右上、左下、右下)
+    let moods = ["normal", "smile", "angry", "thinking"];
+    let positions = [(0, 0), (1, 0), (0, 1), (1, 1)];
+    
+    for (i, mood) in moods.iter().enumerate() {
+        let (col, row) = positions[i];
+        let x = col * piece_w;
+        let y = row * piece_h;
+        
+        let piece = img.crop_imm(x, y, piece_w, piece_h);
+        let piece_path = skin_dir.join(format!("{}.png", mood));
+        
+        piece.save(&piece_path)
+            .map_err(|e| format!("Failed to save {} image: {}", mood, e))?;
+    }
+    
+    println!("[Rust] Skin imported: {} -> {:?}", skin.name, skin_dir);
+    
+    Ok(skin)
+}
+
+/// 获取皮肤图片的本地文件路径（用于 convertFileSrc）
+#[tauri::command]
+#[allow(non_snake_case)]
+fn get_skin_image_path(app: AppHandle, skinId: String, mood: String) -> Result<String, String> {
+    let skins_dir = get_skins_dir(&app)?;
+    let image_path = skins_dir.join(&skinId).join(format!("{}.png", mood));
+    
+    if !image_path.exists() {
+        return Err(format!("Skin image not found: {}/{}.png", skinId, mood));
+    }
+    
+    Ok(image_path.to_string_lossy().to_string())
+}
+
+/// 读取皮肤的指定表情图片（返回 base64，备用方案）
+#[tauri::command]
+#[allow(non_snake_case)]
+fn read_skin_image(app: AppHandle, skinId: String, mood: String) -> Result<String, String> {
+    let skins_dir = get_skins_dir(&app)?;
+    let image_path = skins_dir.join(&skinId).join(format!("{}.png", mood));
+    
+    if !image_path.exists() {
+        return Err(format!("Skin image not found: {}/{}.png", skinId, mood));
+    }
+    
+    let data = fs::read(&image_path)
+        .map_err(|e| format!("Failed to read skin image: {}", e))?;
+    
+    let base64_data = BASE64.encode(&data);
+    Ok(format!("data:image/png;base64,{}", base64_data))
+}
+
+/// 删除皮肤（包括数据库记录和图片文件）
+#[tauri::command]
+#[allow(non_snake_case)]
+fn delete_skin_with_files(app: AppHandle, db: State<DbState>, id: String) -> Result<bool, String> {
+    // 1. 删除数据库记录
+    let deleted = db.delete_skin(&id).map_err(|e| e.to_string())?;
+    
+    if deleted {
+        // 2. 删除图片目录
+        let skins_dir = get_skins_dir(&app)?;
+        let skin_dir = skins_dir.join(&id);
+        if skin_dir.exists() {
+            fs::remove_dir_all(&skin_dir)
+                .map_err(|e| format!("Failed to remove skin dir: {}", e))?;
+        }
+    }
+    
+    Ok(deleted)
+}
+
+/// 获取皮肤图片存储目录
+fn get_skins_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    let app_data_dir = app.path().app_data_dir()
+        .map_err(|e| format!("Failed to get app data dir: {}", e))?;
+    let skins_dir = app_data_dir.join("skins");
+    
+    // 确保目录存在
+    if !skins_dir.exists() {
+        fs::create_dir_all(&skins_dir)
+            .map_err(|e| format!("Failed to create skins dir: {}", e))?;
+    }
+    
+    Ok(skins_dir)
 }
 
 // ============ MCP Server Commands ============
@@ -543,21 +715,8 @@ fn get_uploads_path(app: AppHandle) -> Result<String, String> {
 #[tauri::command]
 fn show_chat_window(app: AppHandle) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
-        // Position chat window relative to character window (bottom-aligned)
-        if let Some(character) = app.get_webview_window("character") {
-            if let (Ok(char_pos), Ok(char_size), Ok(chat_size)) = 
-                (character.outer_position(), character.outer_size(), chat.outer_size()) {
-                // Bottom-aligned: chat window bottom should align with character window bottom
-                // char_pos.y is the TOP of character window
-                // char_pos.y + char_size.height is the BOTTOM of character window
-                // We want: chat_pos.y + chat_size.height = char_pos.y + char_size.height
-                // So: chat_pos.y = char_pos.y + char_size.height - chat_size.height
-                let char_bottom = char_pos.y + char_size.height as i32;
-                let x = char_pos.x - chat_size.width as i32 - 20;
-                let y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
-                let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: x.max(0), y: y.max(0) }));
-            }
-        }
+        // 显示窗口时不改变位置，保持原来的位置
+        // 只有拖动角色时才会跟随移动（由 on_window_event 处理）
         chat.show().map_err(|e| e.to_string())?;
         chat.set_focus().map_err(|e| e.to_string())?;
     }
@@ -580,17 +739,8 @@ fn toggle_chat_window(app: AppHandle) -> Result<bool, String> {
             chat.hide().map_err(|e| e.to_string())?;
             Ok(false)
         } else {
-            // Position chat window relative to character window (bottom-aligned)
-            if let Some(character) = app.get_webview_window("character") {
-                if let (Ok(char_pos), Ok(char_size), Ok(chat_size)) = 
-                    (character.outer_position(), character.outer_size(), chat.outer_size()) {
-                    // Bottom-aligned with 150px offset
-                    let char_bottom = char_pos.y + char_size.height as i32;
-                    let x = char_pos.x - chat_size.width as i32 - 20;
-                    let y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
-                    let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x: x.max(0), y: y.max(0) }));
-                }
-            }
+            // 显示窗口时不改变位置，保持原来的位置
+            // 只有拖动角色时才会跟随移动（由 on_window_event 处理）
             chat.show().map_err(|e| e.to_string())?;
             chat.set_focus().map_err(|e| e.to_string())?;
             Ok(true)
@@ -731,9 +881,15 @@ fn toggle_window(app: &AppHandle, label: &str) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(label) {
         if window.is_visible().unwrap_or(false) {
             window.hide().map_err(|e| e.to_string())?;
+            if label == "manage" {
+                let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": false }));
+            }
         } else {
             window.show().map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
+            if label == "manage" {
+                 let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": true }));
+            }
         }
     }
     Ok(())
@@ -783,6 +939,7 @@ fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<String, St
                 Ok(_) => println!("[open_manage_window_with_tab] Event emitted successfully"),
                 Err(e) => println!("[open_manage_window_with_tab] Failed to emit event: {}", e),
             }
+            let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": true }));
             Ok("visible".to_string())
         } else {
             // 窗口不可见，显示并导航到指定 tab
@@ -790,6 +947,7 @@ fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<String, St
             let _ = window.eval(&format!("window.location.hash = '/manage?tab={}'", tab));
             window.show().map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
+            let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": true }));
             Ok("shown".to_string())
         }
     } else {
@@ -803,6 +961,7 @@ fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<String, St
 fn hide_manage_window(app: AppHandle) -> Result<(), String> {
     if let Some(window) = app.get_webview_window("manage") {
         window.hide().map_err(|e| e.to_string())?;
+        let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": false }));
     }
     Ok(())
 }
@@ -859,6 +1018,18 @@ const SIDEBAR_WIDTH: f64 = 256.0; // 与前端 w-64 (256px) 一致，使用逻�
 static SIDEBAR_EXPANDED: AtomicBool = AtomicBool::new(false);
 // 保存展开前的原始宽度，用于收起时恢复
 static ORIGINAL_WIDTH: AtomicU32 = AtomicU32::new(0);
+// 聊天窗口是否跟随角色移动
+static CHAT_FOLLOWS_CHARACTER: AtomicBool = AtomicBool::new(true);
+
+/// 更新偏好设置的全局状态
+#[tauri::command]
+fn update_preferences(chat_follows_character: Option<bool>) -> Result<(), String> {
+    if let Some(value) = chat_follows_character {
+        CHAT_FOLLOWS_CHARACTER.store(value, Ordering::SeqCst);
+        println!("[Rust] CHAT_FOLLOWS_CHARACTER updated to: {}", value);
+    }
+    Ok(())
+}
 
 #[tauri::command]
 fn toggle_sidebar(app: AppHandle, open: bool) -> Result<(), String> {
@@ -1194,8 +1365,8 @@ pub fn run() {
                                         ));
                                     }
                                     
-                                    // Sync chat window position (skip if sidebar is expanded)
-                                    if !SIDEBAR_EXPANDED.load(Ordering::SeqCst) {
+                                    // Sync chat window position (skip if sidebar is expanded or chat follows is disabled)
+                                    if !SIDEBAR_EXPANDED.load(Ordering::SeqCst) && CHAT_FOLLOWS_CHARACTER.load(Ordering::SeqCst) {
                                         if let Some(chat) = app_handle.get_webview_window("chat") {
                                             // Skip if chat window is not visible
                                             if !chat.is_visible().unwrap_or(false) {
@@ -1293,11 +1464,19 @@ pub fn run() {
             // API Provider commands
             get_api_providers,
             get_api_provider,
-            create_api_provider,
             update_api_provider,
+            create_api_provider,
             delete_api_provider,
-            update_api_provider_models,
-            set_api_provider_validated,
+            // Skin commands
+            get_skins,
+            get_skin,
+            create_skin,
+            update_skin,
+            delete_skin,
+            import_skin,
+            get_skin_image_path,
+            read_skin_image,
+            delete_skin_with_files,
             // MCP Server commands (database)
             get_mcp_servers,
             get_mcp_server,
@@ -1347,6 +1526,7 @@ pub fn run() {
             // Chat window controls
             maximize_chat_window,
             toggle_sidebar,
+            update_preferences,
             // Window size and shortcuts
             update_window_size_preset,
             update_shortcuts,

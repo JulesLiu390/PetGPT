@@ -122,6 +122,17 @@ const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL) => {
 };
 
 export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL, options = {}) => {
+  // Support object argument (legacy/migration support)
+  if (!Array.isArray(messages) && typeof messages === 'object' && messages.messages) {
+    const params = messages;
+    messages = params.messages;
+    apiFormat = params.apiFormat;
+    apiKey = params.apiKey;
+    model = params.model;
+    baseURL = params.baseUrl;
+    options = { ...options, ...params }; 
+  }
+
   const { hasMood = true } = options;
   
   // 使用统一的 LLM 适配层
@@ -439,7 +450,8 @@ export const promptSuggestion = async (messages, apiFormat, apiKey, model, baseU
   }
 };
 
-export const fetchModels = async (apiFormat, apiKey, baseURL) => {
+export const fetchModels = async (baseURL, apiKey, apiFormat) => {
   // 使用统一的 LLM 适配层
+  // Note: Arguments are received in order (baseURL, apiKey, apiFormat) to match usages in ManagementPage.jsx
   return await llmFetchModels({ apiFormat, apiKey, baseUrl: baseURL });
 };

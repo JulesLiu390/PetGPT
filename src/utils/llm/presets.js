@@ -16,10 +16,10 @@ export const OPENAI_COMPATIBLE_PRESETS = [
     notes: 'Official OpenAI API'
   },
   {
-    id: 'xai',
-    label: 'xAI (Grok)',
-    baseUrl: 'https://api.x.ai/v1',
-    notes: 'xAI Grok models'
+    id: 'deepseek',
+    label: 'DeepSeek',
+    baseUrl: 'https://api.deepseek.com/v1',
+    notes: 'DeepSeek API'
   },
   {
     id: 'anthropic',
@@ -28,10 +28,28 @@ export const OPENAI_COMPATIBLE_PRESETS = [
     notes: 'Claude models (OpenAI-compatible endpoint)'
   },
   {
+    id: 'groq',
+    label: 'Groq',
+    baseUrl: 'https://api.groq.com/openai/v1',
+    notes: 'Groq fast inference'
+  },
+  {
+    id: 'xai',
+    label: 'xAI (Grok)',
+    baseUrl: 'https://api.x.ai/v1',
+    notes: 'xAI Grok models'
+  },
+  {
     id: 'openrouter',
     label: 'OpenRouter',
     baseUrl: 'https://openrouter.ai/api/v1',
     notes: 'Multi-provider gateway'
+  },
+  {
+    id: 'together',
+    label: 'Together AI',
+    baseUrl: 'https://api.together.xyz/v1',
+    notes: 'Together AI inference'
   },
   {
     id: 'ollama',

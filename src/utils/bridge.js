@@ -117,11 +117,20 @@ export const updateSettings = async (data) => {
   }
   
   if (isTauri()) {
-    const { invoke } = await getTauriApi();
-    // 将每个设置项保存
+    const { invoke, emit } = await getTauriApi();
+    // 将每个设置项保存并广播更新事件
     for (const [key, value] of Object.entries(data)) {
       const strValue = typeof value === 'string' ? value : JSON.stringify(value);
       await invoke('set_setting', { key, value: strValue });
+      // 广播设置更新事件到所有窗口
+      try {
+        await invoke('emit_to_all', { 
+          event: 'settings-updated', 
+          payload: { key, value } 
+        });
+      } catch (e) {
+        console.warn('[bridge.updateSettings] Failed to emit settings-updated:', e);
+      }
     }
     return data;
   }
@@ -156,6 +165,41 @@ export const onSettingsUpdated = (callback) => {
       }
     });
     
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
+  }
+  
+  return () => {};
+};
+
+// 监听 Manage 窗口可见性变化
+export const onManageWindowVisibilityChanged = (callback) => {
+  if (isElectron()) {
+    // Electron specific implementation if needed
+    return window.electron?.onManageWindowVisibilityChanged?.(callback) || (() => {});
+  }
+  
+  if (isTauri()) {
+    let unlisten = null;
+    let cancelled = false;
+    
+    getTauriEventApi().then(eventApi => {
+      if (cancelled) return;
+      if (eventApi) {
+        eventApi.listen('manage-window-vis-change', (event) => {
+          callback(event.payload);
+        }).then(fn => {
+            if (cancelled) {
+                fn();
+            } else {
+                unlisten = fn;
+            }
+        });
+      }
+    });
+
     return () => {
       cancelled = true;
       if (unlisten) unlisten();
@@ -892,6 +936,130 @@ export const onMcpUpdated = (callback) => {
   return () => {};
 };
 
+// ==================== API Providers 同步事件 ====================
+// 用于跨窗口同步 API providers 的可见模型配置
+const API_PROVIDERS_UPDATE_EVENT = 'petgpt-api-providers-updated';
+
+export const sendApiProvidersUpdate = async (data) => {
+  // 1. 发送本地事件（同窗口内组件同步）
+  window.dispatchEvent(new CustomEvent(API_PROVIDERS_UPDATE_EVENT, { detail: data }));
+  
+  // 2. 发送跨窗口事件
+  if (isElectron()) {
+    window.electron?.sendApiProvidersUpdate?.(data);
+  }
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    if (invoke) {
+      try {
+        await invoke('emit_to_all', { event: 'api-providers-updated', payload: data });
+      } catch (e) {
+        console.warn('Failed to emit api-providers-updated:', e);
+      }
+    }
+  }
+};
+
+export const onApiProvidersUpdated = (callback) => {
+  // 1. 监听本地事件（同窗口内）
+  const localHandler = (e) => callback(e.detail);
+  window.addEventListener(API_PROVIDERS_UPDATE_EVENT, localHandler);
+  
+  // 2. 监听跨窗口事件
+  let tauriUnlisten = null;
+  let cancelled = false;
+  
+  if (isElectron()) {
+    // Electron 暂未实现
+  }
+  if (isTauri()) {
+    getTauriEventApi().then(eventApi => {
+      if (cancelled) return;
+      if (eventApi) {
+        eventApi.listen('api-providers-updated', (event) => {
+          callback(event.payload);
+        }).then(fn => {
+          if (cancelled) {
+            fn();
+          } else {
+            tauriUnlisten = fn;
+          }
+        });
+      }
+    });
+  }
+  
+  return () => {
+    window.removeEventListener(API_PROVIDERS_UPDATE_EVENT, localHandler);
+    cancelled = true;
+    if (tauriUnlisten) tauriUnlisten();
+  };
+};
+
+// ==================== Skins 同步事件 ====================
+// 使用本地事件 + Tauri 事件双重机制，确保同窗口和跨窗口都能同步
+const SKINS_UPDATE_EVENT = 'petgpt-skins-updated';
+
+export const sendSkinsUpdate = async (data) => {
+  // 1. 发送本地事件（同窗口内组件同步）
+  window.dispatchEvent(new CustomEvent(SKINS_UPDATE_EVENT, { detail: data }));
+  
+  // 2. 发送跨窗口事件
+  if (isElectron()) {
+    window.electron?.sendSkinsUpdate?.(data);
+  }
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    if (invoke) {
+      try {
+        await invoke('emit_to_all', { event: 'skins-updated', payload: data });
+      } catch (e) {
+        console.warn('Failed to emit skins-updated:', e);
+      }
+    }
+  }
+};
+
+export const onSkinsUpdated = (callback) => {
+  // 1. 监听本地事件（同窗口内）
+  const localHandler = (e) => callback(e.detail);
+  window.addEventListener(SKINS_UPDATE_EVENT, localHandler);
+  
+  // 2. 监听跨窗口事件
+  let tauriUnlisten = null;
+  let electronUnlisten = null;
+  
+  if (isElectron()) {
+    electronUnlisten = window.electron?.onSkinsUpdated?.(callback);
+  }
+  
+  if (isTauri()) {
+    let cancelled = false;
+    
+    getTauriEventApi().then(eventApi => {
+      if (cancelled) return;
+      if (eventApi) {
+        eventApi.listen('skins-updated', (event) => {
+          callback(event.payload);
+        }).then(fn => {
+          if (cancelled) {
+            fn();
+          } else {
+            tauriUnlisten = fn;
+          }
+        });
+      }
+    });
+  }
+  
+  // 返回清理函数
+  return () => {
+    window.removeEventListener(SKINS_UPDATE_EVENT, localHandler);
+    if (tauriUnlisten) tauriUnlisten();
+    if (electronUnlisten) electronUnlisten();
+  };
+};
+
 export const onNewChatCreated = (callback) => {
   if (isElectron()) {
     return window.electron?.onNewChatCreated(callback);
@@ -1408,6 +1576,153 @@ export const apiProviders = {
   setValidated: setApiProviderValidated,
 };
 
+// ==================== Skins 接口 ====================
+
+export const getSkins = async () => {
+  if (isElectron()) {
+    return [];
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      const result = await invoke('get_skins');
+      return result || [];
+    } catch (err) {
+      console.error('[bridge.getSkins] Error:', err);
+      return [];
+    }
+  }
+  
+  return [];
+};
+
+export const getSkin = async (id) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('get_skin', { id });
+    } catch (err) {
+      console.error('[bridge.getSkin] Error:', err);
+      return null;
+    }
+  }
+  
+  return null;
+};
+
+export const importSkin = async (name, author, imageData) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      const result = await invoke('import_skin', { name, author, imageData });
+      return result;
+    } catch (err) {
+      console.error('[bridge.importSkin] Error:', err);
+      throw err;
+    }
+  }
+  
+  return null;
+};
+
+export const deleteSkin = async (id) => {
+  if (isElectron()) {
+    return false;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('delete_skin_with_files', { id });
+    } catch (err) {
+      console.error('[bridge.deleteSkin] Error:', err);
+      return false;
+    }
+  }
+  
+  return false;
+};
+
+export const getSkinImagePath = async (skinId, mood) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('get_skin_image_path', { skinId, mood });
+    } catch (err) {
+      console.error('[bridge.getSkinImagePath] Error:', err);
+      return null;
+    }
+  }
+  
+  return null;
+};
+
+// 获取皮肤图片的可显示 URL（使用 Tauri asset 协议）
+export const getSkinImageUrl = async (skinId, mood = 'normal') => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      // 获取本地文件路径
+      const filePath = await getSkinImagePath(skinId, mood);
+      if (!filePath) return null;
+      
+      // 使用 Tauri 的 convertFileSrc 转换为可访问的 URL
+      const { convertFileSrc } = await import('@tauri-apps/api/core');
+      return convertFileSrc(filePath);
+    } catch (err) {
+      console.error('[bridge.getSkinImageUrl] Error:', err);
+      // 降级为 base64 方案
+      return await readSkinImage(skinId, mood);
+    }
+  }
+  
+  return null;
+};
+
+// 读取皮肤图片（返回 base64 data URL，备用方案）
+export const readSkinImage = async (skinId, mood) => {
+  if (isElectron()) {
+    return null;
+  }
+  
+  if (isTauri()) {
+    try {
+      const { invoke } = await getTauriApi();
+      return await invoke('read_skin_image', { skinId, mood });
+    } catch (err) {
+      console.error('[bridge.readSkinImage] Error:', err);
+      return null;
+    }
+  }
+  
+  return null;
+};
+
+// Skins 便捷对象
+export const skinsApi = {
+  getAll: getSkins,
+  get: getSkin,
+  import: importSkin,
+  delete: deleteSkin,
+  readImage: readSkinImage,
+};
+
 // ==================== MCP Server 接口 ====================
 
 export const getMcpServers = async () => {
@@ -1894,6 +2209,16 @@ export const toggleSidebar = async (open) => {
   }
 };
 
+// 更新偏好设置到 Rust 后端
+export const updatePreferences = async (preferences = {}) => {
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    await invoke('update_preferences', {
+      chatFollowsCharacter: preferences.chatFollowsCharacter
+    });
+  }
+};
+
 // Tauri 窗口控制扩展
 
 // 开始拖动窗口 (用于自定义拖动区域)
@@ -2199,6 +2524,14 @@ const bridge = {
   updateApiProviderModels,
   setApiProviderValidated,
   
+  // Skins
+  skinsApi,
+  getSkins,
+  getSkin,
+  importSkin,
+  deleteSkin,
+  readSkinImage,
+  
   // MCP
   mcp,
   
@@ -2254,21 +2587,9 @@ const bridge = {
   onMoodUpdated,
   sendPetsUpdate,
   onPetsUpdated,
-  onNewChatCreated,
-  onChatbodyStatusUpdated,
-  updateChatbodyStatus,
-  
-  // 获取 Tauri listen 函数（用于监听来自 Rust 的事件）
-  getTauriListen: async () => {
-    if (!isTauri()) return null;
-    const api = await getTauriApi();
-    return api?.listen;
-  },
-  
-  // 兼容层 - 如果是 Electron，直接透传原始 API
-  get electron() {
-    return isElectron() ? window.electron : null;
-  }
+  sendApiProvidersUpdate,
+  onApiProvidersUpdated,
+  onManageWindowVisibilityChanged,
+  updatePreferences,
 };
-
 export default bridge;

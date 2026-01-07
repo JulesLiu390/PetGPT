@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback } from 'react';
+import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain } from "react-icons/fa6";
@@ -12,6 +12,12 @@ import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
 import * as bridge from '../../utils/bridge';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
+
+// ===== 模块级别全局变量 =====
+// 存储 Preferences 中的默认值，所有组件实例共享
+// 当 Preferences 更新时，这个值会被更新
+// 新建的组件实例会读取这个值作为初始状态
+let globalDefaultMemoryEnabled = true;
 
 /**
  * 获取模型的 API 格式
@@ -70,10 +76,61 @@ export const ChatboxInputBox = ({ activePetId }) => {
   const isGenerating = generatingConversations.has(conversationIdRef.current) || 
                        generatingConversations.has('temp');
   
-  // 新增记忆功能开关状态
-  const [memoryEnabled, setMemoryEnabled] = useState(true);
-  // MCP 服务器启用状态 (服务器名称集合)
-  const [enabledMcpServers, setEnabledMcpServers] = useState(new Set());
+  // Per-Conversation 工具栏状态
+  // 记忆功能开关状态 { [conversationId]: boolean }
+  const [memoryEnabledByConversation, setMemoryEnabledByConversation] = useState({});
+  // MCP 服务器启用状态 { [conversationId]: Set<string> }
+  const [enabledMcpServersByConversation, setEnabledMcpServersByConversation] = useState({});
+  // 追踪每个会话创建时的默认值（用于新 Tab 固化当时的默认值）
+  // Key: conversationId, Value: 该会话创建时的默认值
+  const conversationDefaultsRef = useRef({});
+  
+  // 获取当前会话的记忆状态
+  const currentConvId = conversationIdRef.current || 'temp';
+  
+  // 获取当前会话的记忆状态
+  // 逻辑：
+  // 1. 如果会话有明确设置过的值（用户手动切换过），使用该值
+  // 2. 否则，使用该会话创建时固化的默认值
+  // 3. 如果是全新会话（没有固化过），先固化当前的全局默认值
+  const getMemoryEnabledForConversation = (convId) => {
+    // 如果用户明确设置过，使用设置的值
+    if (convId in memoryEnabledByConversation) {
+      return memoryEnabledByConversation[convId];
+    }
+    // 如果是已固化过默认值的会话，使用固化的值
+    if (convId in conversationDefaultsRef.current) {
+      return conversationDefaultsRef.current[convId];
+    }
+    // 全新会话：固化当前的全局默认值
+    conversationDefaultsRef.current[convId] = globalDefaultMemoryEnabled;
+    console.log(`[ChatboxInputBox] New conversation ${convId} initialized with memory default:`, globalDefaultMemoryEnabled);
+    return globalDefaultMemoryEnabled;
+  };
+  
+  const memoryEnabled = getMemoryEnabledForConversation(currentConvId);
+  
+  // 设置当前会话的记忆状态
+  const setMemoryEnabled = (value) => {
+    const convId = conversationIdRef.current || 'temp';
+    const currentValue = getMemoryEnabledForConversation(convId);
+    setMemoryEnabledByConversation(prev => ({
+      ...prev,
+      [convId]: typeof value === 'function' ? value(currentValue) : value
+    }));
+  };
+  
+  // 获取当前会话的 MCP 服务器启用状态
+  const enabledMcpServers = enabledMcpServersByConversation[currentConvId] ?? new Set();
+  
+  // 设置当前会话的 MCP 服务器启用状态
+  const setEnabledMcpServers = (value) => {
+    const convId = conversationIdRef.current || 'temp';
+    setEnabledMcpServersByConversation(prev => ({
+      ...prev,
+      [convId]: typeof value === 'function' ? value(prev[convId] ?? new Set()) : value
+    }));
+  };
 
   const [userImage, setUserImage] = useState(null);
   const [stateReply, setStateReply] = useState(null);
@@ -235,8 +292,73 @@ export const ChatboxInputBox = ({ activePetId }) => {
   console.log('[ChatboxInputBox] stateValue:', stateValue);
   const [state, dispatch] = stateValue || [{}, () => {}];
   console.log('[ChatboxInputBox] state:', state, 'dispatch:', dispatch);
-  const { userMessages = [], suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {} } = state;
+  const { userMessages = [], suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {}, apiProviders = [] } = state;
   const suggestText = allSuggestTexts[currentConversationId] || [];
+  
+  // 临时覆盖模型（仅当前会话有效，不保存到数据库）
+  const [overrideModel, setOverrideModel] = useState(null);
+  // 模型选择器菜单显示状态
+  const [showModelSelector, setShowModelSelector] = useState(false);
+  
+  // 监听跨窗口的 API providers 更新事件
+  useEffect(() => {
+    const unlisten = bridge.onApiProvidersUpdated((updatedProviders) => {
+      console.log('[ChatboxInputBox] Received api-providers-updated event:', updatedProviders);
+      if (Array.isArray(updatedProviders) && dispatch) {
+        dispatch({
+          type: actionType.SET_API_PROVIDERS,
+          apiProviders: updatedProviders
+        });
+      }
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [dispatch]);
+  
+  // 监听设置更新事件，当 Preferences 保存时更新默认值（仅影响之后新建的 Tab）
+  useEffect(() => {
+    const unlisten = bridge.onSettingsUpdated((payload) => {
+      console.log('[ChatboxInputBox] Settings updated:', payload);
+      if (payload?.key === 'memoryEnabledByDefault') {
+        const newDefault = payload.value !== false && payload.value !== "false";
+        // 更新模块级别全局变量，不触发当前组件重渲染
+        // 只有之后新建的组件实例才会读取这个新值
+        globalDefaultMemoryEnabled = newDefault;
+        console.log('[ChatboxInputBox] Global default memory enabled updated to:', newDefault, '(only affects future tabs)');
+      }
+      if (payload?.key === 'chatFollowsCharacter') {
+        const chatFollows = payload.value !== false && payload.value !== "false";
+        bridge.updatePreferences({ chatFollowsCharacter: chatFollows });
+      }
+    });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+  
+  // 计算可见模型列表（当 apiProviders 变化时自动更新）
+  const visibleModelsByProvider = useMemo(() => {
+    console.log('[ChatboxInputBox] Computing visibleModelsByProvider, apiProviders:', apiProviders);
+    // 确保 apiProviders 是数组
+    if (!Array.isArray(apiProviders)) {
+      console.warn('[ChatboxInputBox] apiProviders is not an array:', apiProviders);
+      return [];
+    }
+    return apiProviders.map(provider => {
+      const models = provider.cachedModels || [];
+      const hiddenModels = provider.hiddenModels || [];
+      const visibleModels = models.filter(model => {
+        const modelName = typeof model === 'string' ? model : model.name;
+        return !hiddenModels.includes(modelName);
+      });
+      return {
+        ...provider,
+        visibleModels
+      };
+    }).filter(p => p.visibleModels.length > 0);
+  }, [apiProviders]);
+
   console.log('[ChatboxInputBox] userMessages:', userMessages);
   // 将 userText 从全局状态中移除，改为本地状态管理
   const [userText, setUserText] = useState("");
@@ -251,12 +373,26 @@ export const ChatboxInputBox = ({ activePetId }) => {
   const [system, setSystem] = useState(null);
   const [firstCharacter, setFirstCharacter] = useState(null)
 
-  // 启动时加载默认角色ID
+  // 启动时加载默认角色ID和偏好设置
   useEffect(() => {
     setSystem(window.navigator.platform);
     const loadDefaultCharacter = async () => {
       const settings = await bridge.getSettings();
+      console.log("[ChatboxInputBox] All settings loaded:", settings);
       let defaultAssistantFound = false;
+      
+      // 加载记忆功能的默认设置
+      if (settings) {
+        // 明确检查是否为 false，其他情况（包括 undefined、true、"true"）都视为 true
+        const memoryDefault = settings.memoryEnabledByDefault !== false && settings.memoryEnabledByDefault !== "false";
+        // 更新模块级别全局变量
+        globalDefaultMemoryEnabled = memoryDefault;
+        console.log("[ChatboxInputBox] Memory default loaded from DB:", memoryDefault);
+        
+        // 同步 chatFollowsCharacter 到 Rust 后端
+        const chatFollows = settings.chatFollowsCharacter !== false && settings.chatFollowsCharacter !== "false";
+        bridge.updatePreferences({ chatFollowsCharacter: chatFollows });
+      }
       
       try {
         if (settings && settings.defaultRoleId) {
@@ -315,8 +451,28 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
       // 加载默认功能模型
       try {
-        if (settings && settings.defaultModelId) {
-          // 验证ID是否有效（优先尝试 getAssistant，然后回退到 getPet）
+        if (settings && settings.functionModelProviderId && settings.functionModelName) {
+          // 从 API providers 中获取配置
+          const providers = await bridge.getApiProviders();
+          if (Array.isArray(providers)) {
+            const provider = providers.find(p => p._id === settings.functionModelProviderId);
+            if (provider) {
+              console.log("[ChatboxInputBox] Default function model loaded:", provider.name, settings.functionModelName);
+              setFunctionModelInfo({
+                modelName: settings.functionModelName,
+                modelUrl: provider.baseUrl,
+                modelApiKey: provider.apiKey,
+                apiFormat: provider.apiFormat || 'openai_compatible',
+                modelProvider: provider.name,
+                _sourceId: provider._id
+              });
+            } else {
+              console.log("Function model provider not found:", settings.functionModelProviderId);
+              setFunctionModelInfo(null);
+            }
+          }
+        } else if (settings && settings.defaultModelId) {
+          // 向后兼容：如果使用旧的 defaultModelId 配置，仍然支持
           try {
             let pet = null;
             try {
@@ -329,7 +485,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
             }
             if (pet) {
               setFounctionModel(settings.defaultModelId);
-              console.log("[ChatboxInputBox] Default function model loaded:", pet.name);
+              console.log("[ChatboxInputBox] Default function model loaded (legacy):", pet.name);
               const { _id, name, modelName, modelApiKey, modelProvider, modelUrl, apiFormat } = pet;
               const systemInstruction = pet.systemInstruction || pet.personality || '';
               setFunctionModelInfo({ _id, name, modelName, systemInstruction, modelApiKey, modelProvider, modelUrl, apiFormat });
@@ -343,7 +499,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
           }
         }
       } catch (error) {
-        console.error("Error loading default model ID from settings:", error);
+        console.error("Error loading default model from settings:", error);
         setFunctionModelInfo(null);
       }
     };
@@ -498,6 +654,71 @@ export const ChatboxInputBox = ({ activePetId }) => {
     };
 
     fetchPetInfo();
+  }, [characterId]);
+
+  // 监听助手更新事件，当当前助手被修改时重新加载 petInfo
+  useEffect(() => {
+    if (!characterId) return;
+
+    const handlePetsUpdate = async (event) => {
+      // event 结构: { action: 'update', type: 'assistant', id, data }
+      console.log("[ChatboxInputBox] Received pets update:", event);
+      
+      // 如果更新的是当前正在使用的助手，重新加载其信息
+      if (event && (event.id === characterId || event._id === characterId)) {
+        console.log("[ChatboxInputBox] Current assistant updated, reloading petInfo...");
+        
+        try {
+          let assistant = await bridge.getAssistant(characterId);
+          let modelConfig = null;
+          
+          if (assistant && assistant.modelConfigId) {
+            modelConfig = await bridge.getModelConfig(assistant.modelConfigId);
+          }
+          
+          setActiveModelConfig(modelConfig);
+          
+          if (!assistant) {
+            assistant = await bridge.getPet(characterId);
+          }
+          
+          if (assistant) {
+            const { _id, name, hasMood, isAgent } = assistant;
+            const systemInstruction = assistant.systemInstruction || assistant.personality || '';
+            const computedHasMood = typeof hasMood === 'boolean' ? hasMood : !isAgent;
+            
+            const apiConfig = modelConfig || assistant;
+            const { modelName, modelApiKey, modelUrl, apiFormat, modelProvider } = apiConfig;
+            
+            setPetInfo({ 
+              _id, 
+              name, 
+              modelName, 
+              systemInstruction, 
+              modelApiKey, 
+              modelProvider, 
+              modelUrl, 
+              apiFormat, 
+              hasMood: computedHasMood 
+            });
+            
+            setCurrentApiFormat(getApiFormat(apiConfig));
+            console.log("[ChatboxInputBox] petInfo reloaded with new modelName:", modelName);
+          }
+        } catch (error) {
+          console.error("[ChatboxInputBox] Error reloading petInfo:", error);
+        }
+      }
+    };
+
+    let cleanup;
+    if (bridge.onPetsUpdated) {
+      cleanup = bridge.onPetsUpdated(handlePetsUpdate);
+    }
+
+    return () => {
+      if (cleanup) cleanup();
+    };
   }, [characterId]);
 
   useEffect(() => {
@@ -734,11 +955,17 @@ export const ChatboxInputBox = ({ activePetId }) => {
     const isDefaultPersonality = petInfo?.systemInstruction &&
       (petInfo.systemInstruction.trim().toLowerCase() === "default model (english)" ||
        petInfo.systemInstruction.trim().toLowerCase() === "default");
-    thisModel = petInfo;
 
     const historyMessages = isRunFromHere ? userMessages.slice(0, -1) : userMessages;
 
-    thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
+    // 确定使用哪个模型：优先级 overrideModel > (isDefaultPersonality ? functionModelInfo : petInfo)
+    if (overrideModel) {
+      thisModel = overrideModel;
+    } else if (isDefaultPersonality && functionModelInfo) {
+      thisModel = functionModelInfo;
+    } else {
+      thisModel = petInfo;
+    }
       
       let content = displayContent;
 
@@ -800,7 +1027,6 @@ export const ChatboxInputBox = ({ activePetId }) => {
           fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
         }
       } else {
-        thisModel = functionModelInfo == null ? petInfo : functionModelInfo;
         if (memoryEnabled) {
           const index = await longTimeMemory(_userText, 
             getApiFormat(thisModel),
@@ -869,10 +1095,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
       try {
         const mcpResult = await callLLMStreamWithTools({
           messages: fullMessages,
-          apiFormat: getApiFormat(petInfo),
-          apiKey: petInfo.modelApiKey,
-          model: petInfo.modelName,
-          baseUrl: petInfo.modelUrl,
+          apiFormat: getApiFormat(thisModel),
+          apiKey: thisModel.modelApiKey,
+          model: thisModel.modelName,
+          baseUrl: thisModel.modelUrl,
           mcpTools: mcpTools,
           options: {},
           onChunk: (deltaText, fullText) => {
@@ -944,10 +1170,10 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
       reply = await callOpenAILibStream(
         fullMessages,
-        getApiFormat(petInfo),
-        petInfo.modelApiKey,
-        petInfo.modelName,
-        petInfo.modelUrl,
+        getApiFormat(thisModel),
+        thisModel.modelApiKey,
+        thisModel.modelName,
+        thisModel.modelUrl,
         (chunk) => {
             // 无论当前是否在同一个 tab，都更新对应 conversation 的流式内容
             dispatch({ 
@@ -1370,19 +1596,122 @@ const handleStop = async () => {
                     maxVisible={5}
                 />
 
-                {/* Model Info / Status (Figure 2 style) */}
+                {/* Model Info / Status with Custom Dropdown */}
                 {petInfo && (
-                    <div className="ml-2 px-2 py-1 bg-gray-200/50 rounded-md text-xs font-medium text-gray-600 flex flex-col justify-center select-none min-w-[60px]">
-                        <div className="font-bold text-gray-800 leading-tight truncate max-w-[100px]">
-                            {petInfo.name}
+                    <div className="relative ml-2">
+                        {/* Trigger Button */}
+                        <div 
+                            onClick={() => setShowModelSelector(prev => !prev)}
+                            className={`px-2 py-1 rounded-md text-xs font-medium text-gray-600 flex flex-col justify-center select-none min-w-[60px] cursor-pointer transition-all duration-150 ${
+                                showModelSelector 
+                                    ? 'bg-gray-300/70 scale-[0.98]' 
+                                    : 'bg-gray-200/50 hover:bg-gray-200'
+                            }`}
+                        >
+                            <div className="font-bold text-gray-800 leading-tight truncate max-w-[100px] flex items-center gap-1">
+                                {petInfo.name}
+                                <svg className={`w-2.5 h-2.5 text-gray-400 transition-transform duration-200 ${showModelSelector ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                                </svg>
+                            </div>
+                            <div className="text-[10px] text-gray-500 leading-tight truncate max-w-[100px] flex items-center gap-1">
+                                {isGenerating ? (
+                                    <span className="animate-pulse text-blue-500">Thinking...</span>
+                                ) : (
+                                    <span>{overrideModel ? overrideModel.modelName : (petInfo.modelName || "3.0")}</span>
+                                )}
+                            </div>
                         </div>
-                        <div className="text-[10px] text-gray-500 leading-tight truncate max-w-[100px] flex items-center gap-1">
-                            {isGenerating ? (
-                                <span className="animate-pulse text-blue-500">Thinking...</span>
-                            ) : (
-                                <span>{petInfo.modelName || "3.0"}</span>
-                            )}
-                        </div>
+
+                        {/* Custom Popover Menu */}
+                        {showModelSelector && (
+                            <>
+                                {/* Backdrop to close menu */}
+                                <div 
+                                    className="fixed inset-0 z-40" 
+                                    onClick={() => setShowModelSelector(false)}
+                                />
+                                {/* Menu */}
+                                <div className="absolute bottom-full right-0 mb-2 w-64 max-h-[min(320px,50vh)] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-100 rounded-xl shadow-xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
+                                    {/* Default Option */}
+                                    <div className="p-1.5">
+                                        <div
+                                            onClick={() => {
+                                                setOverrideModel(null);
+                                                setShowModelSelector(false);
+                                            }}
+                                            className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+                                                !overrideModel 
+                                                    ? 'bg-blue-50 text-blue-600' 
+                                                    : 'hover:bg-gray-50 text-gray-700'
+                                            }`}
+                                        >
+                                            <span className="text-xs font-medium truncate">{petInfo.modelName || "Default"}</span>
+                                            {!overrideModel && (
+                                                <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                                </svg>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Divider */}
+                                    {visibleModelsByProvider.length > 0 && <div className="border-t border-gray-100 mx-2" />}
+
+                                    {/* Provider Groups */}
+                                    {visibleModelsByProvider.map(provider => {
+                                        return (
+                                            <div key={provider._id || provider.name} className="p-1.5">
+                                                <div className="text-[10px] text-gray-400 font-bold px-3 py-1 uppercase tracking-wide">
+                                                    {provider.name}
+                                                </div>
+                                                {provider.visibleModels.map(model => {
+                                                    const modelName = typeof model === 'string' ? model : model.name;
+                                                    const isSelected = overrideModel && 
+                                                        overrideModel._sourceId === provider._id && 
+                                                        overrideModel.modelName === modelName;
+                                                    return (
+                                                        <div
+                                                            key={`${provider._id}:${modelName}`}
+                                                            onClick={() => {
+                                                                setOverrideModel({
+                                                                    modelName: modelName,
+                                                                    modelUrl: provider.baseUrl,
+                                                                    modelApiKey: provider.apiKey,
+                                                                    apiFormat: provider.apiFormat || 'openai_compatible',
+                                                                    modelProvider: provider.name,
+                                                                    _sourceId: provider._id
+                                                                });
+                                                                setShowModelSelector(false);
+                                                            }}
+                                                            className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors ${
+                                                                isSelected 
+                                                                    ? 'bg-blue-50 text-blue-600' 
+                                                                    : 'hover:bg-gray-50 text-gray-700'
+                                                            }`}
+                                                        >
+                                                            <span className="text-xs font-medium truncate">{modelName}</span>
+                                                            {isSelected && (
+                                                                <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                                                </svg>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                })}
+                                            </div>
+                                        );
+                                    })}
+
+                                    {/* Empty State */}
+                                    {apiProviders.every(p => !Array.isArray(p.cachedModels) || p.cachedModels.length === 0) && (
+                                        <div className="p-3 text-center text-xs text-gray-400">
+                                            No models available. Add API providers in Settings.
+                                        </div>
+                                    )}
+                                </div>
+                            </>
+                        )}
                     </div>
                 )}
             </div>

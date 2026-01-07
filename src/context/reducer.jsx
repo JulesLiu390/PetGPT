@@ -22,12 +22,18 @@ export const actionType = {
     CLEAR_TOOL_CALLS: "CLEAR_TOOL_CALLS",     // 清除工具调用
     // 时间注入管理
     UPDATE_TIME_INJECTION: "UPDATE_TIME_INJECTION", // 更新会话的时间注入时间戳
+    SET_API_PROVIDERS: "SET_API_PROVIDERS", // 设置全局 API 服务商列表
 }
 
 const reducer = (state, action) => {
     console.log(action);
 
     switch(action.type) {
+        case actionType.SET_API_PROVIDERS:
+            return {
+                ...state,
+                apiProviders: action.apiProviders,
+            };
         case actionType.TRIGGER_RUN_FROM_HERE:
             return {
                 ...state,

@@ -49,13 +49,14 @@ export const Chatbox = () => {
       
       try {
         const settings = await bridge.getSettings();
-        let defaultAssistantId = settings?.defaultAssistant;
+        // 使用正确的设置键名 defaultRoleId
+        let defaultAssistantId = settings?.defaultRoleId;
         
         // If no default assistant is set, use the first available assistant
         if (!defaultAssistantId) {
           const assistants = await bridge.getAssistants();
           if (assistants && assistants.length > 0) {
-            defaultAssistantId = assistants[0].id;
+            defaultAssistantId = assistants[0]._id;
             console.log('[ChatboxBody] No default assistant set, using first available:', defaultAssistantId);
           }
         }

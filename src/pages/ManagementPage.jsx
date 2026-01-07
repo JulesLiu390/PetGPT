@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard } from "react-icons/fa6";
+import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
 import { MdClose } from "react-icons/md";
 import { LuMaximize2 } from "react-icons/lu";
@@ -8,10 +8,12 @@ import TitleBar from "../components/UI/TitleBar";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Label, Badge, Checkbox } from "../components/UI/ui";
 import { IconSelectorTrigger } from "../components/UI/IconSelector";
 import { fetchModels, callOpenAILib } from "../utils/openai";
-import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl } from "../utils/llm/presets";
+import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl, getDetectionCandidates } from "../utils/llm/presets";
 import * as bridge from "../utils/bridge";
 import { useSettings } from "../utils/useSettings";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
+import { useStateValue } from "../context/StateProvider";
+import { actionType } from "../context/reducer";
 
 // ==================== Shared Components ====================
 
@@ -36,6 +38,10 @@ const CustomImage = ({ imageName }) => {
         } else if(imageName === "Gemina") {
           const module = await import(`../assets/Gemina-normal.png`);
           setImgSrc(module.default);
+        } else if (imageName.startsWith("custom:")) {
+          const skinId = imageName.split(":")[1];
+          const base64Image = await bridge.readSkinImage(skinId, "normal");
+          setImgSrc(base64Image);
         } else {
           const base64Image = await bridge.readPetImage(`${imageName}-normal.png`);
           setImgSrc(base64Image);
@@ -102,6 +108,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [apiProviders, setApiProviders] = useState([]);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [availableModels, setAvailableModels] = useState([]);
+  const [customSkins, setCustomSkins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   
@@ -115,14 +122,50 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     modelUrl: assistant?.modelUrl || "",
     modelApiKey: assistant?.modelApiKey || "",
     apiFormat: assistant?.apiFormat || "",
+    modelConfigId: "", // Clear legacy config ID to ensure local settings take precedence
   });
+  
+  // 加载自定义皮肤列表
+  const loadCustomSkins = async () => {
+    try {
+      const skins = await bridge.getSkins();
+      const skinsList = Array.isArray(skins) ? skins : [];
+      setCustomSkins(skinsList);
+    } catch (err) {
+      console.error('[AssistantForm] Failed to load skins:', err);
+    }
+  };
+  
+  useEffect(() => {
+    loadCustomSkins();
+  }, []);
+  
+  // 监听皮肤更新事件
+  useEffect(() => {
+    const cleanup = bridge.onSkinsUpdated?.(() => {
+      console.log('[AssistantForm] Skins updated, refreshing list...');
+      loadCustomSkins();
+    });
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
 
   // 加载可用的 API Providers
   useEffect(() => {
     const loadApiProviders = async () => {
       try {
-        const providers = await bridge.apiProviders.getAll();
-        if (Array.isArray(providers)) {
+        const rawProviders = await bridge.apiProviders.getAll();
+        if (Array.isArray(rawProviders)) {
+          // Normalize providers: ensure id exists and cachedModels is parsed
+          const providers = rawProviders.map(p => ({
+            ...p,
+            id: p.id || p._id, // Ensure ID is consistent
+            cachedModels: typeof p.cachedModels === 'string' 
+              ? JSON.parse(p.cachedModels) 
+              : (p.cachedModels || [])
+          }));
+          
           setApiProviders(providers);
           
           // 如果是编辑模式，匹配现有的 provider
@@ -133,12 +176,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
             );
             if (matchedProvider) {
               setSelectedProviderId(matchedProvider.id);
-              const models = matchedProvider.cachedModels 
-                ? (typeof matchedProvider.cachedModels === 'string' 
-                    ? JSON.parse(matchedProvider.cachedModels) 
-                    : matchedProvider.cachedModels)
-                : [];
-              setAvailableModels(models);
+              setAvailableModels(matchedProvider.cachedModels);
             }
           } else if (!assistant && providers.length > 0) {
             // 新建模式，默认选第一个
@@ -152,6 +190,22 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
       }
     };
     loadApiProviders();
+    
+    // Listen for provider updates
+    let unlistenFn;
+    const setupListener = async () => {
+      if (bridge.listen) {
+        unlistenFn = await bridge.listen("api-providers-updated", (event) => {
+          console.log("API Providers updated, refreshing list...");
+          loadApiProviders();
+        });
+      }
+    };
+    setupListener();
+    
+    return () => {
+      if (unlistenFn) unlistenFn();
+    };
   }, [assistant]);
 
   const handleProviderChange = (providerId, providerList = apiProviders) => {
@@ -171,11 +225,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     
     const provider = providerList.find(p => p.id === providerId);
     if (provider) {
-      const models = provider.cachedModels 
-        ? (typeof provider.cachedModels === 'string' 
-            ? JSON.parse(provider.cachedModels) 
-            : provider.cachedModels)
-        : [];
+      const models = provider.cachedModels || [];
       setAvailableModels(models);
       
       const firstModel = models.length > 0 ? models[0] : "";
@@ -213,7 +263,9 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
 
     setSaving(true);
     try {
-      await onSave(formData);
+      // Explicitly clear modelConfigId to ensure the Assistant's local settings (Pro) take precedence
+      // over any stale linked configuration (Flash)
+      await onSave({ ...formData, modelConfigId: "" });
     } catch (error) {
       console.error("Save failed:", error);
       alert("Failed to save: " + (error.message || error));
@@ -322,12 +374,28 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
           value={formData.imageName}
           onChange={handleChange}
         >
-          <option value="default">Default</option>
-          <option value="Opai">Opai (OpenAI style)</option>
-          <option value="Gemina">Gemina (Gemini style)</option>
-          <option value="Claudia">Claudia (Claude style)</option>
-          <option value="Grocka">Grocka (Grok style)</option>
+          <optgroup label="Built-in">
+            <option value="default">Default</option>
+            <option value="Opai">Opai (OpenAI style)</option>
+            <option value="Gemina">Gemina (Gemini style)</option>
+            <option value="Claudia">Claudia (Claude style)</option>
+            <option value="Grocka">Grocka (Grok style)</option>
+          </optgroup>
+          {customSkins.length > 0 && (
+            <optgroup label="Custom Skins">
+              {customSkins.map(skin => (
+                <option key={skin.id} value={`custom:${skin.id}`}>
+                  {skin.name}{skin.author ? ` (by ${skin.author})` : ''}
+                </option>
+              ))}
+            </optgroup>
+          )}
         </Select>
+        {customSkins.length === 0 && (
+          <div className="text-xs text-slate-400 mt-1">
+            No custom skins. Import one in the Skins tab.
+          </div>
+        )}
       </FormGroup>
 
       <Checkbox
@@ -413,7 +481,14 @@ const AssistantsPanel = ({ onNavigate }) => {
     if (editingAssistant) {
       // Update existing
       const updatedAssistant = await bridge.updateAssistant(editingAssistant._id, formData);
-      bridge.sendPetsUpdate(updatedAssistant);
+      // 发送包含 id 的更新事件，确保聊天窗口能匹配到
+      bridge.sendPetsUpdate({ 
+        action: 'update', 
+        type: 'assistant', 
+        id: editingAssistant._id,
+        _id: editingAssistant._id,
+        data: updatedAssistant 
+      });
       bridge.sendCharacterId(editingAssistant._id);
     } else {
       // Create new
@@ -422,7 +497,13 @@ const AssistantsPanel = ({ onNavigate }) => {
         throw new Error("Creation failed or no ID returned");
       }
       bridge.sendCharacterId(newAssistant._id);
-      bridge.sendPetsUpdate(newAssistant);
+      bridge.sendPetsUpdate({ 
+        action: 'create', 
+        type: 'assistant', 
+        id: newAssistant._id,
+        _id: newAssistant._id,
+        data: newAssistant 
+      });
     }
     setIsCreating(false);
     setEditingAssistant(null);
@@ -564,11 +645,13 @@ const guessProviderName = (baseUrl) => {
  */
 const detectProviderFromKey = (apiKey) => {
   if (!apiKey) return null;
-  if (apiKey.startsWith("sk-ant-")) return { format: "anthropic", name: "Anthropic" };
-  if (apiKey.startsWith("AIza")) return { format: "gemini_official", name: "Google Gemini" };
-  if (apiKey.startsWith("gsk_")) return { format: "openai_compatible", name: "Groq" };
-  if (apiKey.startsWith("sk-or-")) return { format: "openai_compatible", name: "OpenRouter" };
-  if (apiKey.startsWith("sk-")) return { format: "openai_compatible", name: "OpenAI / DeepSeek" };
+  // Anthropic 使用 OpenAI 兼容格式（通过其兼容端点）
+  if (apiKey.startsWith("sk-ant-")) return { format: "openai_compatible", name: "Anthropic", baseUrl: "https://api.anthropic.com/v1" };
+  if (apiKey.startsWith("AIza")) return { format: "gemini_official", name: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com" };
+  if (apiKey.startsWith("gsk_")) return { format: "openai_compatible", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" };
+  if (apiKey.startsWith("sk-or-")) return { format: "openai_compatible", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" };
+  if (apiKey.startsWith("xai-")) return { format: "openai_compatible", name: "xAI", baseUrl: "https://api.x.ai/v1" };
+  if (apiKey.startsWith("sk-")) return { format: "openai_compatible", name: "OpenAI / DeepSeek", baseUrl: "https://api.openai.com/v1" };
   return null;
 };
 
@@ -597,34 +680,22 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const [isFetchingModels, setIsFetchingModels] = useState(false);
   const [fetchedModels, setFetchedModels] = useState([]);
   const [detectedProvider, setDetectedProvider] = useState(null);
+  const [isAutoDetecting, setIsAutoDetecting] = useState(false);
+  const [autoDetectProgress, setAutoDetectProgress] = useState("");
   
-  // 当 API Key 改变时，尝试检测服务商
+  // 当 API Key 改变时，尝试检测服务商并自动填充
   useEffect(() => {
     const detected = detectProviderFromKey(formData.apiKey);
     setDetectedProvider(detected);
     
-    // 如果检测到了且是新建，自动填充
+    // 如果检测到了且是新建，自动填充所有字段
     if (detected && !provider) {
-      if (detected.format === "gemini_official") {
-        setFormData(prev => ({
-          ...prev,
-          apiFormat: "gemini_official",
-          baseUrl: "https://generativelanguage.googleapis.com",
-          name: prev.name || detected.name,
-        }));
-      } else if (detected.name === "Groq") {
-        setFormData(prev => ({
-          ...prev,
-          baseUrl: "https://api.groq.com/openai/v1",
-          name: prev.name || "Groq",
-        }));
-      } else if (detected.name === "OpenRouter") {
-        setFormData(prev => ({
-          ...prev,
-          baseUrl: "https://openrouter.ai/api/v1",
-          name: prev.name || "OpenRouter",
-        }));
-      }
+      setFormData(prev => ({
+        ...prev,
+        apiFormat: detected.format,
+        baseUrl: detected.baseUrl || prev.baseUrl,
+        name: prev.name || detected.name,
+      }));
     }
   }, [formData.apiKey, provider]);
   
@@ -649,7 +720,8 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
       const models = await fetchModels(formData.baseUrl, formData.apiKey, formData.apiFormat);
       
       if (models && models.length > 0) {
-        setFetchedModels(models);
+        const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
+        setFetchedModels(modelIds);
         setTestResult(`Found ${models.length} models`);
         setTestSuccess(true);
       } else {
@@ -681,7 +753,8 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
       const models = await fetchModels(formData.baseUrl, formData.apiKey, formData.apiFormat);
       
       if (models && models.length > 0) {
-        setFetchedModels(models);
+        const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
+        setFetchedModels(modelIds);
         setTestResult(`✓ Connection successful! Found ${models.length} models`);
         setTestSuccess(true);
       } else {
@@ -709,6 +782,88 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     }
   };
   
+  // Auto-detect endpoint by trying known provider URLs
+  const handleAutoDetect = async () => {
+    if (!formData.apiKey) {
+      setTestResult("Please enter your API Key first");
+      return;
+    }
+    
+    setIsAutoDetecting(true);
+    setTestResult(null);
+    setTestSuccess(false);
+    setAutoDetectProgress("");
+    
+    // Get candidates including local servers
+    const candidates = getDetectionCandidates(true);
+    
+    // Also try Gemini format for Google keys
+    const isGoogleKey = formData.apiKey.startsWith("AIza");
+    
+    if (isGoogleKey) {
+      // For Google keys, directly use Gemini endpoint
+      setAutoDetectProgress("Testing Google Gemini...");
+      try {
+        const models = await fetchModels(
+          "https://generativelanguage.googleapis.com",
+          formData.apiKey,
+          "gemini_official"
+        );
+        if (models && models.length > 0) {
+          setFormData(prev => ({
+            ...prev,
+            baseUrl: "https://generativelanguage.googleapis.com",
+            apiFormat: "gemini_official",
+            name: prev.name || "Google Gemini",
+          }));
+          const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
+          setFetchedModels(modelIds);
+          setTestResult(`✓ Found Google Gemini with ${models.length} models`);
+          setTestSuccess(true);
+          setIsAutoDetecting(false);
+          setAutoDetectProgress("");
+          return;
+        }
+      } catch (e) {
+        console.log("Gemini detection failed:", e.message);
+      }
+    }
+    
+    // Try OpenAI-compatible endpoints
+    for (const candidate of candidates) {
+      setAutoDetectProgress(`Testing ${candidate.label}...`);
+      
+      try {
+        const models = await fetchModels(candidate.baseUrl, formData.apiKey, "openai_compatible");
+        
+        if (models && models.length > 0) {
+          setFormData(prev => ({
+            ...prev,
+            baseUrl: candidate.baseUrl,
+            apiFormat: "openai_compatible",
+            name: prev.name || candidate.label,
+          }));
+          const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
+          setFetchedModels(modelIds);
+          setTestResult(`✓ Found ${candidate.label} with ${models.length} models`);
+          setTestSuccess(true);
+          setIsAutoDetecting(false);
+          setAutoDetectProgress("");
+          return;
+        }
+      } catch (e) {
+        // Continue to next candidate
+        console.log(`${candidate.label} failed:`, e.message);
+      }
+    }
+    
+    // No endpoint found
+    setTestResult("Could not auto-detect endpoint. Please select manually.");
+    setTestSuccess(false);
+    setIsAutoDetecting(false);
+    setAutoDetectProgress("");
+  };
+  
   const handleSubmit = async (e) => {
     e.preventDefault();
     
@@ -718,9 +873,17 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     }
     
     // 保存时包含 cached_models
+    // cachedModels needs to be a JSON string for the backend API
+    const cachedModelsArray = fetchedModels.length > 0 ? fetchedModels : (provider?.cachedModels || []);
+    
+    // 如果是新建 Provider，默认将所有模型设为隐藏
+    // 如果是编辑现有 Provider，保持现有的 hiddenModels
+    const hiddenModelsArray = provider?.hiddenModels || cachedModelsArray;
+    
     const dataToSave = {
       ...formData,
-      cachedModels: fetchedModels.length > 0 ? fetchedModels : (provider?.cachedModels || []),
+      cachedModels: JSON.stringify(cachedModelsArray),
+      hiddenModels: JSON.stringify(hiddenModelsArray),
     };
     
     onSave(dataToSave);
@@ -728,7 +891,6 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   
   const formatOptions = [
     { value: "openai_compatible", label: "OpenAI Compatible" },
-    { value: "anthropic", label: "Anthropic Claude" },
     { value: "gemini_official", label: "Google Gemini" },
   ];
   
@@ -738,11 +900,12 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const handlePresetChange = (e) => {
     const presetUrl = e.target.value;
     if (presetUrl) {
-      const preset = findPresetByUrl(presetUrl);
+      // Find the selected preset directly from the presets array
+      const selectedPreset = presets.find(p => p.baseUrl === presetUrl);
       setFormData(prev => ({
         ...prev,
         baseUrl: presetUrl,
-        name: prev.name || (preset ? preset.name : guessProviderName(presetUrl)),
+        name: prev.name || (selectedPreset ? selectedPreset.label : guessProviderName(presetUrl)),
       }));
     }
   };
@@ -759,11 +922,24 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
           onChange={handleChange}
           placeholder="sk-... or AIza..."
         />
-        {detectedProvider && (
-          <div className="mt-1 text-xs text-blue-600">
-            Detected: {detectedProvider.name}
-          </div>
-        )}
+        <div className="mt-2 flex items-center gap-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="sm"
+            onClick={handleAutoDetect}
+            disabled={isAutoDetecting || !formData.apiKey}
+          >
+            {isAutoDetecting ? <FaSpinner className="w-3 h-3 animate-spin" /> : <FaServer className="w-3 h-3" />}
+            Auto-Detect Endpoint
+          </Button>
+          {autoDetectProgress && (
+            <span className="text-xs text-slate-500">{autoDetectProgress}</span>
+          )}
+          {detectedProvider && !autoDetectProgress && (
+            <span className="text-xs text-blue-600">Detected: {detectedProvider.name}</span>
+          )}
+        </div>
       </FormGroup>
       
       {/* API Format */}
@@ -792,7 +968,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
             <option value="">-- Select preset or enter custom --</option>
             {presets.map(preset => (
               <option key={preset.baseUrl} value={preset.baseUrl}>
-                {preset.name}
+                {preset.label}
               </option>
             ))}
           </Select>
@@ -977,7 +1153,12 @@ const ApiProvidersPanel = () => {
   const loadProviders = useCallback(async () => {
     try {
       const data = await bridge.getApiProviders();
-      const normalized = (data || []).map(p => ({ ...p, _id: p._id || p.id }));
+      const normalized = (data || []).map(p => ({ 
+        ...p, 
+        _id: p._id || p.id,
+        // Parse cachedModels JSON string to array
+        cachedModels: typeof p.cachedModels === 'string' ? JSON.parse(p.cachedModels) : (p.cachedModels || [])
+      }));
       setProviders(normalized);
     } catch (error) {
       console.error("Failed to load API providers:", error);
@@ -1568,6 +1749,213 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
   );
 };
 
+// ==================== Models Panel ====================
+
+const ModelsPanel = () => {
+  const [providers, setProviders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [expandedProviders, setExpandedProviders] = useState(new Set());
+  const [{}, dispatch] = useStateValue();
+
+  const loadProviders = useCallback(async () => {
+    try {
+      const data = await bridge.getApiProviders();
+      const normalized = (data || []).map(p => ({ 
+        ...p, 
+        _id: p._id || p.id,
+        // Parse cachedModels and hiddenModels JSON strings
+        cachedModels: typeof p.cachedModels === 'string' ? JSON.parse(p.cachedModels) : (p.cachedModels || []),
+        hiddenModels: typeof p.hiddenModels === 'string' ? JSON.parse(p.hiddenModels) : (p.hiddenModels || [])
+      }));
+      setProviders(normalized);
+    } catch (error) {
+      console.error("Failed to load providers:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    loadProviders();
+  }, [loadProviders]);
+
+  const toggleModelVisibility = async (provider, modelName) => {
+    try {
+      const hiddenModels = provider.hiddenModels || [];
+      const newHiddenModels = hiddenModels.includes(modelName)
+        ? hiddenModels.filter(m => m !== modelName)
+        : [...hiddenModels, modelName];
+
+      await bridge.updateApiProvider(provider._id, {
+        hiddenModels: JSON.stringify(newHiddenModels)
+      });
+
+      // 重新拉取完整的 providers 数据
+      const updatedProviders = await bridge.getApiProviders();
+      if (updatedProviders) {
+        const normalizedProviders = updatedProviders.map(p => ({
+          ...p,
+          cachedModels: typeof p.cachedModels === 'string' 
+            ? JSON.parse(p.cachedModels) 
+            : (p.cachedModels || []),
+          hiddenModels: typeof p.hiddenModels === 'string'
+            ? JSON.parse(p.hiddenModels)
+            : (p.hiddenModels || [])
+        }));
+        
+        // 更新本地状态
+        setProviders(normalizedProviders);
+        
+        // 更新全局状态
+        dispatch({
+          type: actionType.SET_API_PROVIDERS,
+          apiProviders: normalizedProviders
+        });
+        
+        // 发送跨窗口事件通知其他窗口更新
+        await bridge.sendApiProvidersUpdate(normalizedProviders);
+      }
+    } catch (error) {
+      console.error("Failed to toggle model visibility:", error);
+      alert("Failed to update model visibility");
+    }
+  };
+
+  const toggleProvider = (providerId) => {
+    setExpandedProviders(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(providerId)) {
+        newSet.delete(providerId);
+      } else {
+        newSet.add(providerId);
+      }
+      return newSet;
+    });
+  };
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <FaSpinner className="w-8 h-8 text-blue-500 animate-spin" />
+      </div>
+    );
+  }
+
+  // Flatten all models from all providers
+  const allModels = providers.flatMap(provider => {
+    const models = provider.cachedModels || [];
+    return models.map(modelName => ({
+      modelName,
+      provider: provider.name,
+      providerId: provider._id,
+      isHidden: (provider.hiddenModels || []).includes(modelName)
+    }));
+  });
+
+  if (allModels.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-full">
+        <div className="text-center text-gray-500">
+          <FaList className="w-12 h-12 mx-auto mb-2 opacity-50" />
+          <p>No models available</p>
+          <p className="text-sm">Add API providers and fetch models first</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="h-full overflow-y-auto p-6">
+      <div className="max-w-5xl mx-auto">
+        <div className="mb-6">
+          <h2 className="text-lg font-semibold text-gray-800">Model Visibility</h2>
+          <p className="text-sm text-gray-500 mt-1">
+            Control which models appear in the dropdown selector. All models are disabled by default. Toggle on to enable them in the chat interface.
+          </p>
+        </div>
+
+        {/* Table Header */}
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden shadow-sm">
+          <div className="grid grid-cols-12 gap-4 px-4 py-3 bg-gray-50 border-b border-gray-200 text-xs font-semibold text-gray-600 uppercase tracking-wide">
+            <div className="col-span-6">Model Name</div>
+            <div className="col-span-3">Provider</div>
+            <div className="col-span-3 text-center">Enabled</div>
+          </div>
+
+          {/* Table Body - Grouped by Provider */}
+          {providers.map(provider => {
+            const models = provider.cachedModels || [];
+            const hiddenModels = provider.hiddenModels || [];
+            const isExpanded = expandedProviders.has(provider._id);
+
+            if (models.length === 0) return null;
+
+            return (
+              <div key={provider._id} className="border-b border-gray-100 last:border-b-0">
+                {/* Provider Header */}
+                <div 
+                  className="flex items-center gap-2 px-4 py-3 bg-gray-50/50 cursor-pointer hover:bg-gray-100 transition-colors"
+                  onClick={() => toggleProvider(provider._id)}
+                >
+                  {isExpanded ? (
+                    <FaChevronDown className="w-3 h-3 text-gray-400" />
+                  ) : (
+                    <FaChevronUp className="w-3 h-3 text-gray-400" />
+                  )}
+                  <span className="font-semibold text-sm text-gray-700">
+                    {provider.name}
+                  </span>
+                  <Badge variant="secondary" className="text-xs">
+                    {models.length} models
+                  </Badge>
+                  <Badge variant={models.length - hiddenModels.length > 0 ? "success" : "secondary"} className="text-xs ml-auto">
+                    {models.length - hiddenModels.length} enabled
+                  </Badge>
+                </div>
+
+                {/* Model Rows */}
+                {isExpanded && (
+                  <div>
+                    {models.map((modelName, index) => {
+                      const isHidden = hiddenModels.includes(modelName);
+                      return (
+                        <div 
+                          key={`${provider._id}-${modelName}`}
+                          className={`grid grid-cols-12 gap-4 px-4 py-3 hover:bg-gray-50 transition-colors ${
+                            index !== models.length - 1 ? 'border-b border-gray-100' : ''
+                          }`}
+                        >
+                          <div className="col-span-6 text-sm text-gray-800 font-mono truncate">
+                            {modelName}
+                          </div>
+                          <div className="col-span-3 text-sm text-gray-500">
+                            {provider.name}
+                          </div>
+                          <div className="col-span-3 flex justify-center">
+                            <label className="relative inline-flex items-center cursor-pointer">
+                              <input
+                                type="checkbox"
+                                checked={!isHidden}
+                                onChange={() => toggleModelVisibility(provider, modelName)}
+                                className="sr-only peer"
+                              />
+                              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-2 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                            </label>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const McpServersPanel = () => {
   const [servers, setServers] = useState([]);
   const [serverStatuses, setServerStatuses] = useState({});
@@ -1716,6 +2104,427 @@ const McpServersPanel = () => {
   );
 };
 
+// ==================== Skins Panel ====================
+
+/**
+ * Skins Form Component - 新建/编辑皮肤
+ */
+const SkinForm = ({ skin, onSave, onCancel }) => {
+  const [formData, setFormData] = useState({
+    name: skin?.name || "",
+    imagePath: skin?.imagePath || "",
+    author: skin?.author || "",
+    description: skin?.description || "",
+  });
+  
+  const [preview, setPreview] = useState(skin?.preview || null);
+  const [splitPreviews, setSplitPreviews] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const [error, setError] = useState(null);
+
+  // 处理文件拖放或选择
+  const handleFileSelect = async (e) => {
+    const file = e.type === 'drop' ? e.dataTransfer.files[0] : e.target.files[0];
+    if (!file) return;
+    
+    // 基本验证
+    if (!file.type.startsWith('image/')) {
+      setError("Please select an image file");
+      return;
+    }
+
+    try {
+      setIsProcessing(true);
+      setError(null);
+      
+      // 读取并预览原图
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        const dataUrl = event.target.result;
+        setPreview(dataUrl);
+        
+        // 自动设置名称（如果还没填）
+        if (!formData.name) {
+          const name = file.name.replace(/\.[^/.]+$/, "");
+          setFormData(prev => ({ ...prev, name }));
+        }
+
+        // 自动切割图片 (1x1 到 2x2 grid)
+        // 使用 canvas 模拟切割并显示预览
+        const img = new Image();
+        img.onload = () => {
+          const w = img.width;
+          const h = img.height;
+          // check if square
+          if (Math.abs(w - h) > w * 0.1) {
+            setError("Warning: Image is not square. 2x2 grid splitting might look distorted.");
+          }
+          
+          const pieceW = w / 2;
+          const pieceH = h / 2;
+          
+          const pieces = [];
+          const labels = ['Normal', 'Happy', 'Angry', 'Thinking'];
+          
+          [0, 1].forEach(row => {
+            [0, 1].forEach(col => {
+              const canvas = document.createElement('canvas');
+              canvas.width = pieceW;
+              canvas.height = pieceH;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, col * pieceW, row * pieceH, pieceW, pieceH, 0, 0, pieceW, pieceH);
+              pieces.push({
+                url: canvas.toDataURL('image/png'),
+                label: labels[row * 2 + col]
+              });
+            });
+          });
+          
+          setSplitPreviews(pieces);
+          setIsProcessing(false);
+          
+          // 保存文件原始数据用于上传
+          setFormData(prev => ({ ...prev, file: file }));
+        };
+        img.src = dataUrl;
+      };
+      reader.readAsDataURL(file);
+      
+    } catch (err) {
+      console.error("Image processing failed:", err);
+      setError("Failed to process image: " + err.message);
+      setIsProcessing(false);
+    }
+  };
+
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+    setFormData(prev => ({ ...prev, [name]: value }));
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.name || !preview) {
+      setError("Please provide a name and select an image");
+      return;
+    }
+
+    try {
+       // 传递 base64 图片数据给后端（Rust 会负责分割和保存）
+       await onSave({
+         name: formData.name,
+         author: formData.author,
+         imageData: preview, // base64 data URL，Rust 会解码并分割
+       });
+    } catch (err) {
+      setError("Save failed: " + (err.message || err));
+    }
+  };
+
+  return (
+    <form onSubmit={handleSubmit} className="space-y-4">
+      {/* File Drop Zone */}
+      <div 
+        className="border-2 border-dashed border-slate-300 rounded-xl p-6 flex flex-col items-center justify-center bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer"
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          e.preventDefault();
+          handleFileSelect(e);
+        }}
+        onClick={() => document.getElementById('skin-file-input').click()}
+      >
+        <input 
+          id="skin-file-input" 
+          type="file" 
+          accept="image/*" 
+          className="hidden" 
+          onChange={handleFileSelect}
+        />
+        
+        {preview ? (
+          <div className="relative w-32 h-32 mb-2">
+            <img src={preview} alt="Preview" className="w-full h-full object-contain rounded-lg shadow-sm" />
+            <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 hover:opacity-100 transition-opacity rounded-lg text-white font-medium">
+              Change Image
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center text-slate-400">
+            <FaShirt className="w-8 h-8 mb-2" />
+            <span className="text-sm font-medium">Click or drop 2x2 sprite sheet here</span>
+            <span className="text-xs mt-1">Supports PNG, JPG (Square ratio recommended)</span>
+          </div>
+        )}
+      </div>
+
+      {/* Split Preview */}
+      {splitPreviews && (
+        <div className="bg-white border border-slate-200 rounded-lg p-3">
+          <div className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wide">Output Preview</div>
+          <div className="grid grid-cols-4 gap-2">
+            {splitPreviews.map((piece, i) => (
+              <div key={i} className="flex flex-col items-center gap-1">
+                <div className="bg-slate-100 rounded-md p-1 border border-slate-200 w-full aspect-square flex items-center justify-center">
+                  <img src={piece.url} alt={piece.label} className="max-w-full max-h-full object-contain" />
+                </div>
+                <span className="text-[10px] text-slate-500 font-medium">{piece.label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {error && (
+        <Alert type="error">{error}</Alert>
+      )}
+
+      {/* Meta Info */}
+      <FormGroup>
+        <Label required>Skin Name</Label>
+        <Input 
+          name="name" 
+          value={formData.name} 
+          onChange={handleChange} 
+          placeholder="e.g. Anime Girl" 
+        />
+      </FormGroup>
+
+      <FormGroup>
+        <Label>Author</Label>
+        <Input 
+          name="author" 
+          value={formData.author} 
+          onChange={handleChange} 
+          placeholder="Optional" 
+        />
+      </FormGroup>
+
+      <div className="flex items-center justify-end gap-3 pt-2">
+        <Button variant="secondary" onClick={onCancel} type="button">Cancel</Button>
+        <Button variant="primary" type="submit" disabled={isProcessing}>
+          {isProcessing ? <FaSpinner className="animate-spin mr-2" /> : <FaCheck className="mr-2" />}
+          Import Skin
+        </Button>
+      </div>
+    </form>
+  );
+};
+
+/**
+ * 皮肤预览图组件 - 从后端加载 normal 表情
+ */
+const SkinPreview = ({ skinId, skinName }) => {
+  const [imageUrl, setImageUrl] = useState(null);
+  const [loading, setLoading] = useState(true);
+  
+  useEffect(() => {
+    const loadImage = async () => {
+      try {
+        const url = await bridge.readSkinImage(skinId, 'normal');
+        setImageUrl(url);
+      } catch (err) {
+        console.error('Failed to load skin preview:', err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    loadImage();
+  }, [skinId]);
+  
+  if (loading) {
+    return (
+      <div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+        <FaSpinner className="w-4 h-4 text-slate-400 animate-spin" />
+      </div>
+    );
+  }
+  
+  if (imageUrl) {
+    return (
+      <img 
+        src={imageUrl} 
+        alt={skinName} 
+        className="w-12 h-12 rounded-lg object-cover shrink-0 bg-slate-100"
+      />
+    );
+  }
+  
+  return (
+    <div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
+      <FaShirt className="w-6 h-6 text-slate-400" />
+    </div>
+  );
+};
+
+/**
+ * Skins Panel - 模仿 AssistantsPanel 布局
+ */
+const SkinsPanel = () => {
+  const [skins, setSkins] = useState([]);
+  const [isCreating, setIsCreating] = useState(false);
+  const [loading, setLoading] = useState(true);
+  
+  // 从后端加载皮肤数据
+  const fetchSkins = async () => {
+    try {
+      const data = await bridge.getSkins();
+      const skinsList = Array.isArray(data) ? data : [];
+      setSkins(skinsList);
+    } catch (err) {
+      console.error("Failed to load skins:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  // 初始化加载
+  useEffect(() => {
+    fetchSkins();
+  }, []);
+  
+  // 监听 skins-updated 事件，实现数据同步
+  useEffect(() => {
+    const cleanup = bridge.onSkinsUpdated?.(() => {
+      console.log('[SkinsPanel] Received skins-updated event, refreshing...');
+      fetchSkins();
+    });
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
+  
+  const handleSave = async (data) => {
+    try {
+      console.log("Importing skin:", data.name);
+      
+      // 调用 Rust API 导入皮肤（保存到数据库 + 文件系统）
+      await bridge.importSkin(data.name, data.author || null, data.imageData);
+      
+      // 发送更新事件，通知其他窗口刷新
+      await bridge.sendSkinsUpdate?.({ action: 'create' });
+      
+      setIsCreating(false);
+      fetchSkins();
+    } catch (err) {
+      console.error("Failed to import skin:", err);
+      alert("Failed to import skin: " + (err.message || err));
+    }
+  };
+  
+  const handleDelete = async (skinId) => {
+    const confirmed = await bridge.confirm?.("Are you sure you want to delete this skin?", { title: "Delete Skin" }) ?? window.confirm("Are you sure you want to delete this skin?");
+    if (!confirmed) return;
+    
+    try {
+      // 调用 Rust API 删除皮肤（删除数据库记录 + 图片文件）
+      await bridge.deleteSkin(skinId);
+      
+      // 发送更新事件
+      await bridge.sendSkinsUpdate?.({ action: 'delete', skinId });
+      
+      fetchSkins();
+    } catch (err) {
+      console.error("Failed to delete skin:", err);
+      alert("Failed to delete skin: " + (err.message || err));
+    }
+  };
+
+  const handleCancel = () => {
+    setIsCreating(false);
+  };
+  
+  return (
+    <>
+      {/* Title + Import button */}
+      {!isCreating && (
+        <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+          <div className="text-base font-semibold text-slate-800">
+            Skins ({skins.length})
+          </div>
+          <Button variant="primary" onClick={() => setIsCreating(true)}>
+            <FaPlus className="w-4 h-4" />
+            Import
+          </Button>
+        </div>
+      )}
+      
+      {/* Scrollable content */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+        {isCreating ? (
+          <Card
+            title="Import New Skin"
+            description="Upload a 2x2 sprite sheet (Normal, Happy, Angry, Thinking)"
+          >
+            <SkinForm 
+              onSave={handleSave} 
+              onCancel={handleCancel} 
+            />
+          </Card>
+        ) : loading ? (
+          <div className="flex flex-col items-center justify-center h-full text-center py-12">
+            <FaSpinner className="w-8 h-8 text-slate-400 animate-spin mb-4" />
+            <div className="text-slate-500">Loading skins...</div>
+          </div>
+        ) : skins.length === 0 ? (
+          <div className="flex flex-col items-center justify-center h-full text-center py-12">
+            <FaShirt className="w-12 h-12 text-slate-300 mb-4" />
+            <div className="text-slate-600 font-medium">No custom skins yet</div>
+            <div className="text-slate-400 text-sm mb-4">Import a 2x2 sprite sheet to get started</div>
+            <Button variant="primary" onClick={() => setIsCreating(true)}>
+              <FaPlus className="w-4 h-4" />
+              Import Skin
+            </Button>
+          </div>
+        ) : (
+          // Skin list - 模仿 Assistants 的列表布局
+          skins.map((skin) => (
+            <div
+              key={skin.id}
+              className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex items-start gap-3"
+            >
+              <SkinPreview skinId={skin.id} skinName={skin.name} />
+              <div className="min-w-0 flex-1">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="font-semibold text-slate-900 truncate">
+                      {skin.name}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-1.5">
+                      {skin.author && (
+                        <Badge tone="blue">by {skin.author}</Badge>
+                      )}
+                      <Badge tone="slate">Custom</Badge>
+                    </div>
+                  </div>
+                  <div className="shrink-0 flex items-center gap-1.5">
+                    <Button
+                      variant="danger"
+                      onClick={() => handleDelete(skin.id)}
+                      title="Delete"
+                    >
+                      <FaTrash className="w-3.5 h-3.5" />
+                    </Button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
+};
+
+// ==================== API Settings Panel ====================
+
+const SettingsPanel = () => {
+  return (
+    <div className="flex-1 overflow-hidden bg-slate-50 flex items-center justify-center text-slate-400">
+      Coming Soon
+    </div>
+  );
+};
+
 // ==================== UI Settings Panel ====================
 
 const UIPanel = ({ settings, onSettingsChange, onSave, saving }) => {
@@ -1771,7 +2580,7 @@ const UIPanel = ({ settings, onSettingsChange, onSave, saving }) => {
 
 // ==================== Defaults Panel ====================
 
-const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants, modelConfigs }) => {
+const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants, modelConfigs, apiProviders }) => {
   if (!settings) return null;
   
   // 获取 Assistant 的显示文本
@@ -1785,6 +2594,46 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
   // 获取 ModelConfig 的显示文本
   const getModelConfigDisplayText = (model) => {
     return `${model.name} (${model.modelName})`;
+  };
+  
+  // 获取选中的 provider
+  const selectedProvider = apiProviders?.find(p => p._id === settings.functionModelProviderId);
+  
+  // 获取该 provider 下的可见模型列表
+  const availableModels = selectedProvider 
+    ? (selectedProvider.cachedModels || []).filter(model => {
+        const hiddenModels = selectedProvider.hiddenModels || [];
+        const modelName = typeof model === 'string' ? model : model.name;
+        return !hiddenModels.includes(modelName);
+      })
+    : [];
+  
+  // 处理 provider 变化
+  const handleProviderChange = (e) => {
+    const providerId = e.target.value;
+    onSettingsChange({
+      target: {
+        name: 'functionModelProviderId',
+        value: providerId
+      }
+    });
+    // 清空选中的模型
+    onSettingsChange({
+      target: {
+        name: 'functionModelName',
+        value: ''
+      }
+    });
+  };
+  
+  // 处理 model 变化
+  const handleModelChange = (e) => {
+    onSettingsChange({
+      target: {
+        name: 'functionModelName',
+        value: e.target.value
+      }
+    });
   };
 
   return (
@@ -1816,18 +2665,37 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
                 </Select>
               </FormGroup>
               
-              <FormGroup label="Function Model" hint="Lightweight model for quick tasks (mini recommended)">
+              <FormGroup label="Function Model Provider" hint="Select the API provider for function model">
                 <Select
-                  name="defaultModelId"
-                  value={settings.defaultModelId || ""}
-                  onChange={onSettingsChange}
+                  name="functionModelProviderId"
+                  value={settings.functionModelProviderId || ""}
+                  onChange={handleProviderChange}
                 >
-                  <option value="">Select Function Model</option>
-                  {modelConfigs.map((model) => (
-                    <option key={model._id} value={model._id}>
-                      {getModelConfigDisplayText(model)}
+                  <option value="">Select Provider</option>
+                  {(apiProviders || []).map((provider) => (
+                    <option key={provider._id} value={provider._id}>
+                      {provider.name}
                     </option>
                   ))}
+                </Select>
+              </FormGroup>
+              
+              <FormGroup label="Function Model" hint="Lightweight model for quick tasks (mini recommended)">
+                <Select
+                  name="functionModelName"
+                  value={settings.functionModelName || ""}
+                  onChange={handleModelChange}
+                  disabled={!settings.functionModelProviderId}
+                >
+                  <option value="">Select Model</option>
+                  {availableModels.map((model) => {
+                    const modelName = typeof model === 'string' ? model : model.name;
+                    return (
+                      <option key={modelName} value={modelName}>
+                        {modelName}
+                      </option>
+                    );
+                  })}
                 </Select>
               </FormGroup>
             </div>
@@ -1847,6 +2715,100 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
                   Saving...
                 </span>
               ) : "Save Settings"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
+// ==================== Preferences Panel ====================
+
+const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
+  if (!settings) return null;
+  
+  // 处理 checkbox 变化
+  const handleCheckboxChange = (e) => {
+    const { name, checked } = e.target;
+    onSettingsChange({
+      target: {
+        name,
+        value: checked
+      }
+    });
+  };
+
+  return (
+    <>
+      {/* Title */}
+      <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+        <div className="text-base font-semibold text-slate-800">
+          Preferences
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+        <div className="space-y-4">
+          {/* Memory Settings */}
+          <Card title="Memory" description="Configure conversation memory behavior">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="text-sm font-medium text-slate-700">Enable Memory by Default</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  When enabled, the assistant will remember context across conversations by default.
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="memoryEnabledByDefault"
+                  checked={settings.memoryEnabledByDefault !== false}
+                  onChange={handleCheckboxChange}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+              </label>
+            </div>
+          </Card>
+
+          {/* Window Behavior */}
+          <Card title="Window Behavior" description="Configure window movement settings">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="text-sm font-medium text-slate-700">Chat Window Follows Character</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  When enabled, the chat window will automatically move when you drag the character.
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="chatFollowsCharacter"
+                  checked={settings.chatFollowsCharacter !== false}
+                  onChange={handleCheckboxChange}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+              </label>
+            </div>
+          </Card>
+          
+          <div className="pt-2">
+            <Button
+              type="button"
+              variant="primary"
+              disabled={saving}
+              onClick={onSave}
+              className="w-full py-3"
+            >
+              {saving ? (
+                <span className="flex items-center gap-2">
+                  <FaSpinner className="animate-spin w-4 h-4" />
+                  Saving...
+                </span>
+              ) : "Save Preferences"}
             </Button>
           </div>
         </div>
@@ -1922,13 +2884,16 @@ const tabGroups = [
     tabs: [
       { id: 'assistants', label: 'Assistants', icon: FaRobot },
       { id: 'api', label: 'API', icon: FaKey },
+      { id: 'models', label: 'Models', icon: FaList },
       { id: 'mcp', label: 'MCP', icon: FaPlug },
+      { id: 'skins', label: 'Skins', icon: FaShirt },
     ]
   },
   {
     title: 'SETTINGS',
     tabs: [
       { id: 'defaults', label: 'Defaults', icon: FaGear },
+      { id: 'preferences', label: 'Preferences', icon: FaSliders },
       { id: 'hotkeys', label: 'Hotkeys', icon: FaKeyboard },
       { id: 'ui', label: 'UI', icon: FaPalette },
     ]
@@ -2024,6 +2989,7 @@ const ManagementPage = () => {
   const [localSettings, setLocalSettings] = useState(null);
   const [assistants, setAssistants] = useState([]);
   const [modelConfigs, setModelConfigs] = useState([]);
+  const [apiProviders, setApiProviders] = useState([]);
   const [saving, setSaving] = useState(false);
   
   // 当同步设置加载完成时，初始化本地设置
@@ -2033,19 +2999,33 @@ const ManagementPage = () => {
     }
   }, [syncedSettings, settingsLoading]);
   
-  // 获取 Assistants 和 ModelConfigs 列表 (用于 ModelsPanel)
+  // 获取 Assistants、ModelConfigs 和 ApiProviders 列表
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [assistantData, modelData] = await Promise.all([
+        const [assistantData, modelData, providerData] = await Promise.all([
           bridge.getAssistants(),
-          bridge.getModelConfigs()
+          bridge.getModelConfigs(),
+          bridge.getApiProviders()
         ]);
         if (Array.isArray(assistantData)) {
           setAssistants(assistantData);
         }
         if (Array.isArray(modelData)) {
           setModelConfigs(modelData);
+        }
+        if (Array.isArray(providerData)) {
+          // 规范化 providers 数据
+          const normalizedProviders = providerData.map(p => ({
+            ...p,
+            cachedModels: typeof p.cachedModels === 'string' 
+              ? JSON.parse(p.cachedModels) 
+              : (p.cachedModels || []),
+            hiddenModels: typeof p.hiddenModels === 'string'
+              ? JSON.parse(p.hiddenModels)
+              : (p.hiddenModels || [])
+          }));
+          setApiProviders(normalizedProviders);
         }
       } catch (error) {
         console.error("Failed to load data:", error);
@@ -2152,6 +3132,14 @@ const ManagementPage = () => {
       await saveSettingsHook(localSettings);
       bridge.updateWindowSizePreset(localSettings.windowSize);
       bridge.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey);
+      
+      // 同步偏好设置到 Rust 后端
+      if (localSettings.chatFollowsCharacter !== undefined) {
+        await bridge.updatePreferences({ 
+          chatFollowsCharacter: localSettings.chatFollowsCharacter !== false 
+        });
+      }
+      
       alert("Settings saved successfully!");
     } catch (error) {
       alert("Failed to save settings: " + error.message);
@@ -2164,10 +3152,13 @@ const ManagementPage = () => {
     switch (activeTab) {
       case 'assistants': return 'Assistants';
       case 'api': return 'API Providers';
+      case 'models': return 'Models';
       case 'mcp': return 'MCP Servers';
       case 'defaults': return 'Defaults';
+      case 'preferences': return 'Preferences';
       case 'hotkeys': return 'Keyboard Shortcuts';
       case 'ui': return 'UI Settings';
+      case 'skins': return 'Skins';
       default: return 'Settings';
     }
   };
@@ -2197,7 +3188,9 @@ const ManagementPage = () => {
           <div className="flex-1 flex flex-col min-h-0">
             {activeTab === 'assistants' && <AssistantsPanel />}
             {activeTab === 'api' && <ApiProvidersPanel />}
+            {activeTab === 'models' && <ModelsPanel />}
             {activeTab === 'mcp' && <McpServersPanel />}
+            {activeTab === 'skins' && <SkinsPanel />}
             {activeTab === 'defaults' && (
               <DefaultsPanel 
                 settings={localSettings}
@@ -2206,10 +3199,19 @@ const ManagementPage = () => {
                 saving={saving}
                 assistants={assistants}
                 modelConfigs={modelConfigs}
+                apiProviders={apiProviders}
               />
             )}
             {activeTab === 'hotkeys' && (
               <HotkeysPanel 
+                settings={localSettings}
+                onSettingsChange={handleSettingsChange}
+                onSave={handleSaveSettings}
+                saving={saving}
+              />
+            )}
+            {activeTab === 'preferences' && (
+              <PreferencesPanel 
                 settings={localSettings}
                 onSettingsChange={handleSettingsChange}
                 onSave={handleSaveSettings}

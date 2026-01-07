@@ -10,4 +10,5 @@ export const initialState = {
     // 时间注入管理：记录每个会话上次注入时间的时间戳
     // { conversationId: timestamp }
     lastTimeInjection: {},
+    apiProviders: [], // 全局可用 API 服务商列表
 }
