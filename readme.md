@@ -1,6 +1,12 @@
-# 🐾 PetGPT
+<p align="center">
+  <img src="design/icons/app-icon.png" alt="PetGPT Logo" width="128" height="128">
+</p>
 
-**AI Desktop Pet Assistant** — A lightweight, cross-platform desktop companion powered by large language models.
+<h1 align="center">🐾 PetGPT</h1>
+
+<p align="center">
+  <strong>AI Desktop Pet Assistant</strong> — A lightweight, cross-platform desktop companion powered by large language models.
+</p>
 
 ---
 
