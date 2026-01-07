@@ -30,6 +30,60 @@ export const capabilities = {
 };
 
 /**
+ * 清理历史消息中缺少 thought_signature 的工具调用
+ * 
+ * Gemini API 要求 functionCall parts 必须包含 thought_signature，
+ * 但从数据库加载的历史消息不包含这个签名。
+ * 此函数将历史中的工具调用轮次压缩为纯文本消息。
+ * 
+ * @param {Array} messages - 消息数组
+ * @param {boolean} isCurrentToolLoop - 是否在当前工具调用循环中（内部消息保留签名）
+ * @returns {Array} 清理后的消息数组
+ */
+export const cleanHistoryForGemini = (messages, isCurrentToolLoop = false) => {
+  if (isCurrentToolLoop) {
+    // 当前工具循环中的消息，保留原样（它们有 _rawPart 和签名）
+    return messages;
+  }
+  
+  const cleaned = [];
+  
+  for (const msg of messages) {
+    // 检查是否是带有 functionCall/functionResponse 的 Gemini 格式消息
+    if (msg.parts && Array.isArray(msg.parts)) {
+      const hasFunctionPart = msg.parts.some(p => p.functionCall || p.functionResponse);
+      
+      if (hasFunctionPart) {
+        // 检查是否有 thought_signature（当前轮次的消息会有）
+        const hasSignature = msg.parts.some(p => p.thought_signature);
+        
+        if (!hasSignature) {
+          // 没有签名的工具调用消息 - 跳过（来自历史）
+          // 这些消息的内容已经被总结在后续的 assistant 回复中了
+          console.log('[Gemini] Skipping history message with functionCall/functionResponse (no signature)');
+          continue;
+        }
+      }
+    }
+    
+    // 检查内部格式的消息是否有 toolCallHistory（来自数据库的历史消息标记）
+    // 这些消息的 content 已经是工具调用后的总结文本，可以直接使用
+    if (msg.toolCallHistory && msg.role === 'assistant') {
+      // 只保留文本内容，移除 toolCallHistory 标记（它只用于 UI 显示）
+      cleaned.push({
+        role: msg.role,
+        content: msg.content
+      });
+      continue;
+    }
+    
+    cleaned.push(msg);
+  }
+  
+  return cleaned;
+};
+
+/**
  * 将内部格式消息转换为 Gemini API 格式
  * 
  * Gemini 格式:
@@ -39,13 +93,49 @@ export const capabilities = {
  * }
  */
 export const convertMessages = async (messages) => {
+  // 先分离出已经是 Gemini 格式的消息（来自工具调用循环）
+  // 这些消息不应该经过 normalizeMessages，否则会丢失 parts 字段
+  const geminiFormatMessages = [];
+  const regularMessages = [];
+  
+  for (const msg of messages) {
+    // 检查是否已经是 Gemini 格式（带有 functionCall 或 functionResponse 的 parts）
+    if ((msg.role === 'model' || msg.role === 'user') && msg.parts && Array.isArray(msg.parts)) {
+      const hasFunctionPart = msg.parts.some(p => p.functionCall || p.functionResponse);
+      if (hasFunctionPart) {
+        geminiFormatMessages.push({ index: messages.indexOf(msg), msg });
+        continue;
+      }
+    }
+    regularMessages.push(msg);
+  }
+  
   // docx/txt 等文档先抽取成 text，Gemini 才能基于内容回答
-  const expanded = await expandDocumentPartsToText(messages);
+  const expanded = await expandDocumentPartsToText(regularMessages);
   const normalizedMessages = normalizeMessages(expanded);
   const contents = [];
   let systemInstruction = null;
   
-  for (const msg of normalizedMessages) {
+  // 建立原始索引到处理后索引的映射
+  let regularIndex = 0;
+  
+  for (let i = 0; i < messages.length; i++) {
+    // 检查这个位置是否有 Gemini 格式的消息
+    const geminiMsg = geminiFormatMessages.find(g => g.index === i);
+    if (geminiMsg) {
+      // 直接添加 Gemini 格式的消息
+      contents.push({
+        role: geminiMsg.msg.role,
+        parts: geminiMsg.msg.parts
+      });
+      continue;
+    }
+    
+    // 处理普通消息
+    if (regularIndex >= normalizedMessages.length) continue;
+    const msg = normalizedMessages[regularIndex];
+    regularIndex++;
+    
     // 处理 system 消息
     if (msg.role === 'system') {
       const systemText = msg.content
@@ -199,7 +289,7 @@ export const buildRequest = async ({ messages, apiKey, model, options = {} }) =>
  * 解析响应
  * 
  * @param {Object} responseJson - API 响应
- * @returns {Object} 解析结果，包含 content、toolCalls、usage、raw
+ * @returns {Object} 解析结果，包含 content、toolCalls、usage、raw、rawFunctionCallParts
  */
 export const parseResponse = (responseJson) => {
   const parts = responseJson.candidates?.[0]?.content?.parts || [];
@@ -208,21 +298,28 @@ export const parseResponse = (responseJson) => {
   const textParts = parts.filter(p => p.text);
   const text = textParts.map(p => p.text).join('');
   
-  // 解析函数调用
+  // 解析函数调用，保留原始 parts 以便保留 thought_signature
   let toolCalls = null;
+  let rawFunctionCallParts = null;
   const functionCallParts = parts.filter(p => p.functionCall);
   
   if (functionCallParts.length > 0) {
+    // 保存原始的 function call parts（包含 thought_signature）
+    rawFunctionCallParts = functionCallParts;
+    
     toolCalls = functionCallParts.map((part, index) => ({
       id: `call_${index}_${Date.now()}`,
       name: part.functionCall.name,
-      arguments: part.functionCall.args || {}
+      arguments: part.functionCall.args || {},
+      // 保留原始 part 用于后续构建请求时携带 thought_signature
+      _rawPart: part
     }));
   }
   
   return {
     content: text,
     toolCalls,
+    rawFunctionCallParts, // 原始的 function call parts，包含 thought_signature
     finishReason: responseJson.candidates?.[0]?.finishReason,
     usage: responseJson.usageMetadata,
     raw: responseJson
@@ -233,38 +330,103 @@ export const parseResponse = (responseJson) => {
  * 解析流式响应块 (SSE)
  * 
  * @param {string|Object} chunk - SSE 数据块
- * @returns {Object} 解析结果，包含 deltaText、deltaToolCalls、done
+ * @returns {Object} 解析结果，包含 deltaText、deltaToolCalls、done、error
  */
 export const parseStreamChunk = (chunk) => {
   // Gemini SSE: data: {"candidates":[{"content":{"parts":[{"text":"..."}]}}]}
-  if (!chunk) {
+  if (!chunk || chunk.trim() === '') {
+    return { deltaText: '', deltaToolCalls: null, done: false };
+  }
+  
+  // 跳过 Gemini 的非 JSON 行（如空行或注释）
+  const trimmed = chunk.trim();
+  if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+    // 可能是错误消息或其他非 JSON 内容
+    if (trimmed.length > 0 && trimmed !== '[DONE]') {
+      console.warn('[Gemini] Non-JSON chunk received:', trimmed.substring(0, 100));
+    }
     return { deltaText: '', deltaToolCalls: null, done: false };
   }
   
   try {
     const data = typeof chunk === 'string' ? JSON.parse(chunk) : chunk;
-    const parts = data.candidates?.[0]?.content?.parts || [];
+    
+    // 检查是否有 API 错误
+    if (data.error) {
+      console.error('[Gemini] API error in stream:', data.error);
+      return { 
+        deltaText: '', 
+        deltaToolCalls: null, 
+        done: true, 
+        error: data.error.message || JSON.stringify(data.error)
+      };
+    }
+    
+    // 检查安全过滤 (promptFeedback)
+    if (data.promptFeedback?.blockReason) {
+      const reason = data.promptFeedback.blockReason;
+      console.warn('[Gemini] Content blocked by safety filter:', reason);
+      return { 
+        deltaText: `[Content blocked: ${reason}]`, 
+        deltaToolCalls: null, 
+        done: true,
+        error: `Safety filter: ${reason}`
+      };
+    }
+    
+    // 检查 candidates
+    if (!data.candidates || data.candidates.length === 0) {
+      // 可能是 usageMetadata 等中间响应，不是错误
+      if (data.usageMetadata) {
+        return { deltaText: '', deltaToolCalls: null, done: true };
+      }
+      return { deltaText: '', deltaToolCalls: null, done: false };
+    }
+    
+    const candidate = data.candidates[0];
+    
+    // 检查候选是否被安全过滤
+    if (candidate.finishReason === 'SAFETY') {
+      console.warn('[Gemini] Response blocked by safety filter');
+      return { 
+        deltaText: '[Response blocked by safety filter]', 
+        deltaToolCalls: null, 
+        done: true,
+        error: 'Safety filter blocked response'
+      };
+    }
+    
+    const parts = candidate.content?.parts || [];
     
     // 提取文本
     const textParts = parts.filter(p => p.text);
     const deltaText = textParts.map(p => p.text).join('');
     
-    // 提取函数调用
+    // 提取函数调用，保留原始 part 以便携带 thought_signature
     let deltaToolCalls = null;
+    let rawFunctionCallParts = null;
     const functionCallParts = parts.filter(p => p.functionCall);
     if (functionCallParts.length > 0) {
+      // 保存原始的 function call parts（包含 thought_signature）
+      rawFunctionCallParts = functionCallParts;
+      
       deltaToolCalls = functionCallParts.map((part, index) => ({
         index,
         id: `call_${index}_${Date.now()}`,
         name: part.functionCall.name,
-        arguments: part.functionCall.args || {}
+        arguments: part.functionCall.args || {},
+        // 保留原始 part 用于后续构建请求时携带 thought_signature
+        _rawPart: part
       }));
     }
     
-    const done = data.candidates?.[0]?.finishReason != null;
-    return { deltaText, deltaToolCalls, done, finishReason: data.candidates?.[0]?.finishReason };
+    const done = candidate.finishReason != null;
+    return { deltaText, deltaToolCalls, rawFunctionCallParts, done, finishReason: candidate.finishReason };
   } catch (e) {
-    return { deltaText: '', deltaToolCalls: null, done: false };
+    // JSON 解析失败 - 记录详细日志以便调试
+    console.error('[Gemini] Failed to parse stream chunk:', e.message);
+    console.error('[Gemini] Raw chunk (first 200 chars):', chunk.substring?.(0, 200) || chunk);
+    return { deltaText: '', deltaToolCalls: null, done: false, parseError: e.message };
   }
 };
 
@@ -275,29 +437,56 @@ export const parseStreamChunk = (chunk) => {
  * @param {*} result - 执行结果
  * @returns {Object} Gemini function response part
  */
-export const formatToolResultPart = (name, result) => ({
-  functionResponse: {
-    name: name,
-    response: {
-      result: typeof result === 'string' ? result : JSON.stringify(result)
+export const formatToolResultPart = (name, result) => {
+  // Gemini functionResponse.response 应该是一个对象
+  // 将结果包装成对象格式
+  let responseObj;
+  
+  if (typeof result === 'string') {
+    // 尝试解析 JSON 字符串
+    try {
+      responseObj = JSON.parse(result);
+    } catch {
+      // 不是 JSON，包装成对象
+      responseObj = { output: result };
     }
+  } else if (result === null || result === undefined) {
+    responseObj = { output: 'null' };
+  } else if (typeof result === 'object') {
+    responseObj = result;
+  } else {
+    responseObj = { output: String(result) };
   }
-});
+  
+  return {
+    functionResponse: {
+      name: name,
+      response: responseObj
+    }
+  };
+};
 
 /**
  * 创建带有函数调用的 model 消息
  * 
- * @param {Array} toolCalls - 工具调用数组
+ * @param {Array} toolCalls - 工具调用数组（可能包含 _rawPart）
  * @returns {Object} Gemini model message with function calls
  */
 export const createModelFunctionCallMessage = (toolCalls) => ({
   role: 'model',
-  parts: toolCalls.map(tc => ({
-    functionCall: {
-      name: tc.name,
-      args: tc.arguments
+  parts: toolCalls.map(tc => {
+    // 如果有原始 part（包含 thought_signature），直接使用它
+    if (tc._rawPart) {
+      return tc._rawPart;
     }
-  }))
+    // 否则构建新的 part（向后兼容）
+    return {
+      functionCall: {
+        name: tc.name,
+        args: tc.arguments
+      }
+    };
+  })
 });
 
 /**
@@ -331,6 +520,7 @@ export const fetchModels = async (apiKey) => {
 
 export default {
   capabilities,
+  cleanHistoryForGemini,
   convertMessages,
   buildRequest,
   parseResponse,

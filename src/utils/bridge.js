@@ -2342,9 +2342,18 @@ export const onCharacterId = (callback) => {
   if (isTauri()) {
     let unlisten = null;
     let cancelled = false;
+    let resolveReady = null;
+    
+    // readyPromise 会在监听器设置完成后 resolve
+    const readyPromise = new Promise(resolve => {
+      resolveReady = resolve;
+    });
     
     getTauriEventApi().then(eventApi => {
-      if (cancelled) return; // 如果已经取消则不设置监听器
+      if (cancelled) {
+        resolveReady?.(); // 即使取消也要 resolve
+        return;
+      }
       if (eventApi) {
         console.log('[bridge] Setting up character-id listener');
         eventApi.listen('character-id', (event) => {
@@ -2356,19 +2365,29 @@ export const onCharacterId = (callback) => {
           } else {
             unlisten = fn;
           }
+          resolveReady?.(); // 监听器设置完成
         });
+      } else {
+        resolveReady?.(); // eventApi 不可用时也要 resolve
       }
     });
     
-    return () => {
+    const cleanup = () => {
       cancelled = true;
       if (unlisten) {
         console.log('[bridge] Cleaning up character-id listener');
         unlisten();
       }
     };
+    
+    // 将 readyPromise 附加到 cleanup 函数上
+    cleanup.ready = readyPromise;
+    
+    return cleanup;
   }
-  return () => {};
+  const noop = () => {};
+  noop.ready = Promise.resolve();
+  return noop;
 };
 
 export const sendConversationId = async (id) => {

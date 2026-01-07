@@ -106,6 +106,7 @@ impl Database {
                 auto_start INTEGER DEFAULT 0,
                 show_in_toolbar INTEGER DEFAULT 1,
                 toolbar_order INTEGER DEFAULT 0,
+                max_iterations INTEGER,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )",
@@ -116,6 +117,7 @@ impl Database {
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'stdio'", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN url TEXT", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN api_key TEXT", []);
+        let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN max_iterations INTEGER", []);
 
         // Migration: add is_deleted to pets
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0", []);

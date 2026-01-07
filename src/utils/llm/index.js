@@ -39,9 +39,15 @@ const getAdapter = (apiFormat) => {
 export const callLLM = async ({ messages, apiFormat, apiKey, model, baseUrl, options = {} }) => {
   const adapter = getAdapter(apiFormat);
   
+  // 对于 Gemini，清理历史中缺少 thought_signature 的工具调用消息
+  let cleanedMessages = messages;
+  if (apiFormat === 'gemini_official' && geminiAdapter.cleanHistoryForGemini) {
+    cleanedMessages = geminiAdapter.cleanHistoryForGemini(messages, false);
+  }
+  
   try {
     const req = await adapter.buildRequest({
-      messages,
+      messages: cleanedMessages,
       apiFormat,
       apiKey,
       model,
@@ -98,9 +104,15 @@ export const callLLMStream = async ({
 }) => {
   const adapter = getAdapter(apiFormat);
   
+  // 对于 Gemini，清理历史中缺少 thought_signature 的工具调用消息
+  let cleanedMessages = messages;
+  if (apiFormat === 'gemini_official' && geminiAdapter.cleanHistoryForGemini) {
+    cleanedMessages = geminiAdapter.cleanHistoryForGemini(messages, false);
+  }
+  
   try {
     const req = await adapter.buildRequest({
-      messages,
+      messages: cleanedMessages,
       apiFormat,
       apiKey,
       model,

@@ -9,8 +9,52 @@ import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import bridge from '../bridge.js';
 
-// 最大工具调用轮次，防止无限循环
-const MAX_TOOL_ITERATIONS = 10;
+// 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
+const DEFAULT_MAX_TOOL_ITERATIONS = 100;
+
+// 缓存 MCP 服务器配置，用于获取每个服务器的 maxIterations
+let cachedServerConfigs = new Map();
+
+/**
+ * 刷新服务器配置缓存
+ */
+export const refreshServerConfigsCache = async () => {
+  try {
+    const servers = await bridge.mcp.getServers();
+    cachedServerConfigs = new Map();
+    for (const server of servers || []) {
+      cachedServerConfigs.set(server.name, server);
+    }
+    console.log('[MCP] Server configs cache refreshed:', cachedServerConfigs.size, 'servers');
+  } catch (err) {
+    console.warn('[MCP] Failed to refresh server configs cache:', err);
+  }
+};
+
+/**
+ * 获取服务器的最大迭代次数
+ * @param {string} serverName - 服务器名称
+ * @returns {number|null} 最大迭代次数，null 表示无限制
+ */
+export const getServerMaxIterations = (serverName) => {
+  const config = cachedServerConfigs.get(serverName);
+  if (!config) {
+    console.log(`[MCP] Server config not found for ${serverName}, using default`);
+    return DEFAULT_MAX_TOOL_ITERATIONS;
+  }
+  // null/undefined means unlimited
+  return config.maxIterations;
+};
+
+// 初始化时加载服务器配置
+refreshServerConfigsCache();
+
+// 监听服务器更新事件
+if (bridge.mcp?.onServersUpdated) {
+  bridge.mcp.onServersUpdated(() => {
+    refreshServerConfigsCache();
+  });
+}
 
 // 工具执行超时配置 (毫秒)
 const TOOL_EXECUTION_TIMEOUT_MS = 300000; // 5 minutes for individual tool call
@@ -269,13 +313,25 @@ export const callLLMWithTools = async ({
   const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
   
-  let currentMessages = [...messages];
-  const toolCallHistory = [];
-  let iterations = 0;
+  // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
+  let initialMessages = [...messages];
+  if (apiFormat === 'gemini_official' && geminiAdapter.cleanHistoryForGemini) {
+    initialMessages = geminiAdapter.cleanHistoryForGemini(messages, false);
+    console.log('[MCP] Cleaned history messages for Gemini:', messages.length, '->', initialMessages.length);
+  }
   
-  while (iterations < MAX_TOOL_ITERATIONS) {
-    iterations++;
-    console.log(`[MCP] Tool loop iteration ${iterations}`);
+  let currentMessages = [...initialMessages];
+  const toolCallHistory = [];
+  
+  // 跟踪每个服务器的迭代次数
+  const serverIterations = new Map();
+  // 总迭代次数（防止无限循环的保险）
+  let totalIterations = 0;
+  const MAX_TOTAL_ITERATIONS = 100;
+  
+  while (totalIterations < MAX_TOTAL_ITERATIONS) {
+    totalIterations++;
+    console.log(`[MCP] Tool loop iteration ${totalIterations}`);
     
     // 构建请求
     const req = await adapter.buildRequest({
@@ -317,8 +373,34 @@ export const callLLMWithTools = async ({
     // 执行工具调用
     console.log('[MCP] Tool calls detected:', result.toolCalls);
     
+    // 检查并执行每个工具调用
+    let reachedLimit = false;
+    let limitMessage = '';
+    
     for (const call of result.toolCalls) {
       const toolCallId = call.id || `${call.name}-${Date.now()}`;
+      
+      // 提取服务器名称（格式: serverName__toolName）
+      const parts = call.name.split('__');
+      const serverName = parts.length > 1 ? parts[0] : null;
+      
+      // 检查该服务器是否达到限制
+      if (serverName) {
+        const currentCount = serverIterations.get(serverName) || 0;
+        const maxIterations = getServerMaxIterations(serverName);
+        
+        // maxIterations 为 null 表示无限制
+        if (maxIterations !== null && currentCount >= maxIterations) {
+          console.warn(`[MCP] Server ${serverName} reached max iterations (${maxIterations})`);
+          reachedLimit = true;
+          limitMessage = `Server "${serverName}" reached maximum tool call iterations (${maxIterations})`;
+          continue; // 跳过这个工具调用
+        }
+        
+        // 增加计数
+        serverIterations.set(serverName, currentCount + 1);
+        console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
+      }
       
       if (onToolCall) {
         onToolCall(call.name, call.arguments, toolCallId);
@@ -350,6 +432,14 @@ export const callLLMWithTools = async ({
       }
     }
     
+    // 如果所有工具调用都被跳过（达到限制），返回
+    if (reachedLimit && toolCallHistory.length === 0) {
+      return {
+        content: `[${limitMessage}]`,
+        toolCallHistory
+      };
+    }
+    
     // 将工具调用和结果添加到消息中
     if (apiFormat === 'gemini_official') {
       // Gemini 格式：添加 model 的 functionCall，然后添加 user 的 functionResponse
@@ -357,7 +447,7 @@ export const callLLMWithTools = async ({
       currentMessages.push(geminiAdapter.createFunctionResponseMessage(
         result.toolCalls.map((call, i) => ({
           name: call.name,
-          result: toolCallHistory[toolCallHistory.length - result.toolCalls.length + i].result
+          result: toolCallHistory[toolCallHistory.length - result.toolCalls.length + i]?.result || '[Skipped due to iteration limit]'
         }))
       ));
     } else {
@@ -369,14 +459,14 @@ export const callLLMWithTools = async ({
         const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
         currentMessages.push(openaiAdapter.formatToolResultMessage(
           call.id,
-          toolCallHistory[historyIndex].result
+          toolCallHistory[historyIndex]?.result || '[Skipped due to iteration limit]'
         ));
       }
     }
   }
   
   // 达到最大轮次
-  console.warn('[MCP] Max tool iterations reached');
+  console.warn('[MCP] Max total iterations reached');
   return {
     content: '[Maximum tool call iterations reached]',
     toolCallHistory
@@ -409,14 +499,27 @@ export const callLLMStreamWithTools = async ({
   const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
   
-  let currentMessages = [...messages];
+  // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
+  // 这些消息来自数据库历史，没有签名会导致 API 报错
+  let initialMessages = [...messages];
+  if (apiFormat === 'gemini_official' && geminiAdapter.cleanHistoryForGemini) {
+    initialMessages = geminiAdapter.cleanHistoryForGemini(messages, false);
+    console.log('[MCP] Cleaned history messages for Gemini:', messages.length, '->', initialMessages.length);
+  }
+  
+  let currentMessages = [...initialMessages];
   const toolCallHistory = [];
-  let iterations = 0;
   let fullContent = '';
   
-  while (iterations < MAX_TOOL_ITERATIONS) {
-    iterations++;
-    console.log(`[MCP] Stream tool loop iteration ${iterations}`);
+  // 跟踪每个服务器的迭代次数
+  const serverIterations = new Map();
+  // 总迭代次数（防止无限循环的保险）
+  let totalIterations = 0;
+  const MAX_TOTAL_ITERATIONS = 100;
+  
+  while (totalIterations < MAX_TOTAL_ITERATIONS) {
+    totalIterations++;
+    console.log(`[MCP] Stream tool loop iteration ${totalIterations}`);
     
     // 构建请求
     const req = await adapter.buildRequest({
@@ -463,37 +566,64 @@ export const callLLMStreamWithTools = async ({
       buffer = lines.pop() || '';
       
       for (const line of lines) {
+        // 跳过空行
+        if (!line.trim()) continue;
+        
+        // 处理 SSE 格式
+        let jsonStr = line;
         if (line.startsWith('data: ')) {
-          const jsonStr = line.slice(6).trim();
-          if (jsonStr === '[DONE]') continue;
-          
-          const { deltaText, deltaToolCalls } = adapter.parseStreamChunk(jsonStr);
-          
-          if (deltaText) {
-            iterationContent += deltaText;
-            fullContent += deltaText;
-            if (onChunk) {
-              onChunk(deltaText, fullContent);
-            }
+          jsonStr = line.slice(6).trim();
+        } else if (line.startsWith(':')) {
+          // SSE 注释行，跳过
+          continue;
+        }
+        
+        if (jsonStr === '[DONE]' || jsonStr === '') continue;
+        
+        const parseResult = adapter.parseStreamChunk(jsonStr);
+        const { deltaText, deltaToolCalls, rawFunctionCallParts, error } = parseResult;
+        
+        // 如果有错误，记录但继续处理
+        if (error) {
+          console.warn('[toolExecutor] Stream chunk error:', error);
+        }
+        
+        if (deltaText) {
+          iterationContent += deltaText;
+          fullContent += deltaText;
+          if (onChunk) {
+            onChunk(deltaText, fullContent);
           }
-          
-          // 收集工具调用片段
-          if (deltaToolCalls) {
-            for (const tc of deltaToolCalls) {
-              if (!streamToolCalls.has(tc.index)) {
-                streamToolCalls.set(tc.index, {
-                  id: tc.id || `call_${tc.index}`,
-                  name: tc.name || '',
-                  arguments: ''
-                });
-              }
-              const existing = streamToolCalls.get(tc.index);
-              if (tc.id) existing.id = tc.id;
-              if (tc.name) existing.name = tc.name;
-              if (tc.arguments) {
-                existing.arguments += typeof tc.arguments === 'string' 
-                  ? tc.arguments 
-                  : JSON.stringify(tc.arguments);
+        }
+        
+        // 收集工具调用片段
+        if (deltaToolCalls) {
+          for (const tc of deltaToolCalls) {
+            if (!streamToolCalls.has(tc.index)) {
+              streamToolCalls.set(tc.index, {
+                id: tc.id || `call_${tc.index}`,
+                name: tc.name || '',
+                arguments: null,  // 初始为 null，区分未设置和空字符串
+                _rawPart: null    // 保留原始 part 用于 thought_signature
+              });
+            }
+            const existing = streamToolCalls.get(tc.index);
+            if (tc.id) existing.id = tc.id;
+            if (tc.name) existing.name = tc.name;
+            // 保留原始 part（包含 thought_signature）
+            if (tc._rawPart) existing._rawPart = tc._rawPart;
+            if (tc.arguments !== undefined && tc.arguments !== null) {
+              // Gemini 返回的是对象，OpenAI 流式返回的是字符串片段
+              if (typeof tc.arguments === 'object') {
+                // Gemini: 直接存储对象（通常是完整的）
+                existing.arguments = tc.arguments;
+              } else if (typeof tc.arguments === 'string') {
+                // OpenAI: 累积字符串
+                if (typeof existing.arguments === 'string') {
+                  existing.arguments += tc.arguments;
+                } else {
+                  existing.arguments = tc.arguments;
+                }
               }
             }
           }
@@ -504,13 +634,30 @@ export const callLLMStreamWithTools = async ({
     // 处理收集到的工具调用
     const collectedToolCalls = Array.from(streamToolCalls.values())
       .filter(tc => tc.name)
-      .map(tc => ({
-        id: tc.id,
-        name: tc.name,
-        arguments: typeof tc.arguments === 'string' 
-          ? (tc.arguments ? JSON.parse(tc.arguments) : {})
-          : tc.arguments
-      }));
+      .map(tc => {
+        let parsedArgs = {};
+        
+        if (typeof tc.arguments === 'object' && tc.arguments !== null) {
+          // 已经是对象（Gemini 格式）
+          parsedArgs = tc.arguments;
+        } else if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
+          // 字符串需要解析（OpenAI 格式）
+          try {
+            parsedArgs = JSON.parse(tc.arguments);
+          } catch (e) {
+            console.error('[MCP] Failed to parse tool arguments:', tc.arguments, e);
+            parsedArgs = { _raw: tc.arguments, _parseError: e.message };
+          }
+        }
+        
+        return {
+          id: tc.id,
+          name: tc.name,
+          arguments: parsedArgs,
+          // 保留原始 part（包含 thought_signature）用于 Gemini
+          _rawPart: tc._rawPart
+        };
+      });
     
     // 如果没有工具调用，返回结果
     if (collectedToolCalls.length === 0) {
@@ -522,6 +669,10 @@ export const callLLMStreamWithTools = async ({
     
     // 执行工具调用
     console.log('[MCP] Stream collected tool calls:', collectedToolCalls);
+    
+    // 检查并执行每个工具调用
+    let reachedLimit = false;
+    let limitMessage = '';
     
     for (const call of collectedToolCalls) {
       // 检查是否已中断
@@ -535,6 +686,40 @@ export const callLLMStreamWithTools = async ({
       }
       
       const toolCallId = call.id || `${call.name}-${Date.now()}`;
+      
+      // 提取服务器名称（格式: serverName__toolName）
+      const parts = call.name.split('__');
+      const serverName = parts.length > 1 ? parts[0] : null;
+      
+      // 检查该服务器是否达到限制
+      if (serverName) {
+        const currentCount = serverIterations.get(serverName) || 0;
+        const maxIterations = getServerMaxIterations(serverName);
+        
+        // maxIterations 为 null 表示无限制
+        if (maxIterations !== null && currentCount >= maxIterations) {
+          console.warn(`[MCP] Server ${serverName} reached max iterations (${maxIterations})`);
+          reachedLimit = true;
+          limitMessage = `Server "${serverName}" reached maximum tool call iterations (${maxIterations})`;
+          
+          // 记录跳过的工具调用
+          toolCallHistory.push({
+            id: toolCallId,
+            name: call.name,
+            arguments: call.arguments,
+            result: `[Skipped: ${limitMessage}]`
+          });
+          
+          if (onToolResult) {
+            onToolResult(call.name, `[Skipped: ${limitMessage}]`, toolCallId, true);
+          }
+          continue; // 跳过这个工具调用
+        }
+        
+        // 增加计数
+        serverIterations.set(serverName, currentCount + 1);
+        console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
+      }
       
       if (onToolCall) {
         onToolCall(call.name, call.arguments, toolCallId);
@@ -584,13 +769,19 @@ export const callLLMStreamWithTools = async ({
     
     // 将工具调用和结果添加到消息中
     if (apiFormat === 'gemini_official') {
-      currentMessages.push(geminiAdapter.createModelFunctionCallMessage(collectedToolCalls));
-      currentMessages.push(geminiAdapter.createFunctionResponseMessage(
+      const modelMessage = geminiAdapter.createModelFunctionCallMessage(collectedToolCalls);
+      const responseMessage = geminiAdapter.createFunctionResponseMessage(
         collectedToolCalls.map((call, i) => ({
           name: call.name,
           result: toolCallHistory[toolCallHistory.length - collectedToolCalls.length + i].result
         }))
-      ));
+      );
+      
+      console.log('[MCP] Gemini model message:', JSON.stringify(modelMessage, null, 2));
+      console.log('[MCP] Gemini response message:', JSON.stringify(responseMessage, null, 2));
+      
+      currentMessages.push(modelMessage);
+      currentMessages.push(responseMessage);
     } else {
       currentMessages.push(openaiAdapter.createAssistantToolCallMessage(collectedToolCalls));
       

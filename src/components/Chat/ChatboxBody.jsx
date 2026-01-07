@@ -41,38 +41,14 @@ export const Chatbox = () => {
     bridge.toggleSidebar?.(newState);
   };
 
-  // Auto-load default assistant on first mount
+  // Track if default assistant has been loaded
+  const defaultAssistantLoadedRef = useRef(false);
+  
+  // Keep a ref to the latest navBarChats for use in event handlers
+  const navBarChatsRef = useRef(navBarChats);
   useEffect(() => {
-    const loadDefaultAssistant = async () => {
-      // Only run on first mount when no tabs exist
-      if (tabs.length > 0) return;
-      
-      try {
-        const settings = await bridge.getSettings();
-        // 使用正确的设置键名 defaultRoleId
-        let defaultAssistantId = settings?.defaultRoleId;
-        
-        // If no default assistant is set, use the first available assistant
-        if (!defaultAssistantId) {
-          const assistants = await bridge.getAssistants();
-          if (assistants && assistants.length > 0) {
-            defaultAssistantId = assistants[0]._id;
-            console.log('[ChatboxBody] No default assistant set, using first available:', defaultAssistantId);
-          }
-        }
-        
-        if (defaultAssistantId) {
-          console.log('[ChatboxBody] Auto-loading default assistant:', defaultAssistantId);
-          // Trigger character selection which will create a new tab
-          bridge.sendCharacterId?.(defaultAssistantId);
-        }
-      } catch (error) {
-        console.error('[ChatboxBody] Error loading default assistant:', error);
-      }
-    };
-    
-    loadDefaultAssistant();
-  }, []); // Run only once on mount
+    navBarChatsRef.current = navBarChats;
+  }, [navBarChats]);
 
   useEffect(() => {
     const fetchConversations = async () => {
@@ -167,13 +143,16 @@ export const Chatbox = () => {
   }, [chatbodyStatus]);
 
   // Handle New Tab from Character ID (moved from ChatboxTabBar)
+  // This also handles auto-loading the default assistant on first mount
   useEffect(() => {
     console.log('[ChatboxBody] Setting up character-id listener');
+    
     const handleCharacterId = (id) => {
       console.log('[ChatboxBody] Received character-id:', id);
+      // Use ref to get the latest navBarChats value
       dispatch({
         type: actionType.SET_NAVBAR_CHAT,
-        navBarChats: [...(navBarChats || []), id],
+        navBarChats: [...(navBarChatsRef.current || []), id],
       });
       const fetchCharacter = async () => {
         console.log('[ChatboxBody] Fetching character for id:', id);
@@ -230,11 +209,56 @@ export const Chatbox = () => {
       };
       fetchCharacter();
     };
+    
     const cleanup = bridge.onCharacterId?.(handleCharacterId);
+    
+    // Auto-load default assistant after listener is ready
+    const loadDefaultAssistant = async () => {
+      // Wait for listener to be ready before sending character-id
+      if (cleanup?.ready) {
+        await cleanup.ready;
+      }
+      
+      // Only run once on first mount when no tabs exist
+      if (defaultAssistantLoadedRef.current) return;
+      defaultAssistantLoadedRef.current = true;
+      
+      // Skip if tabs already exist
+      if (tabs.length > 0) {
+        console.log('[ChatboxBody] Tabs already exist, skipping default assistant load');
+        return;
+      }
+      
+      try {
+        const settings = await bridge.getSettings();
+        let defaultAssistantId = settings?.defaultRoleId;
+        
+        // If no default assistant is set, use the first available assistant
+        if (!defaultAssistantId) {
+          const assistants = await bridge.getAssistants();
+          if (assistants && assistants.length > 0) {
+            defaultAssistantId = assistants[0]._id;
+            console.log('[ChatboxBody] No default assistant set, using first available:', defaultAssistantId);
+          }
+        }
+        
+        if (defaultAssistantId) {
+          console.log('[ChatboxBody] Auto-loading default assistant:', defaultAssistantId);
+          // 直接调用 handler，而不是通过事件系统
+          // 这样可以避免竞态条件，因为不需要等待事件传递
+          handleCharacterId(defaultAssistantId);
+        }
+      } catch (error) {
+        console.error('[ChatboxBody] Error loading default assistant:', error);
+      }
+    };
+    
+    loadDefaultAssistant();
+    
     return () => {
       if (cleanup) cleanup();
     };
-  }, [navBarChats]); // Dependency on navBarChats might cause re-subscription, but it's acceptable
+  }, []); // Run only once on mount - handler will use latest navBarChats via closure
 
   const fetchConversationById = async (conversationId) => {
     try {

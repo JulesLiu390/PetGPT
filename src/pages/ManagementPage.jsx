@@ -1288,6 +1288,9 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
   const [autoStart, setAutoStart] = useState(server?.autoStart || false);
   const [icon, setIcon] = useState(server?.icon || '🔧');
   const [showInToolbar, setShowInToolbar] = useState(server?.showInToolbar !== false);
+  // Max iterations: null/undefined means unlimited, number means limited
+  const [maxIterations, setMaxIterations] = useState(server?.maxIterations ?? null);
+  const [isUnlimited, setIsUnlimited] = useState(server?.maxIterations == null);
   
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -1301,7 +1304,8 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
       transport,
       autoStart,
       icon,
-      showInToolbar
+      showInToolbar,
+      maxIterations: isUnlimited ? null : (maxIterations || 10)
     };
     
     if (server?._id) {
@@ -1561,6 +1565,38 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
           label="Show in toolbar"
         />
       </div>
+      
+      {/* Max Iterations Setting */}
+      <FormGroup>
+        <Label>Max Tool Call Iterations</Label>
+        <div className="flex items-center gap-3">
+          <Checkbox
+            checked={isUnlimited}
+            onChange={(e) => {
+              setIsUnlimited(e.target.checked);
+              if (e.target.checked) {
+                setMaxIterations(null);
+              } else {
+                setMaxIterations(10);
+              }
+            }}
+            label="Unlimited"
+          />
+          {!isUnlimited && (
+            <Input
+              type="number"
+              min={1}
+              max={100}
+              value={maxIterations || 10}
+              onChange={(e) => setMaxIterations(parseInt(e.target.value, 10) || 10)}
+              className="w-24"
+            />
+          )}
+        </div>
+        <p className="text-xs text-gray-500 mt-1">
+          Limit the number of tool calls per conversation turn for this server
+        </p>
+      </FormGroup>
       
       {/* Test Result */}
       {(testResult || error) && (

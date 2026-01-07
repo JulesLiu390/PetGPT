@@ -39,6 +39,8 @@ pub struct McpServer {
     pub auto_start: bool,
     pub show_in_toolbar: bool,
     pub toolbar_order: i32,
+    // Max tool call iterations for this server (None = unlimited)
+    pub max_iterations: Option<i32>,
     pub created_at: String,
     pub updated_at: String,
     // Runtime state (not persisted)
@@ -63,6 +65,8 @@ pub struct CreateMcpServerData {
     pub icon: Option<String>,
     pub auto_start: Option<bool>,
     pub show_in_toolbar: Option<bool>,
+    // Max iterations (None = unlimited)
+    pub max_iterations: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,6 +83,19 @@ pub struct UpdateMcpServerData {
     pub auto_start: Option<bool>,
     pub show_in_toolbar: Option<bool>,
     pub toolbar_order: Option<i32>,
+    // Max iterations (None = unlimited, Some(0) to clear/reset to unlimited)
+    #[serde(default, deserialize_with = "deserialize_optional_max_iterations")]
+    pub max_iterations: Option<Option<i32>>,
+}
+
+// Custom deserializer to handle max_iterations: null vs absent vs 0
+fn deserialize_optional_max_iterations<'de, D>(deserializer: D) -> std::result::Result<Option<Option<i32>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let opt: Option<Option<i32>> = Option::deserialize(deserializer)?;
+    Ok(opt)
 }
 
 fn parse_transport(s: &str) -> TransportType {
@@ -100,7 +117,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, transport, command, args, env, url, api_key, icon, auto_start, 
-                    show_in_toolbar, toolbar_order, created_at, updated_at 
+                    show_in_toolbar, toolbar_order, max_iterations, created_at, updated_at 
              FROM mcp_servers ORDER BY toolbar_order"
         )?;
         
@@ -122,8 +139,9 @@ impl Database {
                 auto_start: row.get::<_, i32>(9)? != 0,
                 show_in_toolbar: row.get::<_, i32>(10)? != 0,
                 toolbar_order: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                max_iterations: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
                 is_running: false,
             })
         })?.collect::<Result<Vec<_>>>()?;
@@ -135,7 +153,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, transport, command, args, env, url, api_key, icon, auto_start, 
-                    show_in_toolbar, toolbar_order, created_at, updated_at 
+                    show_in_toolbar, toolbar_order, max_iterations, created_at, updated_at 
              FROM mcp_servers WHERE id = ?"
         )?;
         
@@ -159,8 +177,9 @@ impl Database {
                 auto_start: row.get::<_, i32>(9)? != 0,
                 show_in_toolbar: row.get::<_, i32>(10)? != 0,
                 toolbar_order: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                max_iterations: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
                 is_running: false,
             }))
         } else {
@@ -172,7 +191,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, transport, command, args, env, url, api_key, icon, auto_start, 
-                    show_in_toolbar, toolbar_order, created_at, updated_at 
+                    show_in_toolbar, toolbar_order, max_iterations, created_at, updated_at 
              FROM mcp_servers WHERE name = ?"
         )?;
         
@@ -196,8 +215,9 @@ impl Database {
                 auto_start: row.get::<_, i32>(9)? != 0,
                 show_in_toolbar: row.get::<_, i32>(10)? != 0,
                 toolbar_order: row.get(11)?,
-                created_at: row.get(12)?,
-                updated_at: row.get(13)?,
+                max_iterations: row.get(12)?,
+                created_at: row.get(13)?,
+                updated_at: row.get(14)?,
                 is_running: false,
             }))
         } else {
@@ -219,8 +239,8 @@ impl Database {
         
         conn.execute(
             "INSERT INTO mcp_servers (id, name, transport, command, args, env, url, api_key, icon, auto_start, 
-                                      show_in_toolbar, toolbar_order, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13)",
+                                      show_in_toolbar, toolbar_order, max_iterations, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, 0, ?12, ?13, ?14)",
             params![
                 id,
                 data.name,
@@ -233,6 +253,7 @@ impl Database {
                 data.icon,
                 auto_start as i32,
                 show_in_toolbar as i32,
+                data.max_iterations,
                 now,
                 now
             ],
@@ -251,6 +272,7 @@ impl Database {
             auto_start,
             show_in_toolbar,
             toolbar_order: 0,
+            max_iterations: data.max_iterations,
             created_at: now.clone(),
             updated_at: now,
             is_running: false,
@@ -309,6 +331,10 @@ impl Database {
             updates.push(format!("toolbar_order = ?{}", param_count));
             param_count += 1;
         }
+        if data.max_iterations.is_some() {
+            updates.push(format!("max_iterations = ?{}", param_count));
+            param_count += 1;
+        }
         
         let sql = format!(
             "UPDATE mcp_servers SET {} WHERE id = ?{}",
@@ -329,6 +355,7 @@ impl Database {
         if let Some(auto_start) = data.auto_start { params_vec.push(Box::new(auto_start as i32)); }
         if let Some(show_in_toolbar) = data.show_in_toolbar { params_vec.push(Box::new(show_in_toolbar as i32)); }
         if let Some(toolbar_order) = data.toolbar_order { params_vec.push(Box::new(toolbar_order)); }
+        if let Some(max_iterations) = &data.max_iterations { params_vec.push(Box::new(*max_iterations)); }
         params_vec.push(Box::new(id.to_string()));
         
         let params: Vec<&dyn rusqlite::ToSql> = params_vec.iter().map(|v| v.as_ref()).collect();
