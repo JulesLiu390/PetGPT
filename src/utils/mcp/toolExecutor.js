@@ -639,7 +639,13 @@ export const callLLMStreamWithTools = async ({
             if (tc.id) existing.id = tc.id;
             if (tc.name) existing.name = tc.name;
             // 保留原始 part（包含 thought_signature）
-            if (tc._rawPart) existing._rawPart = tc._rawPart;
+            // 只在当前没有 _rawPart，或新的 part 包含 thought_signature 时更新
+            // 避免被后续不含签名的 chunk 覆盖（Gemini 流式模式可能在后续 chunk 中省略签名）
+            if (tc._rawPart) {
+              if (!existing._rawPart || tc._rawPart.thought_signature) {
+                existing._rawPart = tc._rawPart;
+              }
+            }
             if (tc.arguments !== undefined && tc.arguments !== null) {
               // Gemini 返回的是对象，OpenAI 流式返回的是字符串片段
               if (typeof tc.arguments === 'object') {

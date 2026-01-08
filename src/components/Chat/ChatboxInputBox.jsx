@@ -39,30 +39,6 @@ const getApiFormat = (model) => {
   return 'openai_compatible';
 };
 
-
-
-// 预览粘贴图片组件（无边框，圆角矩形）
-const PastedImagePreview = ({ imageUrl, onRemove }) => {
-  if (!imageUrl) return null;
-
-  return (
-    <div className="relative inline-block rounded-md mt-2">
-      <img
-        src={imageUrl}
-        alt="Pasted"
-        className="max-w-full max-h-32 object-cover rounded-md"
-      />
-      <MdOutlineCancel className="absolute top-1 right-1 cursor-pointer z-10 text-gray-200 hover:text-white"
-      onClick={onRemove}
-      ></MdOutlineCancel>
-    </div>
-  );
-};
-
-
-
-
-
 export const ChatboxInputBox = ({ activePetId }) => {
   // 会话 ID ref（需要先声明，供其他地方引用）
   const conversationIdRef = useRef(null);
@@ -134,7 +110,6 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }));
   };
 
-  const [userImage, setUserImage] = useState(null);
   const [stateReply, setStateReply] = useState(null);
   const [stateReplyConversationId, setStateReplyConversationId] = useState(null); // Track which conversation the reply belongs to
   const [stateThisModel, setStateThisModel] = useState(null);
@@ -916,7 +891,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     // 检查是否有内容可发送（文字或附件）
     const hasText = currentInputText.trim().length > 0;
-    const hasAttachments = attachments.length > 0 || userImage != null;
+    const hasAttachments = attachments.length > 0;
 
     if (!hasText && !hasAttachments) {
         // 没有文字也没有附件，检查是否是重新生成
@@ -953,11 +928,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     if (isRunFromHere) {
         // Use original content from history
         displayContent = runFromHereContent;
-    } else if (userImage != null || attachments.length > 0) {
+    } else if (attachments.length > 0) {
         displayContent = [{ type: "text", text: _userText }];
-        if (userImage) {
-            displayContent.push({ type: "image_url", image_url: { url: userImage } });
-        }
         attachments.forEach(att => {
             if (att.type === 'image_url') {
                 // Use saved file path instead of base64 for persistence
@@ -984,6 +956,17 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     setUserText("");
     dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId: sendingConversationId });
+
+    // 【重要】在添加用户消息之前，先记录当前消息数量
+    // 这是因为后续 historyMessages 是从 Rust TabState 获取的，
+    // 而那时用户消息已经被 pushTabMessage 添加进去了。
+    // 所以我们需要在 pushTabMessage 之前保存消息数量，
+    // 用于后续判断是否是对话的第一条消息（以便设置对话标题）。
+    let messageCountBeforeUserMsg = 0;
+    if (sendingConversationId) {
+      const currentState = await tauri.getTabState(sendingConversationId);
+      messageCountBeforeUserMsg = currentState.messages?.length || 0;
+    }
 
     // 新方案: 使用 Rust TabState 添加用户消息
     const userMsg = { role: "user", content: displayContent };
@@ -1026,8 +1009,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
       
       let content = displayContent;
 
-      if (userImage || attachments.length > 0) {
-          setUserImage(null);
+      if (attachments.length > 0) {
           setAttachments([]);
       }
 
@@ -1121,8 +1103,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         }
       }
       
-      if (userImage || attachments.length > 0) {
-          setUserImage(null);
+      if (attachments.length > 0) {
           setAttachments([]);
       }
 
@@ -1134,6 +1115,35 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     // 检查是否启用了 MCP 工具
     const mcpEnabled = enabledMcpServers.size > 0;
+
+    // 如果启用了 MCP 工具，在 system prompt 中添加工具使用指导
+    if (mcpEnabled && hasTools && mcpTools.length > 0) {
+      const toolGuidance = `
+
+## Tool Usage Guidelines
+When using tools, please follow these guidelines:
+1. Read the tool's parameter descriptions carefully and use only the valid values specified in the schema.
+2. If a tool call returns an error, analyze the error message and retry with corrected parameters.
+3. If you already have successful results from previous tool calls, use those results to answer the user's question instead of giving up.
+4. Do not invent parameter values - only use values that are explicitly documented in the tool schema.
+5. If unsure about a parameter value, try the most common/default option first, or omit optional parameters.
+`;
+      
+      // 在 fullMessages 的 system 消息中追加工具指导
+      const systemMsgIndex = fullMessages.findIndex(m => m.role === 'system');
+      if (systemMsgIndex !== -1) {
+        fullMessages[systemMsgIndex] = {
+          ...fullMessages[systemMsgIndex],
+          content: fullMessages[systemMsgIndex].content + toolGuidance
+        };
+      } else {
+        // 如果没有 system 消息，在开头添加一个
+        fullMessages.unshift({
+          role: 'system',
+          content: toolGuidance.trim()
+        });
+      }
+    }
 
     // 调试日志：检查 MCP 状态
     console.log('[ChatboxInputBox] MCP Debug:', {
@@ -1307,7 +1317,9 @@ export const ChatboxInputBox = ({ activePetId }) => {
         const newHistory = finalState.messages || [];
         
         // Only update title if it's the first message
-        const isFirstMessage = historyMessages.length === 0;
+        // 使用在 pushTabMessage 之前保存的消息数量来判断
+        // （不能用 historyMessages.length，因为它已经包含了刚发送的用户消息）
+        const isFirstMessage = messageCountBeforeUserMsg === 0;
         const newTitle = isFirstMessage ? _userText : undefined;
 
         const updatePayload = {
@@ -1589,7 +1601,6 @@ const handleStop = async () => {
           </div>
         )}
         <div className="flex flex-wrap gap-2">
-            <PastedImagePreview imageUrl={userImage} onRemove={() => setUserImage(null)} />
             {attachments.map((att, index) => (
                 <div key={index} className="relative inline-block rounded-md mt-2 bg-gray-100 border border-gray-200 overflow-hidden">
                     {att.type === 'image_url' ? (

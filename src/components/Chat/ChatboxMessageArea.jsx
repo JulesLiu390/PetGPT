@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import * as tauri from '../../utils/tauri';
 import ReactMarkdown from 'react-markdown';
@@ -353,10 +353,164 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
   const activeToolCalls = liveToolCalls[activeConvId] || [];
   const messageEndRef = useRef(null);
   const scrollContainerRef = useRef(null);
-  const shouldAutoScrollRef = useRef(true);
   const prevConversationIdRef = useRef(null);
-  const [firstTime, setFirstTime] = useState(true);
-  const [Chatlength, setChatlength] = useState(0)
+  
+  // ========== 新的滚动控制系统 ==========
+  // 滚动模式：'auto' = 自动跟随到底部，'user' = 用户控制，保持当前位置
+  const scrollModeRef = useRef('auto');
+  const SCROLL_THRESHOLD = 60; // 距离底部多少像素内认为"在底部"
+  
+  // 滚动到底部的函数（强制版，忽略模式）
+  const forceScrollToBottom = useCallback(() => {
+    if (scrollContainerRef.current) {
+      console.log('[SCROLL] forceScrollToBottom called, scrollHeight:', scrollContainerRef.current.scrollHeight);
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, []);
+  
+  // 滚动到底部的函数（受控版，尊重用户模式）
+  const scrollToBottomIfAuto = useCallback(() => {
+    console.log('[SCROLL] scrollToBottomIfAuto called, mode:', scrollModeRef.current);
+    if (scrollModeRef.current === 'auto' && scrollContainerRef.current) {
+      scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
+    }
+  }, []);
+  
+  // 🔧 正在恢复滚动位置的标志，防止 handleScroll 干扰
+  const isRestoringRef = useRef(false);
+  
+  // 处理用户滚动事件
+  const handleScroll = useCallback(() => {
+    if (!scrollContainerRef.current) return;
+    
+    // 如果正在恢复滚动位置，不要改变模式
+    if (isRestoringRef.current) {
+      console.log('[SCROLL] handleScroll skipped - restoration in progress');
+      return;
+    }
+    
+    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
+    const distanceFromBottom = scrollHeight - scrollTop - clientHeight;
+    
+    const prevMode = scrollModeRef.current;
+    if (distanceFromBottom > SCROLL_THRESHOLD) {
+      // 用户向上滚动，切换到用户控制模式
+      scrollModeRef.current = 'user';
+    } else if (distanceFromBottom < 10) {
+      // 用户滚动到底部，切换回自动模式
+      scrollModeRef.current = 'auto';
+    }
+    if (prevMode !== scrollModeRef.current) {
+      console.log('[SCROLL] Mode changed:', prevMode, '->', scrollModeRef.current, 'distanceFromBottom:', distanceFromBottom);
+    }
+  }, []);
+  
+  // Tab 切换或新对话时，重置为自动模式并滚动到底部
+  useEffect(() => {
+    if (isActive && activeConvId !== prevConversationIdRef.current) {
+      console.log('[SCROLL] Tab/Conv switch, resetting to auto');
+      scrollModeRef.current = 'auto';
+      prevConversationIdRef.current = activeConvId;
+      // 延迟一帧确保内容已渲染
+      requestAnimationFrame(forceScrollToBottom);
+    }
+  }, [isActive, activeConvId, forceScrollToBottom]);
+  
+  // 用户发送新消息时，重置为自动模式并滚动到底部
+  useEffect(() => {
+    if (messages?.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      if (lastMsg.role === 'user') {
+        console.log('[SCROLL] User sent message, resetting to auto');
+        scrollModeRef.current = 'auto';
+        requestAnimationFrame(forceScrollToBottom);
+      }
+    }
+  }, [messages?.length, forceScrollToBottom]);
+  
+  // 流式内容更新时，自动滚动到底部（仅在 auto 模式）
+  useEffect(() => {
+    if (isActive && streamingContent) {
+      scrollToBottomIfAuto();
+    }
+  }, [isActive, streamingContent, scrollToBottomIfAuto]);
+  
+  // 🔧 FIX: 流式内容结束时保护滚动位置
+  const prevStreamingRef = useRef(streamingContent);
+  const savedScrollTopRef = useRef(0);
+  
+  // 在渲染前保存滚动位置
+  if (scrollContainerRef.current && prevStreamingRef.current && !streamingContent) {
+    savedScrollTopRef.current = scrollContainerRef.current.scrollTop;
+    console.log('[SCROLL] Saving scroll position before streaming ends:', savedScrollTopRef.current);
+  }
+  
+  useLayoutEffect(() => {
+    const hadContent = !!prevStreamingRef.current;
+    const hasContent = !!streamingContent;
+    
+    // 流式内容刚结束
+    if (hadContent && !hasContent && isActive) {
+      const container = scrollContainerRef.current;
+      const savedPosition = savedScrollTopRef.current;
+      const mode = scrollModeRef.current;
+      
+      if (container) {
+        if (mode === 'user' && savedPosition > 50) {
+          // 用户模式：恢复到保存的位置
+          console.log('[SCROLL] Streaming ended (user mode), will restore to:', savedPosition);
+          isRestoringRef.current = true;
+          
+          // 立即设置
+          container.scrollTop = savedPosition;
+          
+          // 多次尝试恢复，因为 DOM 可能还在变化
+          requestAnimationFrame(() => {
+            if (container) container.scrollTop = savedPosition;
+            requestAnimationFrame(() => {
+              if (container) container.scrollTop = savedPosition;
+              // 延迟重置恢复标志
+              setTimeout(() => {
+                isRestoringRef.current = false;
+              }, 100);
+            });
+          });
+        } else {
+          // 自动模式：滚动到底部
+          console.log('[SCROLL] Streaming ended (auto mode), scrolling to bottom');
+          container.scrollTop = container.scrollHeight;
+        }
+      }
+    }
+    
+    prevStreamingRef.current = streamingContent;
+  }, [streamingContent, isActive]);
+  
+  // 🔍 DEBUG: 监控 scrollTop 异常变化
+  useEffect(() => {
+    if (!scrollContainerRef.current || !isActive) return;
+    
+    let lastScrollTop = scrollContainerRef.current.scrollTop;
+    const interval = setInterval(() => {
+      if (scrollContainerRef.current) {
+        const currentScrollTop = scrollContainerRef.current.scrollTop;
+        // 检测大幅度向上跳转（可能是 bug）
+        if (lastScrollTop - currentScrollTop > 100) {
+          console.warn('[SCROLL] ⚠️ Unexpected jump UP detected:', {
+            from: lastScrollTop,
+            to: currentScrollTop,
+            diff: currentScrollTop - lastScrollTop,
+            mode: scrollModeRef.current,
+            scrollHeight: scrollContainerRef.current.scrollHeight
+          });
+        }
+        lastScrollTop = currentScrollTop;
+      }
+    }, 100);
+    
+    return () => clearInterval(interval);
+  }, [isActive]);
+  // ========== 滚动控制系统结束 ==========
   const [hoveredMessageIndex, setHoveredMessageIndex] = useState(null);
   const [editingIndex, setEditingIndex] = useState(null);
   const [editingPartIndex, setEditingPartIndex] = useState(null);
@@ -401,10 +555,6 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
       // 3. 订阅状态更新（Rust 会自动推送任何变化）
       unlisten = await tauri.subscribeTabState(activeConvId, (newState) => {
         if (isMounted) {
-          console.log('[ChatboxMessageArea] TabState updated from Rust:', {
-            messagesCount: newState.messages?.length,
-            isThinking: newState.is_thinking
-          });
           setTabState(newState);
         }
       });
@@ -577,15 +727,6 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
     }
   };
 
-  // 监听滚动事件，判断用户是否手动向上滚动
-  const handleScroll = () => {
-    if (!scrollContainerRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = scrollContainerRef.current;
-    // 如果距离底部小于 100px，则认为用户在底部，允许自动滚动
-    const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
-    shouldAutoScrollRef.current = isAtBottom;
-  };
-
   // 注意：思考状态(isThinking)现在通过 TabState 订阅自动更新，不再需要单独的 onMoodUpdated 监听
 
   useEffect(() => {
@@ -594,7 +735,6 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
       if (activeConvId) {
         tauri.setTabThinking(activeConvId, false);
       }
-      setFirstTime(false);
     };
     const cleanup = tauri.onCharacterId?.(handleCharacterId);
     return () => {
@@ -602,63 +742,7 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
     };
   }, [activeConvId]);
 
-  // 处理 Tab 切换时的滚动 (瞬间到底)
-  useEffect(() => {
-    if (isActive && scrollContainerRef.current) {
-        // 使用 setTimeout 确保渲染完成后执行
-        setTimeout(() => {
-            if (scrollContainerRef.current) {
-                scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-            }
-        }, 0);
-    }
-  }, [isActive]);
 
-  // 处理消息更新时的滚动
-  useEffect(() => {
-    if (!isActive) return;
-
-    if(firstTime) {
-      // Note: thinking state is now managed by Rust via setTabThinking
-      setFirstTime(false);
-    } 
-
-    if (messages?.length > 0) {
-        const lastMsg = messages[messages.length - 1];
-        // 只有当最新消息是用户发送的时，才自动滚动
-        // AI 的回复由流式传输逻辑处理滚动，或者用户自己查看
-        if (lastMsg.role === 'user') {
-             messageEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-             shouldAutoScrollRef.current = true; 
-        }
-    }
-    setChatlength(messages?.length || 0)
-  }, [messages?.length]); 
-
-  // 流式传输时的自动滚动
-  useEffect(() => {
-    if (!isActive) return;
-    if (streamingContent && shouldAutoScrollRef.current && scrollContainerRef.current) {
-        // 使用 requestAnimationFrame 确保在渲染后执行滚动
-        requestAnimationFrame(() => {
-            if (scrollContainerRef.current) {
-                scrollContainerRef.current.scrollTop = scrollContainerRef.current.scrollHeight;
-            }
-        });
-    }
-  }, [streamingContent, isActive]);
-
-  // 🔍 DEBUG: 监控渲染状态 (注释掉以减少日志刷新)
-  // useEffect(() => {
-  //   console.log('[MessageArea DEBUG]', {
-  //     messagesLength: messages?.length,
-  //     isArray: Array.isArray(messages),
-  //     streamingContent: streamingContent ? `${streamingContent.substring(0, 50)}...` : null,
-  //     isThinking,
-  //     isActive,
-  //     lastMessageRole: messages?.length > 0 ? messages[messages.length - 1]?.role : null
-  //   });
-  // }, [messages, streamingContent, isThinking, isActive]);
 
   return (
     <div 
@@ -666,13 +750,7 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
         onScroll={handleScroll}
         className="flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh]"
     >
-      {/* 🔍 DEBUG: 显示状态 (已注释) */}
-      {/* {process.env.NODE_ENV === 'development' && (
-        <div className="text-xs text-gray-400 mb-2 p-1 bg-gray-100 rounded">
-          msgs: {messages?.length || 0} | streaming: {streamingContent ? 'yes' : 'no'} | thinking: {isThinking ? 'yes' : 'no'}
-        </div>
-      )} */}
-      {Array.isArray(messages) && messages.map((msg, index) => {
+        {Array.isArray(messages) && messages.map((msg, index) => {
         if (!msg) return null; // Skip null/undefined messages
         const isUser = msg.role === 'user';
         

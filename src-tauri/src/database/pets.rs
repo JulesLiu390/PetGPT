@@ -22,6 +22,7 @@ pub struct Pet {
     pub has_mood: bool,
     #[serde(rename = "imageName")]
     pub icon: Option<String>,
+    pub user_memory: Option<String>,
     pub toolbar_order: i32,
     pub created_at: String,
     pub updated_at: String,
@@ -61,6 +62,7 @@ pub struct UpdatePetData {
     pub has_mood: Option<bool>,
     #[serde(rename = "imageName")]
     pub icon: Option<String>,
+    pub user_memory: Option<String>,
     pub toolbar_order: Option<i32>,
 }
 
@@ -69,7 +71,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, type, model_name, model_url, model_api_key, model_config_id,
-                    api_format, system_instruction, appearance, has_mood, icon, 
+                    api_format, system_instruction, appearance, has_mood, icon, user_memory,
                     toolbar_order, created_at, updated_at 
              FROM pets 
              WHERE is_deleted = 0 
@@ -90,9 +92,10 @@ impl Database {
                 appearance: row.get(9)?,
                 has_mood: row.get::<_, i32>(10)? != 0,
                 icon: row.get(11)?,
-                toolbar_order: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                user_memory: row.get(12)?,
+                toolbar_order: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             })
         })?.collect::<Result<Vec<_>>>()?;
         
@@ -103,7 +106,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
             "SELECT id, name, type, model_name, model_url, model_api_key, model_config_id,
-                    api_format, system_instruction, appearance, has_mood, icon, 
+                    api_format, system_instruction, appearance, has_mood, icon, user_memory,
                     toolbar_order, created_at, updated_at 
              FROM pets WHERE id = ?"
         )?;
@@ -124,9 +127,10 @@ impl Database {
                 appearance: row.get(9)?,
                 has_mood: row.get::<_, i32>(10)? != 0,
                 icon: row.get(11)?,
-                toolbar_order: row.get(12)?,
-                created_at: row.get(13)?,
-                updated_at: row.get(14)?,
+                user_memory: row.get(12)?,
+                toolbar_order: row.get(13)?,
+                created_at: row.get(14)?,
+                updated_at: row.get(15)?,
             }))
         } else {
             Ok(None)
@@ -176,6 +180,7 @@ impl Database {
             appearance: data.appearance,
             has_mood,
             icon: data.icon,
+            user_memory: None,
             toolbar_order: 0,
             created_at: now.clone(),
             updated_at: now,
@@ -233,6 +238,10 @@ impl Database {
         if let Some(icon) = &data.icon {
             updates.push("icon = ?");
             values.push(Box::new(icon.clone()));
+        }
+        if let Some(user_memory) = &data.user_memory {
+            updates.push("user_memory = ?");
+            values.push(Box::new(user_memory.clone()));
         }
         if let Some(toolbar_order) = data.toolbar_order {
             updates.push("toolbar_order = ?");

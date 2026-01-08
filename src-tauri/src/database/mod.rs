@@ -54,6 +54,7 @@ impl Database {
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN model_config_id TEXT", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN api_format TEXT", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN appearance TEXT", []);
+        let _ = conn.execute("ALTER TABLE pets ADD COLUMN user_memory TEXT", []);
 
         // Conversations table
         conn.execute(

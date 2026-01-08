@@ -311,7 +311,7 @@ export const mcp = {
 
 // ==================== File Operations ====================
 
-export const saveFile = (fileName, data) => invoke('save_file', { fileName, data });
+export const saveFile = ({ fileName, fileData, mimeType }) => invoke('save_file', { fileName, fileData, mimeType });
 export const readUpload = (fileName) => invoke('read_upload', { fileName });
 export const getUploadsPath = () => invoke('get_uploads_path');
 
@@ -440,11 +440,27 @@ export const openFileExternal = (path) => shellOpen(`file://${path}`);
 // Pet Memory
 export const getPetUserMemory = async (petId) => {
   const pet = await getPet(petId);
-  return pet?.userMemory || '';
+  // userMemory 存储为 JSON 字符串，解析为对象返回
+  if (pet?.userMemory) {
+    try {
+      return JSON.parse(pet.userMemory);
+    } catch {
+      return {};
+    }
+  }
+  return {};
 };
 
-export const updatePetUserMemory = async (petId, memory) => {
-  return updatePet(petId, { userMemory: memory });
+export const updatePetUserMemory = async (petId, key, value) => {
+  // 获取现有记忆
+  const existingMemory = await getPetUserMemory(petId);
+  // 合并新的键值对
+  const updatedMemory = {
+    ...existingMemory,
+    [key]: value
+  };
+  // 将对象序列化为 JSON 字符串存储
+  return updatePet(petId, { userMemory: JSON.stringify(updatedMemory) });
 };
 
 // Model Configs (alias to pets with model type)
