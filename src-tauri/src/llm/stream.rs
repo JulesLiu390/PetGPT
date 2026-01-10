@@ -164,6 +164,94 @@ async fn stream_openai(
     })
 }
 
+/// 将 ContentPart 转换为 Gemini API 的 part 格式
+fn content_part_to_gemini_part(part: &ContentPart) -> serde_json::Value {
+    match part {
+        ContentPart::Text { text } => {
+            serde_json::json!({ "text": text })
+        }
+        ContentPart::ImageUrl { image_url } => {
+            // 处理图片：支持 base64 data URL 和普通 URL
+            let url = &image_url.url;
+            if url.starts_with("data:") {
+                // Base64 data URL: data:image/png;base64,xxxxx
+                if let Some(comma_pos) = url.find(',') {
+                    let mime_part = &url[5..comma_pos]; // 跳过 "data:"
+                    let mime_type = mime_part.split(';').next().unwrap_or("image/png");
+                    let base64_data = &url[comma_pos + 1..];
+                    serde_json::json!({
+                        "inline_data": {
+                            "mime_type": mime_type,
+                            "data": base64_data
+                        }
+                    })
+                } else {
+                    // 格式不正确，降级为文本
+                    serde_json::json!({ "text": "[Invalid image data]" })
+                }
+            } else if url.starts_with("http") {
+                // HTTP URL - Gemini 支持 fileData 格式
+                serde_json::json!({
+                    "file_data": {
+                        "file_uri": url,
+                        "mime_type": image_url.mime_type.as_deref().unwrap_or("image/png")
+                    }
+                })
+            } else {
+                // 本地文件路径 - 无法直接使用，降级为文本
+                serde_json::json!({ "text": format!("[Image: {}]", url) })
+            }
+        }
+        ContentPart::FileUrl { file_url } => {
+            // 处理文件（PDF、视频、音频等）
+            let url = &file_url.url;
+            let mime_type = file_url.mime_type.as_deref().unwrap_or("application/octet-stream");
+            
+            if url.starts_with("data:") {
+                // Base64 data URL
+                if let Some(comma_pos) = url.find(',') {
+                    let mime_part = &url[5..comma_pos];
+                    let detected_mime = mime_part.split(';').next().unwrap_or(mime_type);
+                    let base64_data = &url[comma_pos + 1..];
+                    serde_json::json!({
+                        "inline_data": {
+                            "mime_type": detected_mime,
+                            "data": base64_data
+                        }
+                    })
+                } else {
+                    let file_name = file_url.name.as_deref().unwrap_or("file");
+                    serde_json::json!({ "text": format!("[Attachment: {}]", file_name) })
+                }
+            } else if url.starts_with("http") {
+                // HTTP URL
+                serde_json::json!({
+                    "file_data": {
+                        "file_uri": url,
+                        "mime_type": mime_type
+                    }
+                })
+            } else {
+                // 本地文件路径 - 无法直接使用
+                let file_name = file_url.name.as_deref().unwrap_or(url);
+                serde_json::json!({ "text": format!("[Attachment: {}]", file_name) })
+            }
+        }
+    }
+}
+
+/// 将 MessageContent 转换为 Gemini API 的 parts 数组
+fn message_content_to_gemini_parts(content: &MessageContent) -> Vec<serde_json::Value> {
+    match content {
+        MessageContent::Text(text) => {
+            vec![serde_json::json!({ "text": text })]
+        }
+        MessageContent::Parts(parts) => {
+            parts.iter().map(content_part_to_gemini_part).collect()
+        }
+    }
+}
+
 /// Gemini 官方 API 流式调用
 async fn stream_gemini(
     app: AppHandle,
@@ -186,7 +274,7 @@ async fn stream_gemini(
         request.api_key
     );
 
-    // 构建 Gemini 请求格式
+    // 构建 Gemini 请求格式 - 支持多模态内容
     let contents: Vec<serde_json::Value> = request.messages.iter()
         .filter(|m| m.role != Role::System)
         .map(|msg| {
@@ -195,9 +283,11 @@ async fn stream_gemini(
                 Role::Assistant => "model",
                 _ => "user",
             };
+            // 使用辅助函数转换多模态内容
+            let parts = message_content_to_gemini_parts(&msg.content);
             serde_json::json!({
                 "role": role,
-                "parts": [{ "text": msg.content.as_text() }]
+                "parts": parts
             })
         })
         .collect();
@@ -205,9 +295,12 @@ async fn stream_gemini(
     // 提取 system instruction
     let system_instruction: Option<serde_json::Value> = request.messages.iter()
         .find(|m| m.role == Role::System)
-        .map(|m| serde_json::json!({
-            "parts": [{ "text": m.content.as_text() }]
-        }));
+        .map(|m| {
+            let parts = message_content_to_gemini_parts(&m.content);
+            serde_json::json!({
+                "parts": parts
+            })
+        });
 
     let mut gemini_request = serde_json::json!({
         "contents": contents,

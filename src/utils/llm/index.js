@@ -51,10 +51,23 @@ const convertMessagesToRustFormat = (messages) => {
           return { type: 'text', text: part.text };
         }
         if (part.type === 'image_url') {
-          return { type: 'image_url', image_url: { url: part.image_url?.url || part.url } };
+          return { 
+            type: 'image_url', 
+            image_url: { 
+              url: part.image_url?.url || part.url,
+              mime_type: part.image_url?.mime_type || part.mime_type
+            }
+          };
         }
         if (part.type === 'file_url') {
-          return { type: 'file_url', file_url: { url: part.file_url?.url || part.url } };
+          return { 
+            type: 'file_url', 
+            file_url: { 
+              url: part.file_url?.url || part.url,
+              mime_type: part.file_url?.mime_type || part.mime_type,
+              name: part.file_url?.name || part.name
+            }
+          };
         }
         return { type: 'text', text: JSON.stringify(part) };
       });

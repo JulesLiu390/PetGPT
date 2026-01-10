@@ -923,23 +923,38 @@ export const ChatboxInputBox = ({ activePetId }) => {
 
     _userText = currentInputText;
     
-    // Construct display content (User Text + Attachments)
+    // Construct display content (for saving to DB - uses file paths)
+    // and LLM content (for sending to AI - uses base64 data)
     let displayContent;
+    let llmContent;  // Content with base64 data for LLM
+    
     if (isRunFromHere) {
         // Use original content from history
         displayContent = runFromHereContent;
+        llmContent = runFromHereContent;
     } else if (attachments.length > 0) {
+        // displayContent uses file paths (for persistence/display)
         displayContent = [{ type: "text", text: _userText }];
+        // llmContent uses base64 data (for sending to LLM)
+        llmContent = [{ type: "text", text: _userText }];
+        
         attachments.forEach(att => {
             if (att.type === 'image_url') {
-                // Use saved file path instead of base64 for persistence
+                // Display: use saved file path for persistence
                 displayContent.push({ 
                     type: 'image_url', 
                     image_url: { url: att.path },
                     mime_type: att.mime_type 
                 });
+                // LLM: use base64 data for actual content
+                llmContent.push({ 
+                    type: 'image_url', 
+                    image_url: { url: att.data || att.url },
+                    mime_type: att.mime_type 
+                });
             } else {
-                // For video/audio/documents, include mime_type for proper rendering
+                // For video/audio/documents
+                // Display: use file path
                 displayContent.push({ 
                     type: 'file_url', 
                     file_url: { 
@@ -948,10 +963,20 @@ export const ChatboxInputBox = ({ activePetId }) => {
                         name: att.name 
                     }
                 });
+                // LLM: use base64 data
+                llmContent.push({ 
+                    type: 'file_url', 
+                    file_url: { 
+                        url: att.data || att.url,
+                        mime_type: att.mime_type,
+                        name: att.name 
+                    }
+                });
             }
         });
     } else {
         displayContent = _userText;
+        llmContent = _userText;
     }
 
     setUserText("");
@@ -996,7 +1021,11 @@ export const ChatboxInputBox = ({ activePetId }) => {
     // 新方案: 从 Rust TabState 获取最新消息
     const tabState = await tauri.getTabState(sendingConversationId);
     const latestMessages = tabState.messages || [];
-    const historyMessages = isRunFromHere ? latestMessages.slice(0, -1) : latestMessages;
+    // 排除最后一条消息（当前用户消息，因为它使用的是 displayContent/文件路径）
+    // 我们将用 llmContent（base64 数据）版本替代它
+    const historyMessages = isRunFromHere 
+        ? latestMessages.slice(0, -1)  // RunFromHere: 排除最后一条
+        : latestMessages.slice(0, -1); // 普通发送: 也排除最后一条（刚添加的 displayContent 版本）
 
     // 确定使用哪个模型：优先级 overrideModel > (isDefaultPersonality ? functionModelInfo : petInfo)
     if (overrideModel) {
@@ -1007,7 +1036,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
       thisModel = petInfo;
     }
       
-      let content = displayContent;
+      // Use llmContent (with base64 data) for sending to LLM
+      let content = llmContent;
 
       if (attachments.length > 0) {
           setAttachments([]);

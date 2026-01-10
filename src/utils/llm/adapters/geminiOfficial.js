@@ -187,6 +187,15 @@ export const convertMessages = async (messages) => {
       const mimeType = part.mime_type;
       const isSupported = isGeminiSupportedMime(mimeType);
       
+      // 调试日志
+      console.log('[Gemini] Processing media part:', {
+        type: part.type,
+        mimeType,
+        isSupported,
+        urlPrefix: part.url?.substring(0, 50),
+        hasDataPrefix: part.url?.startsWith('data:')
+      });
+      
       if (!isSupported) {
         // 不支持的类型，降级为文本
         parts.push({ text: getFileFallbackText(part) });
@@ -196,7 +205,9 @@ export const convertMessages = async (messages) => {
       // 尝试读取文件
       let dataUri = part.url;
       if (!dataUri?.startsWith('data:') && !dataUri?.startsWith('http')) {
+        console.log('[Gemini] URL is not data URI, attempting to read file:', part.url?.substring(0, 100));
         dataUri = await readFileAsBase64(part.url);
+        console.log('[Gemini] readFileAsBase64 result:', dataUri ? 'success (length: ' + dataUri.length + ')' : 'null/failed');
       }
       
       if (!dataUri) {
