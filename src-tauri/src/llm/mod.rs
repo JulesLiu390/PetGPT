@@ -10,4 +10,4 @@ pub mod stream;
 
 pub use client::LlmClient;
 pub use types::*;
-pub use stream::*;
+pub use stream::{stream_chat, LlmStreamCancellation};

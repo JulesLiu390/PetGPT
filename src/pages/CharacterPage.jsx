@@ -20,16 +20,29 @@ export const Character = () => {
   const [characterMood, setCharacterMood] = useState("normal");
   // 当前展示的图片路径
   const [imgSrc, setImgSrc] = useState(null);
-  // 控制是否显示顶部按钮
+  // 控制是否显示顶部按钮（传统 onMouseEnter/Leave，作为备用）
   const [isShowOptions, setIsShowOptions] = useState(false);
+  // 鼠标是否在窗口上（通过 Rust 轮询检测，即使窗口失去焦点也能工作）
+  const [isMouseOver, setIsMouseOver] = useState(false);
   // 控制 Settings/Manage 窗口是否打开
   const [isManageVisible, setIsManageVisible] = useState(false);
+  // 控制 Chat 窗口是否打开
+  const [isChatVisible, setIsChatVisible] = useState(false);
   const [imageName, setImageName] = useState("Jules");
   const [currentPetId, setCurrentPetId] = useState(null);
+  
+  // 表情恢复定时器
+  const moodResetTimerRef = useRef(null);
+  const [moodResetDelay, setMoodResetDelay] = useState(30); // 默认 30 秒
 
   const loadCharacter = useCallback(async (targetId = null) => {
     try {
       const settings = await tauri.getSettings();
+      
+      // 加载表情恢复延迟设置
+      if (settings?.moodResetDelay !== undefined) {
+        setMoodResetDelay(settings.moodResetDelay);
+      }
       
       // 注册快捷键
       if (settings?.programHotkey || settings?.dialogHotkey) {
@@ -142,6 +155,41 @@ export const Character = () => {
     }
   }, []);
 
+  // 监听 chat 窗口可见性
+  useEffect(() => {
+    const handleChatVisibility = (payload) => {
+        console.log("Chat window visibility changed:", payload);
+        if (payload && typeof payload.visible === 'boolean') {
+            setIsChatVisible(payload.visible);
+        }
+    };
+
+    let cleanup;
+    if (tauri.onChatWindowVisibilityChanged) {
+        cleanup = tauri.onChatWindowVisibilityChanged(handleChatVisibility);
+    }
+    
+    return () => {
+        if (cleanup) cleanup();
+    }
+  }, []);
+
+  // 监听鼠标是否在 character 窗口上（通过 Rust 轮询，支持失焦状态）
+  useEffect(() => {
+    let cleanup;
+    const setupListener = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      cleanup = await listen('mouse-over-character', (event) => {
+        setIsMouseOver(event.payload);
+      });
+    };
+    setupListener();
+    
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
+
   // 监听设置更新
   useEffect(() => {
     const handleSettingsUpdate = (payload) => {
@@ -150,6 +198,10 @@ export const Character = () => {
       // 注意：Tauri 中 key 可能是 'defaultRoleId'，Electron 中可能是 'defaultAssistant'，根据实际 key 调整
       if (payload.key === 'defaultRoleId' || payload.key === 'defaultAssistant') {
          loadCharacter();
+      }
+      // 更新表情恢复延迟
+      if (payload.key === 'moodResetDelay') {
+        setMoodResetDelay(payload.value);
       }
     };
     
@@ -164,14 +216,33 @@ export const Character = () => {
     const moodUpdateHandler = (event, updatedMood) => {
       console.log("Received updated mood:", updatedMood);
       setCharacterMood(updatedMood);
+      
+      // 清除之前的定时器
+      if (moodResetTimerRef.current) {
+        clearTimeout(moodResetTimerRef.current);
+        moodResetTimerRef.current = null;
+      }
+      
+      // 如果不是 normal 或 thinking，设置定时器恢复到 normal
+      // thinking 表示正在处理，不应自动恢复
+      if (updatedMood !== 'normal' && updatedMood !== 'thinking' && moodResetDelay > 0) {
+        moodResetTimerRef.current = setTimeout(() => {
+          console.log(`Mood reset to normal after ${moodResetDelay}s`);
+          setCharacterMood('normal');
+        }, moodResetDelay * 1000);
+      }
     };
     const cleanup = tauri.onMoodUpdated(moodUpdateHandler);
 
     // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
     return () => {
       if (cleanup) cleanup();
+      // 清除定时器
+      if (moodResetTimerRef.current) {
+        clearTimeout(moodResetTimerRef.current);
+      }
     };
-  }, []);
+  }, [moodResetDelay]);
 
   // 监听角色 ID
   useEffect(() => {
@@ -399,15 +470,18 @@ export const Character = () => {
       });
   }, []);
 
+  // 计算是否有其他窗口打开（chat 或 manage/settings）
+  const hasOtherWindowOpen = isChatVisible || isManageVisible;
+  // 工具栏显示逻辑：如果有其他窗口打开则一直显示，否则使用鼠标悬停逻辑
+  const showToolbar = hasOtherWindowOpen || isMouseOver;
+
   return (
     <div
       className="select-none h-full w-full flex flex-col justify-center items-center rounded-xl overflow-hidden"
-      onMouseEnter={() => setIsShowOptions(true)}
-      onMouseLeave={() => setIsShowOptions(false)}
     >
       {/* 顶部按钮区 */}
       <div className="h-[50px] w-full">
-        {(isShowOptions || isManageVisible) && (
+        {showToolbar && (
           <motion.div
             className="flex justify-evenly items-center gap-2 py-2 bg-black/30 rounded-lg p-2"
             initial={{ opacity: 0, y: -10 }}

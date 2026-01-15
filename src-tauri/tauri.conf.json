@@ -32,10 +32,10 @@
         "label": "chat",
         "title": "PetGPT Chat",
         "url": "/#/",
-        "width": 420,
-        "height": 280,
+        "width": 500,
+        "height": 340,
         "minWidth": 460,
-        "minHeight": 256,
+        "minHeight": 300,
         "resizable": true,
         "fullscreen": false,
         "decorations": false,
@@ -66,6 +66,9 @@
   "bundle": {
     "active": true,
     "targets": ["app"],
+    "resources": [
+      "assets/*"
+    ],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

@@ -4,17 +4,107 @@ use futures::StreamExt;
 use reqwest::Client;
 use tauri::{AppHandle, Emitter};
 use crate::llm::types::*;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// LLM 流取消管理器
+pub struct LlmStreamCancellation {
+    /// 每个 conversation_id 的取消状态
+    cancelled: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl LlmStreamCancellation {
+    pub fn new() -> Self {
+        Self {
+            cancelled: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 获取或创建指定会话的取消令牌
+    pub fn get_token(&self, conversation_id: &str) -> Arc<AtomicBool> {
+        let mut map = self.cancelled.lock().unwrap();
+        map.entry(conversation_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)))
+            .clone()
+    }
+
+    /// 取消指定会话的流
+    pub fn cancel(&self, conversation_id: &str) {
+        let map = self.cancelled.lock().unwrap();
+        if let Some(token) = map.get(conversation_id) {
+            log::info!("[LLM] Cancelling stream for conversation: {}", conversation_id);
+            token.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// 取消所有流
+    pub fn cancel_all(&self) {
+        let map = self.cancelled.lock().unwrap();
+        for (id, token) in map.iter() {
+            log::info!("[LLM] Cancelling stream for conversation: {}", id);
+            token.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// 重置指定会话的取消状态
+    pub fn reset(&self, conversation_id: &str) {
+        let mut map = self.cancelled.lock().unwrap();
+        if let Some(token) = map.get(conversation_id) {
+            token.store(false, Ordering::SeqCst);
+        } else {
+            map.insert(conversation_id.to_string(), Arc::new(AtomicBool::new(false)));
+        }
+    }
+
+    /// 重置所有取消状态
+    pub fn reset_all(&self) {
+        let map = self.cancelled.lock().unwrap();
+        for token in map.values() {
+            token.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// 检查是否已取消
+    pub fn is_cancelled(&self, conversation_id: &str) -> bool {
+        let map = self.cancelled.lock().unwrap();
+        map.get(conversation_id)
+            .map(|t| t.load(Ordering::SeqCst))
+            .unwrap_or(false)
+    }
+
+    /// 清理已完成的会话（可选，用于内存管理）
+    pub fn cleanup(&self, conversation_id: &str) {
+        let mut map = self.cancelled.lock().unwrap();
+        map.remove(conversation_id);
+    }
+}
+
+impl Default for LlmStreamCancellation {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// 流式调用 LLM 并通过 Tauri 事件推送块
 pub async fn stream_chat(
     app: AppHandle,
     request: LlmRequest,
+    cancellation: Arc<LlmStreamCancellation>,
 ) -> Result<LlmResponse, String> {
     let client = Client::new();
+    let conversation_id = request.conversation_id.clone();
+    
+    // 重置取消状态
+    cancellation.reset(&conversation_id);
+    
+    // 获取取消令牌
+    let cancel_token = cancellation.get_token(&conversation_id);
     
     match request.api_format {
-        ApiFormat::OpenaiCompatible => stream_openai(app, client, request).await,
-        ApiFormat::GeminiOfficial => stream_gemini(app, client, request).await,
+        ApiFormat::OpenaiCompatible => stream_openai(app, client, request, cancel_token).await,
+        ApiFormat::GeminiOfficial => stream_gemini(app, client, request, cancel_token).await,
     }
 }
 
@@ -23,6 +113,7 @@ async fn stream_openai(
     app: AppHandle,
     client: Client,
     request: LlmRequest,
+    cancel_token: Arc<AtomicBool>,
 ) -> Result<LlmResponse, String> {
     let base = request.base_url.as_deref().unwrap_or("https://api.openai.com/v1");
     let base = if base == "default" { "https://api.openai.com/v1" } else { base };
@@ -55,10 +146,18 @@ async fn stream_openai(
                             "type": "text",
                             "text": text
                         }),
-                        ContentPart::ImageUrl { image_url } => serde_json::json!({
-                            "type": "image_url",
-                            "image_url": { "url": &image_url.url }
-                        }),
+                        ContentPart::ImageUrl { image_url } => {
+                            // 验证 URL 格式
+                            let url = &image_url.url;
+                            if !url.starts_with("data:") && !url.starts_with("http") {
+                                log::warn!("[LLM] Invalid image_url format (not base64 or http): {}", 
+                                    if url.len() > 100 { &url[..100] } else { url });
+                            }
+                            serde_json::json!({
+                                "type": "image_url",
+                                "image_url": { "url": url }
+                            })
+                        },
                         ContentPart::FileUrl { file_url } => serde_json::json!({
                             "type": "text",
                             "text": format!("[Attachment: {}]", file_url.url)
@@ -102,8 +201,16 @@ async fn stream_openai(
     let mut buffer = String::new();
     let mut full_text = String::new();
     let conversation_id = request.conversation_id.clone();
+    let mut cancelled = false;
 
     while let Some(chunk_result) = stream.next().await {
+        // 检查取消状态
+        if cancel_token.load(Ordering::SeqCst) {
+            log::info!("[LLM] OpenAI stream cancelled for conversation: {}", conversation_id);
+            cancelled = true;
+            break;
+        }
+        
         let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
@@ -145,7 +252,7 @@ async fn stream_openai(
         buffer = remaining.to_string();
     }
 
-    // 发送完成事件
+    // 发送完成/取消事件
     let done_chunk = StreamChunk {
         conversation_id: conversation_id.clone(),
         delta: String::new(),
@@ -156,12 +263,21 @@ async fn stream_openai(
     let event_name = format!("llm-chunk:{}", conversation_id);
     let _ = app.emit(&event_name, &done_chunk);
 
-    Ok(LlmResponse {
-        content: full_text,
-        mood: "normal".to_string(),
-        error: None,
-        tool_calls: None,
-    })
+    if cancelled {
+        Ok(LlmResponse {
+            content: full_text,
+            mood: "normal".to_string(),
+            error: Some("Stream cancelled by user".to_string()),
+            tool_calls: None,
+        })
+    } else {
+        Ok(LlmResponse {
+            content: full_text,
+            mood: "normal".to_string(),
+            error: None,
+            tool_calls: None,
+        })
+    }
 }
 
 /// 将 ContentPart 转换为 Gemini API 的 part 格式
@@ -257,6 +373,7 @@ async fn stream_gemini(
     app: AppHandle,
     client: Client,
     request: LlmRequest,
+    cancel_token: Arc<AtomicBool>,
 ) -> Result<LlmResponse, String> {
     let mut base_url = request.base_url.clone()
         .unwrap_or_else(|| "https://generativelanguage.googleapis.com/v1beta".to_string());
@@ -332,8 +449,16 @@ async fn stream_gemini(
     let mut buffer = String::new();
     let mut full_text = String::new();
     let conversation_id = request.conversation_id.clone();
+    let mut cancelled = false;
 
     while let Some(chunk_result) = stream.next().await {
+        // 检查取消状态
+        if cancel_token.load(Ordering::SeqCst) {
+            log::info!("[LLM] Gemini stream cancelled for conversation: {}", conversation_id);
+            cancelled = true;
+            break;
+        }
+        
         let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
         let chunk_str = String::from_utf8_lossy(&chunk);
         buffer.push_str(&chunk_str);
@@ -369,7 +494,7 @@ async fn stream_gemini(
         buffer = remaining.to_string();
     }
 
-    // 发送完成事件
+    // 发送完成/取消事件
     let done_chunk = StreamChunk {
         conversation_id: conversation_id.clone(),
         delta: String::new(),
@@ -380,10 +505,19 @@ async fn stream_gemini(
     let event_name = format!("llm-chunk:{}", conversation_id);
     let _ = app.emit(&event_name, &done_chunk);
 
-    Ok(LlmResponse {
-        content: full_text,
-        mood: "normal".to_string(),
-        error: None,
-        tool_calls: None,
-    })
+    if cancelled {
+        Ok(LlmResponse {
+            content: full_text,
+            mood: "normal".to_string(),
+            error: Some("Stream cancelled by user".to_string()),
+            tool_calls: None,
+        })
+    } else {
+        Ok(LlmResponse {
+            content: full_text,
+            mood: "normal".to_string(),
+            error: None,
+            tool_calls: None,
+        })
+    }
 }

@@ -8,7 +8,7 @@ use database::{Database, pets, conversations, messages, settings, mcp_servers, a
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
 use message_cache::TabMessageCache;
 use tab_state::TabState;
-use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk};
+use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::HashMap;
@@ -21,6 +21,9 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 // Type alias for LLM client state
 type LlmState = Arc<LlmClient>;
+
+// Type alias for LLM stream cancellation state
+type LlmCancelState = Arc<LlmStreamCancellation>;
 
 // Type alias for MCP manager state
 type McpState = Arc<tokio::sync::RwLock<McpManager>>;
@@ -74,6 +77,29 @@ fn get_pending_character_id() -> Option<String> {
     pending.take()
 }
 
+/// 设置 chat 窗口的 vibrancy 效果（macOS only）
+#[tauri::command]
+fn set_vibrancy_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+        
+        if let Some(chat_window) = app.get_webview_window("chat") {
+            if enabled {
+                let _ = apply_vibrancy(
+                    &chat_window, 
+                    NSVisualEffectMaterial::FullScreenUI, 
+                    Some(NSVisualEffectState::Active), 
+                    Some(16.0)
+                );
+            } else {
+                let _ = clear_vibrancy(&chat_window);
+            }
+        }
+    }
+    Ok(())
+}
+
 // ============ LLM Commands ============
 
 /// 非流式调用 LLM
@@ -89,9 +115,39 @@ async fn llm_call(
 #[tauri::command]
 async fn llm_stream(
     app: AppHandle,
+    cancellation: State<'_, LlmCancelState>,
     request: LlmRequest,
 ) -> Result<LlmResponse, String> {
-    llm::stream_chat(app, request).await
+    llm::stream_chat(app, request, cancellation.inner().clone()).await
+}
+
+/// 取消指定会话的 LLM 流
+#[tauri::command]
+fn llm_cancel_stream(
+    cancellation: State<'_, LlmCancelState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    cancellation.cancel(&conversation_id);
+    Ok(())
+}
+
+/// 取消所有 LLM 流
+#[tauri::command]
+fn llm_cancel_all_streams(
+    cancellation: State<'_, LlmCancelState>,
+) -> Result<(), String> {
+    cancellation.cancel_all();
+    Ok(())
+}
+
+/// 重置指定会话的取消状态
+#[tauri::command]
+fn llm_reset_cancellation(
+    cancellation: State<'_, LlmCancelState>,
+    conversation_id: String,
+) -> Result<(), String> {
+    cancellation.reset(&conversation_id);
+    Ok(())
 }
 
 // ============ Pet Commands ============
@@ -281,6 +337,11 @@ fn get_skin(db: State<DbState>, id: String) -> Result<Option<skins::Skin>, Strin
 }
 
 #[tauri::command]
+fn get_skin_by_name(db: State<DbState>, name: String) -> Result<Option<skins::Skin>, String> {
+    db.get_skin_by_name(&name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn create_skin(db: State<DbState>, data: skins::CreateSkinData) -> Result<skins::Skin, String> {
     db.create_skin(data).map_err(|e| e.to_string())
 }
@@ -305,100 +366,327 @@ fn restore_skin(db: State<DbState>, id: String) -> Result<bool, String> {
     db.restore_skin(&id).map_err(|e| e.to_string())
 }
 
-/// 导入皮肤：保存元数据到数据库，图片到文件系统
+/// 导入皮肤：从 JSON 文件导入，自动读取同目录下的图片
+/// JSON 格式：{ "name": "MySkin", "author": "Me", "moods": ["happy", "sad"] }
+/// 图片命名：0.png, 1.png, 2.png... 或 0.jpg, 0.gif 等
 #[tauri::command]
 #[allow(non_snake_case)]
 fn import_skin(
     app: AppHandle,
     db: State<DbState>,
-    name: String,
-    author: Option<String>,
-    imageData: String,  // Base64 编码的 2x2 sprite sheet
+    jsonPath: String,  // JSON 文件的绝对路径
 ) -> Result<skins::Skin, String> {
-    // 1. 创建数据库记录（用户导入的皮肤不是内置皮肤）
+    use std::path::Path;
+    use indexmap::IndexMap;
+    
+    // 1. 读取并解析 JSON 配置
+    // moods 格式: { "表情名": "图片文件名" }，例如 { "normal": "idle.png", "happy": "smile.gif" }
+    // 使用 IndexMap 保持插入顺序
+    #[derive(serde::Deserialize)]
+    struct SkinConfig {
+        name: String,
+        author: Option<String>,
+        description: Option<String>,
+        moods: IndexMap<String, String>,  // 表情名 -> 图片文件名（保持顺序）
+    }
+    
+    let json_content = fs::read_to_string(&jsonPath)
+        .map_err(|e| format!("Failed to read JSON file: {}", e))?;
+    
+    let config: SkinConfig = serde_json::from_str(&json_content)
+        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
+    
+    // 验证必须有 normal 表情
+    if !config.moods.contains_key("normal") {
+        return Err("Skin must have a 'normal' mood defined".to_string());
+    }
+    
+    // 确保 normal 在索引 0 位置，其他保持原顺序
+    let mut mood_names: Vec<String> = Vec::new();
+    mood_names.push("normal".to_string());
+    for key in config.moods.keys() {
+        if key != "normal" {
+            mood_names.push(key.clone());
+        }
+    }
+    
+    // 2. 创建数据库记录
     let skin = db.create_skin(skins::CreateSkinData {
-        name: name.clone(),
-        author,
-        description: None,
+        name: config.name.clone(),
+        author: config.author,
+        description: config.description,
         is_builtin: false,
+        moods: Some(mood_names.clone()),
     }).map_err(|e| e.to_string())?;
     
-    // 2. 创建皮肤图片目录
+    // 3. 创建皮肤图片目录
     let skins_dir = get_skins_dir(&app)?;
     let skin_dir = skins_dir.join(&skin.id);
     fs::create_dir_all(&skin_dir)
         .map_err(|e| format!("Failed to create skin dir: {}", e))?;
     
-    // 3. 解码并分割图片
-    let base64_data = if imageData.contains(",") {
-        imageData.split(",").nth(1).unwrap_or(&imageData)
-    } else {
-        &imageData
-    };
+    // 4. 获取 JSON 文件所在目录
+    let json_dir = Path::new(&jsonPath)
+        .parent()
+        .ok_or_else(|| "Invalid JSON path".to_string())?;
     
-    let decoded = BASE64.decode(base64_data)
-        .map_err(|e| format!("Failed to decode base64: {}", e))?;
-    
-    // 使用 image crate 分割图片
-    let img = image::load_from_memory(&decoded)
-        .map_err(|e| format!("Failed to load image: {}", e))?;
-    
-    let width = img.width();
-    let height = img.height();
-    let piece_w = width / 2;
-    let piece_h = height / 2;
-    
-    // 表情名称映射 (2x2 grid: 左上、右上、左下、右下)
-    let moods = ["normal", "smile", "angry", "thinking"];
-    let positions = [(0, 0), (1, 0), (0, 1), (1, 1)];
-    
-    for (i, mood) in moods.iter().enumerate() {
-        let (col, row) = positions[i];
-        let x = col * piece_w;
-        let y = row * piece_h;
+    // 5. 按照 mood 顺序读取并复制图片文件（保留原始格式）
+    // normal 现在是索引 0
+    for (i, mood_name) in mood_names.iter().enumerate() {
+        let image_filename = config.moods.get(mood_name)
+            .ok_or_else(|| format!("Missing image for mood: {}", mood_name))?;
         
-        let piece = img.crop_imm(x, y, piece_w, piece_h);
-        let piece_path = skin_dir.join(format!("{}.png", mood));
+        let source_path = json_dir.join(image_filename);
         
-        piece.save(&piece_path)
-            .map_err(|e| format!("Failed to save {} image: {}", mood, e))?;
+        if !source_path.exists() {
+            // 清理已创建的资源
+            let _ = fs::remove_dir_all(&skin_dir);
+            let _ = db.delete_skin(&skin.id);
+            return Err(format!(
+                "Image file not found for mood '{}': {}",
+                mood_name,
+                source_path.display()
+            ));
+        }
+        
+        // 获取原始文件扩展名
+        let ext = source_path.extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("png")
+            .to_lowercase();
+        
+        // 直接复制文件，保留原始格式（支持 GIF 动画）
+        let dest_path = skin_dir.join(format!("{}.{}", i, ext));
+        fs::copy(&source_path, &dest_path)
+            .map_err(|e| format!("Failed to copy image '{}': {}", image_filename, e))?;
     }
     
-    println!("[Rust] Skin imported: {} -> {:?}", skin.name, skin_dir);
+    println!("[Rust] Skin imported from JSON: {} with {} moods -> {:?}", skin.name, mood_names.len(), skin_dir);
     
     Ok(skin)
+}
+
+/// 导出皮肤到指定目录
+/// 生成 JSON 配置文件 + 图片文件（按表情名命名）
+#[tauri::command]
+#[allow(non_snake_case)]
+fn export_skin(
+    app: AppHandle,
+    db: State<DbState>,
+    skinId: String,
+    exportDir: String,  // 导出目标目录
+) -> Result<String, String> {
+    use std::path::Path;
+    use std::collections::HashMap;
+    
+    // 1. 获取皮肤信息
+    let skin = db.get_skin_by_id(&skinId)
+        .map_err(|e| format!("Failed to get skin: {}", e))?
+        .ok_or_else(|| format!("Skin not found: {}", skinId))?;
+    
+    let moods = skin.moods.clone().unwrap_or_else(|| {
+        vec!["normal".to_string(), "smile".to_string(), "angry".to_string(), "thinking".to_string()]
+    });
+    
+    // 2. 创建导出目录（以皮肤名命名子目录）
+    let export_path = Path::new(&exportDir).join(&skin.name);
+    fs::create_dir_all(&export_path)
+        .map_err(|e| format!("Failed to create export directory: {}", e))?;
+    
+    // 3. 构建 moods 映射并复制图片
+    let mut moods_map: HashMap<String, String> = HashMap::new();
+    
+    if skin.is_builtin {
+        // 内置皮肤：图片在应用资源目录 assets/
+        // 开发模式：src-tauri/assets/
+        // 生产模式：Resources/assets/
+        let resource_path = app.path().resource_dir()
+            .map_err(|e| format!("Failed to get resource dir: {}", e))?;
+        let assets_dir = resource_path.join("assets");
+        
+        // 开发模式下可能在 src-tauri/assets
+        let dev_assets_dir = std::env::current_dir()
+            .unwrap_or_default()
+            .join("assets");
+        
+        for mood_name in moods.iter() {
+            // 内置皮肤的图片命名格式：{SkinName}-{mood}.png
+            let source_filename = format!("{}-{}.png", skin.name, mood_name);
+            
+            // 尝试生产路径
+            let mut source_path = assets_dir.join(&source_filename);
+            
+            // 如果不存在，尝试开发路径
+            if !source_path.exists() {
+                source_path = dev_assets_dir.join(&source_filename);
+            }
+            
+            let image_filename = format!("{}.png", mood_name);
+            let dest_path = export_path.join(&image_filename);
+            
+            if source_path.exists() {
+                fs::copy(&source_path, &dest_path)
+                    .map_err(|e| format!("Failed to copy image {}: {}", mood_name, e))?;
+                moods_map.insert(mood_name.clone(), image_filename);
+            } else {
+                println!("[Rust] Warning: Builtin image not found. Tried: {:?} and {:?}", 
+                    assets_dir.join(&source_filename), 
+                    dev_assets_dir.join(&source_filename));
+            }
+        }
+    } else {
+        // 自定义皮肤：图片在 skins_dir/{skinId}/
+        let skins_dir = get_skins_dir(&app)?;
+        let skin_dir = skins_dir.join(&skinId);
+        let extensions = ["png", "gif", "jpg", "jpeg", "webp"];
+        
+        for (i, mood_name) in moods.iter().enumerate() {
+            // 尝试各种扩展名找到图片文件
+            let mut found = false;
+            for ext in &extensions {
+                let source_path = skin_dir.join(format!("{}.{}", i, ext));
+                if source_path.exists() {
+                    let image_filename = format!("{}.{}", mood_name, ext);
+                    let dest_path = export_path.join(&image_filename);
+                    
+                    fs::copy(&source_path, &dest_path)
+                        .map_err(|e| format!("Failed to copy image {}: {}", mood_name, e))?;
+                    moods_map.insert(mood_name.clone(), image_filename);
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                println!("[Rust] Warning: Custom image not found for mood '{}' at index {}", mood_name, i);
+            }
+        }
+    }
+    
+    if moods_map.is_empty() {
+        // 清理空目录
+        let _ = fs::remove_dir_all(&export_path);
+        return Err("No images found for this skin. Export aborted.".to_string());
+    }
+    
+    // 4. 生成 JSON 配置文件
+    #[derive(serde::Serialize)]
+    struct ExportConfig {
+        name: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        author: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        moods: HashMap<String, String>,
+    }
+    
+    let config = ExportConfig {
+        name: skin.name.clone(),
+        author: skin.author.clone(),
+        description: skin.description.clone(),
+        moods: moods_map,
+    };
+    
+    let json_path = export_path.join("skin.json");
+    let json_content = serde_json::to_string_pretty(&config)
+        .map_err(|e| format!("Failed to serialize JSON: {}", e))?;
+    
+    fs::write(&json_path, json_content)
+        .map_err(|e| format!("Failed to write JSON file: {}", e))?;
+    
+    println!("[Rust] Skin exported: {} -> {:?}", skin.name, export_path);
+    
+    Ok(json_path.to_string_lossy().to_string())
 }
 
 /// 获取皮肤图片的本地文件路径（用于 convertFileSrc）
 #[tauri::command]
 #[allow(non_snake_case)]
-fn get_skin_image_path(app: AppHandle, skinId: String, mood: String) -> Result<String, String> {
+fn get_skin_image_path(app: AppHandle, db: State<DbState>, skinId: String, mood: String) -> Result<String, String> {
     let skins_dir = get_skins_dir(&app)?;
-    let image_path = skins_dir.join(&skinId).join(format!("{}.png", mood));
     
-    if !image_path.exists() {
-        return Err(format!("Skin image not found: {}/{}.png", skinId, mood));
+    // 获取 skin 的 moods 数组，找到 mood 对应的索引
+    let skin = db.get_skin_by_id(&skinId)
+        .map_err(|e| format!("Failed to get skin: {}", e))?
+        .ok_or_else(|| format!("Skin not found: {}", skinId))?;
+    
+    let index = if let Some(moods) = &skin.moods {
+        moods.iter().position(|m| m == &mood)
+            .ok_or_else(|| format!("Mood '{}' not found in skin moods", mood))?
+    } else {
+        // 向后兼容：如果没有 moods，使用默认映射
+        let default_moods = ["normal", "smile", "angry", "thinking"];
+        default_moods.iter().position(|m| *m == mood)
+            .ok_or_else(|| format!("Mood '{}' not found in default moods", mood))?
+    };
+    
+    // 支持多种图片格式
+    let skin_dir = skins_dir.join(&skinId);
+    let extensions = ["png", "gif", "jpg", "jpeg", "webp"];
+    
+    for ext in &extensions {
+        let path = skin_dir.join(format!("{}.{}", index, ext));
+        if path.exists() {
+            return Ok(path.to_string_lossy().to_string());
+        }
     }
     
-    Ok(image_path.to_string_lossy().to_string())
+    Err(format!("Skin image not found: {}/{}.{{png,gif,jpg,...}}", skinId, index))
 }
 
 /// 读取皮肤的指定表情图片（返回 base64，备用方案）
 #[tauri::command]
 #[allow(non_snake_case)]
-fn read_skin_image(app: AppHandle, skinId: String, mood: String) -> Result<String, String> {
+fn read_skin_image(app: AppHandle, db: State<DbState>, skinId: String, mood: String) -> Result<String, String> {
     let skins_dir = get_skins_dir(&app)?;
-    let image_path = skins_dir.join(&skinId).join(format!("{}.png", mood));
     
-    if !image_path.exists() {
-        return Err(format!("Skin image not found: {}/{}.png", skinId, mood));
+    // 获取 skin 的 moods 数组，找到 mood 对应的索引
+    let skin = db.get_skin_by_id(&skinId)
+        .map_err(|e| format!("Failed to get skin: {}", e))?
+        .ok_or_else(|| format!("Skin not found: {}", skinId))?;
+    
+    let index = if let Some(moods) = &skin.moods {
+        moods.iter().position(|m| m == &mood)
+            .ok_or_else(|| format!("Mood '{}' not found in skin moods", mood))?
+    } else {
+        // 向后兼容：如果没有 moods，使用默认映射
+        let default_moods = ["normal", "smile", "angry", "thinking"];
+        default_moods.iter().position(|m| *m == mood)
+            .ok_or_else(|| format!("Mood '{}' not found in default moods", mood))?
+    };
+    
+    // 支持多种图片格式
+    let skin_dir = skins_dir.join(&skinId);
+    let extensions = ["png", "gif", "jpg", "jpeg", "webp"];
+    
+    let mut image_path = None;
+    let mut found_ext = "png";
+    
+    for ext in &extensions {
+        let path = skin_dir.join(format!("{}.{}", index, ext));
+        if path.exists() {
+            image_path = Some(path);
+            found_ext = ext;
+            break;
+        }
     }
+    
+    let image_path = image_path.ok_or_else(|| {
+        format!("Skin image not found: {}/{}.{{png,gif,jpg,...}}", skinId, index)
+    })?;
     
     let data = fs::read(&image_path)
         .map_err(|e| format!("Failed to read skin image: {}", e))?;
     
+    // 根据扩展名设置正确的 MIME type
+    let mime_type = match found_ext {
+        "gif" => "image/gif",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        _ => "image/png",
+    };
+    
     let base64_data = BASE64.encode(&data);
-    Ok(format!("data:image/png;base64,{}", base64_data))
+    Ok(format!("data:{};base64,{}", mime_type, base64_data))
 }
 
 /// 删除皮肤（包括数据库记录和图片文件）
@@ -459,11 +747,14 @@ fn initialize_builtin_skins(db: &Database) {
         
         if !exists {
             // 创建内置皮肤记录（不需要图片文件，前端会从 assets 加载）
+            // 默认表情列表：normal, smile, angry, thinking
+            let default_moods = vec!["normal".to_string(), "smile".to_string(), "angry".to_string(), "thinking".to_string()];
             match db.create_skin(skins::CreateSkinData {
                 name: builtin.name.to_string(),
                 author: Some(builtin.author.to_string()),
                 description: Some(format!("Built-in {} skin", builtin.name)),
                 is_builtin: true,
+                moods: Some(default_moods),
             }) {
                 Ok(skin) => {
                     println!("[Skins] Created builtin skin: {} (id: {})", builtin.name, skin.id);
@@ -833,6 +1124,7 @@ fn show_chat_window(app: AppHandle) -> Result<(), String> {
         // 只有拖动角色时才会跟随移动（由 on_window_event 处理）
         chat.show().map_err(|e| e.to_string())?;
         chat.set_focus().map_err(|e| e.to_string())?;
+        let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": true }));
     }
     Ok(())
 }
@@ -841,6 +1133,7 @@ fn show_chat_window(app: AppHandle) -> Result<(), String> {
 fn hide_chat_window(app: AppHandle) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
         chat.hide().map_err(|e| e.to_string())?;
+        let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": false }));
     }
     Ok(())
 }
@@ -851,12 +1144,14 @@ fn toggle_chat_window(app: AppHandle) -> Result<bool, String> {
         let is_visible = chat.is_visible().unwrap_or(false);
         if is_visible {
             chat.hide().map_err(|e| e.to_string())?;
+            let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": false }));
             Ok(false)
         } else {
             // 显示窗口时不改变位置，保持原来的位置
             // 只有拖动角色时才会跟随移动（由 on_window_event 处理）
             chat.show().map_err(|e| e.to_string())?;
             chat.set_focus().map_err(|e| e.to_string())?;
+            let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": true }));
             Ok(true)
         }
     } else {
@@ -1094,27 +1389,43 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn maximize_chat_window(app: AppHandle) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
+        let is_fullscreen = chat.is_fullscreen().unwrap_or(false);
         let is_maximized = chat.is_maximized().unwrap_or(false);
-        if is_maximized {
+        
+        if is_fullscreen || is_maximized {
             // 还原
-            chat.unmaximize().map_err(|e| e.to_string())?;
+            if is_fullscreen {
+                chat.set_fullscreen(false).map_err(|e| e.to_string())?;
+            } else {
+                chat.unmaximize().map_err(|e| e.to_string())?;
+            }
             chat.set_always_on_top(true).map_err(|e| e.to_string())?;
             
-            // 恢复到角色窗口旁边的位置
+            // 恢复到保存的位置和大小
+            let saved_pos = SAVED_CHAT_POSITION.lock().unwrap().take();
+            let saved_size = SAVED_CHAT_SIZE.lock().unwrap().take();
+            
+            if let Some((x, y)) = saved_pos {
+                let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+            }
+            if let Some((w, h)) = saved_size {
+                let _ = chat.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: w, height: h }));
+            }
+            
+            // 显示角色窗口
             if let Some(character) = app.get_webview_window("character") {
-                if let Ok(char_pos) = character.outer_position() {
-                    // 获取聊天窗口大小
-                    if let Ok(chat_size) = chat.outer_size() {
-                        let x = char_pos.x - chat_size.width as i32 - 50;
-                        let y = char_pos.y + 240 - chat_size.height as i32;
-                        let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
-                    }
-                }
-                // 显示角色窗口
                 let _ = character.show();
             }
         } else {
-            // 最大化
+            // 保存当前位置和大小
+            if let Ok(pos) = chat.outer_position() {
+                *SAVED_CHAT_POSITION.lock().unwrap() = Some((pos.x, pos.y));
+            }
+            if let Ok(size) = chat.outer_size() {
+                *SAVED_CHAT_SIZE.lock().unwrap() = Some((size.width, size.height));
+            }
+            
+            // 最大化（不是全屏）
             chat.maximize().map_err(|e| e.to_string())?;
             chat.set_always_on_top(false).map_err(|e| e.to_string())?;
             
@@ -1134,6 +1445,12 @@ static SIDEBAR_EXPANDED: AtomicBool = AtomicBool::new(false);
 static ORIGINAL_WIDTH: AtomicU32 = AtomicU32::new(0);
 // 聊天窗口是否跟随角色移动
 static CHAT_FOLLOWS_CHARACTER: AtomicBool = AtomicBool::new(true);
+
+// 保存最大化前的窗口位置和大小
+lazy_static::lazy_static! {
+    static ref SAVED_CHAT_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
+    static ref SAVED_CHAT_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
+}
 
 /// 偏好设置结构体
 #[derive(serde::Deserialize, Default)]
@@ -1230,16 +1547,16 @@ struct BaselineSize {
 fn get_baseline_sizes() -> HashMap<&'static str, BaselineSize> {
     let mut sizes = HashMap::new();
     sizes.insert("character", BaselineSize { width: 200.0, height: 300.0 });
-    sizes.insert("chat", BaselineSize { width: 400.0, height: 350.0 });
+    sizes.insert("chat", BaselineSize { width: 500.0, height: 400.0 });
     sizes.insert("manage", BaselineSize { width: 640.0, height: 680.0 });
     sizes
 }
 
 fn get_scale_factor_for_preset(preset: &str) -> f64 {
     match preset {
-        "small" => 0.8,
+        "small" => 0.9,
         "medium" => 1.0,
-        "large" => 1.2,
+        "large" => 1.15,
         _ => 1.0,
     }
 }
@@ -1446,11 +1763,93 @@ pub fn run() {
             let llm_client: LlmState = Arc::new(LlmClient::new());
             app.manage(llm_client);
 
+            // Initialize LLM stream cancellation manager
+            let llm_cancellation: LlmCancelState = Arc::new(LlmStreamCancellation::new());
+            app.manage(llm_cancellation);
+
             // Initialize tab message cache for in-memory message management (legacy)
             app.manage(TabMessageCache::new());
             
             // Initialize new tab state manager (Rust-owned state)
             app.manage(TabState::new());
+
+            // Apply vibrancy effect to chat window only (macOS only)
+            #[cfg(target_os = "macos")]
+            {
+                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
+                
+                if let Some(chat_window) = app.get_webview_window("chat") {
+                    // 使用 FullScreenUI 材质，设置为 Active 状态以保持始终透明
+                    // macOS 圆角：vibrancy 处理，前端不设置 border-radius
+                    let _ = apply_vibrancy(
+                        &chat_window, 
+                        NSVisualEffectMaterial::FullScreenUI, 
+                        Some(NSVisualEffectState::Active), 
+                        Some(16.0)
+                    );
+                }
+            }
+
+            // Setup mouse hover detection for chat window (polls cursor position)
+            {
+                let app_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    let mut last_mouse_over_chat = false;
+                    let mut last_mouse_over_character = false;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        
+                        // Check chat window
+                        if let Some(chat) = app_handle.get_webview_window("chat") {
+                            // Only check if window is visible
+                            if !chat.is_visible().unwrap_or(false) {
+                                if last_mouse_over_chat {
+                                    last_mouse_over_chat = false;
+                                    let _ = chat.emit("mouse-over-chat", false);
+                                }
+                            } else {
+                                // Get cursor position (desktop coordinates)
+                                if let Ok(cursor_pos) = chat.cursor_position() {
+                                    if let (Ok(window_pos), Ok(window_size)) = (chat.outer_position(), chat.outer_size()) {
+                                        // Check if cursor is within window bounds
+                                        let is_mouse_over = 
+                                            cursor_pos.x >= window_pos.x as f64 &&
+                                            cursor_pos.x <= (window_pos.x + window_size.width as i32) as f64 &&
+                                            cursor_pos.y >= window_pos.y as f64 &&
+                                            cursor_pos.y <= (window_pos.y + window_size.height as i32) as f64;
+                                        
+                                        // Only emit event when state changes
+                                        if is_mouse_over != last_mouse_over_chat {
+                                            last_mouse_over_chat = is_mouse_over;
+                                            let _ = chat.emit("mouse-over-chat", is_mouse_over);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // Check character window
+                        if let Some(character) = app_handle.get_webview_window("character") {
+                            if let Ok(cursor_pos) = character.cursor_position() {
+                                if let (Ok(window_pos), Ok(window_size)) = (character.outer_position(), character.outer_size()) {
+                                    // Check if cursor is within window bounds
+                                    let is_mouse_over = 
+                                        cursor_pos.x >= window_pos.x as f64 &&
+                                        cursor_pos.x <= (window_pos.x + window_size.width as i32) as f64 &&
+                                        cursor_pos.y >= window_pos.y as f64 &&
+                                        cursor_pos.y <= (window_pos.y + window_size.height as i32) as f64;
+                                    
+                                    // Only emit event when state changes
+                                    if is_mouse_over != last_mouse_over_character {
+                                        last_mouse_over_character = is_mouse_over;
+                                        let _ = character.emit("mouse-over-character", is_mouse_over);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }
 
             // Position character window at bottom-right
             position_character_window(app.handle());
@@ -1658,12 +2057,14 @@ pub fn run() {
             get_skins,
             get_skins_with_hidden,
             get_skin,
+            get_skin_by_name,
             create_skin,
             update_skin,
             delete_skin,
             hide_skin,
             restore_skin,
             import_skin,
+            export_skin,
             get_skin_image_path,
             read_skin_image,
             delete_skin_with_files,
@@ -1723,6 +2124,7 @@ pub fn run() {
             // Event broadcasting
             emit_to_all,
             get_pending_character_id,
+            set_vibrancy_enabled,
             // Tab message cache commands (legacy)
             message_cache::get_tab_messages,
             message_cache::set_tab_messages,
@@ -1743,6 +2145,9 @@ pub fn run() {
             // LLM commands
             llm_call,
             llm_stream,
+            llm_cancel_stream,
+            llm_cancel_all_streams,
+            llm_reset_cancellation,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

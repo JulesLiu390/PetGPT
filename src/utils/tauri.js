@@ -7,8 +7,9 @@
 
 import { invoke } from '@tauri-apps/api/core';
 import { listen, emit } from '@tauri-apps/api/event';
-import { ask } from '@tauri-apps/plugin-dialog';
+import { ask, open as dialogOpen } from '@tauri-apps/plugin-dialog';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
+import { readTextFile } from '@tauri-apps/plugin-fs';
 
 // ==================== Dialog ====================
 
@@ -26,6 +27,59 @@ export const confirm = async (message, options = {}) => {
   }
 };
 
+/**
+ * 打开文件选择对话框
+ * @param {Object} options - 选项
+ * @param {Array<{name: string, extensions: string[]}>} options.filters - 文件过滤器
+ * @param {boolean} options.multiple - 是否允许多选
+ * @param {boolean} options.directory - 是否选择目录
+ * @returns {Promise<string|string[]|null>} 选择的文件路径
+ */
+export const selectFile = async (options = {}) => {
+  try {
+    const result = await dialogOpen({
+      filters: options.filters,
+      multiple: options.multiple || false,
+      directory: options.directory || false,
+    });
+    return result;
+  } catch (err) {
+    console.error('[tauri.selectFile] Dialog error:', err);
+    throw err;
+  }
+};
+
+/**
+ * 读取文本文件内容
+ * @param {string} path - 文件路径
+ * @returns {Promise<string>} 文件内容
+ */
+export const readFile = async (path) => {
+  try {
+    return await readTextFile(path);
+  } catch (err) {
+    console.error('[tauri.readFile] Read error:', err);
+    throw err;
+  }
+};
+
+/**
+ * 选择目录
+ * @returns {Promise<string|null>} 选择的目录路径
+ */
+export const selectDirectory = async () => {
+  try {
+    const result = await dialogOpen({
+      directory: true,
+      multiple: false,
+    });
+    return result;
+  } catch (err) {
+    console.error('[tauri.selectDirectory] Dialog error:', err);
+    throw err;
+  }
+};
+
 // ==================== Settings ====================
 
 const DEFAULT_SETTINGS = {
@@ -35,6 +89,7 @@ const DEFAULT_SETTINGS = {
   dialogHotkey: 'Alt + Space',
   launchAtStartup: false,
   theme: 'light',
+  moodResetDelay: 30,  // 表情恢复到 normal 的延迟时间（秒）
 };
 
 export const getSettings = async () => {
@@ -229,6 +284,23 @@ export const llmCall = (request) => invoke('llm_call', { request });
 export const llmStream = (request) => invoke('llm_stream', { request });
 
 /**
+ * 取消指定会话的 LLM 流
+ * @param {string} conversationId - 对话 ID
+ */
+export const llmCancelStream = (conversationId) => invoke('llm_cancel_stream', { conversationId });
+
+/**
+ * 取消所有 LLM 流
+ */
+export const llmCancelAllStreams = () => invoke('llm_cancel_all_streams');
+
+/**
+ * 重置指定会话的取消状态
+ * @param {string} conversationId - 对话 ID
+ */
+export const llmResetCancellation = (conversationId) => invoke('llm_reset_cancellation', { conversationId });
+
+/**
  * 订阅 LLM 流式响应
  * @param {string} conversationId - 对话 ID
  * @param {Function} callback - 回调函数，接收 StreamChunk
@@ -252,13 +324,15 @@ export const deleteApiProvider = (id) => invoke('delete_api_provider', { id });
 export const getSkins = () => invoke('get_skins');
 export const getSkinsWithHidden = () => invoke('get_skins_with_hidden');
 export const getSkin = (id) => invoke('get_skin', { id });
+export const getSkinByName = (name) => invoke('get_skin_by_name', { name });
 export const createSkin = (data) => invoke('create_skin', { data });
 export const updateSkin = (id, data) => invoke('update_skin', { id, data });
 export const deleteSkin = (id) => invoke('delete_skin', { id });
 export const hideSkin = (id) => invoke('hide_skin', { id });
 export const restoreSkin = (id) => invoke('restore_skin', { id });
-export const importSkin = (data) => invoke('import_skin', { data });
-export const readSkinImage = (skinId, imageType) => invoke('read_skin_image', { skinId, imageType });
+export const importSkin = (jsonPath) => invoke('import_skin', { jsonPath });
+export const exportSkin = (skinId, exportDir) => invoke('export_skin', { skinId, exportDir });
+export const readSkinImage = (skinId, mood) => invoke('read_skin_image', { skinId, mood });
 
 // ==================== MCP Servers ====================
 
@@ -304,7 +378,14 @@ export const mcp = {
     return invoke('mcp_call_tool', { serverId: server._id, toolName, arguments: args });
   },
   isServerRunning: (id) => invoke('mcp_is_server_running', { serverId: id }),
-  testServer: (config) => invoke('mcp_test_server', { config }),
+  testServer: (config) => invoke('mcp_test_server', { 
+    transport: config.transport || 'stdio',
+    command: config.command || null,
+    args: config.args || null,
+    env: config.env || null,
+    url: config.url || null,
+    apiKey: config.apiKey || null,
+  }),
   cancelAllToolCalls: () => invoke('mcp_cancel_all_tool_calls'),
   resetCancellation: () => invoke('mcp_reset_cancellation'),
 };
@@ -356,6 +437,9 @@ export const sendCharacterId = (id) =>
 
 // 获取待处理的 character-id（用于 chat 窗口启动时检查）
 export const getPendingCharacterId = () => invoke('get_pending_character_id');
+
+// 设置 vibrancy 效果（macOS）
+export const setVibrancyEnabled = (enabled) => invoke('set_vibrancy_enabled', { enabled });
 
 export const onCharacterId = (callback) => {
   let unlisten = null;
@@ -417,6 +501,13 @@ export const onApiProvidersUpdated = (callback) => {
 export const onManageWindowVisibilityChanged = (callback) => {
   let unlisten = null;
   listen('manage-window-vis-change', (event) => callback(event.payload))
+    .then(fn => { unlisten = fn; });
+  return () => { if (unlisten) unlisten(); };
+};
+
+export const onChatWindowVisibilityChanged = (callback) => {
+  let unlisten = null;
+  listen('chat-window-vis-change', (event) => callback(event.payload))
     .then(fn => { unlisten = fn; });
   return () => { if (unlisten) unlisten(); };
 };
@@ -484,6 +575,29 @@ export const updateChatbodyStatus = async (status, conversationId) => {
 // MCP Settings window
 export const openMcpSettings = () => openManageWindowWithTab('mcp');
 
+// Window mouse enter/leave events (works even when window is not focused)
+export const onWindowMouseEnter = async (callback) => {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const appWindow = getCurrentWindow();
+    return appWindow.onMouseEnter(callback);
+  } catch (err) {
+    console.error('[tauri.onWindowMouseEnter] Error:', err);
+    return () => {};
+  }
+};
+
+export const onWindowMouseLeave = async (callback) => {
+  try {
+    const { getCurrentWindow } = await import('@tauri-apps/api/window');
+    const appWindow = getCurrentWindow();
+    return appWindow.onMouseLeave(callback);
+  } catch (err) {
+    console.error('[tauri.onWindowMouseLeave] Error:', err);
+    return () => {};
+  }
+};
+
 // New chat created event
 export const onNewChatCreated = (callback) => {
   let unlisten = null;
@@ -541,7 +655,7 @@ export { listen } from '@tauri-apps/api/event';
 
 export const changeChatWindow = showChatWindow;
 export const changeSelectCharacterWindow = () => openManageWindowWithTab('assistants');
-export const changeSettingsWindow = () => openManageWindowWithTab('settings');
+export const changeSettingsWindow = () => openManageWindowWithTab('defaults');
 export const changeMcpWindow = () => openManageWindowWithTab('mcp');
 export const changeApiWindow = () => openManageWindowWithTab('api');
 export const hideApiWindow = hideManageWindow;
@@ -554,6 +668,9 @@ export const maxmizeChatWindow = maximizeChatWindow; // Typo alias for backwards
 const tauri = {
   // Dialog
   confirm,
+  selectFile,
+  selectDirectory,
+  readFile,
   
   // Settings
   getSettings,
@@ -602,6 +719,9 @@ const tauri = {
   // LLM
   llmCall,
   llmStream,
+  llmCancelStream,
+  llmCancelAllStreams,
+  llmResetCancellation,
   subscribeLlmStream,
   
   // API Providers
@@ -615,12 +735,14 @@ const tauri = {
   getSkins,
   getSkinsWithHidden,
   getSkin,
+  getSkinByName,
   createSkin,
   updateSkin,
   deleteSkin,
   hideSkin,
   restoreSkin,
   importSkin,
+  exportSkin,
   readSkinImage,
   
   // MCP
@@ -658,6 +780,7 @@ const tauri = {
   // Events
   sendCharacterId,
   getPendingCharacterId,
+  setVibrancyEnabled,
   onCharacterId,
   sendConversationId,
   onConversationId,
@@ -668,6 +791,7 @@ const tauri = {
   sendApiProvidersUpdate,
   onApiProvidersUpdated,
   onManageWindowVisibilityChanged,
+  onChatWindowVisibilityChanged,
   onChatbodyStatusUpdated,
   
   // External
@@ -687,6 +811,10 @@ const tauri = {
   
   // MCP Settings
   openMcpSettings,
+  
+  // Window mouse events
+  onWindowMouseEnter,
+  onWindowMouseLeave,
   
   // New chat event
   onNewChatCreated,

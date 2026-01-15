@@ -2,10 +2,10 @@ import React, { useState } from 'react'
 
 import ChatboxInputBox from './ChatboxInputBox'
 
-export const ChatboxInputArea = ({ activePetId }) => {
+export const ChatboxInputArea = ({ activePetId, sidebarOpen }) => {
   return (
     <div className='w-full'>
-        <ChatboxInputBox activePetId={activePetId}></ChatboxInputBox>
+        <ChatboxInputBox activePetId={activePetId} sidebarOpen={sidebarOpen}></ChatboxInputBox>
     </div>
   )
 }

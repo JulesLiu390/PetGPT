@@ -1,36 +1,62 @@
 import React, { useState } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion, AnimatePresence, Reorder } from 'framer-motion';
 import { AiOutlineClose, AiOutlineDown } from 'react-icons/ai';
 
-const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onAddTab, compact = false }) => {
+const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onCloseAllTabs, onAddTab, onReorderTabs, compact = false }) => {
   const [showDropdown, setShowDropdown] = useState(false);
 
+  // 处理拖拽排序
+  const handleReorder = (newOrder) => {
+    onReorderTabs?.(newOrder);
+  };
+
   return (
-    <div className={`draggable w-full h-full flex items-center px-1 gap-0 min-w-0 ${compact ? 'h-full' : 'h-8 mt-1'}`} data-tauri-drag-region>
-      {/* Scrollable Tabs Area */}
-      <div className="flex-1 w-0 min-w-0 h-full flex flex-nowrap overflow-x-auto scrollbar-hide gap-0 items-end mask-linear-fade" data-tauri-drag-region>
-        {tabs.map((tab, index) => (
-          <motion.div
-            key={tab.id}
-            initial={false}
-            onClick={() => onTabClick(tab.id)}
-            className={`no-drag group relative flex-1 min-w-[60px] max-w-[160px] flex items-center justify-between cursor-pointer text-[11px] px-3 transition-all duration-150 ${
-              tab.id === activeTabId 
-                ? 'tab-active text-gray-800 z-10 h-full' 
-                : 'bg-transparent text-gray-500 hover:bg-slate-200/50 h-[75%] rounded-t-lg'
-            }`}
-          >
-            <span className="truncate flex-1 text-center">{tab.label}</span>
-            <AiOutlineClose
-              onClick={(e) => { e.stopPropagation(); onCloseTab(e, tab.id); }}
-              className={`ml-1 text-gray-400 hover:text-red-500 cursor-pointer ${
-                tab.id === activeTabId ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+    <div className={`draggable w-full h-full flex items-center px-1 gap-1 min-w-0 ${compact ? 'h-full' : 'h-8 mt-1'}`} data-tauri-drag-region>
+      {/* Scrollable Tabs Area with Reorder */}
+      <Reorder.Group
+        axis="x"
+        values={tabs}
+        onReorder={handleReorder}
+        className="flex-1 w-0 min-w-0 h-full flex flex-nowrap overflow-x-auto scrollbar-thin gap-1 items-center mask-linear-fade"
+        data-tauri-drag-region
+      >
+        <AnimatePresence mode="popLayout">
+          {tabs.map((tab) => (
+            <Reorder.Item
+              key={tab.id}
+              value={tab}
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              transition={{ 
+                layout: { duration: 0.2, ease: "easeOut" },
+                opacity: { duration: 0.15 }
+              }}
+              whileDrag={{ 
+                scale: 1.05, 
+                boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+                zIndex: 50,
+                cursor: "grabbing"
+              }}
+              onClick={() => onTabClick(tab.id)}
+              className={`no-drag group relative flex-1 min-w-[60px] max-w-[160px] flex items-center justify-between cursor-pointer text-[11px] px-3 py-1.5 rounded-full transition-colors duration-150 ${
+                tab.id === activeTabId 
+                  ? 'bg-white/70 text-gray-700 font-medium shadow-sm' 
+                  : 'bg-transparent text-gray-500 hover:bg-white/40'
               }`}
-              size={10}
-            />
-          </motion.div>
-        ))}
-      </div>
+            >
+              <span className="truncate flex-1 text-center pointer-events-none">{tab.label}</span>
+              <AiOutlineClose
+                onClick={(e) => { e.stopPropagation(); onCloseTab(e, tab.id); }}
+                className={`ml-1 text-gray-400 hover:text-red-500 cursor-pointer pointer-events-auto ${
+                  tab.id === activeTabId ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                }`}
+                size={10}
+              />
+            </Reorder.Item>
+          ))}
+        </AnimatePresence>
+      </Reorder.Group>
 
       {/* Actions: Dropdown */}
       <div className="flex items-center gap-0.5 no-drag flex-shrink-0">
@@ -68,6 +94,19 @@ const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onAddTab, co
                                 />
                             </div>
                         ))}
+                        {/* Close All Divider & Button */}
+                        {tabs.length > 0 && (
+                          <>
+                            <div className="border-t border-gray-100 my-1" />
+                            <div 
+                                onClick={() => { onCloseAllTabs?.(); setShowDropdown(false); }}
+                                className="px-3 py-2 text-xs text-red-500 hover:bg-red-50 cursor-pointer flex items-center gap-1"
+                            >
+                                <AiOutlineClose size={10} />
+                                <span>Close All</span>
+                            </div>
+                          </>
+                        )}
                     </motion.div>
                     </>
                 )}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash } from "react-icons/fa6";
+import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash, FaFile, FaDownload } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
 import { MdClose } from "react-icons/md";
 import { LuMaximize2 } from "react-icons/lu";
@@ -2197,201 +2197,129 @@ const McpServersPanel = () => {
 // ==================== Skins Panel ====================
 
 /**
- * Skins Form Component - 新建/编辑皮肤
+ * Skins Form - 选择 JSON 文件导入
+ * JSON 格式示例：
+ * {
+ *   "name": "My Skin",
+ *   "author": "Me",
+ *   "description": "Optional",
+ *   "moods": {
+ *     "happy": "smile.png",
+ *     "sad": "cry.gif",
+ *     "angry": "angry.jpg"
+ *   }
+ * }
+ * 图片文件与 JSON 同目录，名称在 moods 对象中指定
  */
-const SkinForm = ({ skin, onSave, onCancel }) => {
-  const [formData, setFormData] = useState({
-    name: skin?.name || "",
-    imagePath: skin?.imagePath || "",
-    author: skin?.author || "",
-    description: skin?.description || "",
-  });
-  
-  const [preview, setPreview] = useState(skin?.preview || null);
-  const [splitPreviews, setSplitPreviews] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+const SkinForm = ({ onSave, onCancel }) => {
+  const [jsonPath, setJsonPath] = useState(null);
+  const [config, setConfig] = useState(null);
   const [error, setError] = useState(null);
+  const [isProcessing, setIsProcessing] = useState(false);
 
-  // 处理文件拖放或选择
-  const handleFileSelect = async (e) => {
-    const file = e.type === 'drop' ? e.dataTransfer.files[0] : e.target.files[0];
-    if (!file) return;
-    
-    // 基本验证
-    if (!file.type.startsWith('image/')) {
-      setError("Please select an image file");
-      return;
-    }
-
+  const handleFileSelect = async () => {
     try {
-      setIsProcessing(true);
+      // 使用 Tauri 的文件对话框选择 JSON 文件
+      const selected = await tauri.selectFile({
+        filters: [{
+          name: 'Skin Config',
+          extensions: ['json']
+        }],
+        multiple: false,
+        directory: false,
+      });
+
+      if (!selected) return;
+
+      setJsonPath(selected);
       setError(null);
-      
-      // 读取并预览原图
-      const reader = new FileReader();
-      reader.onload = async (event) => {
-        const dataUrl = event.target.result;
-        setPreview(dataUrl);
+
+      // 读取并验证 JSON 内容
+      try {
+        const content = await tauri.readFile(selected);
+        const parsed = JSON.parse(content);
         
-        // 自动设置名称（如果还没填）
-        if (!formData.name) {
-          const name = file.name.replace(/\.[^/.]+$/, "");
-          setFormData(prev => ({ ...prev, name }));
+        // 验证必需字段 - moods 现在是对象 { moodName: imageName }
+        if (!parsed.name || !parsed.moods || typeof parsed.moods !== 'object' || Object.keys(parsed.moods).length === 0) {
+          setError("Invalid JSON: must have 'name' and 'moods' object (e.g. { \"happy\": \"smile.png\" })");
+          setJsonPath(null);
+          return;
         }
 
-        // 自动切割图片 (1x1 到 2x2 grid)
-        // 使用 canvas 模拟切割并显示预览
-        const img = new Image();
-        img.onload = () => {
-          const w = img.width;
-          const h = img.height;
-          // check if square
-          if (Math.abs(w - h) > w * 0.1) {
-            setError("Warning: Image is not square. 2x2 grid splitting might look distorted.");
-          }
-          
-          const pieceW = w / 2;
-          const pieceH = h / 2;
-          
-          const pieces = [];
-          const labels = ['Normal', 'Happy', 'Angry', 'Thinking'];
-          
-          [0, 1].forEach(row => {
-            [0, 1].forEach(col => {
-              const canvas = document.createElement('canvas');
-              canvas.width = pieceW;
-              canvas.height = pieceH;
-              const ctx = canvas.getContext('2d');
-              ctx.drawImage(img, col * pieceW, row * pieceH, pieceW, pieceH, 0, 0, pieceW, pieceH);
-              pieces.push({
-                url: canvas.toDataURL('image/png'),
-                label: labels[row * 2 + col]
-              });
-            });
-          });
-          
-          setSplitPreviews(pieces);
-          setIsProcessing(false);
-          
-          // 保存文件原始数据用于上传
-          setFormData(prev => ({ ...prev, file: file }));
-        };
-        img.src = dataUrl;
-      };
-      reader.readAsDataURL(file);
-      
+        setConfig(parsed);
+      } catch (e) {
+        setError("Failed to read or parse JSON: " + e.message);
+        setJsonPath(null);
+      }
     } catch (err) {
-      console.error("Image processing failed:", err);
-      setError("Failed to process image: " + err.message);
-      setIsProcessing(false);
+      setError("Failed to open file dialog: " + err.message);
     }
-  };
-
-  const handleChange = (e) => {
-    const { name, value } = e.target;
-    setFormData(prev => ({ ...prev, [name]: value }));
   };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    if (!formData.name || !preview) {
-      setError("Please provide a name and select an image");
+    
+    if (!jsonPath) {
+      setError("Please select a JSON file");
       return;
     }
 
+    setIsProcessing(true);
+    setError(null);
+
     try {
-       // 传递 base64 图片数据给后端（Rust 会负责分割和保存）
-       await onSave({
-         name: formData.name,
-         author: formData.author,
-         imageData: preview, // base64 data URL，Rust 会解码并分割
-       });
+      await onSave(jsonPath);
     } catch (err) {
-      setError("Save failed: " + (err.message || err));
+      setError("Import failed: " + (err.message || err));
+    } finally {
+      setIsProcessing(false);
     }
   };
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      {/* File Drop Zone */}
-      <div 
-        className="border-2 border-dashed border-slate-300 rounded-xl p-6 flex flex-col items-center justify-center bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer"
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          e.preventDefault();
-          handleFileSelect(e);
-        }}
-        onClick={() => document.getElementById('skin-file-input').click()}
-      >
-        <input 
-          id="skin-file-input" 
-          type="file" 
-          accept="image/*" 
-          className="hidden" 
-          onChange={handleFileSelect}
-        />
-        
-        {preview ? (
-          <div className="relative w-32 h-32 mb-2">
-            <img src={preview} alt="Preview" className="w-full h-full object-contain rounded-lg shadow-sm" />
-            <div className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 hover:opacity-100 transition-opacity rounded-lg text-white font-medium">
-              Change Image
-            </div>
+      {error && <Alert type="error">{error}</Alert>}
+
+      {/* File Selection */}
+      <div className="space-y-3">
+        <Label>Skin Configuration</Label>
+        <div className="flex gap-2">
+          <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-600 truncate">
+            {jsonPath ? jsonPath : "No file selected"}
           </div>
-        ) : (
-          <div className="flex flex-col items-center text-slate-400">
-            <FaShirt className="w-8 h-8 mb-2" />
-            <span className="text-sm font-medium">Click or drop 2x2 sprite sheet here</span>
-            <span className="text-xs mt-1">Supports PNG, JPG (Square ratio recommended)</span>
-          </div>
-        )}
+          <Button variant="secondary" onClick={handleFileSelect} type="button">
+            <FaFile className="w-4 h-4 mr-2" />
+            Select JSON
+          </Button>
+        </div>
+        <div className="text-xs text-slate-500">
+          Select a JSON file containing skin configuration. Images (0.png, 1.png, etc.) should be in the same directory.
+        </div>
       </div>
 
-      {/* Split Preview */}
-      {splitPreviews && (
-        <div className="bg-white border border-slate-200 rounded-lg p-3">
-          <div className="text-xs font-semibold text-slate-500 mb-2 uppercase tracking-wide">Output Preview</div>
-          <div className="grid grid-cols-4 gap-2">
-            {splitPreviews.map((piece, i) => (
-              <div key={i} className="flex flex-col items-center gap-1">
-                <div className="bg-slate-100 rounded-md p-1 border border-slate-200 w-full aspect-square flex items-center justify-center">
-                  <img src={piece.url} alt={piece.label} className="max-w-full max-h-full object-contain" />
-                </div>
-                <span className="text-[10px] text-slate-500 font-medium">{piece.label}</span>
+      {/* Config Preview */}
+      {config && (
+        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
+          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Preview</div>
+          <div className="space-y-1 text-sm">
+            <div><span className="font-medium text-slate-700">Name:</span> {config.name}</div>
+            {config.author && <div><span className="font-medium text-slate-700">Author:</span> {config.author}</div>}
+            {config.description && <div><span className="font-medium text-slate-700">Description:</span> {config.description}</div>}
+            <div>
+              <span className="font-medium text-slate-700">Moods ({Object.keys(config.moods).length}):</span>
+              <div className="flex flex-wrap gap-1 mt-1">
+                {Object.entries(config.moods).map(([moodName, imageName], i) => (
+                  <Badge key={i} tone="blue">{i}: {moodName} → {imageName}</Badge>
+                ))}
               </div>
-            ))}
+            </div>
           </div>
         </div>
       )}
 
-      {error && (
-        <Alert type="error">{error}</Alert>
-      )}
-
-      {/* Meta Info */}
-      <FormGroup>
-        <Label required>Skin Name</Label>
-        <Input 
-          name="name" 
-          value={formData.name} 
-          onChange={handleChange} 
-          placeholder="e.g. Anime Girl" 
-        />
-      </FormGroup>
-
-      <FormGroup>
-        <Label>Author</Label>
-        <Input 
-          name="author" 
-          value={formData.author} 
-          onChange={handleChange} 
-          placeholder="Optional" 
-        />
-      </FormGroup>
-
       <div className="flex items-center justify-end gap-3 pt-2">
         <Button variant="secondary" onClick={onCancel} type="button">Cancel</Button>
-        <Button variant="primary" type="submit" disabled={isProcessing}>
+        <Button variant="primary" type="submit" disabled={isProcessing || !jsonPath}>
           {isProcessing ? <FaSpinner className="animate-spin mr-2" /> : <FaCheck className="mr-2" />}
           Import Skin
         </Button>
@@ -2458,38 +2386,52 @@ const SkinPreview = ({ skinId, skinName, isBuiltin }) => {
 };
 
 /**
- * 皮肤状态预览组件 - 显示四种心情状态
+ * 皮肤状态预览组件 - 动态显示心情状态
+ * @param {string} skinId - 皮肤 ID
+ * @param {string} skinName - 皮肤名称
+ * @param {boolean} isBuiltin - 是否内置皮肤
+ * @param {string[]} moods - 动态表情列表 e.g. ["normal", "smile", "angry", "thinking"]
  */
-const SkinMoodPreview = ({ skinId, skinName, isBuiltin }) => {
-  const moods = ['normal', 'smile', 'angry', 'thinking'];
-  const moodLabels = { normal: 'Normal', smile: 'Happy', angry: 'Angry', thinking: 'Thinking' };
+const SkinMoodPreview = ({ skinId, skinName, isBuiltin, moods: propMoods }) => {
+  // 使用传入的 moods，如果没有则使用默认值
+  const moods = propMoods && propMoods.length > 0 ? propMoods : ['normal', 'smile', 'angry', 'thinking'];
+  // 生成显示标签：首字母大写
+  const getMoodLabel = (mood) => mood.charAt(0).toUpperCase() + mood.slice(1);
   const [images, setImages] = useState({});
+  const [loading, setLoading] = useState(true);
   
   useEffect(() => {
     const loadImages = async () => {
       const loaded = {};
-      const assetName = skinName === 'default' ? 'Jules' : skinName;
+      setLoading(true);
+      
       for (const mood of moods) {
         try {
-          // 先尝试从 assets 加载
-          try {
-            const module = await import(`../assets/${assetName}-${mood}.png`);
-            loaded[mood] = module.default;
-            continue;
-          } catch {
-            // assets 中没有，从自定义目录加载
+          if (isBuiltin) {
+            // 内置皮肤：从 assets 加载
+            const assetName = skinName === 'default' ? 'Jules' : skinName;
+            try {
+              const module = await import(`../assets/${assetName}-${mood}.png`);
+              loaded[mood] = module.default;
+              continue;
+            } catch {
+              console.warn(`[SkinMoodPreview] Asset not found: ${assetName}-${mood}.png`);
+            }
           }
-          // 从自定义目录加载
+          
+          // 自定义皮肤或内置皮肤加载失败：从文件系统加载
           const url = await tauri.readSkinImage(skinId, mood);
           loaded[mood] = url;
         } catch (err) {
-          console.error(`Failed to load ${mood} image:`, err);
+          console.error(`[SkinMoodPreview] Failed to load ${mood} image for skin ${skinId}:`, err);
         }
       }
+      
       setImages(loaded);
+      setLoading(false);
     };
     loadImages();
-  }, [skinId, skinName, isBuiltin]);
+  }, [skinId, skinName, isBuiltin, moods]);
   
   return (
     <div className="grid grid-cols-4 gap-3 p-3 bg-slate-50 rounded-lg">
@@ -2498,13 +2440,17 @@ const SkinMoodPreview = ({ skinId, skinName, isBuiltin }) => {
           <div className="w-16 h-16 rounded-lg overflow-hidden bg-white border border-slate-200 shadow-sm">
             {images[mood] ? (
               <img src={images[mood]} alt={mood} className="w-full h-full object-cover" />
-            ) : (
+            ) : loading ? (
               <div className="w-full h-full flex items-center justify-center">
                 <FaSpinner className="w-4 h-4 text-slate-300 animate-spin" />
               </div>
+            ) : (
+              <div className="w-full h-full flex items-center justify-center">
+                <FaShirt className="w-6 h-6 text-slate-200" />
+              </div>
             )}
           </div>
-          <span className="text-xs text-slate-500">{moodLabels[mood]}</span>
+          <span className="text-xs text-slate-500">{getMoodLabel(mood)}</span>
         </div>
       ))}
     </div>
@@ -2553,12 +2499,12 @@ const SkinsPanel = () => {
     };
   }, [showHidden]);
   
-  const handleSave = async (data) => {
+  const handleSave = async (jsonPath) => {
     try {
-      console.log("Importing skin:", data.name);
+      console.log("Importing skin from:", jsonPath);
       
-      // 调用 Rust API 导入皮肤（保存到数据库 + 文件系统）
-      await tauri.importSkin(data.name, data.author || null, data.imageData);
+      // 调用 Rust API 导入皮肤（JSON + 自动发现图片）
+      await tauri.importSkin(jsonPath);
       
       // 发送更新事件，通知其他窗口刷新
       await tauri.sendSkinsUpdate?.({ action: 'create' });
@@ -2613,6 +2559,21 @@ const SkinsPanel = () => {
     }
   };
 
+  const handleExport = async (skin) => {
+    try {
+      // 选择导出目录
+      const exportDir = await tauri.selectDirectory();
+      if (!exportDir) return;
+      
+      // 导出皮肤
+      const jsonPath = await tauri.exportSkin(skin.id, exportDir);
+      alert(`Skin exported successfully!\n\nLocation: ${jsonPath}`);
+    } catch (err) {
+      console.error("Failed to export skin:", err);
+      alert("Failed to export skin: " + (err.message || err));
+    }
+  };
+
   const handleCancel = () => {
     setIsCreating(false);
   };
@@ -2652,7 +2613,7 @@ const SkinsPanel = () => {
         {isCreating ? (
           <Card
             title="Import New Skin"
-            description="Upload a 2x2 sprite sheet (Normal, Happy, Angry, Thinking)"
+            description="Select a JSON configuration file. Image files (0.png, 1.jpg, etc.) should be in the same directory."
           >
             <SkinForm 
               onSave={handleSave} 
@@ -2707,6 +2668,13 @@ const SkinsPanel = () => {
                       </div>
                       <div className="shrink-0 flex items-center gap-1.5">
                         <Button
+                          variant="secondary"
+                          onClick={(e) => { e.stopPropagation(); handleExport(skin); }}
+                          title="Export"
+                        >
+                          <FaDownload className="w-3.5 h-3.5" />
+                        </Button>
+                        <Button
                           variant="danger"
                           onClick={(e) => { e.stopPropagation(); handleDelete(skin); }}
                           title={skin.isBuiltin ? "Hide" : "Delete"}
@@ -2723,7 +2691,7 @@ const SkinsPanel = () => {
                 </div>
                 {/* 展开的预览面板 */}
                 {selectedSkinId === skin.id && (
-                  <SkinMoodPreview skinId={skin.id} skinName={skin.name} isBuiltin={skin.isBuiltin} />
+                  <SkinMoodPreview skinId={skin.id} skinName={skin.name} isBuiltin={skin.isBuiltin} moods={skin.moods} />
                 )}
               </div>
             ))}
@@ -2764,6 +2732,13 @@ const SkinsPanel = () => {
                           </div>
                         </div>
                         <div className="shrink-0 flex items-center gap-1.5">
+                          <Button
+                            variant="secondary"
+                            onClick={(e) => { e.stopPropagation(); handleExport(skin); }}
+                            title="Export"
+                          >
+                            <FaDownload className="w-3.5 h-3.5" />
+                          </Button>
                           <Button
                             variant="secondary"
                             onClick={(e) => { e.stopPropagation(); handleRestore(skin.id); }}
@@ -3064,6 +3039,30 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                 <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
               </label>
             </div>
+          </Card>
+          
+          {/* Character Mood Settings */}
+          <Card title="Character Mood" description="Configure character expression behavior">
+            <FormGroup>
+              <Label>Mood Reset Delay (seconds)</Label>
+              <div className="flex items-center gap-3">
+                <Input
+                  type="number"
+                  name="moodResetDelay"
+                  value={settings.moodResetDelay ?? 30}
+                  onChange={onSettingsChange}
+                  min={0}
+                  max={300}
+                  className="w-24"
+                />
+                <span className="text-sm text-slate-500">
+                  {settings.moodResetDelay === 0 ? "Disabled" : `Reset to normal after ${settings.moodResetDelay ?? 30}s`}
+                </span>
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                Time before the character's expression returns to normal after responding. Set to 0 to disable.
+              </div>
+            </FormGroup>
           </Card>
           
           <div className="pt-2">
@@ -3435,7 +3434,7 @@ const ManagementPage = () => {
   };
 
   return (
-    <PageLayout className="bg-white/95">
+    <PageLayout className="bg-white">
       <div className="flex h-screen w-full">
         {/* Sidebar */}
         <Sidebar 

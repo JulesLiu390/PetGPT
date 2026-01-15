@@ -306,8 +306,9 @@ impl McpClient {
             },
         };
 
+        // Use send_request_init to bypass connection check during initialization
         let result: InitializeResult = self
-            .send_request("initialize", Some(serde_json::to_value(params).unwrap()))
+            .send_request_init("initialize", Some(serde_json::to_value(params).unwrap()))
             .await
             .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))?;
 
@@ -315,8 +316,12 @@ impl McpClient {
         *self.server_capabilities.lock().unwrap() = result.capabilities;
         *self.server_info.lock().unwrap() = result.server_info;
 
-        // Send initialized notification
-        self.send_notification("notifications/initialized", None).await?;
+        // Send initialized notification (also bypass connection check)
+        self.send_notification_init("notifications/initialized", None).await?;
+
+        // Mark as connected now so refresh_tools/resources can use normal send_request
+        // Note: This is set here temporarily, connect() will set it again after initialize() returns
+        *self.is_connected.lock().unwrap() = true;
 
         // Fetch tools and resources
         self.refresh_tools().await?;
@@ -388,7 +393,7 @@ impl McpClient {
 
         // Use longer timeout for tool calls
         let result: ToolCallResult = self
-            .send_request_with_timeout("tools/call", Some(serde_json::to_value(params).unwrap()), TOOL_CALL_TIMEOUT_MS)
+            .send_request_with_timeout("tools/call", Some(serde_json::to_value(params).unwrap()), TOOL_CALL_TIMEOUT_MS, true)
             .await
             .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))?;
         
@@ -421,13 +426,18 @@ impl McpClient {
 
     /// Send a JSON-RPC request and wait for response with default timeout
     async fn send_request(&self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
-        self.send_request_with_timeout(method, params, REQUEST_TIMEOUT_MS).await
+        self.send_request_with_timeout(method, params, REQUEST_TIMEOUT_MS, true).await
+    }
+    
+    /// Send a JSON-RPC request during initialization (skips connection check)
+    async fn send_request_init(&self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+        self.send_request_with_timeout(method, params, REQUEST_TIMEOUT_MS, false).await
     }
     
     /// Send a JSON-RPC request and wait for response with custom timeout
-    async fn send_request_with_timeout(&self, method: &str, params: Option<serde_json::Value>, timeout_ms: u64) -> Result<serde_json::Value, String> {
-        // Check connection state first
-        if !*self.is_connected.lock().unwrap() {
+    async fn send_request_with_timeout(&self, method: &str, params: Option<serde_json::Value>, timeout_ms: u64, check_connected: bool) -> Result<serde_json::Value, String> {
+        // Check connection state first (skip during initialization)
+        if check_connected && !*self.is_connected.lock().unwrap() {
             if let Some(error) = self.get_last_error() {
                 return Err(format!("Not connected: {}", error));
             }
@@ -493,6 +503,16 @@ impl McpClient {
 
     /// Send a notification (no response expected)
     async fn send_notification(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), String> {
+        self.send_notification_internal(method, params).await
+    }
+
+    /// Send a notification during initialization (same as send_notification, for clarity)
+    async fn send_notification_init(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), String> {
+        self.send_notification_internal(method, params).await
+    }
+
+    /// Internal notification sender
+    async fn send_notification_internal(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), String> {
         let notification = JsonRpcNotification {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),

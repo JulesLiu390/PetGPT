@@ -1,8 +1,13 @@
 @import "tailwindcss";
 
-html, body {
+html, body, #root {
   background: transparent;
-  overflow: hidden;
+  overflow: clip;
+}
+
+#root {
+  height: 100vh;
+  width: 100vw;
 }
 
 /* 全局隐藏滚动条 - 适用于所有元素 */
@@ -29,8 +34,62 @@ html, body {
   scrollbar-width: none;  /* Firefox */
 }
 
+/* 标题栏控件淡入动画 */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.animate-fade-in {
+  animation: fade-in 0.2s ease-out;
+}
+
+/* Thinking 动画 - 忽大忽小的黑色圆圈 */
+@keyframes thinking-pulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.8;
+  }
+  50% {
+    transform: scale(1.5);
+    opacity: 1;
+  }
+}
+
+.animate-thinking-pulse {
+  animation: thinking-pulse 1s ease-in-out infinite;
+}
+
 .scrollbar-hide::-webkit-scrollbar {
   display: none;
+}
+
+/* 横向滚动条样式 - 用于标签栏 */
+@utility scrollbar-thin {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(156, 163, 175, 0.5) transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar {
+  display: block !important;
+  height: 4px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: rgba(156, 163, 175, 0.5);
+  border-radius: 2px;
+}
+
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(156, 163, 175, 0.7);
 }
 
 /* Chrome-style tab with curved corner connectors */

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from 'react';
+import React, { useEffect, useState, useRef, useCallback } from 'react';
 import ChatboxTitleBar from '../Layout/ChatboxTitleBar';
 import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
@@ -6,7 +6,7 @@ import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import * as tauri from '../../utils/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning } from 'react-icons/md';
+import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
 // import { AiFillChrome } from 'react-icons/ai';
@@ -17,12 +17,17 @@ export const Chatbox = () => {
   const [{ navBarChats, updatedConversation, streamingReplies, characterMoods }, dispatch] = useStateValue();
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [isMouseOver, setIsMouseOver] = useState(false);
+  const [showTitleBar, setShowTitleBar] = useState(false); // 延迟隐藏用
+  const [isTitleBarVisible, setIsTitleBarVisible] = useState(false); // 控制 opacity
   const [conversations, setConversations] = useState([]);
   const [orphanConversations, setOrphanConversations] = useState([]);
   const [isThinking, setIsThinking] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [selectedOrphanConv, setSelectedOrphanConv] = useState(null);
   const [availableAssistants, setAvailableAssistants] = useState([]);
+  const [allAssistants, setAllAssistants] = useState([]); // 所有 assistants 列表
+  const [showAssistantDropdown, setShowAssistantDropdown] = useState(false); // 底部 assistant 下拉菜单
   // Per-tab chatbody status for "Memory updating" display
   const [chatbodyStatuses, setChatbodyStatuses] = useState({}); // { conversationId: status }
   
@@ -50,37 +55,79 @@ export const Chatbox = () => {
     navBarChatsRef.current = navBarChats;
   }, [navBarChats]);
 
-  useEffect(() => {
-    const fetchConversations = async () => {
-      console.log('[ChatboxBody] fetchConversations called');
-      try {
-        const data = await tauri.getConversations();
-        console.log('[ChatboxBody] getConversations returned:', data);
-        if (Array.isArray(data)) {
-            // Filter out empty conversations (no messages)
-            const nonEmptyConversations = data.filter(conv => conv.messageCount > 0);
-            setConversations(nonEmptyConversations);
-            console.log('[ChatboxBody] setConversations with', nonEmptyConversations.length, 'non-empty items');
-        } else {
-            console.warn("getConversations returned non-array:", data);
-            setConversations([]);
-        }
-        
-        // Also fetch orphan conversations
-        const orphans = await tauri.getOrphanConversations();
-        if (Array.isArray(orphans)) {
-            const nonEmptyOrphans = orphans.filter(conv => conv.messageCount > 0);
-            setOrphanConversations(nonEmptyOrphans);
-            console.log('[ChatboxBody] setOrphanConversations with', nonEmptyOrphans.length, 'items');
-        }
-      } catch (error) {
-        console.error("Error fetching conversations:", error);
-        setConversations([]);
-        setOrphanConversations([]);
+  // 将 fetchConversations 提取为可重用的函数
+  const fetchConversations = useCallback(async () => {
+    console.log('[ChatboxBody] fetchConversations called');
+    try {
+      const data = await tauri.getConversations();
+      console.log('[ChatboxBody] getConversations returned:', data);
+      if (Array.isArray(data)) {
+          // Filter out empty conversations (no messages)
+          const nonEmptyConversations = data.filter(conv => conv.messageCount > 0);
+          setConversations(nonEmptyConversations);
+          console.log('[ChatboxBody] setConversations with', nonEmptyConversations.length, 'non-empty items');
+      } else {
+          console.warn("getConversations returned non-array:", data);
+          setConversations([]);
       }
-    };
+      
+      // Also fetch orphan conversations
+      const orphans = await tauri.getOrphanConversations();
+      if (Array.isArray(orphans)) {
+          const nonEmptyOrphans = orphans.filter(conv => conv.messageCount > 0);
+          setOrphanConversations(nonEmptyOrphans);
+          console.log('[ChatboxBody] setOrphanConversations with', nonEmptyOrphans.length, 'items');
+      }
+    } catch (error) {
+      console.error("Error fetching conversations:", error);
+      setConversations([]);
+      setOrphanConversations([]);
+    }
+  }, []);
+
+  // 初始加载
+  useEffect(() => {
     fetchConversations();
-  }, []); // 新方案: 不再依赖 tabMessages
+    // 加载所有 assistants
+    tauri.getAssistants().then(assistants => {
+      setAllAssistants(assistants || []);
+    }).catch(console.error);
+  }, [fetchConversations]);
+
+  // 监听 Rust 端发送的鼠标悬停事件
+  useEffect(() => {
+    let unlisten;
+    listen('mouse-over-chat', (event) => {
+      setIsMouseOver(event.payload);
+    }).then(fn => { unlisten = fn; });
+    
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // 标题栏显示/隐藏逻辑：淡入淡出都用延迟
+  useEffect(() => {
+    const shouldShow = sidebarOpen || isMouseOver;
+    
+    if (shouldShow) {
+      // 立即挂载组件（opacity: 0）
+      setShowTitleBar(true);
+      // 下一帧设置 opacity 为 1（触发淡入动画）
+      const timer = setTimeout(() => {
+        setIsTitleBarVisible(true);
+      }, 10); // 小延迟确保组件已挂载
+      return () => clearTimeout(timer);
+    } else {
+      // 先设置 opacity 为 0（触发淡出动画）
+      setIsTitleBarVisible(false);
+      // 延迟后卸载组件
+      const timer = setTimeout(() => {
+        setShowTitleBar(false);
+      }, 200); // 与 CSS transition 时间一致
+      return () => clearTimeout(timer);
+    }
+  }, [sidebarOpen, isMouseOver]);
 
   // 监听后台更新的会话消息（处理非激活 Tab 的更新）
   useEffect(() => {
@@ -97,8 +144,10 @@ export const Chatbox = () => {
             }
             return tab;
         }));
+        // 刷新对话列表以显示更新
+        fetchConversations();
     }
-  }, [updatedConversation]);
+  }, [updatedConversation, fetchConversations]);
 
   useEffect(() => {
     // This handler is for "Memory updating" status, NOT mood
@@ -244,6 +293,9 @@ export const Chatbox = () => {
         
         console.log('[ChatboxBody] ★★★ Calling handleTabClick:', newConversation._id);
         handleTabClick(newConversation._id);
+        
+        // 刷新对话列表以显示新创建的对话
+        fetchConversations();
       } finally {
         // 处理完成后移除标志
         processingCharacterIdsRef.current.delete(id);
@@ -400,6 +452,18 @@ export const Chatbox = () => {
     }
   };
 
+  const handleCloseAllTabs = () => {
+    setTabs([]);
+    setActiveTabId(null);
+    activeTabIdRef.current = null;
+    dispatch({ type: actionType.SET_CURRENT_CONVERSATION_ID, id: null });
+  };
+
+  // 处理标签页拖拽排序
+  const handleReorderTabs = (newOrder) => {
+    setTabs(newOrder);
+  };
+
   const handleAddTabClick = () => {
     handleNewChat();
   };
@@ -446,6 +510,73 @@ export const Chatbox = () => {
         type: actionType.SET_CURRENT_CONVERSATION_ID,
         id: conv._id,
     });
+  };
+
+  // 从某条消息处创建分支（复制该消息及之前的所有消息到新对话）
+  const handleBranchFromMessage = async (sourceConvId, messageIndex) => {
+    try {
+      // 1. 获取源对话的 tab
+      const sourceTab = tabs.find(t => t.id === sourceConvId);
+      if (!sourceTab) {
+        console.error('[Branch] Source tab not found:', sourceConvId);
+        return;
+      }
+
+      // 2. 获取源对话的消息（从 TabState）
+      const tabState = await tauri.getTabState(sourceConvId);
+      const sourceMessages = tabState?.messages || [];
+      if (!sourceMessages || sourceMessages.length === 0) {
+        console.error('[Branch] No messages to branch from');
+        return;
+      }
+
+      // 3. 复制从开始到 messageIndex 的所有消息
+      const messagesToCopy = sourceMessages.slice(0, messageIndex + 1);
+      
+      // 4. 获取源对话标题
+      let sourceTitle = "Chat";
+      try {
+        const sourceConv = await tauri.getConversationById(sourceConvId);
+        if (sourceConv?.title) {
+          sourceTitle = sourceConv.title;
+        }
+      } catch (e) {
+        // 使用默认标题
+      }
+
+      // 5. 创建新对话
+      const newConversation = await tauri.createConversation({
+        petId: sourceTab.petId,
+        title: `${sourceTitle} (Branch)`,
+        history: messagesToCopy,
+      });
+
+      console.log('[Branch] Created new conversation:', newConversation._id);
+
+      // 5.5 保存消息到数据库（这样 messageCount 才会正确）
+      await tauri.updateConversation(newConversation._id, { history: messagesToCopy });
+
+      // 6. 初始化新对话的 TabState
+      await tauri.initTabMessages(newConversation._id, messagesToCopy);
+
+      // 7. 创建新 Tab
+      const newTab = {
+        id: newConversation._id,
+        label: `${sourceTitle} (Branch)`,
+        petId: sourceTab.petId,
+        messages: messagesToCopy,
+        isActive: true
+      };
+
+      // 8. 添加 Tab 并切换
+      setTabs(prev => [...prev.map(t => ({ ...t, isActive: false })), newTab]);
+      handleTabClick(newConversation._id);
+      
+      // 9. 刷新对话列表
+      fetchConversations();
+    } catch (error) {
+      console.error('[Branch] Failed to create branch:', error);
+    }
   };
 
   const handleNewChat = () => {
@@ -574,7 +705,10 @@ export const Chatbox = () => {
   };
 
   return (
-    <div className="h-full flex bg-white">
+    <div className={`h-screen rounded-[16px] overflow-clip relative`}>
+    {/* 白色遮罩层：侧边栏关闭时 80% 透明度，打开时 100% */}
+    <div className={`absolute inset-0 bg-white transition-opacity duration-200 pointer-events-none ${sidebarOpen ? 'opacity-100' : 'opacity-80'}`} />
+    <div className={`h-full flex group/chatwindow overflow-hidden relative`}>
       {/* Sidebar - 小窗口根据 sidebarOpen 状态显示，全屏时始终显示 */}
       <div className={`${sidebarOpen ? 'flex' : 'hidden'} lg:!flex flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
         
@@ -652,34 +786,89 @@ export const Chatbox = () => {
           )}
         </div>
 
-        {/* User Info */}
-        <div className="p-3 border-t border-gray-200">
-            <div className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-200 cursor-pointer">
-                <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold">JL</div>
-                <div className="text-sm font-medium text-gray-700">Jules Liu</div>
+        {/* Quick New Chat - Assistant Dropdown */}
+        <div className="p-3 border-t border-gray-200 relative">
+            <div 
+              onClick={() => setShowAssistantDropdown(!showAssistantDropdown)}
+              className="flex items-center gap-2 p-2 rounded-lg hover:bg-gray-200 cursor-pointer"
+            >
+                {(() => {
+                  const currentPetId = tabs.find(t => t.id === activeTabId)?.petId;
+                  const currentAssistant = allAssistants.find(a => a._id === currentPetId);
+                  const name = currentAssistant?.name || 'Select Assistant';
+                  const initials = name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+                  return (
+                    <>
+                      <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+                        {initials}
+                      </div>
+                      <div className="flex-1 text-sm font-medium text-gray-700 truncate">{name}</div>
+                      <MdKeyboardArrowDown className={`text-gray-500 transition-transform flex-shrink-0 ${showAssistantDropdown ? 'rotate-180' : ''}`} />
+                    </>
+                  );
+                })()}
             </div>
+            
+            {/* Assistant Dropdown Menu */}
+            {showAssistantDropdown && (
+              <>
+                <div className="fixed inset-0 z-40" onClick={() => setShowAssistantDropdown(false)} />
+                <div className="absolute bottom-full left-3 right-3 mb-1 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 max-h-48 overflow-y-auto">
+                  {allAssistants.map(assistant => {
+                    const initials = assistant.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
+                    return (
+                      <div 
+                        key={assistant._id}
+                        onClick={() => {
+                          tauri.sendCharacterId?.(assistant._id);
+                          setShowAssistantDropdown(false);
+                        }}
+                        className="flex items-center gap-2 px-3 py-2 hover:bg-gray-100 cursor-pointer"
+                      >
+                        <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">
+                          {initials}
+                        </div>
+                        <span className="text-sm text-gray-700 truncate">{assistant.name}</span>
+                      </div>
+                    );
+                  })}
+                  {allAssistants.length === 0 && (
+                    <div className="px-3 py-2 text-sm text-gray-400">No assistants available</div>
+                  )}
+                </div>
+              </>
+            )}
         </div>
       </div>
 
       {/* Main Chat Area */}
-      <div className="h-full flex-1 flex flex-col justify-between bg-white relative">
-        <ChatboxTitleBar 
-            activePetId={tabs.find(t => t.id === activeTabId)?.petId} 
-            tabs={tabs} 
-            activeTabId={activeTabId} 
-            onTabClick={handleTabClick} 
-            onCloseTab={handleCloseTab}
-            onAddTab={handleAddTabClick}
-            onShare={handleShare}
-            sidebarOpen={sidebarOpen}
-            onToggleSidebar={handleToggleSidebar}
-        />
+      <div className={`h-full flex-1 flex flex-col justify-between relative`}>
+        {/* Title Bar - 淡入淡出效果 */}
+        {showTitleBar && (
+          <div className={`flex-shrink-0 transition-opacity duration-200 ${isTitleBarVisible ? 'opacity-100' : 'opacity-0'}`}>
+            <ChatboxTitleBar 
+                activePetId={tabs.find(t => t.id === activeTabId)?.petId} 
+                tabs={tabs} 
+                activeTabId={activeTabId} 
+                onTabClick={handleTabClick} 
+                onCloseTab={handleCloseTab}
+                onCloseAllTabs={handleCloseAllTabs}
+                onAddTab={handleAddTabClick}
+                onReorderTabs={handleReorderTabs}
+                onShare={handleShare}
+                sidebarOpen={sidebarOpen}
+                isMouseOver={isMouseOver}
+                onToggleSidebar={handleToggleSidebar}
+            />
+          </div>
+        )}
         {chatbodyStatus != "" && (
           <div className="text-center text-sm text-gray-600 animate-pulse absolute top-10 left-0 right-0 z-10 pointer-events-none">
             Memory updating: {chatbodyStatus}
           </div>
         )}
         
+        {/* 消息区域 - 始终从顶部开始，标题栏覆盖在上面 */}
         <div className="flex-1 overflow-hidden relative flex flex-col">
              {tabs.length === 0 ? (
                 <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
@@ -701,7 +890,9 @@ export const Chatbox = () => {
                         <ChatboxMessageArea 
                             conversationId={tab.id}
                             streamingContent={streamingReplies ? streamingReplies[tab.id] : null} 
-                            isActive={tab.id === activeTabId} 
+                            isActive={tab.id === activeTabId}
+                            showTitleBar={showTitleBar}
+                            onBranchFromMessage={handleBranchFromMessage}
                         />
                     </div>
                 ))
@@ -712,6 +903,7 @@ export const Chatbox = () => {
             <ChatboxInputArea 
                 className="w-full" 
                 activePetId={tabs.find(t => t.id === activeTabId)?.petId}
+                sidebarOpen={sidebarOpen}
             />
         </div>
       </div>
@@ -767,6 +959,7 @@ export const Chatbox = () => {
           </div>
         </div>
       )}
+    </div>
     </div>
   );
 };

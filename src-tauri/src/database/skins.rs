@@ -11,6 +11,8 @@ pub struct Skin {
     pub name: String,
     pub author: Option<String>,
     pub description: Option<String>,
+    /// Dynamic mood/expression list, stored as JSON array e.g. ["normal", "happy", "sad"]
+    pub moods: Option<Vec<String>>,
     pub is_builtin: bool,
     pub is_hidden: bool,
     pub created_at: String,
@@ -23,6 +25,8 @@ pub struct CreateSkinData {
     pub name: String,
     pub author: Option<String>,
     pub description: Option<String>,
+    /// Dynamic mood/expression list e.g. ["normal", "happy", "sad"]
+    pub moods: Option<Vec<String>>,
     #[serde(default)]
     pub is_builtin: bool,
 }
@@ -33,6 +37,8 @@ pub struct UpdateSkinData {
     pub name: Option<String>,
     pub author: Option<String>,
     pub description: Option<String>,
+    /// Dynamic mood/expression list e.g. ["normal", "happy", "sad"]
+    pub moods: Option<Vec<String>>,
 }
 
 impl Database {
@@ -40,22 +46,26 @@ impl Database {
     pub fn get_all_skins(&self) -> Result<Vec<Skin>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, author, description, is_builtin, is_hidden, created_at, updated_at 
+            "SELECT id, name, author, description, moods, is_builtin, is_hidden, created_at, updated_at 
              FROM skins 
              WHERE is_hidden = 0
              ORDER BY is_builtin DESC, created_at DESC"
         )?;
         
         let skins = stmt.query_map([], |row| {
+            let moods_str: Option<String> = row.get(4)?;
+            let moods: Option<Vec<String>> = moods_str.and_then(|s| serde_json::from_str(&s).ok());
+            
             Ok(Skin {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 author: row.get(2)?,
                 description: row.get(3)?,
-                is_builtin: row.get::<_, i32>(4)? != 0,
-                is_hidden: row.get::<_, i32>(5)? != 0,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                moods,
+                is_builtin: row.get::<_, i32>(5)? != 0,
+                is_hidden: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?.collect::<Result<Vec<_>>>()?;
         
@@ -66,21 +76,25 @@ impl Database {
     pub fn get_all_skins_with_hidden(&self) -> Result<Vec<Skin>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, author, description, is_builtin, is_hidden, created_at, updated_at 
+            "SELECT id, name, author, description, moods, is_builtin, is_hidden, created_at, updated_at 
              FROM skins 
              ORDER BY is_builtin DESC, created_at DESC"
         )?;
         
         let skins = stmt.query_map([], |row| {
+            let moods_str: Option<String> = row.get(4)?;
+            let moods: Option<Vec<String>> = moods_str.and_then(|s| serde_json::from_str(&s).ok());
+            
             Ok(Skin {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 author: row.get(2)?,
                 description: row.get(3)?,
-                is_builtin: row.get::<_, i32>(4)? != 0,
-                is_hidden: row.get::<_, i32>(5)? != 0,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                moods,
+                is_builtin: row.get::<_, i32>(5)? != 0,
+                is_hidden: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             })
         })?.collect::<Result<Vec<_>>>()?;
         
@@ -90,22 +104,56 @@ impl Database {
     pub fn get_skin_by_id(&self, id: &str) -> Result<Option<Skin>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, name, author, description, is_builtin, is_hidden, created_at, updated_at 
+            "SELECT id, name, author, description, moods, is_builtin, is_hidden, created_at, updated_at 
              FROM skins WHERE id = ?"
         )?;
         
         let mut rows = stmt.query(params![id])?;
         
         if let Some(row) = rows.next()? {
+            let moods_str: Option<String> = row.get(4)?;
+            let moods: Option<Vec<String>> = moods_str.and_then(|s| serde_json::from_str(&s).ok());
+            
             Ok(Some(Skin {
                 id: row.get(0)?,
                 name: row.get(1)?,
                 author: row.get(2)?,
                 description: row.get(3)?,
-                is_builtin: row.get::<_, i32>(4)? != 0,
-                is_hidden: row.get::<_, i32>(5)? != 0,
-                created_at: row.get(6)?,
-                updated_at: row.get(7)?,
+                moods,
+                is_builtin: row.get::<_, i32>(5)? != 0,
+                is_hidden: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
+            }))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Get a skin by name
+    pub fn get_skin_by_name(&self, name: &str) -> Result<Option<Skin>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT id, name, author, description, moods, is_builtin, is_hidden, created_at, updated_at 
+             FROM skins WHERE name = ?"
+        )?;
+        
+        let mut rows = stmt.query(params![name])?;
+        
+        if let Some(row) = rows.next()? {
+            let moods_str: Option<String> = row.get(4)?;
+            let moods: Option<Vec<String>> = moods_str.and_then(|s| serde_json::from_str(&s).ok());
+            
+            Ok(Some(Skin {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                author: row.get(2)?,
+                description: row.get(3)?,
+                moods,
+                is_builtin: row.get::<_, i32>(5)? != 0,
+                is_hidden: row.get::<_, i32>(6)? != 0,
+                created_at: row.get(7)?,
+                updated_at: row.get(8)?,
             }))
         } else {
             Ok(None)
@@ -116,11 +164,12 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
+        let moods_json = data.moods.as_ref().map(|m| serde_json::to_string(m).unwrap_or_default());
         
         conn.execute(
-            "INSERT INTO skins (id, name, author, description, is_builtin, is_hidden, created_at, updated_at) 
-             VALUES (?1, ?2, ?3, ?4, ?5, 0, ?6, ?7)",
-            params![id, data.name, data.author, data.description, data.is_builtin as i32, now, now],
+            "INSERT INTO skins (id, name, author, description, moods, is_builtin, is_hidden, created_at, updated_at) 
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)",
+            params![id, data.name, data.author, data.description, moods_json, data.is_builtin as i32, now, now],
         )?;
         
         Ok(Skin {
@@ -128,6 +177,7 @@ impl Database {
             name: data.name,
             author: data.author,
             description: data.description,
+            moods: data.moods,
             is_builtin: data.is_builtin,
             is_hidden: false,
             created_at: now.clone(),
@@ -157,6 +207,12 @@ impl Database {
         if let Some(ref description) = data.description {
             updates.push(format!("description = ?{}", param_index));
             params_vec.push(Box::new(description.clone()));
+            param_index += 1;
+        }
+        if let Some(ref moods) = data.moods {
+            updates.push(format!("moods = ?{}", param_index));
+            let moods_json = serde_json::to_string(moods).unwrap_or_default();
+            params_vec.push(Box::new(moods_json));
             param_index += 1;
         }
         

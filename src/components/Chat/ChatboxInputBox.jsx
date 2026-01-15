@@ -39,7 +39,101 @@ const getApiFormat = (model) => {
   return 'openai_compatible';
 };
 
-export const ChatboxInputBox = ({ activePetId }) => {
+/**
+ * 处理历史消息中的图片路径，将文件路径转换为 base64 数据
+ * 用于发送给 LLM API 之前的预处理
+ * @param {Array} messages - 历史消息数组
+ * @returns {Promise<Array>} - 处理后的消息数组
+ */
+const processMessagesForLLM = async (messages) => {
+  const processedMessages = [];
+  
+  for (const msg of messages) {
+    // 如果消息内容是字符串，直接使用
+    if (typeof msg.content === 'string') {
+      processedMessages.push(msg);
+      continue;
+    }
+    
+    // 如果消息内容是数组（多模态内容），需要处理每个部分
+    if (Array.isArray(msg.content)) {
+      const processedParts = [];
+      
+      for (const part of msg.content) {
+        if (part.type === 'image_url' && part.image_url?.url) {
+          const url = part.image_url.url;
+          
+          // 如果已经是 base64 或 http URL，直接使用
+          if (url.startsWith('data:') || url.startsWith('http')) {
+            processedParts.push(part);
+          } else {
+            // 是文件路径，需要加载为 base64
+            try {
+              const fileName = url.split('/').pop();
+              const base64Data = await tauri.readUpload(fileName);
+              processedParts.push({
+                ...part,
+                image_url: { 
+                  ...part.image_url,
+                  url: base64Data 
+                }
+              });
+            } catch (err) {
+              console.error('[processMessagesForLLM] Failed to load image:', url, err);
+              // 加载失败，转换为文本描述
+              processedParts.push({
+                type: 'text',
+                text: `[Image could not be loaded: ${url}]`
+              });
+            }
+          }
+        } else if (part.type === 'file_url' && part.file_url?.url) {
+          const url = part.file_url.url;
+          
+          // 如果已经是 base64 或 http URL，直接使用
+          if (url.startsWith('data:') || url.startsWith('http')) {
+            processedParts.push(part);
+          } else {
+            // 是文件路径，需要加载为 base64
+            try {
+              const fileName = url.split('/').pop();
+              const base64Data = await tauri.readUpload(fileName);
+              processedParts.push({
+                ...part,
+                file_url: { 
+                  ...part.file_url,
+                  url: base64Data 
+                }
+              });
+            } catch (err) {
+              console.error('[processMessagesForLLM] Failed to load file:', url, err);
+              // 加载失败，保留原始路径（降级处理）
+              processedParts.push({
+                type: 'text',
+                text: `[File: ${part.file_url.name || url}]`
+              });
+            }
+          }
+        } else {
+          // 其他类型的 part，直接保留
+          processedParts.push(part);
+        }
+      }
+      
+      processedMessages.push({
+        ...msg,
+        content: processedParts
+      });
+    } else {
+      // 其他情况，直接使用
+      processedMessages.push(msg);
+    }
+  }
+  
+  return processedMessages;
+};
+
+export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
   // 会话 ID ref（需要先声明，供其他地方引用）
   const conversationIdRef = useRef(null);
   
@@ -275,6 +369,20 @@ export const ChatboxInputBox = ({ activePetId }) => {
   // 这样当 Tab 切换时，isGenerating 会随着 currentConversationId 的变化而重新计算
   const isGenerating = generatingConversations.has(currentConversationId) || 
                        generatingConversations.has('temp');
+  
+  // 发送/暂停按钮切换动画状态
+  const [buttonAnimating, setButtonAnimating] = useState(false);
+  const prevIsGeneratingRef = useRef(isGenerating);
+  
+  // 监听 isGenerating 变化，触发动画
+  useEffect(() => {
+    if (prevIsGeneratingRef.current !== isGenerating) {
+      setButtonAnimating(true);
+      const timer = setTimeout(() => setButtonAnimating(false), 100);
+      prevIsGeneratingRef.current = isGenerating;
+      return () => clearTimeout(timer);
+    }
+  }, [isGenerating]);
   
   // 本地消息状态 - 从 Rust TabState 加载
   const [userMessages, setUserMessages] = useState([]);
@@ -615,7 +723,7 @@ export const ChatboxInputBox = ({ activePetId }) => {
         }
         
         if (assistant) {
-          const { _id, name, hasMood, isAgent } = assistant;
+          const { _id, name, hasMood, isAgent, imageName } = assistant;
           // 向后兼容：优先使用 systemInstruction，fallback 到 personality
           const systemInstruction = assistant.systemInstruction || assistant.personality || '';
           // hasMood 向后兼容：如果没设置 hasMood，则根据 !isAgent 判断
@@ -624,6 +732,30 @@ export const ChatboxInputBox = ({ activePetId }) => {
           // 从 ModelConfig 获取 API 配置，如果没有则从 assistant 本身获取（兼容旧数据）
           const apiConfig = modelConfig || assistant;
           const { modelName, modelApiKey, modelUrl, apiFormat, modelProvider } = apiConfig;
+          
+          // 获取 skin 的 moods 列表（动态表情支持）
+          let availableMoods = null;
+          if (imageName) {
+            try {
+              // 处理 custom:skinId 格式
+              const skinName = imageName.startsWith('custom:') ? null : imageName;
+              const skinId = imageName.startsWith('custom:') ? imageName.split(':')[1] : null;
+              
+              let skin = null;
+              if (skinId) {
+                skin = await tauri.getSkin(skinId);
+              } else if (skinName) {
+                skin = await tauri.getSkinByName(skinName);
+              }
+              
+              if (skin && skin.moods && skin.moods.length > 0) {
+                availableMoods = skin.moods;
+                console.log('[ChatboxInputBox] Loaded skin moods:', availableMoods);
+              }
+            } catch (e) {
+              console.warn('[ChatboxInputBox] Failed to load skin moods:', e);
+            }
+          }
           
           setPetInfo({ 
             _id, 
@@ -634,7 +766,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
             modelProvider, 
             modelUrl, 
             apiFormat, 
-            hasMood: computedHasMood 
+            hasMood: computedHasMood,
+            availableMoods
           });
           
           // 更新当前 API 格式，用于 MCP 工具转换
@@ -716,12 +849,34 @@ export const ChatboxInputBox = ({ activePetId }) => {
           }
           
           if (assistant) {
-            const { _id, name, hasMood, isAgent } = assistant;
+            const { _id, name, hasMood, isAgent, imageName } = assistant;
             const systemInstruction = assistant.systemInstruction || assistant.personality || '';
             const computedHasMood = typeof hasMood === 'boolean' ? hasMood : !isAgent;
             
             const apiConfig = modelConfig || assistant;
             const { modelName, modelApiKey, modelUrl, apiFormat, modelProvider } = apiConfig;
+            
+            // 获取 skin 的 moods 列表（动态表情支持）
+            let availableMoods = null;
+            if (imageName) {
+              try {
+                const skinName = imageName.startsWith('custom:') ? null : imageName;
+                const skinId = imageName.startsWith('custom:') ? imageName.split(':')[1] : null;
+                
+                let skin = null;
+                if (skinId) {
+                  skin = await tauri.getSkin(skinId);
+                } else if (skinName) {
+                  skin = await tauri.getSkinByName(skinName);
+                }
+                
+                if (skin && skin.moods && skin.moods.length > 0) {
+                  availableMoods = skin.moods;
+                }
+              } catch (e) {
+                console.warn('[ChatboxInputBox] Failed to load skin moods on update:', e);
+              }
+            }
             
             setPetInfo({ 
               _id, 
@@ -732,7 +887,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
               modelProvider, 
               modelUrl, 
               apiFormat, 
-              hasMood: computedHasMood 
+              hasMood: computedHasMood,
+              availableMoods
             });
             
             setCurrentApiFormat(getApiFormat(apiConfig));
@@ -931,6 +1087,8 @@ export const ChatboxInputBox = ({ activePetId }) => {
     if (isRunFromHere) {
         // Use original content from history
         displayContent = runFromHereContent;
+        // RunFromHere content may contain file paths, need to process for LLM
+        // We'll process it later with processMessagesForLLM
         llmContent = runFromHereContent;
     } else if (attachments.length > 0) {
         // displayContent uses file paths (for persistence/display)
@@ -1023,9 +1181,12 @@ export const ChatboxInputBox = ({ activePetId }) => {
     const latestMessages = tabState.messages || [];
     // 排除最后一条消息（当前用户消息，因为它使用的是 displayContent/文件路径）
     // 我们将用 llmContent（base64 数据）版本替代它
-    const historyMessages = isRunFromHere 
+    const rawHistoryMessages = isRunFromHere 
         ? latestMessages.slice(0, -1)  // RunFromHere: 排除最后一条
         : latestMessages.slice(0, -1); // 普通发送: 也排除最后一条（刚添加的 displayContent 版本）
+    
+    // 处理历史消息中的图片路径，将文件路径转换为 base64 数据
+    const historyMessages = await processMessagesForLLM(rawHistoryMessages);
 
     // 确定使用哪个模型：优先级 overrideModel > (isDefaultPersonality ? functionModelInfo : petInfo)
     if (overrideModel) {
@@ -1037,7 +1198,13 @@ export const ChatboxInputBox = ({ activePetId }) => {
     }
       
       // Use llmContent (with base64 data) for sending to LLM
+      // If llmContent is an array (multimodal), process it to ensure all images are base64
       let content = llmContent;
+      if (Array.isArray(content)) {
+        // Process the current message content as well (for RunFromHere case)
+        const processedContent = await processMessagesForLLM([{ role: 'user', content }]);
+        content = processedContent[0]?.content || content;
+      }
 
       if (attachments.length > 0) {
           setAttachments([]);
@@ -1280,7 +1447,11 @@ When using tools, please follow these guidelines:
             });
         },
         controller.signal, // Pass the signal
-        { hasMood: petInfo.hasMood !== false, conversationId: sendingConversationId } // 传递 hasMood 和 conversationId 选项
+        { 
+          hasMood: petInfo.hasMood !== false, 
+          conversationId: sendingConversationId,
+          availableMoods: petInfo.availableMoods // 传递动态表情列表
+        }
       );
       
       console.log('[ChatboxInputBox] callOpenAILibStream returned:', reply);
@@ -1470,10 +1641,20 @@ const handleStop = async () => {
     const currentConvId = conversationIdRef.current || 'temp';
     const controller = abortControllersRef.current.get(currentConvId);
     
-    // 取消 AbortController（如果存在）
+    // 取消 AbortController（如果存在 - 用于 JS fetch 请求）
     if (controller) {
       controller.abort();
       abortControllersRef.current.delete(currentConvId);
+    }
+    
+    // 取消 Rust 端的 LLM 流
+    try {
+      if (tauri.llmCancelStream) {
+        await tauri.llmCancelStream(currentConvId);
+        console.log('[handleStop] Rust LLM stream cancelled');
+      }
+    } catch (err) {
+      console.error('[handleStop] Failed to cancel Rust LLM stream:', err);
     }
     
     // 始终清除生成状态（即使 controller 不存在）
@@ -1612,10 +1793,12 @@ const handleStop = async () => {
     <div className="relative w-full max-w-3xl mx-auto px-4 pb-4 no-drag">
       {/* 主输入框容器：模仿图2的紧凑风格 */}
       <div 
-        className={`relative bg-[#f4f4f4] rounded-[26px] p-3 shadow-sm border transition-all no-drag ${
+        className={`relative rounded-[20px] p-3 shadow-sm border transition-all no-drag  ${
           isDragging 
             ? 'border-blue-400 bg-blue-50' 
-            : 'border-transparent focus-within:border-gray-200'
+            : sidebarOpen
+              ? 'bg-[#e8e8e8] border-[#d0d0d0]'
+              : 'bg-[#c5c5c5] border-[#b0b0b0]'
         }`}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -1670,7 +1853,7 @@ const handleStop = async () => {
           onInput={autoResize}
           placeholder="Ask anything"
           rows={1}
-          className="w-full bg-transparent outline-none text-gray-800 placeholder-gray-500 mb-8 no-drag resize-none overflow-y-auto" 
+          className="w-full bg-transparent outline-none text-gray-700 placeholder-gray-500 mb-8 no-drag resize-none overflow-y-auto" 
           style={{ maxHeight: '200px', minHeight: '24px' }}
           onChange={handleChange}
         />
@@ -1683,7 +1866,7 @@ const handleStop = async () => {
             <div className="flex items-center gap-1">
                 <button 
                     onClick={() => fileInputRef.current?.click()}
-                    className="p-2 text-gray-500 hover:bg-gray-200 rounded-full transition-colors"
+                    className="p-2 text-gray-500 hover:bg-gray-400/50 rounded-full transition-colors"
                     title="Add Attachment"
                 >
                     <AiOutlinePlus className="w-5 h-5" />
@@ -1698,12 +1881,15 @@ const handleStop = async () => {
                 
                 <button
                     onClick={toggleMemory}
-                    className={`p-2 rounded-full transition-colors ${
-                        memoryEnabled ? "text-blue-600 bg-blue-100" : "text-gray-500 hover:bg-gray-200"
+                    className={`flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
+                        memoryEnabled 
+                            ? "px-3 py-1.5 text-gray-700 bg-gray-300/80 border border-gray-400" 
+                            : "p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent"
                     }`}
                     title="Memory"
                 >
                     <FaBrain className="w-4 h-4" />
+                    {memoryEnabled && <span className="hidden sm:inline">Memory</span>}
                 </button>
                 
                 {/* MCP 工具栏 - 每个服务器单独的图标 */}
@@ -1724,21 +1910,21 @@ const handleStop = async () => {
                         {/* Trigger Button */}
                         <div 
                             onClick={() => setShowModelSelector(prev => !prev)}
-                            className={`px-2 py-1 rounded-md text-xs font-medium text-gray-600 flex flex-col justify-center select-none min-w-[60px] cursor-pointer transition-all duration-150 ${
+                            className={`px-2 py-1 rounded-md text-xs font-medium text-gray-500 flex flex-col justify-center select-none min-w-[60px] cursor-pointer transition-all duration-150 ${
                                 showModelSelector 
                                     ? 'bg-gray-300/70 scale-[0.98]' 
-                                    : 'bg-gray-200/50 hover:bg-gray-200'
+                                    : 'bg-gray-200/50 hover:bg-gray-300/50'
                             }`}
                         >
-                            <div className="font-bold text-gray-800 leading-tight truncate max-w-[100px] flex items-center gap-1">
+                            <div className="font-bold text-gray-600 leading-tight truncate max-w-[100px] flex items-center gap-1">
                                 {petInfo.name}
                                 <svg className={`w-2.5 h-2.5 text-gray-400 transition-transform duration-200 ${showModelSelector ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
                                 </svg>
                             </div>
-                            <div className="text-[10px] text-gray-500 leading-tight truncate max-w-[100px] flex items-center gap-1">
+                            <div className="text-[10px] text-gray-400 leading-tight truncate max-w-[100px] flex items-center gap-1">
                                 {isGenerating ? (
-                                    <span className="animate-pulse text-blue-500">Thinking...</span>
+                                    <span className="animate-pulse text-gray-500">Thinking...</span>
                                 ) : (
                                     <span>{overrideModel ? overrideModel.modelName : (petInfo.modelName || "3.0")}</span>
                                 )}
@@ -1848,7 +2034,7 @@ const handleStop = async () => {
                 >
                     <button
                         onClick={() => setShowReplyOptions(prev => !prev)}
-                        className="p-2 rounded-full hover:bg-gray-200 transition-colors text-gray-500"
+                        className="p-2 rounded-full hover:bg-gray-300/50 transition-colors text-gray-400"
                     >
                         <SiQuicktype className="w-5 h-5" style={{ color:(suggestText.length == 0) ? "#c1c1c1" : "#555" }} />
                     </button>
@@ -1879,16 +2065,18 @@ const handleStop = async () => {
                 <button
                     onClick={isGenerating ? handleStop : handleSend}
                     disabled={!String(userText).trim() && !isGenerating && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')}
-                    className={`p-2 rounded-full transition-all duration-200 ${
+                    className={`p-2.5 rounded-full transition-all duration-100 transform ${
+                        buttonAnimating ? 'scale-0' : 'scale-100'
+                    } ${
                         !String(userText).trim() && !isGenerating && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')
-                        ? "bg-gray-300 cursor-not-allowed" 
-                        : "bg-black hover:bg-gray-800 shadow-md"
+                        ? "bg-gray-400 cursor-not-allowed" 
+                        : "bg-black hover:bg-gray-900 shadow-lg"
                     }`}
                 >
                     {!isGenerating ? (
                     <FaArrowUp className="w-4 h-4 text-white" />
                     ) : (
-                    <FaStop className="w-4 h-4 text-white animate-pulse" />
+                    <FaStop className="w-4 h-4 text-white" />
                     )}
                 </button>
             </div>

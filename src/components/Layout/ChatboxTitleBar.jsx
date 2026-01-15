@@ -7,10 +7,13 @@ import ChatboxTabBar from '../Chat/ChatboxTabBar';
 import tauri from '../../utils/tauri';
 
 
-export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, onCloseTab, onAddTab, onShare, sidebarOpen, onToggleSidebar }) => {
+export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, onCloseTab, onCloseAllTabs, onAddTab, onReorderTabs, onShare, sidebarOpen, isMouseOver, onToggleSidebar }) => {
   const [titleInfo, setTitleInfo] = useState({ name: "PetGPT", model: "3.0" });
   const [isLargeWindow, setIsLargeWindow] = useState(false);
   const [isMaximized, setIsMaximized] = useState(false);
+  
+  // 当侧边栏打开或鼠标悬停在窗口上时显示控制按钮
+  const showControls = sidebarOpen || isMouseOver;
 
   useEffect(() => {
     const handleResize = () => {
@@ -82,17 +85,22 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
 
 
   return (
-    <div className='draggable select-none cursor-default w-full h-9 flex items-center justify-between px-2 bg-slate-100 gap-2 relative z-30' data-tauri-drag-region>
+    <div 
+      className="draggable select-none cursor-default w-full h-9 flex items-center justify-between px-2 gap-2 relative z-30" 
+      data-tauri-drag-region
+    >
       {/* Left: Close Button (no-drag) + Title */}
       <div className="flex items-center gap-2 flex-shrink-0 z-20 relative">
-        {/* Window Close Button */}
-        <div 
-            className="no-drag flex-shrink-0 p-1 text-gray-400 hover:text-red-500 hover:bg-slate-200 rounded-md cursor-pointer transition-colors"
-            onClick={handleClose}
-            title="Close Window"
-        >
-            <MdClose size={14} />
-        </div>
+        {/* Window Close Button - 圆形深灰色背景，侧边栏打开时隐藏 */}
+        {!sidebarOpen && (
+          <div 
+              className="no-drag flex-shrink-0 w-4 h-4 flex items-center justify-center bg-gray-500 hover:bg-gray-600 rounded-full cursor-pointer transition-all duration-200"
+              onClick={handleClose}
+              title="Close Window"
+          >
+              <MdClose size={10} className="text-white" />
+          </div>
+        )}
         
         {/* Title / Model Info (Only visible when large window/sidebar visible) */}
         {isLargeWindow && (
@@ -111,13 +119,14 @@ export const ChatboxTitleBar = ({ activePetId, tabs, activeTabId, onTabClick, on
             activeTabId={activeTabId} 
             onTabClick={onTabClick} 
             onCloseTab={onCloseTab} 
+            onCloseAllTabs={onCloseAllTabs}
             onAddTab={onAddTab}
+            onReorderTabs={onReorderTabs}
             compact={true}
         />
       </div>
       
-      {/* Bottom white line that connects with active tab */}
-      <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-white z-0"></div>
+      {/* Bottom line removed for transparent look */}
 
       {/* Right: Share and Sidebar Actions (no-drag for buttons only) */}
       <div className="flex items-center gap-1.5 text-gray-500 flex-shrink-0 z-20 relative pl-1" data-tauri-drag-region>

@@ -39,7 +39,7 @@ const renderIcon = (icon, className = '') => {
 };
 
 /**
- * 单个服务器图标按钮
+ * 单个服务器图标按钮 - Google 风格
  */
 const ServerIconButton = ({ server, isEnabled, onToggle, onContextMenu }) => {
   const [showTooltip, setShowTooltip] = useState(false);
@@ -55,24 +55,28 @@ const ServerIconButton = ({ server, isEnabled, onToggle, onContextMenu }) => {
         onMouseEnter={() => setShowTooltip(true)}
         onMouseLeave={() => setShowTooltip(false)}
         className={`
-          relative p-2 rounded-full flex items-center justify-center
-          transition-colors duration-200
+          relative flex items-center gap-1.5 rounded-full
+          transition-all duration-200 text-sm font-medium
           ${isEnabled 
-            ? 'text-blue-600 bg-blue-100' 
-            : 'text-gray-500 hover:bg-gray-200'
+            ? 'px-3 py-1.5 text-gray-700 bg-gray-300/80 border border-gray-400' 
+            : 'p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent'
           }
         `}
         title={server.name}
       >
-        {renderIcon(server.icon, "text-lg")}
+        {renderIcon(server.icon, "text-base")}
+        {/* 只有启用时显示文字，小屏幕隐藏 */}
+        {isEnabled && (
+          <span className="hidden sm:inline max-w-[60px] truncate">{server.name}</span>
+        )}
         {/* 启用状态指示点 */}
         {isEnabled && (
-          <span className="absolute top-0 right-0 w-2 h-2 bg-green-500 rounded-full border-2 border-white" />
+          <span className="w-1.5 h-1.5 bg-green-500 rounded-full" />
         )}
       </button>
       
-      {/* Tooltip */}
-      {showTooltip && (
+      {/* Tooltip - 未启用时显示 */}
+      {showTooltip && !isEnabled && (
         <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 px-2 py-1 
                       bg-gray-800 text-white text-xs rounded whitespace-nowrap z-50
                       pointer-events-none shadow-lg">

@@ -161,6 +161,19 @@ impl Database {
         // Migration: add is_builtin and is_hidden columns if not exists
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_builtin INTEGER DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_hidden INTEGER DEFAULT 0", []);
+        // Migration: add moods column for dynamic mood/expression support
+        // Stored as JSON array e.g. ["normal", "smile", "angry", "thinking"]
+        let _ = conn.execute("ALTER TABLE skins ADD COLUMN moods TEXT", []);
+        // Migration: set default moods for existing skins without moods
+        let _ = conn.execute(
+            "UPDATE skins SET moods = '[\"normal\", \"smile\", \"angry\", \"thinking\"]' WHERE moods IS NULL",
+            []
+        );
+        // Migration: fix incorrect moods from previous migration (happy/sad -> smile/thinking)
+        let _ = conn.execute(
+            "UPDATE skins SET moods = '[\"normal\", \"smile\", \"angry\", \"thinking\"]' WHERE moods LIKE '%happy%' OR moods LIKE '%sad%'",
+            []
+        );
 
         Ok(())
     }

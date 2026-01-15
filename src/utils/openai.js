@@ -2,6 +2,7 @@ import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { callLLM, callLLMStream, fetchModels as llmFetchModels } from './llm/index.js';
+import { detectMood as detectMoodDynamic, DEFAULT_MOODS, createMoodSchema } from './moodDetector.js';
 
 // 根据 apiFormat 获取默认 URL（用于辅助函数）
 // 注意：这些辅助函数使用 OpenAI SDK，所以 gemini_official 走 OpenAI 兼容端点
@@ -43,6 +44,7 @@ const StructuredResponseSchema = z.object({
   mood: z.enum(["angry", "normal", "smile"]),
 });
 
+// 保留静态 MoodSchema 用于向后兼容
 const MoodSchema = z.object({
   mood: z.enum(["angry", "normal", "smile"]),
 });
@@ -55,97 +57,29 @@ const isGeminiFormat = (apiFormat) => {
   return apiFormat === 'gemini_official' || apiFormat === 'gemini';
 };
 
-// 独立的情绪判断函数 - 基于用户问题判断情绪
-const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL) => {
-  console.log('[detectMood] Starting mood detection based on user question');
+/**
+ * 情绪判断函数 - 支持动态表情注入
+ * @param {string} userQuestion - 用户消息
+ * @param {string} apiFormat - API 格式
+ * @param {string} apiKey - API 密钥
+ * @param {string} model - 模型名称
+ * @param {string} baseURL - API 基础 URL
+ * @param {string[]} availableMoods - 可用表情列表（可选，默认使用 DEFAULT_MOODS）
+ * @returns {Promise<string>} 表情名称
+ */
+const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL, availableMoods = null) => {
+  // 使用新的动态情绪检测器
+  const moods = availableMoods || DEFAULT_MOODS;
   
-  // 基于用户问题判断情绪的消息
-  const moodMessages = [
-    { 
-      role: "system", 
-      content: "Based on the user's message, determine what mood/emotion the assistant should show when responding. Choose exactly one from: 'angry' (for complaints, frustration), 'normal' (for neutral questions), 'smile' (for happy, grateful, or friendly messages). Return only JSON: {\"mood\": \"...\"}." 
-    },
-    {
-      role: "user",
-      content: userQuestion
-    }
-  ];
-
-  try {
-    // 对于 Gemini API，使用 Rust 后端调用以绕过浏览器 CORS 限制
-    if (isGeminiFormat(apiFormat)) {
-      console.log('[detectMood] Using Rust backend for Gemini API');
-      const result = await callLLM({
-        messages: moodMessages,
-        apiFormat,
-        apiKey,
-        model,
-        baseUrl: baseURL === "default" ? undefined : baseURL,
-        options: { temperature: 0.1 }
-      });
-      
-      const content = (result.content || "").toLowerCase();
-      console.log('[detectMood] Gemini response:', content);
-      if (content.includes("angry")) return "angry";
-      if (content.includes("smile")) return "smile";
-      return "normal";
-    }
-    
-    // 对于其他 API，使用 OpenAI SDK（支持结构化输出）
-    let url = baseURL;
-    if (url === "default") {
-      url = getDefaultUrl(apiFormat);
-    } else {
-      // 只有当 URL 不包含 /v1 时才添加
-      if (!url.includes('/v1')) {
-        if(url.slice(-1) == "/") {
-          url += 'v1';
-        } else {
-          url += '/v1';
-        }
-      }
-    }
-    
-    console.log('[detectMood] Using URL:', url);
-
-    const openai = new OpenAI({
-      apiKey: apiKey,
-      baseURL: url,
-      dangerouslyAllowBrowser: true,
-    });
-
-    if (notSupportedModels.includes(model)) {
-      console.log('[detectMood] Using non-structured output path for model:', model);
-      // 不支持结构化输出，使用普通对话并解析
-      const completion = await openai.chat.completions.create({
-        model: model,
-        messages: sanitizeMessages(moodMessages),
-        stream: false
-      });
-      const content = completion.choices[0]?.message?.content?.toLowerCase() || "";
-      console.log('[detectMood] Raw response:', content);
-      if (content.includes("angry")) return "angry";
-      if (content.includes("smile")) return "smile";
-      return "normal";
-    } else {
-      console.log('[detectMood] Using structured output path for model:', model);
-      // 支持结构化输出
-      const completion = await openai.beta.chat.completions.parse({
-        model: model,
-        messages: sanitizeMessages(moodMessages),
-        response_format: zodResponseFormat(MoodSchema, "mood_response"),
-      });
-      const result = completion.choices[0]?.message?.parsed?.mood || "normal";
-      console.log('[detectMood] Structured output result:', result);
-      return result;
-    }
-  } catch (error) {
-    console.warn("[detectMood] Mood detection failed, defaulting to normal:", error);
-    return "normal";
-  }
-};
-
-export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL, options = {}) => {
+  console.log('[detectMood] Using dynamic mood detector with moods:', moods);
+  
+  return detectMoodDynamic(userQuestion, moods, {
+    apiFormat,
+    apiKey,
+    model,
+    baseURL
+  });
+};export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL, options = {}) => {
   // Support object argument (legacy/migration support)
   if (!Array.isArray(messages) && typeof messages === 'object' && messages.messages) {
     const params = messages;
@@ -192,9 +126,9 @@ export const callOpenAILib = async (messages, apiFormat, apiKey, model, baseURL,
 };
 
 export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, baseURL, onChunk, abortSignal, options = {}) => {
-  const { hasMood = true, enableSearch = false, conversationId = 'default' } = options;
+  const { hasMood = true, enableSearch = false, conversationId = 'default', availableMoods = null } = options;
   
-  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'enableSearch:', enableSearch, 'options:', options);
+  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'enableSearch:', enableSearch, 'availableMoods:', availableMoods);
   
   // 从 messages 中提取用户最后一条消息
   const userMessages = messages.filter(m => m.role === 'user');
@@ -206,16 +140,17 @@ export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, ba
   console.log('[callOpenAILibStream] userQuestion for mood:', userQuestion);
   
   // 只有启用情绪时才启动并发的情绪判断（基于用户问题）
+  // 支持动态表情列表注入
   let moodPromise;
   if (hasMood && userQuestion) {
-    console.log('[callOpenAILibStream] Starting mood detection...');
-    moodPromise = detectMood(userQuestion, apiFormat, apiKey, model, baseURL).catch((e) => {
+    console.log('[callOpenAILibStream] Starting mood detection with moods:', availableMoods || 'default');
+    moodPromise = detectMood(userQuestion, apiFormat, apiKey, model, baseURL, availableMoods).catch((e) => {
       console.warn('[callOpenAILibStream] Mood detection failed:', e);
-      return "normal";
+      return availableMoods?.[0] || "normal";
     });
   } else {
     console.log('[callOpenAILibStream] Skipping mood detection, hasMood:', hasMood, 'userQuestion:', !!userQuestion);
-    moodPromise = Promise.resolve("normal");
+    moodPromise = Promise.resolve(availableMoods?.[0] || "normal");
   }
 
   // 使用统一的 LLM 适配层

@@ -7,6 +7,32 @@ import hljs from 'highlight.js';
 import 'highlight.js/styles/atom-one-dark.css'; // 引入暗色主题
 import { LiveToolCalls, ToolCallHistory } from './ToolCallDisplay';
 
+// 紧凑 Markdown 样式（行间距、段间距大幅缩小）
+const CompactMarkdownStyles = () => (
+  <style>{`
+    .message-markdown p { margin: 0.1em 0 !important; }
+    .message-markdown h1, 
+    .message-markdown h2, 
+    .message-markdown h3, 
+    .message-markdown h4, 
+    .message-markdown h5, 
+    .message-markdown h6 { margin: 0.3em 0 0.1em 0 !important; }
+    .message-markdown ul, 
+    .message-markdown ol { margin: 0.1em 0 !important; padding-left: 1.25em; }
+    .message-markdown li { margin: 0 !important; }
+    .message-markdown li p { margin: 0 !important; }
+    .message-markdown pre { margin: 0.1em 0 !important; }
+    .message-markdown blockquote { margin: 0.1em 0 !important; }
+    .message-markdown > *:first-child { margin-top: 0 !important; }
+    .message-markdown > *:last-child { margin-bottom: 0 !important; }
+    
+    @keyframes cursor-blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0; }
+    }
+  `}</style>
+);
+
 // 自定义链接组件，自动添加 target="_blank"
 const LinkRenderer = ({ href, children, ...props }) => {
   // 如果没有 href，则直接返回 span
@@ -77,7 +103,7 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
   );
 };
 
-import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh, MdOpenInNew, MdPlayCircle, MdAudiotrack, MdInsertDriveFile } from 'react-icons/md';
+import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh, MdOpenInNew, MdPlayCircle, MdAudiotrack, MdInsertDriveFile, MdCallSplit } from 'react-icons/md';
 import { actionType } from '../../context/reducer';
 
 // Helper: get mime type from file extension
@@ -216,7 +242,10 @@ const MessagePartContent = ({ part, isUser }) => {
             <span>{part.text}</span>
         </div>
     ) : (
-        <div className="prose-sm prose-neutral break-words w-full max-w-full">
+        <div 
+          className="prose-sm prose-neutral break-words w-full max-w-full message-markdown"
+          style={{ lineHeight: '1.3' }}
+        >
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={{a: LinkRenderer, code: CodeBlock}}>
                 {part.text}
             </ReactMarkdown>
@@ -336,7 +365,7 @@ const MessagePartContent = ({ part, isUser }) => {
   return null;
 };
 
-const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
+const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTitleBar = true, onBranchFromMessage }) => {
   const stateValue = useStateValue();
   const [state, dispatch] = stateValue || [{}, () => {}];
   const { currentConversationId, liveToolCalls = {} } = state;
@@ -379,6 +408,9 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
   // 🔧 正在恢复滚动位置的标志，防止 handleScroll 干扰
   const isRestoringRef = useRef(false);
   
+  // 🔧 用户模式下的滚动位置记录（实时更新）
+  const userScrollPositionRef = useRef(0);
+  
   // 处理用户滚动事件
   const handleScroll = useCallback(() => {
     if (!scrollContainerRef.current) return;
@@ -400,6 +432,12 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
       // 用户滚动到底部，切换回自动模式
       scrollModeRef.current = 'auto';
     }
+    
+    // 🔧 在 user 模式下实时记录滚动位置
+    if (scrollModeRef.current === 'user') {
+      userScrollPositionRef.current = scrollTop;
+    }
+    
     if (prevMode !== scrollModeRef.current) {
       console.log('[SCROLL] Mode changed:', prevMode, '->', scrollModeRef.current, 'distanceFromBottom:', distanceFromBottom);
     }
@@ -439,7 +477,7 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
   const prevStreamingRef = useRef(streamingContent);
   const savedScrollTopRef = useRef(0);
   
-  // 在渲染前保存滚动位置
+  // 在渲染前保存滚动位置（仅用于 user 模式）
   if (scrollContainerRef.current && prevStreamingRef.current && !streamingContent) {
     savedScrollTopRef.current = scrollContainerRef.current.scrollTop;
     console.log('[SCROLL] Saving scroll position before streaming ends:', savedScrollTopRef.current);
@@ -452,33 +490,49 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
     // 流式内容刚结束
     if (hadContent && !hasContent && isActive) {
       const container = scrollContainerRef.current;
-      const savedPosition = savedScrollTopRef.current;
       const mode = scrollModeRef.current;
       
       if (container) {
-        if (mode === 'user' && savedPosition > 50) {
-          // 用户模式：恢复到保存的位置
-          console.log('[SCROLL] Streaming ended (user mode), will restore to:', savedPosition);
+        if (mode === 'user') {
+          // 用户模式：恢复到用户记录的滚动位置
+          const userPosition = userScrollPositionRef.current;
+          console.log('[SCROLL] Streaming ended (user mode), restoring to:', userPosition);
           isRestoringRef.current = true;
           
-          // 立即设置
-          container.scrollTop = savedPosition;
+          // 立即恢复位置
+          container.scrollTop = userPosition;
           
-          // 多次尝试恢复，因为 DOM 可能还在变化
+          // 多次尝试恢复位置（防止 DOM 变化导致跳转）
           requestAnimationFrame(() => {
-            if (container) container.scrollTop = savedPosition;
+            if (container) container.scrollTop = userPosition;
             requestAnimationFrame(() => {
-              if (container) container.scrollTop = savedPosition;
-              // 延迟重置恢复标志
+              if (container) container.scrollTop = userPosition;
               setTimeout(() => {
+                if (container) container.scrollTop = userPosition;
                 isRestoringRef.current = false;
-              }, 100);
+              }, 50);
             });
           });
         } else {
-          // 自动模式：滚动到底部
-          console.log('[SCROLL] Streaming ended (auto mode), scrolling to bottom');
+          // 自动模式：多次强制滚动到底部，确保不会跳回
+          console.log('[SCROLL] Streaming ended (auto mode), force scrolling to bottom');
+          isRestoringRef.current = true;
+          
+          // 立即滚动到底部
           container.scrollTop = container.scrollHeight;
+          
+          // 多次尝试确保滚动到底部（防止 DOM 变化导致跳回）
+          requestAnimationFrame(() => {
+            if (container) container.scrollTop = container.scrollHeight;
+            requestAnimationFrame(() => {
+              if (container) container.scrollTop = container.scrollHeight;
+              // 再延迟一次确保
+              setTimeout(() => {
+                if (container) container.scrollTop = container.scrollHeight;
+                isRestoringRef.current = false;
+              }, 50);
+            });
+          });
         }
       }
     }
@@ -748,8 +802,9 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
     <div 
         ref={scrollContainerRef}
         onScroll={handleScroll}
-        className="flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh]"
+        className={`flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh] ${!showTitleBar ? 'pt-11' : 'pt-2'}`}
     >
+        <CompactMarkdownStyles />
         {Array.isArray(messages) && messages.map((msg, index) => {
         if (!msg) return null; // Skip null/undefined messages
         const isUser = msg.role === 'user';
@@ -762,7 +817,7 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
         return (
           <div
             key={index}
-            className={`flex flex-col gap-2 mb-2 w-full ${isUser ? 'items-end' : 'items-start'} ${index === 0 ? 'mt-4' : ''}`}
+            className={`flex flex-col gap-2 mb-2 w-full ${isUser ? 'items-end' : 'items-start'}`}
           >
             {/* 显示工具调用历史 (仅 assistant 消息) */}
             {!isUser && msg.toolCallHistory && msg.toolCallHistory.length > 0 && (
@@ -831,6 +886,13 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
                             <MdRefresh size={12} />
                         </button>
                         <button
+                            onClick={() => onBranchFromMessage?.(conversationId, index)}
+                            className="p-1 text-gray-400 hover:text-purple-500 transition-colors rounded"
+                            title="Branch from here"
+                        >
+                            <MdCallSplit size={12} />
+                        </button>
+                        <button
                             onClick={() => handleDeletePart(index, partIndex)}
                             className="p-1 text-gray-400 hover:text-red-500 transition-colors rounded"
                             title="Delete"
@@ -862,14 +924,25 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
       {/* ✅ Streaming Reply Area */}
       {streamingContent && (
         <div className="flex mb-4 justify-start">
-            <div className="rounded-2xl px-4 py-2 whitespace-pre-wrap bg-transparent text-left text-sm" style={{ maxWidth: '100%' }}>
-                <div className="prose-sm prose-neutral break-words w-full max-w-full">
+            <div className="whitespace-pre-wrap bg-transparent text-left text-sm" style={{ maxWidth: '100%' }}>
+                <div 
+                  className="prose-sm prose-neutral break-words w-full max-w-full message-markdown"
+                  style={{ lineHeight: '1.3' }}
+                >
                     <ReactMarkdown
                         remarkPlugins={[remarkGfm]}
                         components={{a: LinkRenderer, code: CodeBlock}}
                     >
                         {streamingContent}
                     </ReactMarkdown>
+                    {/* 闪烁光标 */}
+                    <span 
+                      className="inline-block w-0.5 h-4 bg-gray-600 ml-0.5 align-middle"
+                      style={{ 
+                        animation: 'cursor-blink 0.8s ease-in-out infinite',
+                        verticalAlign: 'text-bottom'
+                      }} 
+                    />
                 </div>
             </div>
         </div>
@@ -878,8 +951,8 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive }) => {
       {/* ✅ 额外渲染：不属于 userMessages，仅根据 isThinking */}
       {isThinking && !streamingContent && messages?.length > 0 && messages[messages.length - 1].role === "user" && (
         <div className="flex mb-4 justify-start">
-          <div className="rounded-2xl px-4 py-2 whitespace-pre-wrap bg-transparent text-left text-sm animate-pulse italic text-gray-400">
-            Thinking……
+          <div className="flex items-center justify-center px-2 py-2">
+            <div className="w-3 h-3 bg-black rounded-full animate-thinking-pulse" />
           </div>
         </div>
       )}
