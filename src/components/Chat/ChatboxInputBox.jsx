@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain } from "react-icons/fa6";
+import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera } from "react-icons/fa6";
 import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { promptSuggestion, callOpenAILib, callOpenAILibStream, longTimeMemory, processMemory } from '../../utils/openai';
@@ -12,6 +12,7 @@ import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
 import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
+import { listen } from '@tauri-apps/api/event';
 
 // ===== 模块级别全局变量 =====
 // 存储 Preferences 中的默认值，所有组件实例共享
@@ -133,7 +134,7 @@ const processMessagesForLLM = async (messages) => {
   return processedMessages;
 };
 
-export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
+export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, activeTabId }) => {
   // 会话 ID ref（需要先声明，供其他地方引用）
   const conversationIdRef = useRef(null);
   
@@ -211,6 +212,9 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
   let reply = null;
   let thisModel = null;
   let _userText = null;
+
+  // ============ 截图功能状态 ============
+  // 截图功能现在使用独立窗口，不再需要本地选择器状态
 
   // 获取当前模型的 API 格式
   const [currentApiFormat, setCurrentApiFormat] = useState('openai_compatible');
@@ -338,6 +342,80 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
     console.log('[MCP] Edit icon for server:', server.name);
     // 可以通过 IPC 打开 MCP 设置窗口
     tauri.openMcpSettings();
+  }, []);
+
+  // ============ 截图功能 ============
+  
+  // 截图按钮点击处理 - 调用系统截图，Rust端会自动显示选择器窗口
+  const handleScreenshot = useCallback(async () => {
+    try {
+      console.log('[Screenshot] Starting screenshot...');
+      await tauri.takeScreenshot();
+      // 截图完成后，Rust端会自动打开 screenshot-prompt 窗口
+      // 用户选择后会通过 screenshot-with-prompt 事件发送结果
+    } catch (err) {
+      if (err.includes?.('cancelled') || err === 'Screenshot cancelled by user') {
+        console.log('[Screenshot] Cancelled by user');
+      } else {
+        console.error('[Screenshot] Failed:', err);
+      }
+    }
+  }, []);
+
+  // 监听截图选择结果事件
+  useEffect(() => {
+    let unlisten = null;
+    let cancelled = false;
+    
+    const setup = async () => {
+      const unlistenFn = await listen('screenshot-with-prompt', (event) => {
+        const { prompt, promptName, screenshot } = event.payload;
+        console.log('[Screenshot] Received selection:', promptName || 'Direct send');
+        
+        if (!screenshot) return;
+        
+        // 添加截图到附件
+        setAttachments(prev => [...prev, {
+          type: 'image_url',
+          url: screenshot.data,
+          path: screenshot.path,
+          name: screenshot.name,
+          mime_type: 'image/png',
+          data: screenshot.data
+        }]);
+        
+        // 如果有 prompt，设置文本并自动发送
+        if (prompt) {
+          setUserText(prompt);
+          // 延迟触发发送
+          setTimeout(() => {
+            if (inputRef.current) {
+              const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+              inputRef.current.dispatchEvent(enterEvent);
+            }
+          }, 100);
+        } else {
+          // 无 prompt，聚焦输入框让用户添加文字
+          setTimeout(() => {
+            inputRef.current?.focus();
+          }, 50);
+        }
+      });
+      
+      // 如果在 setup 完成前组件已卸载，立即清理
+      if (cancelled) {
+        unlistenFn();
+      } else {
+        unlisten = unlistenFn;
+      }
+    };
+    
+    setup();
+    
+    return () => {
+      cancelled = true;
+      if (unlisten) unlisten();
+    };
   }, []);
 
   // 修改后的：点击按钮时复制对话内容
@@ -733,30 +811,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
           const apiConfig = modelConfig || assistant;
           const { modelName, modelApiKey, modelUrl, apiFormat, modelProvider } = apiConfig;
           
-          // 获取 skin 的 moods 列表（动态表情支持）
-          let availableMoods = null;
-          if (imageName) {
-            try {
-              // 处理 custom:skinId 格式
-              const skinName = imageName.startsWith('custom:') ? null : imageName;
-              const skinId = imageName.startsWith('custom:') ? imageName.split(':')[1] : null;
-              
-              let skin = null;
-              if (skinId) {
-                skin = await tauri.getSkin(skinId);
-              } else if (skinName) {
-                skin = await tauri.getSkinByName(skinName);
-              }
-              
-              if (skin && skin.moods && skin.moods.length > 0) {
-                availableMoods = skin.moods;
-                console.log('[ChatboxInputBox] Loaded skin moods:', availableMoods);
-              }
-            } catch (e) {
-              console.warn('[ChatboxInputBox] Failed to load skin moods:', e);
-            }
-          }
-          
           setPetInfo({ 
             _id, 
             name, 
@@ -766,8 +820,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
             modelProvider, 
             modelUrl, 
             apiFormat, 
-            hasMood: computedHasMood,
-            availableMoods
+            hasMood: computedHasMood
           });
           
           // 更新当前 API 格式，用于 MCP 工具转换
@@ -856,28 +909,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
             const apiConfig = modelConfig || assistant;
             const { modelName, modelApiKey, modelUrl, apiFormat, modelProvider } = apiConfig;
             
-            // 获取 skin 的 moods 列表（动态表情支持）
-            let availableMoods = null;
-            if (imageName) {
-              try {
-                const skinName = imageName.startsWith('custom:') ? null : imageName;
-                const skinId = imageName.startsWith('custom:') ? imageName.split(':')[1] : null;
-                
-                let skin = null;
-                if (skinId) {
-                  skin = await tauri.getSkin(skinId);
-                } else if (skinName) {
-                  skin = await tauri.getSkinByName(skinName);
-                }
-                
-                if (skin && skin.moods && skin.moods.length > 0) {
-                  availableMoods = skin.moods;
-                }
-              } catch (e) {
-                console.warn('[ChatboxInputBox] Failed to load skin moods on update:', e);
-              }
-            }
-            
             setPetInfo({ 
               _id, 
               name, 
@@ -887,8 +918,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen }) => {
               modelProvider, 
               modelUrl, 
               apiFormat, 
-              hasMood: computedHasMood,
-              availableMoods
+              hasMood: computedHasMood
             });
             
             setCurrentApiFormat(getApiFormat(apiConfig));
@@ -1447,10 +1477,9 @@ When using tools, please follow these guidelines:
             });
         },
         controller.signal, // Pass the signal
-        { 
+                { 
           hasMood: petInfo.hasMood !== false, 
-          conversationId: sendingConversationId,
-          availableMoods: petInfo.availableMoods // 传递动态表情列表
+          conversationId: sendingConversationId
         }
       );
       
@@ -1696,6 +1725,18 @@ const handleStop = async () => {
   const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
 
+  // 当窗口可见或切换 Tab 时，自动聚焦输入框
+  useEffect(() => {
+    if (autoFocus && inputRef.current) {
+      // 添加短暂延迟确保窗口完全显示和 DOM 更新完成
+      const timer = setTimeout(() => {
+        inputRef.current?.focus();
+        console.log('[ChatboxInputBox] Auto-focused input, autoFocus:', autoFocus, 'activeTabId:', activeTabId);
+      }, 150);
+      return () => clearTimeout(timer);
+    }
+  }, [autoFocus, activeTabId]);
+
   // Helper function to process a file and add to attachments
   const processFile = async (file) => {
     return new Promise((resolve) => {
@@ -1815,29 +1856,31 @@ const handleStop = async () => {
         )}
         <div className="flex flex-wrap gap-2">
             {attachments.map((att, index) => (
-                <div key={index} className="relative inline-block rounded-md mt-2 bg-gray-100 border border-gray-200 overflow-hidden">
-                    {att.type === 'image_url' ? (
-                        <img src={att.url} alt="Attachment" className="w-20 h-20 object-cover" />
-                    ) : att.mime_type?.startsWith('video/') ? (
-                        <div className="w-20 h-20 bg-black flex items-center justify-center relative">
-                            <video src={att.url} className="w-full h-full object-cover" muted />
-                            <div className="absolute inset-0 flex items-center justify-center bg-black/30">
-                                <span className="text-white text-2xl">▶</span>
+                <div key={index} className="relative inline-block mt-2">
+                    <div className="rounded-md bg-gray-100 border border-gray-200 overflow-hidden">
+                        {att.type === 'image_url' ? (
+                            <img src={att.url} alt="Attachment" className="w-20 h-20 object-cover" />
+                        ) : att.mime_type?.startsWith('video/') ? (
+                            <div className="w-20 h-20 bg-black flex items-center justify-center relative">
+                                <video src={att.url} className="w-full h-full object-cover" muted />
+                                <div className="absolute inset-0 flex items-center justify-center bg-black/30">
+                                    <span className="text-white text-2xl">▶</span>
+                                </div>
                             </div>
-                        </div>
-                    ) : att.mime_type?.startsWith('audio/') ? (
-                        <div className="w-20 h-20 bg-gradient-to-br from-green-400 to-green-600 flex flex-col items-center justify-center p-1">
-                            <span className="text-white text-2xl">🎵</span>
-                            <span className="text-white text-[8px] truncate w-full text-center mt-1">{att.name}</span>
-                        </div>
-                    ) : (
-                        <div className="w-20 h-20 flex flex-col items-center justify-center p-1">
-                            <FaFile className="text-gray-500 text-xl" />
-                            <span className="text-[8px] text-gray-600 truncate w-full text-center mt-1">{att.name}</span>
-                        </div>
-                    )}
+                        ) : att.mime_type?.startsWith('audio/') ? (
+                            <div className="w-20 h-20 bg-gradient-to-br from-green-400 to-green-600 flex flex-col items-center justify-center p-1">
+                                <span className="text-white text-2xl">🎵</span>
+                                <span className="text-white text-[8px] truncate w-full text-center mt-1">{att.name}</span>
+                            </div>
+                        ) : (
+                            <div className="w-20 h-20 flex flex-col items-center justify-center p-1">
+                                <FaFile className="text-gray-500 text-xl" />
+                                <span className="text-[8px] text-gray-600 truncate w-full text-center mt-1">{att.name}</span>
+                            </div>
+                        )}
+                    </div>
                     <MdOutlineCancel 
-                        className="absolute -top-2 -right-2 cursor-pointer z-10 text-gray-500 hover:text-red-500 bg-white rounded-full"
+                        className="absolute -top-1.5 -right-1.5 cursor-pointer z-10 text-gray-500 hover:text-red-500 bg-white rounded-full text-lg"
                         onClick={() => handleRemoveAttachment(index)}
                     />
                 </div>
@@ -1878,6 +1921,15 @@ const handleStop = async () => {
                     className="hidden" 
                     multiple 
                 />
+                
+                {/* 截图按钮 */}
+                <button 
+                    onClick={handleScreenshot}
+                    className="p-2 text-gray-500 hover:bg-gray-400/50 rounded-full transition-colors"
+                    title="Screenshot"
+                >
+                    <FaCamera className="w-4 h-4" />
+                </button>
                 
                 <button
                     onClick={toggleMemory}

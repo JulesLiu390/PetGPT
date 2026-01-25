@@ -2308,9 +2308,19 @@ const SkinForm = ({ onSave, onCancel }) => {
             <div>
               <span className="font-medium text-slate-700">Moods ({Object.keys(config.moods).length}):</span>
               <div className="flex flex-wrap gap-1 mt-1">
-                {Object.entries(config.moods).map(([moodName, imageName], i) => (
-                  <Badge key={i} tone="blue">{i}: {moodName} → {imageName}</Badge>
-                ))}
+                {/* 按标准顺序排序显示 moods */}
+                {(() => {
+                  const MOOD_ORDER = ['normal', 'smile', 'sad', 'shocked', 'thinking', 'idle-1', 'idle-2', 'idle-3'];
+                  const sortedEntries = Object.entries(config.moods).sort((a, b) => {
+                    const indexA = MOOD_ORDER.indexOf(a[0]);
+                    const indexB = MOOD_ORDER.indexOf(b[0]);
+                    // 未知的 mood 放到末尾
+                    return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB);
+                  });
+                  return sortedEntries.map(([moodName, imageName], i) => (
+                    <Badge key={i} tone="blue">{i}: {moodName} → {imageName}</Badge>
+                  ));
+                })()}
               </div>
             </div>
           </div>
@@ -2390,13 +2400,24 @@ const SkinPreview = ({ skinId, skinName, isBuiltin }) => {
  * @param {string} skinId - 皮肤 ID
  * @param {string} skinName - 皮肤名称
  * @param {boolean} isBuiltin - 是否内置皮肤
- * @param {string[]} moods - 动态表情列表 e.g. ["normal", "smile", "angry", "thinking"]
+ * @param {string[]} moods - 动态表情列表 e.g. ["normal", "smile", "sad", "shocked", "thinking"]
  */
 const SkinMoodPreview = ({ skinId, skinName, isBuiltin, moods: propMoods }) => {
-  // 使用传入的 moods，如果没有则使用默认值
-  const moods = propMoods && propMoods.length > 0 ? propMoods : ['normal', 'smile', 'angry', 'thinking'];
-  // 生成显示标签：首字母大写
-  const getMoodLabel = (mood) => mood.charAt(0).toUpperCase() + mood.slice(1);
+  // 固定表情系统: 情绪表情 + 系统状态
+  const DEFAULT_MOODS = ['normal', 'smile', 'sad', 'shocked', 'thinking', 'idle-1', 'idle-2', 'idle-3'];
+  
+  // 内置皮肤总是使用完整的表情列表（因为数据库中的旧记录可能不完整）
+  // 自定义皮肤使用传入的 moods，如果没有则使用默认值
+  const moods = isBuiltin ? DEFAULT_MOODS : (propMoods && propMoods.length > 0 ? propMoods : DEFAULT_MOODS);
+  
+  // 生成显示标签：处理 idle-1 等特殊格式
+  const getMoodLabel = (mood) => {
+    if (mood.startsWith('idle-')) {
+      const num = mood.split('-')[1];
+      return `Idle ${num}`;
+    }
+    return mood.charAt(0).toUpperCase() + mood.slice(1);
+  };
   const [images, setImages] = useState({});
   const [loading, setLoading] = useState(true);
   
@@ -3092,6 +3113,26 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
 const HotkeysPanel = ({ settings, onSettingsChange, onSave, saving }) => {
   if (!settings) return null;
   
+  // 检测平台
+  const isMacOS = typeof navigator !== 'undefined' && (
+    navigator.platform.toUpperCase().indexOf('MAC') >= 0 || 
+    navigator.userAgent.toUpperCase().indexOf('MAC') >= 0
+  );
+  
+  // 单行快捷键设置组件
+  const HotkeyRow = ({ label, name, value }) => (
+    <div className="flex items-center justify-between py-3 border-b border-slate-100 last:border-b-0">
+      <label className="text-sm font-medium text-slate-700 shrink-0 w-32">{label}</label>
+      <div className="flex-1 max-w-xs">
+        <SettingsHotkeyInput
+          name={name}
+          value={value || ""}
+          onChange={onSettingsChange}
+        />
+      </div>
+    </div>
+  );
+  
   return (
     <>
       {/* Title */}
@@ -3102,42 +3143,77 @@ const HotkeysPanel = ({ settings, onSettingsChange, onSave, saving }) => {
       </div>
 
       {/* Content */}
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
-        <div className="space-y-4">
-          <Card title="Global Hotkeys" description="Configure global hotkeys for quick access">
-            <div className="space-y-4">
-              <FormGroup label="Program Hotkey" hint="Show/hide the application">
-                <SettingsHotkeyInput
-                  name="programHotkey"
-                  value={settings.programHotkey || ""}
-                  onChange={onSettingsChange}
-                />
-              </FormGroup>
-              
-              <FormGroup label="Dialog Hotkey" hint="Open quick dialog anywhere">
-                <SettingsHotkeyInput
-                  name="dialogHotkey"
-                  value={settings.dialogHotkey || ""}
-                  onChange={onSettingsChange}
-                />
-              </FormGroup>
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4">
+        <div className="space-y-5">
+          {/* Global Hotkeys Section */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-blue-600 flex items-center justify-center">
+                <FaKeyboard className="w-4 h-4 text-white" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-800">Global Hotkeys</h3>
+                <p className="text-xs text-slate-500">Works anywhere on your system</p>
+              </div>
             </div>
-          </Card>
+            
+            <div className="bg-slate-50 rounded-xl px-4">
+              <HotkeyRow label="Show/Hide App" name="programHotkey" value={settings.programHotkey} />
+              <HotkeyRow label="Quick Dialog" name="dialogHotkey" value={settings.dialogHotkey} />
+            </div>
+          </div>
           
+          {/* Chat Tab Hotkeys Section */}
+          <div>
+            <div className="flex items-center gap-2 mb-3">
+              <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-emerald-500 to-emerald-600 flex items-center justify-center">
+                <svg className="w-4 h-4 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h7" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-slate-800">Chat Tab Hotkeys</h3>
+                <p className="text-xs text-slate-500">Works when chat window is focused</p>
+              </div>
+            </div>
+            
+            <div className="bg-slate-50 rounded-xl px-4">
+              <HotkeyRow label="New Tab" name="newTabHotkey" value={settings.newTabHotkey} />
+              <HotkeyRow label="Close Tab" name="closeTabHotkey" value={settings.closeTabHotkey} />
+              <div className="flex items-center justify-between py-3">
+                <div className="shrink-0 w-32">
+                  <label className="text-sm font-medium text-slate-700">Switch Tab</label>
+                  <p className="text-xs text-slate-400">+ number (1-9)</p>
+                </div>
+                <div className="flex-1 max-w-xs">
+                  <SettingsHotkeyInput
+                    name="switchTabPrefix"
+                    value={settings.switchTabPrefix || ""}
+                    onChange={onSettingsChange}
+                  />
+                  <p className="text-xs text-slate-400 mt-1">
+                    e.g. {isMacOS ? '⌘' : 'Ctrl'} + 1 → first tab
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+          
+          {/* Save Button */}
           <div className="pt-2">
             <Button
               type="button"
               variant="primary"
               disabled={saving}
               onClick={onSave}
-              className="w-full py-3"
+              className="w-full py-2.5"
             >
               {saving ? (
-                <span className="flex items-center gap-2">
+                <span className="flex items-center justify-center gap-2">
                   <FaSpinner className="animate-spin w-4 h-4" />
                   Saving...
                 </span>
-              ) : "Save Settings"}
+              ) : "Save Changes"}
             </Button>
           </div>
         </div>

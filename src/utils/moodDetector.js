@@ -1,124 +1,142 @@
 /**
- * 动态情绪检测器
+ * 固定表情系统
  * 
- * 支持注入式表情管理：
- * - 输入：表情名称数组 ["normal", "happy", "sad"]
- * - Schema：动态生成 z.enum(["normal", "happy", "sad"])
- * - LLM 返回：表情名称 "happy"
- * - 映射：代码转换成数字索引用于加载图片
+ * 表情分为两类：
+ * 1. 情绪表情 (由 LLM 检测): normal, smile, sad, shocked
+ * 2. 系统状态 (由代码控制): thinking, idle-1, idle-2, idle-3
+ * 
+ * 图片命名规则: {角色名}-{表情名}.png
+ * 例如: Jules-normal.png, Jules-smile.png
  */
 
-import { z } from "zod";
-import { zodResponseFormat } from "openai/helpers/zod";
 import { callLLM } from './llm/index.js';
 
-// 默认表情列表（向后兼容）
-export const DEFAULT_MOODS = ["normal", "smile", "angry", "thinking"];
+// ============ 固定表情常量 ============
 
 /**
- * 动态创建情绪 Schema
- * @param {string[]} moods - 表情名称数组 e.g. ["normal", "happy", "sad"]
- * @returns {z.ZodObject} 动态生成的 Zod Schema
+ * 情绪表情 - 由 LLM 检测用户情绪后返回
+ * 这些是 LLM 可以选择的 4 种情绪
  */
-export const createMoodSchema = (moods) => {
-  if (!moods?.length) moods = DEFAULT_MOODS;
-  // 动态生成 enum: z.enum(["normal", "happy", "sad", ...])
-  return z.object({
-    mood: z.enum([moods[0], ...moods.slice(1)])
-  });
+export const EMOTION_MOODS = ["normal", "smile", "sad", "shocked"];
+
+/**
+ * 系统状态 - 由代码逻辑控制，不参与 LLM 检测
+ * - thinking: AI 正在处理
+ * - idle-1/2/3: 待机动画（无对话时随机切换）
+ */
+export const SYSTEM_STATES = ["thinking", "idle-1", "idle-2", "idle-3"];
+
+/**
+ * 所有可用的表情/状态（用于图片加载）
+ */
+export const ALL_MOODS = [...EMOTION_MOODS, ...SYSTEM_STATES];
+
+/**
+ * 默认表情（向后兼容）
+ * @deprecated 使用 EMOTION_MOODS 代替
+ */
+export const DEFAULT_MOODS = EMOTION_MOODS;
+
+// ============ 表情映射（向后兼容） ============
+
+/**
+ * 旧表情名 -> 新表情名 映射
+ * 用于兼容旧的皮肤和数据
+ */
+const MOOD_MIGRATION_MAP = {
+  'angry': 'sad',      // angry 图片临时作为 sad 使用
+  'happy': 'smile',    // happy 映射到 smile
+  'thinking': 'thinking', // 保持
+  'normal': 'normal',  // 保持
 };
 
 /**
- * 表情名称 -> 索引映射（用于加载图片）
- * @param {string[]} moods - 表情列表
- * @param {string} mood - 当前表情名称
- * @returns {number} 索引 (0-based)
+ * 将旧表情名映射到新表情名
+ * @param {string} mood - 可能是旧的表情名
+ * @returns {string} 新的表情名
  */
-export const moodToIndex = (moods, mood) => {
-  const idx = moods.indexOf(mood);
-  return idx >= 0 ? idx : 0;
+export const migrateMoodName = (mood) => {
+  return MOOD_MIGRATION_MAP[mood] || mood;
 };
 
-/**
- * 索引 -> 表情名称映射
- * @param {string[]} moods - 表情列表
- * @param {number} index - 索引
- * @returns {string} 表情名称
- */
-export const indexToMood = (moods, index) => {
-  return (index >= 0 && index < moods.length) ? moods[index] : moods[0];
-};
+// ============ 情绪检测 ============
 
 /**
- * 检测用户情绪
+ * 检测用户情绪（固定 4 选 1）
+ * 
  * @param {string} userMessage - 用户消息
- * @param {string[]} moods - 可用表情列表
  * @param {object} apiConfig - { apiFormat, apiKey, model, baseURL }
- * @returns {Promise<string>} 表情名称
+ * @returns {Promise<string>} 表情名称: "normal" | "smile" | "sad" | "shocked"
  */
-export const detectMood = async (userMessage, moods, apiConfig) => {
-  // 使用默认表情列表（如果未提供）
-  if (!moods?.length) {
-    moods = DEFAULT_MOODS;
-  }
-  
+export const detectMood = async (userMessage, apiConfig) => {
   const { apiFormat, apiKey, model, baseURL } = apiConfig;
   
-  // 动态生成 prompt，直接列出表情名称
-  const moodList = moods.join(', ');
-  const systemPrompt = `You analyze user emotions for a desktop pet assistant.
+  // 针对固定 4 种情绪优化的 prompt - 更强调只返回 JSON
+  const systemPrompt = `You are a mood classifier. Your ONLY job is to output a JSON object.
 
-Available moods: ${moodList}
+Analyze the user's message and determine the appropriate mood for a desktop pet to display.
 
-Based on the user's message, determine what mood/emotion the pet should display.
-Guidelines:
-- "normal": Neutral questions, factual requests, or unclear emotion
-- "happy"/"smile": Joyful, grateful, friendly, praising messages
-- "sad": User is upset, disappointed, or sharing bad news
-- "angry": User is frustrated, complaining harshly, or being rude
-- Use other moods from the list as appropriate based on their names
+Available moods:
+- "normal": Neutral, factual, greetings, unclear emotion
+- "smile": Happy, grateful, excited, good news
+- "sad": Upset, disappointed, worried, bad news
+- "shocked": Surprising, unexpected, unusual
 
-Reply with JSON only: {"mood": "<mood_name>"}`;
+IMPORTANT: You must respond with ONLY this JSON format, nothing else:
+{"mood": "normal"}
+
+Replace "normal" with the appropriate mood. Do not add any explanation or other text.`;
   
-  console.log('[detectMood] Available moods:', moodList);
   console.log('[detectMood] User message preview:', userMessage.slice(0, 50));
   
   try {
     const result = await callLLM({
       messages: [
         { role: "system", content: systemPrompt },
-        { role: "user", content: userMessage }
+        { role: "user", content: `Classify this message's mood: "${userMessage}"` }
       ],
       apiFormat,
       apiKey,
       model,
       baseUrl: baseURL === "default" ? undefined : baseURL,
-      options: { temperature: 0.1, max_tokens: 20 }
+      options: { temperature: 0.1, maxTokens: 30 }  // 使用 maxTokens 而不是 max_tokens
     });
     
     const content = result.content || "";
     console.log('[detectMood] Raw response:', content);
     
     // 解析返回的表情名称
-    let detectedMood = moods[0];
+    let detectedMood = "normal";
     
-    try {
-      // 尝试解析 JSON
-      const parsed = JSON.parse(content);
-      if (parsed.mood && moods.includes(parsed.mood)) {
-        detectedMood = parsed.mood;
-      } else if (parsed.mood) {
-        // 如果返回的 mood 不在列表中，尝试模糊匹配
-        const lowerMood = parsed.mood.toLowerCase();
-        const matched = moods.find(m => m.toLowerCase() === lowerMood);
-        if (matched) {
-          detectedMood = matched;
+    // 首先尝试提取 JSON（可能被其他文本包围）
+    const jsonMatch = content.match(/\{[\s\S]*?"mood"[\s\S]*?\}/);
+    if (jsonMatch) {
+      try {
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.mood) {
+          const lowerMood = parsed.mood.toLowerCase();
+          const matched = EMOTION_MOODS.find(m => m.toLowerCase() === lowerMood);
+          if (matched) {
+            detectedMood = matched;
+          } else {
+            // 尝试使用迁移映射
+            const migrated = migrateMoodName(lowerMood);
+            if (EMOTION_MOODS.includes(migrated)) {
+              detectedMood = migrated;
+            }
+          }
         }
+      } catch {
+        // JSON 解析失败，继续尝试其他方法
       }
-    } catch {
-      // 如果不是 JSON，直接匹配表情名称
+    }
+    
+    // 如果 JSON 解析失败，直接在文本中查找表情关键词
+    if (detectedMood === "normal" && !jsonMatch) {
       const lowerContent = content.toLowerCase();
-      for (const m of moods) {
+      // 按优先级顺序检查（避免 "normal" 误匹配）
+      const priorityOrder = ["shocked", "smile", "sad", "normal"];
+      for (const m of priorityOrder) {
         if (lowerContent.includes(m.toLowerCase())) {
           detectedMood = m;
           break;
@@ -126,43 +144,64 @@ Reply with JSON only: {"mood": "<mood_name>"}`;
       }
     }
     
-    console.log('[detectMood] Result:', detectedMood, '-> index:', moodToIndex(moods, detectedMood));
+    console.log('[detectMood] Result:', detectedMood);
     return detectedMood;
     
   } catch (e) {
     console.warn('[detectMood] Error:', e);
-    return moods[0];
+    return "normal";
   }
 };
 
-/**
- * 为支持结构化输出的模型创建 response_format
- * @param {string[]} moods - 可用表情列表
- * @returns {object} OpenAI response_format
- */
-export const createMoodResponseFormat = (moods) => {
-  const schema = createMoodSchema(moods);
-  return zodResponseFormat(schema, "mood_response");
-};
+// ============ 辅助函数 ============
 
 /**
- * 验证表情名称是否有效
+ * 验证表情名称是否有效（情绪表情）
  * @param {string} mood - 表情名称
- * @param {string[]} moods - 可用表情列表
  * @returns {boolean}
  */
-export const isValidMood = (mood, moods) => {
-  if (!moods?.length) moods = DEFAULT_MOODS;
-  return moods.includes(mood);
+export const isValidEmotionMood = (mood) => {
+  return EMOTION_MOODS.includes(mood);
 };
 
 /**
- * 获取安全的表情名称（如果无效则返回第一个）
+ * 验证是否是系统状态
+ * @param {string} state - 状态名称
+ * @returns {boolean}
+ */
+export const isSystemState = (state) => {
+  return SYSTEM_STATES.includes(state);
+};
+
+/**
+ * 验证表情/状态名称是否有效（包括情绪和系统状态）
+ * @param {string} mood - 表情/状态名称
+ * @returns {boolean}
+ */
+export const isValidMood = (mood) => {
+  return ALL_MOODS.includes(mood);
+};
+
+/**
+ * 获取安全的表情名称（如果无效则返回 normal）
  * @param {string} mood - 表情名称
- * @param {string[]} moods - 可用表情列表
  * @returns {string}
  */
-export const getSafeMood = (mood, moods) => {
-  if (!moods?.length) moods = DEFAULT_MOODS;
-  return isValidMood(mood, moods) ? mood : moods[0];
+export const getSafeMood = (mood) => {
+  // 先尝试迁移映射
+  const migrated = migrateMoodName(mood);
+  if (isValidMood(migrated)) {
+    return migrated;
+  }
+  return "normal";
+};
+
+/**
+ * 获取随机待机状态
+ * @returns {string} "idle-1" | "idle-2" | "idle-3"
+ */
+export const getRandomIdleState = () => {
+  const idleStates = ["idle-1", "idle-2", "idle-3"];
+  const randomIndex = Math.floor(Math.random() * idleStates.length);
+  return idleStates[randomIndex];
 };

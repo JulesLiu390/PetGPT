@@ -55,3 +55,8 @@ lazy_static = "1.4"
 
 # Window effects
 window-vibrancy = "0.5"
+
+# macOS specific
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+objc = "0.2"

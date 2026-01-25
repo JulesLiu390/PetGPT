@@ -162,16 +162,24 @@ impl Database {
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_builtin INTEGER DEFAULT 0", []);
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_hidden INTEGER DEFAULT 0", []);
         // Migration: add moods column for dynamic mood/expression support
-        // Stored as JSON array e.g. ["normal", "smile", "angry", "thinking"]
+        // 固定表情系统: ["normal", "smile", "sad", "shocked", "thinking"]
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN moods TEXT", []);
         // Migration: set default moods for existing skins without moods
+        // 新默认表情: normal, smile, sad, shocked, thinking
         let _ = conn.execute(
-            "UPDATE skins SET moods = '[\"normal\", \"smile\", \"angry\", \"thinking\"]' WHERE moods IS NULL",
+            "UPDATE skins SET moods = '[\"normal\", \"smile\", \"sad\", \"shocked\", \"thinking\"]' WHERE moods IS NULL",
             []
         );
-        // Migration: fix incorrect moods from previous migration (happy/sad -> smile/thinking)
+        // Migration: update old mood names to new fixed system
+        // angry -> sad (保持兼容，angry 图片用于 sad)
         let _ = conn.execute(
-            "UPDATE skins SET moods = '[\"normal\", \"smile\", \"angry\", \"thinking\"]' WHERE moods LIKE '%happy%' OR moods LIKE '%sad%'",
+            "UPDATE skins SET moods = REPLACE(moods, '\"angry\"', '\"sad\"') WHERE moods LIKE '%angry%'",
+            []
+        );
+        // Migration: add shocked if missing (for old skins)
+        // 如果皮肤只有旧的 4 个表情，添加 shocked
+        let _ = conn.execute(
+            "UPDATE skins SET moods = REPLACE(moods, ']', ', \"shocked\"]') WHERE moods NOT LIKE '%shocked%' AND moods IS NOT NULL",
             []
         );
 

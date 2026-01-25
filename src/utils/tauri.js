@@ -82,6 +82,11 @@ export const selectDirectory = async () => {
 
 // ==================== Settings ====================
 
+// 检测平台，决定默认修饰键
+const isMacOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0 || 
+                navigator.userAgent.toUpperCase().indexOf('MAC') >= 0;
+const MOD_KEY = isMacOS ? 'Cmd' : 'Ctrl';
+
 const DEFAULT_SETTINGS = {
   windowSize: 'medium',
   defaultAssistant: '',
@@ -90,6 +95,18 @@ const DEFAULT_SETTINGS = {
   launchAtStartup: false,
   theme: 'light',
   moodResetDelay: 30,  // 表情恢复到 normal 的延迟时间（秒）
+  // Chat Tab 快捷键（窗口内快捷键）- 根据平台自动选择 Ctrl/Cmd
+  newTabHotkey: `${MOD_KEY} + N`,
+  closeTabHotkey: `${MOD_KEY} + W`,
+  switchTabPrefix: MOD_KEY,  // 切换标签页前缀，按下此键 + 数字(1-9)切换
+  // 截图快捷 Prompt 配置
+  screenshotPrompts: [
+    { id: 'ocr', name: 'OCR 识别', prompt: '请识别图片中的所有文字，保持原有格式输出', icon: '🔍' },
+    { id: 'describe', name: '描述图片', prompt: '请详细描述这张图片的内容', icon: '📝' },
+    { id: 'code', name: '分析代码', prompt: '请分析这段代码截图，指出潜在问题并给出改进建议', icon: '💻' },
+    { id: 'translate', name: '翻译文字', prompt: '请翻译图片中的文字为中文', icon: '🌐' },
+  ],
+  defaultScreenshotPrompt: null, // null = 显示选择器, 'id' = 直接使用该 prompt
 };
 
 export const getSettings = async () => {
@@ -331,6 +348,9 @@ export const deleteSkin = (id) => invoke('delete_skin', { id });
 export const hideSkin = (id) => invoke('hide_skin', { id });
 export const restoreSkin = (id) => invoke('restore_skin', { id });
 export const importSkin = (jsonPath) => invoke('import_skin', { jsonPath });
+export const validateSkinFolder = (folderPath) => invoke('validate_skin_folder', { folderPath });
+export const importSkinFromFolder = (folderPath, skinName, author = null, description = null) => 
+  invoke('import_skin_from_folder', { folderPath, skinName, author, description });
 export const exportSkin = (skinId, exportDir) => invoke('export_skin', { skinId, exportDir });
 export const readSkinImage = (skinId, mood) => invoke('read_skin_image', { skinId, mood });
 
@@ -396,6 +416,25 @@ export const saveFile = ({ fileName, fileData, mimeType }) => invoke('save_file'
 export const readUpload = (fileName) => invoke('read_upload', { fileName });
 export const getUploadsPath = () => invoke('get_uploads_path');
 
+// ==================== Screenshot ====================
+
+/**
+ * 打开截图选择窗口（全屏透明覆盖层）
+ * 用户拖动选择区域后，需要调用 captureRegion 来实际截图
+ */
+export const takeScreenshot = () => invoke('take_screenshot');
+
+/**
+ * 截取指定区域的屏幕
+ * @param {number} x - 区域左上角 X 坐标（逻辑坐标）
+ * @param {number} y - 区域左上角 Y 坐标（逻辑坐标）
+ * @param {number} width - 区域宽度
+ * @param {number} height - 区域高度
+ * @returns {Promise<{imageBase64: string, path: string, name: string}>} 截图结果
+ */
+export const captureRegion = (x, y, width, height) => 
+  invoke('capture_region', { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) });
+
 // ==================== Window Management ====================
 
 export const showChatWindow = () => invoke('show_chat_window');
@@ -422,6 +461,20 @@ export const openManageWindowWithTab = (tab) => invoke('open_manage_window_with_
 export const hideManageWindow = () => invoke('hide_manage_window');
 export const hideSettingsWindow = () => invoke('hide_settings_window');
 
+/**
+ * 隐藏指定窗口
+ * @param {string} label - 窗口标签
+ */
+export const hideWindow = async (label) => {
+  const { getCurrentWindow, Window } = await import('@tauri-apps/api/window');
+  if (label) {
+    const win = new Window(label);
+    await win.hide();
+  } else {
+    await getCurrentWindow().hide();
+  }
+};
+
 // Shortcuts
 export const updateWindowSizePreset = (preset) => invoke('update_window_size_preset', { preset });
 export const updateShortcuts = (programHotkey, dialogHotkey) => 
@@ -434,6 +487,14 @@ export const updatePreferences = (preferences) => invoke('update_preferences', {
 
 export const sendCharacterId = (id) => 
   invoke('emit_to_all', { event: 'character-id', payload: id });
+
+/**
+ * 广播事件到所有窗口
+ * @param {string} event - 事件名称
+ * @param {any} payload - 事件数据
+ */
+export const emitToAll = (event, payload) => 
+  invoke('emit_to_all', { event, payload });
 
 // 获取待处理的 character-id（用于 chat 窗口启动时检查）
 export const getPendingCharacterId = () => invoke('get_pending_character_id');
@@ -742,6 +803,8 @@ const tauri = {
   hideSkin,
   restoreSkin,
   importSkin,
+  validateSkinFolder,
+  importSkinFromFolder,
   exportSkin,
   readSkinImage,
   

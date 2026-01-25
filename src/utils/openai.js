@@ -2,7 +2,10 @@ import OpenAI from "openai/index.mjs";
 import { zodResponseFormat } from "openai/helpers/zod";
 import { z } from "zod";
 import { callLLM, callLLMStream, fetchModels as llmFetchModels } from './llm/index.js';
-import { detectMood as detectMoodDynamic, DEFAULT_MOODS, createMoodSchema } from './moodDetector.js';
+import { detectMood as detectMoodFixed, EMOTION_MOODS, getSafeMood } from './moodDetector.js';
+
+// 向后兼容：导出 DEFAULT_MOODS
+export { EMOTION_MOODS as DEFAULT_MOODS } from './moodDetector.js';
 
 // 根据 apiFormat 获取默认 URL（用于辅助函数）
 // 注意：这些辅助函数使用 OpenAI SDK，所以 gemini_official 走 OpenAI 兼容端点
@@ -58,22 +61,18 @@ const isGeminiFormat = (apiFormat) => {
 };
 
 /**
- * 情绪判断函数 - 支持动态表情注入
+ * 情绪判断函数 - 使用固定 4 种情绪
  * @param {string} userQuestion - 用户消息
  * @param {string} apiFormat - API 格式
  * @param {string} apiKey - API 密钥
  * @param {string} model - 模型名称
  * @param {string} baseURL - API 基础 URL
- * @param {string[]} availableMoods - 可用表情列表（可选，默认使用 DEFAULT_MOODS）
- * @returns {Promise<string>} 表情名称
+ * @returns {Promise<string>} 表情名称: "normal" | "smile" | "sad" | "shocked"
  */
-const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL, availableMoods = null) => {
-  // 使用新的动态情绪检测器
-  const moods = availableMoods || DEFAULT_MOODS;
+const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL) => {
+  console.log('[detectMood] Using fixed mood detector (4 emotions)');
   
-  console.log('[detectMood] Using dynamic mood detector with moods:', moods);
-  
-  return detectMoodDynamic(userQuestion, moods, {
+  return detectMoodFixed(userQuestion, {
     apiFormat,
     apiKey,
     model,
@@ -126,9 +125,9 @@ const detectMood = async (userQuestion, apiFormat, apiKey, model, baseURL, avail
 };
 
 export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, baseURL, onChunk, abortSignal, options = {}) => {
-  const { hasMood = true, enableSearch = false, conversationId = 'default', availableMoods = null } = options;
+  const { hasMood = true, enableSearch = false, conversationId = 'default' } = options;
   
-  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'enableSearch:', enableSearch, 'availableMoods:', availableMoods);
+  console.log('[callOpenAILibStream] hasMood option:', hasMood, 'enableSearch:', enableSearch);
   
   // 从 messages 中提取用户最后一条消息
   const userMessages = messages.filter(m => m.role === 'user');
@@ -139,18 +138,17 @@ export const callOpenAILibStream = async (messages, apiFormat, apiKey, model, ba
   
   console.log('[callOpenAILibStream] userQuestion for mood:', userQuestion);
   
-  // 只有启用情绪时才启动并发的情绪判断（基于用户问题）
-  // 支持动态表情列表注入
+  // 只有启用情绪时才启动并发的情绪判断（使用固定 4 种情绪）
   let moodPromise;
   if (hasMood && userQuestion) {
-    console.log('[callOpenAILibStream] Starting mood detection with moods:', availableMoods || 'default');
-    moodPromise = detectMood(userQuestion, apiFormat, apiKey, model, baseURL, availableMoods).catch((e) => {
+    console.log('[callOpenAILibStream] Starting mood detection (fixed 4 emotions)');
+    moodPromise = detectMood(userQuestion, apiFormat, apiKey, model, baseURL).catch((e) => {
       console.warn('[callOpenAILibStream] Mood detection failed:', e);
-      return availableMoods?.[0] || "normal";
+      return "normal";
     });
   } else {
     console.log('[callOpenAILibStream] Skipping mood detection, hasMood:', hasMood, 'userQuestion:', !!userQuestion);
-    moodPromise = Promise.resolve(availableMoods?.[0] || "normal");
+    moodPromise = Promise.resolve("normal");
   }
 
   // 使用统一的 LLM 适配层

@@ -57,6 +57,22 @@
         "visible": false,
         "alwaysOnTop": true,
         "acceptFirstMouse": true
+      },
+      {
+        "label": "screenshot-prompt",
+        "title": "Screenshot Prompt",
+        "url": "/#/screenshot-prompt",
+        "width": 800,
+        "height": 600,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "alwaysOnTop": true,
+        "shadow": false,
+        "skipTaskbar": true,
+        "acceptFirstMouse": true,
+        "focus": true
       }
     ],
     "security": {

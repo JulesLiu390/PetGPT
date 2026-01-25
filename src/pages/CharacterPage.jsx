@@ -5,10 +5,73 @@ import { FaPlug } from "react-icons/fa6";
 import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
+import { getSafeMood, EMOTION_MOODS, SYSTEM_STATES, ALL_MOODS, getRandomIdleState } from '../utils/moodDetector';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
 const CLICK_TIME_THRESHOLD = 200; // 200ms 内释放视为点击
+
+// ============ 状态系统常量 ============
+
+/**
+ * 角色状态枚举
+ * - active: 活跃状态（有对话时）
+ * - idle: 待机状态（无对话一段时间后）
+ * - thinking: 思考状态（AI 处理中）
+ */
+const CHARACTER_STATE = {
+  ACTIVE: 'active',
+  IDLE: 'idle',
+  THINKING: 'thinking',
+};
+
+// 待机相关配置
+const IDLE_TIMEOUT_MS = 30000;      // 30秒无操作进入待机
+const IDLE_ANIMATION_INTERVAL_MS = 5000; // 待机动画切换间隔 5秒
+
+/**
+ * 表情/状态名称到图片文件名的映射
+ * 用于处理新表情系统中某些表情暂时没有对应图片的情况
+ * 
+ * 注意：自定义皮肤如果有对应的 idle 图片，会直接使用
+ * 内置皮肤暂时还没有 idle 图片，会回退到 normal/smile
+ */
+const MOOD_TO_IMAGE_MAP = {
+  // 情绪表情
+  'normal': 'normal',
+  'smile': 'smile',
+  'sad': 'angry',       // sad 暂时用 angry 图片
+  'shocked': 'smile',   // shocked 暂时用 smile 图片
+  // 系统状态
+  'thinking': 'thinking',
+  // idle 状态 - 自定义皮肤应该有这些图片
+  'idle-1': 'idle-1',
+  'idle-2': 'idle-2',
+  'idle-3': 'idle-3',
+};
+
+/**
+ * 内置皮肤的 idle 回退映射（因为内置皮肤没有 idle 图片）
+ */
+const BUILTIN_IDLE_FALLBACK = {
+  'idle-1': 'normal',
+  'idle-2': 'smile',
+  'idle-3': 'normal',
+};
+
+/**
+ * 获取表情对应的图片文件名后缀
+ * @param {string} mood - 表情/状态名称
+ * @param {boolean} isBuiltin - 是否为内置皮肤
+ * @returns {string} 图片文件名后缀（不含连字符前缀）
+ */
+const getMoodImageName = (mood, isBuiltin = false) => {
+  // 内置皮肤的 idle 状态需要回退
+  if (isBuiltin && BUILTIN_IDLE_FALLBACK[mood]) {
+    return BUILTIN_IDLE_FALLBACK[mood];
+  }
+  return MOOD_TO_IMAGE_MAP[mood] || 'normal';
+};
 
 
 
@@ -16,8 +79,31 @@ const CLICK_TIME_THRESHOLD = 200; // 200ms 内释放视为点击
 
 export const Character = () => {
   // window.electron?.testOpen("open -a Calculator");
-  // 用于接收来自主进程的心情更新
-  const [characterMood, setCharacterMood] = useState("normal");
+  
+  // ============ 状态分层管理 ============
+  // 第一层：角色状态（active/idle/thinking）
+  const [characterState, setCharacterState] = useState(CHARACTER_STATE.ACTIVE);
+  // 第二层：情绪表情（normal/smile/sad/shocked）- 仅在 active 状态下有效
+  const [emotionMood, setEmotionMood] = useState("normal");
+  // 第三层：当前待机动画帧（idle-1/idle-2/idle-3）- 仅在 idle 状态下有效
+  const [idleFrame, setIdleFrame] = useState("idle-1");
+  
+  // 计算最终显示的表情/状态（用于图片加载）
+  const getDisplayMood = useCallback(() => {
+    switch (characterState) {
+      case CHARACTER_STATE.THINKING:
+        return 'thinking';
+      case CHARACTER_STATE.IDLE:
+        return idleFrame;
+      case CHARACTER_STATE.ACTIVE:
+      default:
+        return emotionMood;
+    }
+  }, [characterState, emotionMood, idleFrame]);
+  
+  // 兼容旧代码：characterMood 现在是计算属性
+  const characterMood = getDisplayMood();
+  
   // 当前展示的图片路径
   const [imgSrc, setImgSrc] = useState(null);
   // 控制是否显示顶部按钮（传统 onMouseEnter/Leave，作为备用）
@@ -31,9 +117,150 @@ export const Character = () => {
   const [imageName, setImageName] = useState("Jules");
   const [currentPetId, setCurrentPetId] = useState(null);
   
-  // 表情恢复定时器
+  // 表情恢复定时器（情绪 -> normal）
   const moodResetTimerRef = useRef(null);
   const [moodResetDelay, setMoodResetDelay] = useState(30); // 默认 30 秒
+  
+  // 待机相关定时器
+  const idleTimeoutRef = useRef(null);      // 进入待机的定时器
+  const idleAnimationRef = useRef(null);    // 待机动画切换定时器
+  
+  // ============ 状态切换函数 ============
+  
+  /**
+   * 重置待机计时器（有活动时调用）
+   * 使用 ref 来避免闭包陈旧值问题
+   */
+  const resetIdleTimer = useCallback(() => {
+    // 清除待机定时器
+    if (idleTimeoutRef.current) {
+      clearTimeout(idleTimeoutRef.current);
+      idleTimeoutRef.current = null;
+    }
+    // 清除待机动画定时器
+    if (idleAnimationRef.current) {
+      clearInterval(idleAnimationRef.current);
+      idleAnimationRef.current = null;
+    }
+    
+    // 使用函数式更新来获取最新状态
+    setCharacterState(prevState => {
+      // 如果当前是待机状态，切换回活跃状态
+      if (prevState === CHARACTER_STATE.IDLE) {
+        console.log('[Character] Exiting idle state -> active');
+        return CHARACTER_STATE.ACTIVE;
+      }
+      return prevState;
+    });
+    
+    // 设置新的待机定时器
+    idleTimeoutRef.current = setTimeout(() => {
+      // 只有在非思考状态时才进入待机
+      setCharacterState(prevState => {
+        if (prevState !== CHARACTER_STATE.THINKING) {
+          console.log('[Character] Entering idle state after timeout');
+          return CHARACTER_STATE.IDLE;
+        }
+        return prevState;
+      });
+    }, IDLE_TIMEOUT_MS);
+  }, []); // 不再依赖 characterState
+  
+  /**
+   * 进入思考状态
+   */
+  const enterThinkingState = useCallback(() => {
+    console.log('[Character] Entering thinking state');
+    // 清除所有定时器
+    if (idleTimeoutRef.current) {
+      clearTimeout(idleTimeoutRef.current);
+      idleTimeoutRef.current = null;
+    }
+    if (idleAnimationRef.current) {
+      clearInterval(idleAnimationRef.current);
+      idleAnimationRef.current = null;
+    }
+    if (moodResetTimerRef.current) {
+      clearTimeout(moodResetTimerRef.current);
+      moodResetTimerRef.current = null;
+    }
+    setCharacterState(CHARACTER_STATE.THINKING);
+  }, []);
+  
+  /**
+   * 退出思考状态，设置情绪
+   */
+  const exitThinkingWithMood = useCallback((mood) => {
+    console.log('[Character] Exiting thinking state with mood:', mood);
+    setCharacterState(CHARACTER_STATE.ACTIVE);
+    setEmotionMood(mood || 'normal');
+    
+    // 重置待机计时器
+    if (idleTimeoutRef.current) {
+      clearTimeout(idleTimeoutRef.current);
+    }
+    idleTimeoutRef.current = setTimeout(() => {
+      setCharacterState(CHARACTER_STATE.IDLE);
+    }, IDLE_TIMEOUT_MS);
+    
+    // 如果不是 normal，设置情绪恢复定时器
+    if (mood && mood !== 'normal' && moodResetDelay > 0) {
+      if (moodResetTimerRef.current) {
+        clearTimeout(moodResetTimerRef.current);
+      }
+      moodResetTimerRef.current = setTimeout(() => {
+        console.log(`[Character] Mood reset to normal after ${moodResetDelay}s`);
+        setEmotionMood('normal');
+      }, moodResetDelay * 1000);
+    }
+  }, [moodResetDelay]);
+  
+  // ============ 待机动画循环 ============
+  useEffect(() => {
+    if (characterState === CHARACTER_STATE.IDLE) {
+      // 进入待机状态，开始动画循环
+      console.log('[Character] Starting idle animation loop');
+      setIdleFrame(getRandomIdleState());
+      
+      idleAnimationRef.current = setInterval(() => {
+        setIdleFrame(getRandomIdleState());
+      }, IDLE_ANIMATION_INTERVAL_MS);
+    } else {
+      // 离开待机状态，停止动画
+      if (idleAnimationRef.current) {
+        clearInterval(idleAnimationRef.current);
+        idleAnimationRef.current = null;
+      }
+    }
+    
+    return () => {
+      if (idleAnimationRef.current) {
+        clearInterval(idleAnimationRef.current);
+      }
+    };
+  }, [characterState]);
+  
+  // ============ 初始化 idle 计时器 ============
+  useEffect(() => {
+    // 组件加载后启动 idle 计时器
+    console.log('[Character] Initializing idle timer');
+    idleTimeoutRef.current = setTimeout(() => {
+      setCharacterState(prevState => {
+        if (prevState !== CHARACTER_STATE.THINKING) {
+          console.log('[Character] Entering idle state after initial timeout');
+          return CHARACTER_STATE.IDLE;
+        }
+        return prevState;
+      });
+    }, IDLE_TIMEOUT_MS);
+    
+    // 清理
+    return () => {
+      if (idleTimeoutRef.current) {
+        clearTimeout(idleTimeoutRef.current);
+      }
+    };
+  }, []); // 只在组件挂载时运行一次
 
   const loadCharacter = useCallback(async (targetId = null) => {
     try {
@@ -101,9 +328,28 @@ export const Character = () => {
     }
   }, []);
 
-  // 启动时加载
+  // 启动时加载 + 初始化待机计时器
   useEffect(() => {
     loadCharacter();
+    
+    // 启动初始待机计时器
+    idleTimeoutRef.current = setTimeout(() => {
+      console.log('[Character] Initial idle timeout - entering idle state');
+      setCharacterState(CHARACTER_STATE.IDLE);
+    }, IDLE_TIMEOUT_MS);
+    
+    // 清理函数
+    return () => {
+      if (idleTimeoutRef.current) {
+        clearTimeout(idleTimeoutRef.current);
+      }
+      if (idleAnimationRef.current) {
+        clearInterval(idleAnimationRef.current);
+      }
+      if (moodResetTimerRef.current) {
+        clearTimeout(moodResetTimerRef.current);
+      }
+    };
   }, [loadCharacter]);
 
   // 监听宠物/助手更新事件
@@ -212,37 +458,50 @@ export const Character = () => {
   }, [loadCharacter]);
 
   // 注册监听主进程发来的 'character-mood-updated' 消息
+  // 适配新的状态系统
   useEffect(() => {
     const moodUpdateHandler = (event, updatedMood) => {
-      console.log("Received updated mood:", updatedMood);
-      setCharacterMood(updatedMood);
+      console.log("[Character] Received mood update:", updatedMood);
       
-      // 清除之前的定时器
-      if (moodResetTimerRef.current) {
-        clearTimeout(moodResetTimerRef.current);
-        moodResetTimerRef.current = null;
+      // 处理 thinking 状态
+      if (updatedMood === 'thinking') {
+        enterThinkingState();
+        return;
       }
       
-      // 如果不是 normal 或 thinking，设置定时器恢复到 normal
-      // thinking 表示正在处理，不应自动恢复
-      if (updatedMood !== 'normal' && updatedMood !== 'thinking' && moodResetDelay > 0) {
-        moodResetTimerRef.current = setTimeout(() => {
-          console.log(`Mood reset to normal after ${moodResetDelay}s`);
-          setCharacterMood('normal');
-        }, moodResetDelay * 1000);
+      // 其他情绪：退出 thinking 并设置情绪
+      if (characterState === CHARACTER_STATE.THINKING) {
+        exitThinkingWithMood(updatedMood);
+      } else {
+        // 当前不在 thinking 状态，直接更新情绪并重置待机计时
+        setEmotionMood(updatedMood || 'normal');
+        resetIdleTimer();
+        
+        // 如果不是 normal，设置情绪恢复定时器
+        if (updatedMood && updatedMood !== 'normal' && moodResetDelay > 0) {
+          if (moodResetTimerRef.current) {
+            clearTimeout(moodResetTimerRef.current);
+          }
+          moodResetTimerRef.current = setTimeout(() => {
+            console.log(`[Character] Mood reset to normal after ${moodResetDelay}s`);
+            setEmotionMood('normal');
+          }, moodResetDelay * 1000);
+        }
       }
     };
     const cleanup = tauri.onMoodUpdated(moodUpdateHandler);
 
-    // 如果需要在组件卸载时移除监听，可在此处调用 removeListener
+    // 组件卸载时清理
     return () => {
       if (cleanup) cleanup();
-      // 清除定时器
       if (moodResetTimerRef.current) {
         clearTimeout(moodResetTimerRef.current);
       }
+      if (pokeResetTimerRef.current) {
+        clearTimeout(pokeResetTimerRef.current);
+      }
     };
-  }, [moodResetDelay]);
+  }, [moodResetDelay, characterState, enterThinkingState, exitThinkingWithMood, resetIdleTimer]);
 
   // 监听角色 ID
   useEffect(() => {
@@ -307,30 +566,39 @@ export const Character = () => {
   // 根据 characterMood 动态加载对应图片
   useEffect(() => {
     const loadImage = async () => {
+      // 判断是否为内置皮肤
+      const isBuiltinSkin = imageName === 'default' || imageName === 'Jules' || 
+                           imageName === 'Maodie' || imageName === 'LittlePony';
+      
+      // 使用映射表获取实际的图片文件名后缀
+      // 内置皮肤的 idle 会回退到 normal/smile
+      const imageNameSuffix = getMoodImageName(characterMood, isBuiltinSkin);
+      console.log(`[CharacterPage] Loading image for mood: ${characterMood} -> ${imageNameSuffix} (builtin: ${isBuiltinSkin})`);
+      
       try {
         // 内置皮肤：Jules (default)、Maodie、LittlePony
         if(imageName === 'default' || imageName === 'Jules') {
-          const module = await import(`../assets/Jules-${characterMood}.png`);
+          const module = await import(`../assets/Jules-${imageNameSuffix}.png`);
           setImgSrc(module.default);
         } else if(imageName === "Maodie") {
-          const module = await import(`../assets/Maodie-${characterMood}.png`);
+          const module = await import(`../assets/Maodie-${imageNameSuffix}.png`);
           setImgSrc(module.default);
         } else if(imageName === "LittlePony") {
-          const module = await import(`../assets/LittlePony-${characterMood}.png`);
+          const module = await import(`../assets/LittlePony-${imageNameSuffix}.png`);
           setImgSrc(module.default);
         } else if (imageName.startsWith("custom:")) {
-          // 自定义皮肤从文件系统加载
+          // 自定义皮肤从文件系统加载 - 直接使用原始 mood 名称
           const skinId = imageName.split(":")[1];
-          const base64Image = await tauri.readSkinImage(skinId, characterMood);
+          const base64Image = await tauri.readSkinImage(skinId, imageNameSuffix);
           setImgSrc(base64Image);
         } else {
           // 其他皮肤尝试从文件系统加载
-          const base64Image = await tauri.readPetImage(`${imageName}-${characterMood}.png`);
+          const base64Image = await tauri.readPetImage(`${imageName}-${imageNameSuffix}.png`);
           setImgSrc(base64Image);
         }
         
       } catch (err) {
-        console.error(`Failed to load image for mood: ${characterMood}`, err);
+        console.error(`Failed to load image for mood: ${characterMood} (${imageNameSuffix})`, err);
         // 如果失败，回退到 normal
         try {
           if(imageName === 'default' || imageName === 'Jules') {
@@ -358,24 +626,29 @@ export const Character = () => {
     loadImage();
   }, [characterMood, imageName]);
 
-  // 各种点击事件
+  // 各种点击事件 - 都会重置待机计时器
   const handleClick = () => {
+    resetIdleTimer();
     tauri.toggleChatWindow();
   };
   const handleClickApi = () => {
+    resetIdleTimer();
     tauri.changeManageWindow('api');
   };
   const handleClickSelectCharacter = () => {
+    resetIdleTimer();
     tauri.changeManageWindow('assistants');
   };
   const handleClickSettings = () => {
+    resetIdleTimer();
     tauri.changeSettingsWindow();
   };
   const handleClickMcp = () => {
+    resetIdleTimer();
     tauri.changeManageWindow('mcp');
   };
 
-  // ========== 混合拖动方案 ==========
+  // ========== 混合拖动方案 + 双击打扰系统 ==========
   const dragState = useRef({
     isMouseDown: false,
     startX: 0,
@@ -383,6 +656,60 @@ export const Character = () => {
     startTime: 0,
     isDragging: false,
   });
+  
+  // 双击打扰相关状态
+  const lastClickTimeRef = useRef(0);
+  const pokeCountRef = useRef(0);              // 打扰计数
+  const pokeResetTimerRef = useRef(null);      // 打扰计数重置定时器
+  const DOUBLE_CLICK_THRESHOLD = 300;          // 双击判定时间（毫秒）
+  const POKE_ANGRY_THRESHOLD = 5;              // 触发愤怒的打扰次数
+  const POKE_RESET_DELAY = 10000;              // 打扰计数重置延迟（10秒）
+  const POKE_REACTION_DURATION = 1500;         // 被戳反应持续时间（1.5秒）
+  
+  /**
+   * 处理被戳（双击）
+   */
+  const handlePoke = useCallback(() => {
+    console.log('[Character] Poked! Count:', pokeCountRef.current + 1);
+    
+    // 重置待机计时器
+    resetIdleTimer();
+    
+    // 增加打扰计数
+    pokeCountRef.current += 1;
+    
+    // 重置打扰计数的定时器
+    if (pokeResetTimerRef.current) {
+      clearTimeout(pokeResetTimerRef.current);
+    }
+    pokeResetTimerRef.current = setTimeout(() => {
+      console.log('[Character] Poke count reset');
+      pokeCountRef.current = 0;
+    }, POKE_RESET_DELAY);
+    
+    // 检查是否达到愤怒阈值
+    if (pokeCountRef.current >= POKE_ANGRY_THRESHOLD) {
+      console.log('[Character] Too many pokes! Getting angry...');
+      // 显示愤怒（用 sad 表情，因为 angry 图片映射到 sad）
+      setCharacterState(CHARACTER_STATE.ACTIVE);
+      setEmotionMood('sad');  // 使用 sad 作为"不耐烦"的表情
+      
+      // 一段时间后恢复并进入待机
+      setTimeout(() => {
+        setEmotionMood('normal');
+        pokeCountRef.current = 0;  // 重置计数
+      }, POKE_REACTION_DURATION * 2);
+    } else {
+      // 普通戳反应 - 显示 shocked 表情（惊讶）
+      setCharacterState(CHARACTER_STATE.ACTIVE);
+      setEmotionMood('shocked');
+      
+      // 短暂显示后恢复
+      setTimeout(() => {
+        setEmotionMood('normal');
+      }, POKE_REACTION_DURATION);
+    }
+  }, [resetIdleTimer]);
 
   const handleCharacterMouseDown = useCallback((e) => {
     // 忽略右键和中键
@@ -435,13 +762,24 @@ export const Character = () => {
     
     // 如果是快速点击且移动距离小，视为点击
     if (elapsed < CLICK_TIME_THRESHOLD && distance < DRAG_THRESHOLD) {
-      // 这是一个点击，打开聊天窗口
-      handleClick();
+      const now = Date.now();
+      const timeSinceLastClick = now - lastClickTimeRef.current;
+      
+      if (timeSinceLastClick < DOUBLE_CLICK_THRESHOLD) {
+        // 这是双击 - 触发打扰反应
+        console.log('[Character] Double click detected!');
+        handlePoke();
+        lastClickTimeRef.current = 0; // 重置，避免三击也被当作双击
+      } else {
+        // 这是单击 - 打开聊天窗口
+        lastClickTimeRef.current = now;
+        handleClick();
+      }
     }
     
     dragState.current.isMouseDown = false;
     dragState.current.isDragging = false;
-  }, []);
+  }, [handlePoke]);
 
   // 清理函数
   useEffect(() => {

@@ -1,5 +1,11 @@
 import React, { useState, useEffect, useRef } from "react";
 
+// 检测平台
+const isMacOS = typeof navigator !== 'undefined' && (
+  navigator.platform.toUpperCase().indexOf('MAC') >= 0 || 
+  navigator.userAgent.toUpperCase().indexOf('MAC') >= 0
+);
+
 export const SettingsHotkeyInput = ({ name, value, onChange }) => {
   // 当前已选择的按键
   const [keys, setKeys] = useState([]);
@@ -28,8 +34,9 @@ export const SettingsHotkeyInput = ({ name, value, onChange }) => {
     "PageDown": "PageDown"
   };
   
-  // 修饰键列表
-  const modifierKeys = ["Ctrl", "Alt", "Shift", "Meta"];
+  // 修饰键列表 - macOS 显示 Cmd，其他平台显示 Ctrl
+  const cmdOrCtrlDisplay = isMacOS ? "Cmd" : "Ctrl";
+  const modifierKeys = [cmdOrCtrlDisplay, "Alt", "Shift"];
   
   // 处理按键事件
   const handleKeyDown = (e) => {
@@ -43,11 +50,11 @@ export const SettingsHotkeyInput = ({ name, value, onChange }) => {
     // 输出调试信息 - 帮助了解按键事件
     console.log("Key pressed:", e.key, "Code:", e.code);
     
-    // 修饰键处理
+    // 修饰键处理 - macOS 的 Meta 键显示为 Cmd，Windows 的 Control 显示为 Ctrl
     if (e.key === "Control" || e.key === "Ctrl" || e.code.startsWith("Control")) keyPressed = "Ctrl";
     else if (e.key === "Alt" || e.code.startsWith("Alt")) keyPressed = "Alt";
     else if (e.key === "Shift" || e.code.startsWith("Shift")) keyPressed = "Shift";
-    else if (e.key === "Meta" || e.code.startsWith("Meta") || e.key === "Command" || e.key === "Win") keyPressed = "Meta";
+    else if (e.key === "Meta" || e.code.startsWith("Meta") || e.key === "Command" || e.key === "Win") keyPressed = isMacOS ? "Cmd" : "Ctrl";
     // 特殊按键处理
     else if (specialKeys[e.key]) keyPressed = specialKeys[e.key];
     // 功能键处理 (F1-F12)
@@ -160,7 +167,13 @@ export const SettingsHotkeyInput = ({ name, value, onChange }) => {
   useEffect(() => {
     if (value && typeof value === 'string') {
       // 确保正确地从 "Ctrl + Alt + A" 这样的格式解析出按键数组
-      const keyArray = value.split(" + ").map(k => k.trim()).filter(k => k);
+      let keyArray = value.split(" + ").map(k => k.trim()).filter(k => k);
+      // 将 Meta 转换为平台对应的显示名称
+      keyArray = keyArray.map(k => {
+        if (k === 'Meta' || k === 'meta') return isMacOS ? 'Cmd' : 'Ctrl';
+        if (k === 'Cmd' || k === 'cmd') return isMacOS ? 'Cmd' : 'Ctrl';
+        return k;
+      });
       setKeys(keyArray);
     } else {
       setKeys([]);
@@ -183,56 +196,76 @@ export const SettingsHotkeyInput = ({ name, value, onChange }) => {
   }, [isRecording]);
   
   return (
-    <div className="w-full">
-      <div className="mb-2">
-        {/* 已选按键显示 */}
-        <div className="flex flex-wrap gap-1 mb-2">
-          {keys.map((key, index) => (
-            <div key={index} className="flex items-center bg-blue-100 rounded px-2 py-1">
-              <span className="mr-1">{key}</span>
-              <button
-                type="button"
-                onClick={() => removeKey(key)}
-                className="text-red-500 hover:text-red-700"
-              >
-                ✕
-              </button>
-            </div>
-          ))}
-          
-          {/* 添加按键按钮 */}
-          {keys.length < 3 && (
+    <div className="w-full space-y-2">
+      {/* 已选按键显示区域 */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {keys.map((key, index) => (
+          <div 
+            key={index} 
+            className="inline-flex items-center gap-1 px-2.5 py-1 bg-gradient-to-b from-slate-50 to-slate-100 
+                       text-slate-700 text-sm font-medium rounded-md border border-slate-200 shadow-sm"
+          >
+            <span>{key}</span>
             <button
               type="button"
-              onClick={startRecording}
-              className={`px-2 py-1 border rounded ${isRecording ? 'bg-yellow-100' : 'bg-gray-100'}`}
+              onClick={() => removeKey(key)}
+              className="text-slate-400 hover:text-red-500 transition-colors ml-0.5"
             >
-              {isRecording ? "Please press key..." : "+ add key"}
+              <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+              </svg>
             </button>
-          )}
-        </div>
+          </div>
+        ))}
         
-        {/* 隐藏的输入框，用于捕获按键 */}
-        <input
-          ref={inputRef}
-          type="text"
-          className="opacity-0 absolute h-0 w-0"
-          onKeyDown={handleKeyDown}
-          onKeyUp={(e) => e.preventDefault()}
-          onKeyPress={(e) => e.preventDefault()}
-          disabled={!isRecording}
-          autoFocus={isRecording}
-        />
-      </div>
-      
-      {/* 当前组合显示 */}
-      <div className="text-center p-2 bg-gray-100 rounded">
-        {keys.length > 0 ? (
-          <span>Present Shortcut: {keys.join("+")}</span>
-        ) : (
-          <span className="text-gray-500">Please Press key</span>
+        {/* 添加按键按钮 */}
+        {keys.length < 3 && (
+          <button
+            type="button"
+            onClick={startRecording}
+            className={`inline-flex items-center gap-1 px-2.5 py-1 text-sm font-medium rounded-md border transition-all ${
+              isRecording 
+                ? 'bg-amber-50 border-amber-300 text-amber-700' 
+                : 'bg-white border-dashed border-slate-300 text-slate-500 hover:border-slate-400 hover:text-slate-600'
+            }`}
+          >
+            {isRecording ? (
+              <>
+                <span className="w-1.5 h-1.5 bg-amber-500 rounded-full animate-pulse"></span>
+                Press a key...
+              </>
+            ) : (
+              <>
+                <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+                </svg>
+                Add key
+              </>
+            )}
+          </button>
         )}
       </div>
+      
+      {/* 当前快捷键预览 */}
+      <div className="text-xs text-slate-500">
+        {keys.length > 0 ? (
+          <span>Current: <span className="font-medium text-slate-700">{keys.join(' + ')}</span></span>
+        ) : (
+          <span>Click "Add key" to set shortcut</span>
+        )}
+      </div>
+      
+      {/* 隐藏的输入框，用于捕获按键 */}
+      <input
+        ref={inputRef}
+        type="text"
+        className="opacity-0 absolute h-0 w-0"
+        onKeyDown={handleKeyDown}
+        onKeyUp={(e) => e.preventDefault()}
+        onKeyPress={(e) => e.preventDefault()}
+        disabled={!isRecording}
+        autoFocus={isRecording}
+      />
     </div>
   );
 };

@@ -17,6 +17,7 @@ export const Chatbox = () => {
   const [{ navBarChats, updatedConversation, streamingReplies, characterMoods }, dispatch] = useStateValue();
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [windowVisible, setWindowVisible] = useState(true); // 窗口可见性状态，默认为 true
   const [isMouseOver, setIsMouseOver] = useState(false);
   const [showTitleBar, setShowTitleBar] = useState(false); // 延迟隐藏用
   const [isTitleBarVisible, setIsTitleBarVisible] = useState(false); // 控制 opacity
@@ -83,6 +84,43 @@ export const Chatbox = () => {
       setConversations([]);
       setOrphanConversations([]);
     }
+  }, []);
+
+  // ============ Tab 快捷键设置 ============
+  // 检测平台，决定默认修饰键
+  const isMacOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0 || 
+                  navigator.userAgent.toUpperCase().indexOf('MAC') >= 0;
+  const MOD_KEY = isMacOS ? 'Cmd' : 'Ctrl';
+  
+  const [hotkeySettings, setHotkeySettings] = useState({
+    newTabHotkey: `${MOD_KEY} + N`,
+    closeTabHotkey: `${MOD_KEY} + W`,
+    switchTabPrefix: MOD_KEY,
+  });
+
+  // 加载快捷键设置
+  useEffect(() => {
+    const loadHotkeySettings = async () => {
+      try {
+        const settings = await tauri.getSettings();
+        setHotkeySettings({
+          newTabHotkey: settings.newTabHotkey || `${MOD_KEY} + N`,
+          closeTabHotkey: settings.closeTabHotkey || `${MOD_KEY} + W`,
+          switchTabPrefix: settings.switchTabPrefix || MOD_KEY,
+        });
+      } catch (error) {
+        console.error('[ChatboxBody] Error loading hotkey settings:', error);
+      }
+    };
+    loadHotkeySettings();
+
+    // 监听设置更新
+    const cleanup = tauri.onSettingsUpdated?.((payload) => {
+      if (payload?.key?.includes('Hotkey') || payload?.key?.includes('switchTab')) {
+        loadHotkeySettings();
+      }
+    });
+    return () => { if (cleanup) cleanup(); };
   }, []);
 
   // 初始加载
@@ -173,6 +211,25 @@ export const Chatbox = () => {
       setIsThinking(false);
     }
   }, [chatbodyStatus]);
+
+  // ============ 监听窗口可见性变化 ============
+  useEffect(() => {
+    const handleVisibilityChange = (payload) => {
+      if (payload && typeof payload.visible === 'boolean') {
+        setWindowVisible(payload.visible);
+        console.log('[ChatboxBody] Window visibility changed:', payload.visible);
+      }
+    };
+
+    let cleanup;
+    if (tauri.onChatWindowVisibilityChanged) {
+      cleanup = tauri.onChatWindowVisibilityChanged(handleVisibilityChange);
+    }
+    
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
 
   // Handle New Tab from Character ID (moved from ChatboxTabBar)
   // This also handles auto-loading the default assistant on first mount
@@ -704,6 +761,123 @@ export const Chatbox = () => {
     tauri.maxmizeChatWindow?.();
   };
 
+  // ============ Tab 快捷键监听 ============
+  // 使用 ref 存储函数引用，避免 useEffect 依赖问题
+  const handleNewChatRef = useRef(handleNewChat);
+  const handleTabClickRef = useRef(handleTabClick);
+  const handleCloseTabRef = useRef(handleCloseTab);
+  
+  useEffect(() => {
+    handleNewChatRef.current = handleNewChat;
+    handleTabClickRef.current = handleTabClick;
+    handleCloseTabRef.current = handleCloseTab;
+  });
+
+  // 辅助函数：解析快捷键字符串
+  const parseHotkey = useCallback((hotkeyStr) => {
+    if (!hotkeyStr) return null;
+    // 处理不同格式：'Ctrl+N', 'Ctrl + N', 'Meta + N' 等
+    // 先移除所有空格，再按 + 分割
+    const normalized = hotkeyStr.replace(/\s+/g, '').toLowerCase();
+    const parts = normalized.split('+');
+    return {
+      ctrl: parts.includes('ctrl') || parts.includes('control'),
+      meta: parts.includes('meta') || parts.includes('cmd') || parts.includes('command'),
+      alt: parts.includes('alt') || parts.includes('option'),
+      shift: parts.includes('shift'),
+      key: parts.filter(p => !['ctrl', 'control', 'meta', 'cmd', 'command', 'alt', 'option', 'shift'].includes(p))[0] || ''
+    };
+  }, []);
+
+  // 辅助函数：检查按键事件是否匹配快捷键
+  const matchesHotkey = useCallback((e, hotkey) => {
+    if (!hotkey) return false;
+    
+    // 处理 Ctrl/Meta 修饰键
+    // - 如果设置了 ctrl 或 meta，检查是否按下了对应的键
+    // - Ctrl 和 Cmd(Meta) 互相兼容（跨平台支持）
+    let ctrlMetaMatch;
+    if (hotkey.ctrl || hotkey.meta) {
+      // 设置了 Ctrl 或 Meta，要求按下 ctrlKey 或 metaKey
+      ctrlMetaMatch = e.ctrlKey || e.metaKey;
+    } else {
+      // 没有设置修饰键，要求都不按
+      ctrlMetaMatch = !e.ctrlKey && !e.metaKey;
+    }
+    
+    const altMatch = hotkey.alt ? e.altKey : !e.altKey;
+    const shiftMatch = hotkey.shift ? e.shiftKey : !e.shiftKey;
+    
+    const keyMatch = e.key.toLowerCase() === hotkey.key.toLowerCase() ||
+                     e.key === hotkey.key;
+    
+    return ctrlMetaMatch && altMatch && shiftMatch && keyMatch;
+  }, []);
+
+  // 键盘事件处理
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // 忽略单独的修饰键
+      if (['Control', 'Meta', 'Alt', 'Shift'].includes(e.key)) {
+        return;
+      }
+      
+      // 解析所有快捷键
+      const newTabHotkey = parseHotkey(hotkeySettings.newTabHotkey);
+      const closeTabHotkey = parseHotkey(hotkeySettings.closeTabHotkey);
+      const switchPrefix = parseHotkey(hotkeySettings.switchTabPrefix);
+      
+      // 检查新建标签页快捷键
+      if (matchesHotkey(e, newTabHotkey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[ChatboxBody] New tab hotkey triggered');
+        handleNewChatRef.current();
+        return;
+      }
+      
+      // 检查关闭标签页快捷键
+      if (matchesHotkey(e, closeTabHotkey)) {
+        e.preventDefault();
+        e.stopPropagation();
+        console.log('[ChatboxBody] Close tab hotkey triggered');
+        if (activeTabIdRef.current) {
+          handleCloseTabRef.current({ stopPropagation: () => {} }, activeTabIdRef.current);
+        }
+        return;
+      }
+      
+      // 检查切换标签页快捷键 (前缀 + 1-9)
+      // 检查是否按下了正确的修饰键组合
+      if (switchPrefix) {
+        const modifiersMatch = 
+          ((switchPrefix.ctrl || switchPrefix.meta) ? (e.ctrlKey || e.metaKey) : (!e.ctrlKey && !e.metaKey)) &&
+          (switchPrefix.alt ? e.altKey : !e.altKey) &&
+          (switchPrefix.shift ? e.shiftKey : !e.shiftKey);
+        
+        if (modifiersMatch) {
+          // 检查是否按下了数字键 1-9
+          const num = parseInt(e.key, 10);
+          if (num >= 1 && num <= 9) {
+            e.preventDefault();
+            e.stopPropagation();
+            console.log(`[ChatboxBody] Switch to tab ${num} hotkey triggered`);
+            setTabs(currentTabs => {
+              if (currentTabs.length >= num) {
+                handleTabClickRef.current(currentTabs[num - 1].id);
+              }
+              return currentTabs;
+            });
+            return;
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [hotkeySettings, parseHotkey, matchesHotkey]);
+
   return (
     <div className={`h-screen rounded-[16px] overflow-clip relative`}>
     {/* 白色遮罩层：侧边栏关闭时 80% 透明度，打开时 100% */}
@@ -904,6 +1078,8 @@ export const Chatbox = () => {
                 className="w-full" 
                 activePetId={tabs.find(t => t.id === activeTabId)?.petId}
                 sidebarOpen={sidebarOpen}
+                autoFocus={windowVisible}
+                activeTabId={activeTabId}
             />
         </div>
       </div>
