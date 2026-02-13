@@ -355,11 +355,17 @@ export const Character = () => {
   // 监听宠物/助手更新事件
   useEffect(() => {
     const handlePetsUpdate = async (event) => {
-      // event structure: { action: 'update'|'create', type: 'assistant'|'pet', id, data }
-      console.log("Received pets update:", event);
-      
+      // event structure: { action: 'update'|'create'|'switch', type: 'assistant'|'pet', id, data }
+      console.log("[CharacterPage] ★★★ Received pets update:", event);
+      console.log("[CharacterPage] ★★★ Current petId:", currentPetId);
+
+      // 如果是切换 assistant，立即加载新的角色
+      if (event.action === 'switch' && event.id) {
+        console.log("[CharacterPage] ★★★ Switching character to:", event.id, event.data?.name);
+        loadCharacter(event.id);
+      }
       // 如果更新的是当前角色，或者当前没有加载角色，则刷新
-      if (event.action === 'update' && (event.id === currentPetId || !currentPetId)) {
+      else if (event.action === 'update' && (event.id === currentPetId || !currentPetId)) {
         console.log("Current character updated, reloading...");
         loadCharacter(event.id);
       } else if (event.action === 'delete' && event.id === currentPetId) {
@@ -367,18 +373,24 @@ export const Character = () => {
         loadCharacter(null);
       }
     };
-    
-    // 如果 tauri.onPetsUpdated 存在，则注册
-    let cleanup;
-    if (tauri.onPetsUpdated) {
-      cleanup = tauri.onPetsUpdated(handlePetsUpdate);
-    } else {
-      // Fallback using general listener if specific one not available
-      // Not implemented here, assuming onPetsUpdated exists as per tauri.js inspection
-    }
+
+    // 直接使用 listen API 来正确设置监听器
+    let unlisten = null;
+    const setupListener = async () => {
+      const { listen } = await import('@tauri-apps/api/event');
+      unlisten = await listen('pets-updated', (event) => {
+        console.log("[CharacterPage] ★★★ Raw event received from Rust:", event);
+        handlePetsUpdate(event.payload);
+      });
+      console.log("[CharacterPage] ★★★ pets-updated listener is READY");
+    };
+    setupListener();
 
     return () => {
-      if (cleanup) cleanup();
+      if (unlisten) {
+        console.log("[CharacterPage] Cleaning up pets-updated listener");
+        unlisten();
+      }
     };
   }, [currentPetId, loadCharacter]);
 
@@ -620,6 +632,11 @@ export const Character = () => {
           }
         } catch (fallbackErr) {
           console.error('Failed to load fallback image:', fallbackErr);
+          // 最终回退到默认 Jules 皮肤
+          try {
+            const module = await import(`../assets/Jules-normal.png`);
+            setImgSrc(module.default);
+          } catch (_) {}
         }
       }
     };

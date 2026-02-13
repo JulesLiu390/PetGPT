@@ -52,22 +52,26 @@ impl Database {
     pub fn get_conversation_by_id(&self, id: &str) -> Result<Option<Conversation>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, pet_id, title, created_at, updated_at 
-             FROM conversations WHERE id = ?"
+            "SELECT c.id, c.pet_id, c.title, c.created_at, c.updated_at,
+                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count
+             FROM conversations c WHERE c.id = ?"
         )?;
         
         let mut rows = stmt.query(params![id])?;
         
         if let Some(row) = rows.next()? {
-            Ok(Some(Conversation {
+            let conv = Conversation {
                 id: row.get(0)?,
                 pet_id: row.get(1)?,
                 title: row.get(2)?,
                 created_at: row.get(3)?,
                 updated_at: row.get(4)?,
-                message_count: 0,
-            }))
+                message_count: row.get(5)?,
+            };
+            println!("[Rust get_conversation_by_id] id={}, messageCount={}", conv.id, conv.message_count);
+            Ok(Some(conv))
         } else {
+            println!("[Rust get_conversation_by_id] id={} NOT FOUND", id);
             Ok(None)
         }
     }

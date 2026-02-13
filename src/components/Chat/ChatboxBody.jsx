@@ -235,26 +235,28 @@ export const Chatbox = () => {
   // This also handles auto-loading the default assistant on first mount
   // 追踪正在处理的 character-id，防止重复处理
   const processingCharacterIdsRef = useRef(new Set());
+  // 标志位：是否正在切换 assistant（防止 character-id 事件创建新对话）
+  const switchingAssistantRef = useRef(false);
 
   useEffect(() => {
-    console.log('[ChatboxBody] Setting up character-id listener');
     let unlisten = null;
     let isMounted = true;
-    
+
     const handleCharacterId = async (id) => {
-      console.log('[ChatboxBody] ★★★ Received character-id:', id);
-      if (!isMounted) {
-        console.log('[ChatboxBody] ★★★ Component not mounted, skipping');
+      if (!isMounted) return;
+
+      // 如果是切换 assistant 触发的，跳过创建新对话（只用于更新 character 窗口皮肤）
+      // 不在此处重置 flag，由 dropdown click handler 的 setTimeout 负责重置
+      if (switchingAssistantRef.current) {
         return;
       }
-      
+
       // 防止重复处理同一个 id
       if (processingCharacterIdsRef.current.has(id)) {
-        console.log('[ChatboxBody] ★★★ Already processing this id, skipping');
         return;
       }
       processingCharacterIdsRef.current.add(id);
-      
+
       try {
         // 只有当 id 不在 navBarChats 中时才添加
         if (!navBarChatsRef.current?.includes(id)) {
@@ -263,31 +265,26 @@ export const Chatbox = () => {
             navBarChats: [...(navBarChatsRef.current || []), id],
           });
         }
-        
-        console.log('[ChatboxBody] ★★★ Fetching character for id:', id);
+
         // 优先尝试新的 Assistant API，失败则回退到旧的 Pet API
         let pet = null;
         try {
           pet = await tauri.getAssistant(id);
-          console.log('[ChatboxBody] ★★★ Got assistant:', pet);
         } catch (e) {
-          console.log('[ChatboxBody] ★★★ getAssistant failed:', e, ', trying getPet');
           // 回退到旧 API
         }
         if (!pet) {
           try {
             pet = await tauri.getPet(id);
-            console.log('[ChatboxBody] ★★★ Got pet:', pet);
           } catch (e) {
-            console.error('[ChatboxBody] ★★★ getPet also failed:', e);
+            console.error('[ChatboxBody] getPet failed:', e);
           }
         }
         if (!pet) {
-          console.error("[ChatboxBody] ★★★ Could not find assistant or pet with id:", id);
+          console.error("[ChatboxBody] Could not find assistant or pet with id:", id);
           return;
         }
-        
-        console.log('[ChatboxBody] ★★★ Creating conversation for pet:', pet._id);
+
         let newConversation;
         try {
           newConversation = await tauri.createConversation({
@@ -295,14 +292,13 @@ export const Chatbox = () => {
             title: "New Chat",
             history: [],
           });
-          console.log('[ChatboxBody] ★★★ Created conversation:', newConversation);
         } catch (e) {
-          console.error('[ChatboxBody] ★★★ Failed to create conversation:', e);
+          console.error('[ChatboxBody] Failed to create conversation:', e);
           return;
         }
-        
+
         tauri.sendConversationId?.(newConversation._id);
-        
+
         const newTab = {
             id: newConversation._id,
             label: "New Chat",
@@ -310,15 +306,14 @@ export const Chatbox = () => {
             messages: [],
             isActive: true
         };
-        
-        console.log('[ChatboxBody] ★★★ Initializing tab messages');
+
         // 新方案: 初始化 Rust TabState
         try {
           await tauri.initTabMessages(newConversation._id, []);
         } catch (e) {
-          console.error('[ChatboxBody] ★★★ initTabMessages failed:', e);
+          console.error('[ChatboxBody] initTabMessages failed:', e);
         }
-        
+
         // Initialize mood and suggestText for new conversation
         dispatch({
             type: actionType.SET_CHARACTER_MOOD,
@@ -330,27 +325,18 @@ export const Chatbox = () => {
             suggestText: [],
             conversationId: newConversation._id
         });
-        
-        if (!isMounted) {
-          console.log('[ChatboxBody] ★★★ Component unmounted during async, skipping setTabs');
-          return;
-        }
-        
-        console.log('[ChatboxBody] ★★★ Setting tabs with new tab:', newTab);
+
+        if (!isMounted) return;
+
         setTabs(prev => {
-            console.log('[ChatboxBody] ★★★ setTabs prev:', prev);
             if (prev.some(t => t.id === newTab.id)) {
-              console.log('[ChatboxBody] ★★★ Tab already exists');
               return prev;
             }
-            const newTabs = [...prev.map(t => ({...t, isActive: false})), newTab];
-            console.log('[ChatboxBody] ★★★ setTabs newTabs:', newTabs);
-            return newTabs;
+            return [...prev.map(t => ({...t, isActive: false})), newTab];
         });
-        
-        console.log('[ChatboxBody] ★★★ Calling handleTabClick:', newConversation._id);
+
         handleTabClick(newConversation._id);
-        
+
         // 刷新对话列表以显示新创建的对话
         fetchConversations();
       } finally {
@@ -358,15 +344,12 @@ export const Chatbox = () => {
         processingCharacterIdsRef.current.delete(id);
       }
     };
-    
+
     // 直接使用 Tauri listen API
     const setup = async () => {
-      console.log('[ChatboxBody] Setting up listen for character-id...');
       unlisten = await listen('character-id', (event) => {
-        console.log('[ChatboxBody] ★★★ Raw event received:', event);
         handleCharacterId(event.payload);
       });
-      console.log('[ChatboxBody] ★★★ character-id listener is READY, unlisten:', unlisten);
       
       // 检查是否有待处理的 character-id (在 listener ready 之前发送的)
       try {
@@ -991,10 +974,34 @@ export const Chatbox = () => {
                   {allAssistants.map(assistant => {
                     const initials = assistant.name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
                     return (
-                      <div 
+                      <div
                         key={assistant._id}
-                        onClick={() => {
-                          tauri.sendCharacterId?.(assistant._id);
+                        onClick={async () => {
+                          // 如果有活跃的对话，在当前对话中切换 assistant
+                          if (activeTabId && activeTabId !== 'temp') {
+                            try {
+                              await tauri.transferConversation(activeTabId, assistant._id);
+                              // 更新标签页的 petId
+                              setTabs(prev => prev.map(t =>
+                                t.id === activeTabId ? { ...t, petId: assistant._id } : t
+                              ));
+                              console.log(`[ChatboxBody] Switched conversation ${activeTabId} to assistant ${assistant._id}`);
+
+                              // 重新发送 conversation-id 以确保 ChatboxInputBox 的 conversationIdRef 正确
+                              tauri.sendConversationId?.(activeTabId);
+
+                              // 通知 character 窗口切换皮肤
+                              switchingAssistantRef.current = true;
+                              await tauri.sendCharacterId?.(assistant._id);
+                              // 延迟重置 flag，确保所有监听器（含 StrictMode 重复监听器）都已处理
+                              setTimeout(() => { switchingAssistantRef.current = false; }, 200);
+                            } catch (error) {
+                              console.error('[ChatboxBody] Error switching assistant:', error);
+                            }
+                          } else {
+                            // 没有活跃对话时，创建新对话
+                            tauri.sendCharacterId?.(assistant._id);
+                          }
                           setShowAssistantDropdown(false);
                         }}
                         className="flex items-center gap-2 px-3 py-2 hover:bg-gray-100 cursor-pointer"

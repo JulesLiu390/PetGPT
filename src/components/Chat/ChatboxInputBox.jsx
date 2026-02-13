@@ -853,18 +853,12 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
           return;
         }
 
-        if (conversationIdRef.current && tauri) {
-          const currentConv = await tauri.getConversationById(conversationIdRef.current);
-          if (!currentConv || currentConv.petId !== characterId) {
-            // 不再触发 dispatch，因为这可能导致不必要的重新渲染
-            // dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
-            conversationIdRef.current = null;
-          }
-        }
-        // 移除这个 else 分支，避免不必要的 dispatch
-        // else {
-        //   dispatch({ type: actionType.SET_MESSAGE, userMessages: [] });
-        // }
+        // 注意：不再在此处清空 conversationIdRef.current
+        // 原因：侧边栏切换 assistant 时，transferConversation 已更新数据库的 pet_id，
+        // 但 fetchPetInfo 的异步操作可能与 transferConversation 产生竞态条件，
+        // 导致 conversationIdRef.current 被错误清空，后续消息无法保存到正确的对话。
+        // Tab 系统已通过 currentConversationId + sync effect 管理活跃对话 ID，
+        // 无需在此处重复管理。
       } catch (error) {
         console.error("Error fetching pet info:", error);
         // 不要在错误时设置 characterId 为 null，这可能导致循环
@@ -1103,6 +1097,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     let sendingConversationId = conversationIdRef.current || 'temp';
     // 保存初始 ID 用于状态清理（因为 sendingConversationId 后面可能会变）
     const initialConversationId = sendingConversationId;
+    console.log('[handleSend] ★ sendingConversationId:', sendingConversationId, 'conversationIdRef:', conversationIdRef.current, 'currentConversationId:', currentConversationId);
     
     // 标记该会话正在生成
     setGeneratingConversations(prev => new Set(prev).add(initialConversationId));
@@ -1515,16 +1510,22 @@ When using tools, please follow these guidelines:
     }
 
     // 如果是新对话（没有真实的 conversationId），创建新对话
+    console.log('[handleSend] ★★★ 新对话判断: sendingConversationId=', sendingConversationId);
     if (!sendingConversationId || sendingConversationId === 'temp') {
+      console.log('[handleSend] ★★★ 创建新对话 (sendingConversationId is temp/null)');
       try {
         // 新方案: 新对话时从 Rust TabState 获取最新消息
         const currentState = await tauri.getTabState(sendingConversationId || 'temp');
         const currentMsgs = currentState.messages || [];
+        console.log('[handleSend] ★★★ temp TabState messages:', currentMsgs.length);
+        // 如果用户通过快速切换按钮选择了不同的模型，使用 overrideModel._sourceId
+        const actualPetId = overrideModel ? overrideModel._sourceId : petInfo._id;
         const newConversation = await tauri.createConversation({
-          petId: petInfo._id,
+          petId: actualPetId,
           title: _userText,
           history: [...currentMsgs, botReply],
         });
+        console.log('[handleSend] ★★★ 新对话创建完成: id=', newConversation?._id);
         if (newConversation) {
             sendingConversationId = newConversation._id;
             // 初始化 Rust TabState
@@ -1537,15 +1538,26 @@ When using tools, please follow these guidelines:
       } catch (error) {
         console.error("Failed to create conversation:", error);
       }
+    } else {
+      console.log('[handleSend] ★★★ 已有对话，不需要创建新的, convId=', sendingConversationId);
     }
 
     // 使用 sendingConversationId 更新数据库，确保写入正确的对话
     // 只有当 conversationId 是有效的（不是 'temp'）时才更新数据库
+    console.log('[handleSend] ★★★ 保存判断: sendingConversationId=', sendingConversationId, 'type=', typeof sendingConversationId);
     if (sendingConversationId && sendingConversationId !== 'temp') {
+        console.log('[handleSend] ★★★ 进入保存流程, convId=', sendingConversationId);
+        // 如果用户通过快速切换按钮选择了不同的模型，更新会话的 pet_id
+        if (overrideModel && overrideModel._sourceId !== petInfo._id) {
+            await tauri.transferConversation(sendingConversationId, overrideModel._sourceId);
+            console.log(`[handleSend] Transferred conversation ${sendingConversationId} to pet ${overrideModel._sourceId}`);
+        }
+
         // 新方案: 从 Rust TabState 获取最新完整历史
         const finalState = await tauri.getTabState(sendingConversationId);
         const newHistory = finalState.messages || [];
-        
+        console.log('[handleSend] ★★★ getTabState 返回: convId=', sendingConversationId, 'historyLength=', newHistory.length, 'messages=', newHistory.map(m => `${m.role}:${typeof m.content === 'string' ? m.content.substring(0, 30) : '[complex]'}`));
+
         // Only update title if it's the first message
         // 使用在 pushTabMessage 之前保存的消息数量来判断
         // （不能用 historyMessages.length，因为它已经包含了刚发送的用户消息）
@@ -1559,8 +1571,10 @@ When using tools, please follow these guidelines:
         if (newTitle) {
             updatePayload.title = newTitle;
         }
+        console.log('[handleSend] ★★★ 调用 updateConversation, payload.history.length=', updatePayload.history.length, 'title=', updatePayload.title);
 
         await tauri.updateConversation(sendingConversationId, updatePayload);
+        console.log('[handleSend] ★★★ updateConversation 完成!');
         
         // 通知全局状态更新该会话的消息记录（用于侧边栏等）
         dispatch({

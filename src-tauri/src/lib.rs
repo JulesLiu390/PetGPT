@@ -45,27 +45,22 @@ lazy_static::lazy_static! {
 /// 广播事件到所有窗口
 #[tauri::command]
 fn emit_to_all(app: AppHandle, event: String, payload: JsonValue) -> Result<(), String> {
-    // println!("[Rust] emit_to_all called: event={}, payload={:?}", event, payload);
-    
     // 如果是 character-id 事件，存储到 pending
     if event == "character-id" {
         if let Some(id) = payload.as_str() {
             let mut pending = PENDING_CHARACTER_ID.lock().unwrap();
             *pending = Some(id.to_string());
-            // println!("[Rust] Stored pending character-id: {}", id);
         }
     }
-    
+
     // 尝试发送到每个已知窗口
     let windows = ["chat", "character", "manage"];
     for label in windows {
         if let Some(window) = app.get_webview_window(label) {
-            if let Err(e) = window.emit(&event, payload.clone()) {
-                println!("[Rust] Failed to emit to {}: {:?}", label, e);
-            }
+            let _ = window.emit(&event, payload.clone());
         }
     }
-    
+
     // 也用 app.emit 广播一次
     app.emit(&event, payload.clone()).map_err(|e| e.to_string())
 }
@@ -232,13 +227,25 @@ fn get_messages(db: State<DbState>, conversationId: String) -> Result<Vec<messag
 
 #[tauri::command]
 fn create_message(db: State<DbState>, data: messages::CreateMessageData) -> Result<messages::Message, String> {
-    db.create_message(data).map_err(|e| e.to_string())
+    println!("[Rust create_message] ★ convId={}, role={}, content_len={}", data.conversation_id, data.role, data.content.len());
+    let result = db.create_message(data);
+    match &result {
+        Ok(msg) => println!("[Rust create_message] ✅ saved msgId={} to convId={}", msg.id, msg.conversation_id),
+        Err(e) => println!("[Rust create_message] ❌ ERROR: {:?}", e),
+    }
+    result.map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 #[allow(non_snake_case)]
 fn clear_conversation_messages(db: State<DbState>, conversationId: String) -> Result<usize, String> {
-    db.clear_conversation_messages(&conversationId).map_err(|e| e.to_string())
+    println!("[Rust clear_conversation_messages] ★ convId={}", conversationId);
+    let result = db.clear_conversation_messages(&conversationId);
+    match &result {
+        Ok(count) => println!("[Rust clear_conversation_messages] ✅ deleted {} messages from convId={}", count, conversationId),
+        Err(e) => println!("[Rust clear_conversation_messages] ❌ ERROR: {:?}", e),
+    }
+    result.map_err(|e| e.to_string())
 }
 
 // ============ Settings Commands ============

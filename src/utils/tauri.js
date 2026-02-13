@@ -166,6 +166,12 @@ export const getConversations = async () => {
     const convs = await invoke('get_conversations_by_pet', { petId: pet._id });
     allConversations.push(...convs.map(c => ({ ...c, petName: pet.name })));
   }
+  // 全局按 updated_at 降序排列，确保最新对话始终在最前面
+  allConversations.sort((a, b) => {
+    const timeA = a.updatedAt || a.updated_at || '';
+    const timeB = b.updatedAt || b.updated_at || '';
+    return timeB.localeCompare(timeA);
+  });
   return allConversations;
 };
 
@@ -202,25 +208,43 @@ export const createConversation = async (data) => {
 };
 
 export const updateConversation = async (id, data) => {
+  console.log('[tauri.js updateConversation] ★★★ called with id=', id, 'title=', data.title, 'historyLength=', data.history?.length);
   // Handle title update
   if (data.title !== undefined) {
+    console.log('[tauri.js updateConversation] updating title to:', data.title);
     await invoke('update_conversation_title', { id, title: data.title });
   }
   // Handle history update - save each message
   if (data.history) {
+    console.log('[tauri.js updateConversation] clearing old messages for convId=', id);
     await invoke('clear_conversation_messages', { conversationId: id });
-    for (const msg of data.history) {
+    console.log('[tauri.js updateConversation] saving', data.history.length, 'messages to convId=', id);
+    for (let i = 0; i < data.history.length; i++) {
+      const msg = data.history[i];
+      const contentStr = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+      console.log(`[tauri.js updateConversation] saving msg[${i}] role=${msg.role} content_len=${contentStr.length} to convId=${id}`);
       await invoke('create_message', {
         data: {
           conversationId: id,
           role: msg.role,
-          content: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+          content: contentStr,
           toolCallHistory: msg.toolCallHistory ? JSON.stringify(msg.toolCallHistory) : null,
         }
       });
     }
+    console.log('[tauri.js updateConversation] ✅ all', data.history.length, 'messages saved to convId=', id);
+    // 🔍 保存后立即回读验证
+    const verifyMessages = await invoke('get_messages', { conversationId: id });
+    console.log(`[tauri.js updateConversation] 🔍 VERIFY: DB中实际有 ${verifyMessages.length} 条消息 (convId=${id})`);
+    if (verifyMessages.length !== data.history.length) {
+      console.error(`[tauri.js updateConversation] ❌ 数据不一致! 写入=${data.history.length} 读回=${verifyMessages.length}`);
+    }
+  } else {
+    console.log('[tauri.js updateConversation] ⚠️ NO history provided, skipping message save');
   }
-  return invoke('get_conversation', { id });
+  const result = await invoke('get_conversation', { id });
+  console.log('[tauri.js updateConversation] final conversation:', result?._id || result?.id, 'messageCount=', result?.messageCount);
+  return result;
 };
 
 export const deleteConversation = (id) => invoke('delete_conversation', { id });
