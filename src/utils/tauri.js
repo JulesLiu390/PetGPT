@@ -92,6 +92,7 @@ const DEFAULT_SETTINGS = {
   defaultAssistant: '',
   programHotkey: 'Shift + Space',
   dialogHotkey: 'Alt + Space',
+  screenshotHotkey: 'Cmd + Shift + A',
   launchAtStartup: false,
   theme: 'light',
   moodResetDelay: 30,  // 表情恢复到 normal 的延迟时间（秒）
@@ -501,8 +502,8 @@ export const hideWindow = async (label) => {
 
 // Shortcuts
 export const updateWindowSizePreset = (preset) => invoke('update_window_size_preset', { preset });
-export const updateShortcuts = (programHotkey, dialogHotkey) => 
-  invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey });
+export const updateShortcuts = (programHotkey, dialogHotkey, screenshotHotkey = '') => 
+  invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey, shortcut3: screenshotHotkey });
 
 // Preferences
 export const updatePreferences = (preferences) => invoke('update_preferences', { preferences });

@@ -16,6 +16,7 @@ use tauri::{State, Manager, AppHandle, LogicalPosition, LogicalSize, Emitter};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::image::Image;
+use tauri_plugin_clipboard_manager::ClipboardExt;
 use serde_json::Value as JsonValue;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
@@ -1063,6 +1064,388 @@ fn save_file(app: AppHandle, fileName: String, fileData: String, mimeType: Strin
     })
 }
 
+/// Copy a base64-encoded PNG image to the system clipboard
+#[tauri::command]
+#[allow(non_snake_case)]
+fn copy_image_to_clipboard(app: AppHandle, base64Data: String) -> Result<(), String> {
+    // Strip data URL prefix if present
+    let raw = if base64Data.contains(",") {
+        base64Data.split(",").nth(1).unwrap_or(&base64Data)
+    } else {
+        &base64Data
+    };
+
+    let decoded = BASE64.decode(raw)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+    // Use Tauri's Image type to create image from PNG bytes
+    let img = Image::from_bytes(&decoded)
+        .map_err(|e| format!("Failed to create image: {}", e))?;
+
+    // Write to clipboard using the clipboard manager plugin
+    app.clipboard().write_image(&img)
+        .map_err(|e| format!("Failed to copy to clipboard: {}", e))?;
+
+    println!("[Rust] Image copied to clipboard");
+    Ok(())
+}
+
+/// Save a base64-encoded image to a user-chosen path
+#[tauri::command]
+#[allow(non_snake_case)]
+fn save_image_to_path(filePath: String, base64Data: String) -> Result<(), String> {
+    // Strip data URL prefix if present
+    let raw = if base64Data.contains(",") {
+        base64Data.split(",").nth(1).unwrap_or(&base64Data)
+    } else {
+        &base64Data
+    };
+
+    let decoded = BASE64.decode(raw)
+        .map_err(|e| format!("Failed to decode base64: {}", e))?;
+
+    std::fs::write(&filePath, decoded)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    println!("[Rust] Image saved to: {}", filePath);
+    Ok(())
+}
+
+// ============ Screenshot Commands ============
+
+/// macOS 原生截图 FFI — 直接调用 CoreGraphics，避免 screencapture 进程开销
+#[cfg(target_os = "macos")]
+mod screenshot_mac {
+    use std::ffi::c_void;
+
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayCreateImage(display: u32) -> *mut c_void;
+        fn CGImageGetWidth(image: *const c_void) -> usize;
+        fn CGImageGetHeight(image: *const c_void) -> usize;
+        fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
+        fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
+        fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFDataGetLength(data: *const c_void) -> isize;
+        fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
+        fn CFRelease(cf: *const c_void);
+    }
+
+    /// 截取主显示器全屏，返回 (BGRA 原始像素数据, 宽, 高)
+    /// 保留原始 BGRA 格式，避免逐像素转换开销（~150ms on 5.6M pixels）
+    pub fn capture_screen() -> Result<(Vec<u8>, u32, u32), String> {
+        unsafe {
+            let display_id = CGMainDisplayID();
+            let cg_image = CGDisplayCreateImage(display_id);
+            if cg_image.is_null() {
+                return Err("CGDisplayCreateImage 返回 null（可能需要屏幕录制权限）".to_string());
+            }
+
+            let width = CGImageGetWidth(cg_image) as u32;
+            let height = CGImageGetHeight(cg_image) as u32;
+            let bytes_per_row = CGImageGetBytesPerRow(cg_image);
+
+            let provider = CGImageGetDataProvider(cg_image);
+            let cf_data = CGDataProviderCopyData(provider);
+            if cf_data.is_null() {
+                CFRelease(cg_image);
+                return Err("无法从 CGImage 获取像素数据".to_string());
+            }
+
+            let data_len = CFDataGetLength(cf_data) as usize;
+            let data_ptr = CFDataGetBytePtr(cf_data);
+            let raw_bytes = std::slice::from_raw_parts(data_ptr, data_len);
+
+            // 保留原始 BGRA 格式，仅去除行对齐 padding（如果有的话）
+            let stride = width as usize * 4;
+            let bgra = if bytes_per_row == stride {
+                // 无 padding，直接 memcpy
+                raw_bytes[..stride * height as usize].to_vec()
+            } else {
+                // 有行对齐 padding，逐行拷贝紧凑数据
+                let mut buf = Vec::with_capacity(stride * height as usize);
+                for y in 0..height as usize {
+                    let row_start = y * bytes_per_row;
+                    buf.extend_from_slice(&raw_bytes[row_start..row_start + stride]);
+                }
+                buf
+            };
+
+            CFRelease(cf_data);
+            CFRelease(cg_image);
+
+            Ok((bgra, width, height))
+        }
+    }
+
+    /// 将 BGRA 数据写为 BMP 文件（零编码成本：文件头 + 原始像素直写）
+    /// BMP 原生就是 BGRA 存储，与 macOS 截屏数据完全匹配
+    pub fn write_bmp(path: &std::path::Path, bgra: &[u8], width: u32, height: u32) -> Result<(), String> {
+        use std::io::Write;
+
+        let row_size = (width * 4) as usize;
+        let pixel_data_size = row_size * height as usize;
+        let file_size = 54 + pixel_data_size as u32;
+
+        let mut file = std::fs::File::create(path)
+            .map_err(|e| format!("Failed to create BMP file: {}", e))?;
+
+        // BMP File Header (14 bytes)
+        file.write_all(b"BM").map_err(|e| e.to_string())?;
+        file.write_all(&file_size.to_le_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(&[0u8; 4]).map_err(|e| e.to_string())?; // reserved
+        file.write_all(&54u32.to_le_bytes()).map_err(|e| e.to_string())?; // pixel data offset
+
+        // DIB Header - BITMAPINFOHEADER (40 bytes)
+        file.write_all(&40u32.to_le_bytes()).map_err(|e| e.to_string())?; // header size
+        file.write_all(&width.to_le_bytes()).map_err(|e| e.to_string())?;
+        // BMP 存储是 bottom-up，用负高度表示 top-down（避免翻转像素）
+        file.write_all(&(-(height as i32)).to_le_bytes()).map_err(|e| e.to_string())?;
+        file.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?; // planes
+        file.write_all(&32u16.to_le_bytes()).map_err(|e| e.to_string())?; // bits per pixel
+        file.write_all(&[0u8; 24]).map_err(|e| e.to_string())?; // compression + rest zeros
+
+        // Pixel data — BGRA 直写，零编码
+        file.write_all(&bgra[..pixel_data_size]).map_err(|e| e.to_string())?;
+
+        Ok(())
+    }
+}
+
+/// 全屏截图的缓存 — 存储原始 BGRA 像素数据（与 macOS 原生格式一致，避免转换开销）
+lazy_static::lazy_static! {
+    static ref SCREENSHOT_CACHE: Mutex<Option<(Vec<u8>, u32, u32)>> = Mutex::new(None);
+}
+
+/// 截取全屏并打开选区窗口
+/// CGDisplay FFI 截屏 + BMP 直写预览（零编码开销）
+#[tauri::command]
+fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
+    println!("[Screenshot] Taking full screen capture...");
+    let t0 = std::time::Instant::now();
+
+    // 0. 读取设置：是否隐藏现有窗口
+    let should_hide = db.get_setting("screenshot_hide_windows")
+        .ok()
+        .flatten()
+        .map(|v| v.trim_matches('"') != "false")
+        .unwrap_or(true);
+
+    // 1. 根据设置决定是否隐藏所有 PetGPT 窗口
+    let windows_to_hide = ["chat", "character", "manage"];
+    let mut was_visible: Vec<(&str, bool)> = Vec::new();
+    if should_hide {
+        for label in &windows_to_hide {
+            if let Some(win) = app.get_webview_window(label) {
+                let visible = win.is_visible().unwrap_or(false);
+                was_visible.push((label, visible));
+                if visible {
+                    let _ = win.hide();
+                }
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+
+    let t1 = std::time::Instant::now();
+
+    // 2. CGDisplay FFI 截屏（返回原始 BGRA 数据，无格式转换）
+    #[cfg(target_os = "macos")]
+    let (bgra_data, width, height) = screenshot_mac::capture_screen()?;
+    #[cfg(not(target_os = "macos"))]
+    return Err("Screenshot is only supported on macOS".to_string());
+
+    let t2 = std::time::Instant::now();
+    println!("[Screenshot] CGDisplay capture: {}ms, {}x{}, {} bytes BGRA",
+        t2.duration_since(t1).as_millis(), width, height, bgra_data.len());
+
+    // 3. BMP 直写预览文件（零编码：文件头 + BGRA 像素 memcpy）
+    let preview_path = get_uploads_dir(&app)?.join("_screenshot_preview.bmp");
+    screenshot_mac::write_bmp(&preview_path, &bgra_data, width, height)?;
+    let preview_path_str = preview_path.to_string_lossy().to_string();
+
+    let t3 = std::time::Instant::now();
+    println!("[Screenshot] BMP write: {}ms", t3.duration_since(t2).as_millis());
+
+    // 4. 缓存 BGRA 原始数据（capture_region 裁剪时再局部转 RGBA）
+    {
+        let mut cache = SCREENSHOT_CACHE.lock().unwrap();
+        *cache = Some((bgra_data, width, height));
+    }
+
+    // 5. 获取 scale factor 和逻辑尺寸
+    let scale_factor = app.primary_monitor()
+        .ok()
+        .flatten()
+        .map(|m| m.scale_factor())
+        .unwrap_or(2.0);
+    let logical_width = (width as f64 / scale_factor) as u32;
+    let logical_height = (height as f64 / scale_factor) as u32;
+
+    // 6. 显示 screenshot-prompt 窗口，发送文件路径
+    if let Some(ss_win) = app.get_webview_window("screenshot-prompt") {
+        let _ = ss_win.set_size(tauri::LogicalSize::new(logical_width, logical_height));
+        let _ = ss_win.set_position(tauri::LogicalPosition::new(0, 0));
+        let _ = ss_win.show();
+        let _ = ss_win.set_focus();
+
+        let _ = app.emit("screenshot-ready", serde_json::json!({
+            "previewPath": preview_path_str,
+            "width": width,
+            "height": height,
+            "logicalWidth": logical_width,
+            "logicalHeight": logical_height,
+            "scaleFactor": scale_factor,
+        }));
+    }
+
+    // 7. 记住哪些窗口需要恢复
+    {
+        let mut pending = PENDING_RESTORE_WINDOWS.lock().unwrap();
+        *pending = was_visible.iter()
+            .filter(|(_, v)| *v)
+            .map(|(l, _)| l.to_string())
+            .collect();
+    }
+
+    println!("[Screenshot] Total take_screenshot: {}ms", t0.elapsed().as_millis());
+    Ok(())
+}
+
+lazy_static::lazy_static! {
+    static ref PENDING_RESTORE_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+}
+
+/// 裁剪指定区域并返回结果（优化：直接使用缓存的 RGBA 数据，无需解码）
+#[tauri::command]
+fn capture_region(app: AppHandle, x: u32, y: u32, width: u32, height: u32) -> Result<serde_json::Value, String> {
+    println!("[Screenshot] Cropping region: ({}, {}) {}x{}", x, y, width, height);
+    let t0 = std::time::Instant::now();
+
+    // 1. 从缓存取出 BGRA 原始数据
+    let (bgra_data, full_w, full_h) = {
+        let cache = SCREENSHOT_CACHE.lock().unwrap();
+        cache.clone().ok_or("No screenshot in cache")?
+    };
+
+    // 2. 裁剪区域（确保不越界）
+    let crop_x = x.min(full_w.saturating_sub(1));
+    let crop_y = y.min(full_h.saturating_sub(1));
+    let crop_w = width.min(full_w - crop_x);
+    let crop_h = height.min(full_h - crop_y);
+
+    // 3. 从 BGRA 缓存中提取裁剪区域并转为 RGBA（仅转换裁剪区域，非全图）
+    let stride = full_w as usize * 4;
+    let mut rgba_cropped = Vec::with_capacity((crop_w * crop_h * 4) as usize);
+    for row in 0..crop_h as usize {
+        let src_y = crop_y as usize + row;
+        let src_offset = src_y * stride + crop_x as usize * 4;
+        for col in 0..crop_w as usize {
+            let i = src_offset + col * 4;
+            rgba_cropped.push(bgra_data[i + 2]); // R
+            rgba_cropped.push(bgra_data[i + 1]); // G
+            rgba_cropped.push(bgra_data[i]);     // B
+            rgba_cropped.push(255);               // A
+        }
+    }
+
+    // 4. 编码裁剪结果为 PNG
+    let mut cropped_bytes = Vec::new();
+    {
+        use image::ImageEncoder;
+        let encoder = image::codecs::png::PngEncoder::new(&mut cropped_bytes);
+        encoder.write_image(
+            &rgba_cropped,
+            crop_w,
+            crop_h,
+            image::ExtendedColorType::Rgba8,
+        ).map_err(|e| format!("Failed to encode cropped PNG: {}", e))?;
+    }
+
+    // 5. 保存到 uploads 目录
+    let uploads_dir = get_uploads_dir(&app)?;
+    let file_name = format!("screenshot_{}.png", chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let file_path = uploads_dir.join(&file_name);
+    fs::write(&file_path, &cropped_bytes)
+        .map_err(|e| format!("Failed to save screenshot: {}", e))?;
+
+    // 6. 生成 base64 data URL
+    let base64_data = format!("data:image/png;base64,{}", BASE64.encode(&cropped_bytes));
+
+    // 7. 复制到剪贴板
+    if let Ok(img) = Image::from_bytes(&cropped_bytes) {
+        let _ = app.clipboard().write_image(&img);
+        println!("[Screenshot] Copied to clipboard");
+    }
+
+    // 8. 隐藏 screenshot-prompt 窗口
+    if let Some(ss_win) = app.get_webview_window("screenshot-prompt") {
+        let _ = ss_win.hide();
+    }
+
+    // 9. 恢复之前隐藏的窗口
+    {
+        let labels = PENDING_RESTORE_WINDOWS.lock().unwrap().clone();
+        for label in labels {
+            if let Some(win) = app.get_webview_window(&label) {
+                let _ = win.show();
+            }
+        }
+        let mut pending = PENDING_RESTORE_WINDOWS.lock().unwrap();
+        pending.clear();
+    }
+
+    // 10. 清除截图缓存
+    {
+        let mut cache = SCREENSHOT_CACHE.lock().unwrap();
+        *cache = None;
+    }
+
+    println!("[Screenshot] Region captured: {}x{}, saved to {} ({}ms)", 
+        crop_w, crop_h, file_name, t0.elapsed().as_millis());
+
+    Ok(serde_json::json!({
+        "imageBase64": base64_data,
+        "path": file_path.to_string_lossy(),
+        "name": file_name,
+    }))
+}
+
+/// 取消截图（隐藏窗口，恢复之前状态）
+#[tauri::command]
+fn cancel_screenshot(app: AppHandle) -> Result<(), String> {
+    // 隐藏 screenshot-prompt 窗口
+    if let Some(ss_win) = app.get_webview_window("screenshot-prompt") {
+        let _ = ss_win.hide();
+    }
+
+    // 恢复之前隐藏的窗口
+    {
+        let labels = PENDING_RESTORE_WINDOWS.lock().unwrap().clone();
+        for label in labels {
+            if let Some(win) = app.get_webview_window(&label) {
+                let _ = win.show();
+            }
+        }
+        let mut pending = PENDING_RESTORE_WINDOWS.lock().unwrap();
+        pending.clear();
+    }
+
+    // 清除截图缓存
+    {
+        let mut cache = SCREENSHOT_CACHE.lock().unwrap();
+        *cache = None;
+    }
+
+    println!("[Screenshot] Cancelled");
+    Ok(())
+}
+
 #[tauri::command]
 #[allow(non_snake_case)]
 fn read_upload(app: AppHandle, fileName: String) -> Result<String, String> {
@@ -1635,7 +2018,7 @@ fn update_window_size_preset(app: AppHandle, preset: String) -> Result<(), Strin
 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, ShortcutState};
 
 #[tauri::command]
-fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String) -> Result<serde_json::Value, String> {
+fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortcut3: String) -> Result<serde_json::Value, String> {
     // Unregister all existing shortcuts
     let _ = app.global_shortcut().unregister_all();
     
@@ -1680,7 +2063,7 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String) -> Res
     let normalized1 = normalize_shortcut(&shortcut1);
     let normalized2 = normalize_shortcut(&shortcut2);
     
-    log::info!("[Shortcuts] Registering: {} -> {}, {} -> {}", shortcut1, normalized1, shortcut2, normalized2);
+    log::info!("[Shortcuts] Registering: s1={} -> {}, s2={} -> {}, s3={}", shortcut1, normalized1, shortcut2, normalized2, shortcut3);
     
     // Register shortcut1: toggle character window visibility
     if !normalized1.is_empty() {
@@ -1730,11 +2113,35 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String) -> Res
         }
     }
     
+    // Register shortcut3: take screenshot
+    let normalized3 = normalize_shortcut(&shortcut3);
+    if !normalized3.is_empty() {
+        if let Ok(shortcut) = normalized3.parse::<Shortcut>() {
+            let app_handle = app.clone();
+            let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                if event.state != ShortcutState::Pressed {
+                    return;
+                }
+                log::info!("[Shortcuts] Shortcut3 triggered (screenshot)");
+                // 调用 take_screenshot 逻辑：读取 DB 设置并截屏
+                let db = app_handle.state::<DbState>();
+                if let Err(e) = take_screenshot(app_handle.clone(), db) {
+                    log::error!("[Shortcuts] Screenshot failed: {}", e);
+                }
+            });
+        } else {
+            log::warn!("[Shortcuts] Failed to parse shortcut3: {}", normalized3);
+        }
+    }
+    
+    log::info!("[Shortcuts] Registered: s1={}, s2={}, s3={}", normalized1, normalized2, normalized3);
+
     Ok(serde_json::json!({
         "success": true,
         "shortcuts": {
             "shortcut1": shortcut1,
-            "shortcut2": shortcut2
+            "shortcut2": shortcut2,
+            "shortcut3": shortcut3
         }
     }))
 }
@@ -2096,8 +2503,14 @@ pub fn run() {
             mcp_reset_cancellation,
             // File handling commands
             save_file,
+            save_image_to_path,
+            copy_image_to_clipboard,
             read_upload,
             get_uploads_path,
+            // Screenshot commands
+            take_screenshot,
+            capture_region,
+            cancel_screenshot,
             // Window management commands
             show_chat_window,
             hide_chat_window,

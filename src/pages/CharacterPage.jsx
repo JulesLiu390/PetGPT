@@ -272,8 +272,8 @@ export const Character = () => {
       }
       
       // 注册快捷键
-      if (settings?.programHotkey || settings?.dialogHotkey) {
-        tauri.updateShortcuts(settings.programHotkey || '', settings.dialogHotkey || '');
+      if (settings?.programHotkey || settings?.dialogHotkey || settings?.screenshotHotkey) {
+        tauri.updateShortcuts(settings.programHotkey || '', settings.dialogHotkey || '', settings.screenshotHotkey || '');
       }
       
       let foundPet = null;

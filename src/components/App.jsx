@@ -3,6 +3,7 @@ import ChatboxBody from './Chat/ChatboxBody'
 import { HashRouter, Routes, Route } from "react-router-dom";
 import CharacterPage from '../pages/CharacterPage';
 import ManagementPage from '../pages/ManagementPage';
+import ScreenshotOverlay from '../pages/ScreenshotOverlay';
 import { useStateValue } from '../context/StateProvider';
 import { actionType } from '../context/reducer';
 import * as tauri from '../utils/tauri';
@@ -46,6 +47,7 @@ function App() {
           } />
           <Route path="/character" element={<CharacterPage />} />
           <Route path="/manage" element={<ManagementPage />} />
+          <Route path="/screenshot-prompt" element={<ScreenshotOverlay />} />
         </Routes>
   )
 }

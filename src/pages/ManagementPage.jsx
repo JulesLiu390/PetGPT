@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash, FaFile, FaDownload } from "react-icons/fa6";
+import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash, FaFile, FaDownload, FaCamera } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
 import { MdClose } from "react-icons/md";
 import { LuMaximize2 } from "react-icons/lu";
@@ -3222,6 +3222,228 @@ const HotkeysPanel = ({ settings, onSettingsChange, onSave, saving }) => {
   );
 };
 
+// ==================== Screenshot Panel ====================
+
+const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
+  if (!settings) return null;
+
+  // 解析 screenshot_prompts（JSON 字符串 → 数组）
+  const prompts = (() => {
+    try {
+      const raw = settings.screenshot_prompts;
+      if (Array.isArray(raw)) return raw;
+      if (typeof raw === 'string') return JSON.parse(raw);
+      return [];
+    } catch { return []; }
+  })();
+
+  const [editingIdx, setEditingIdx] = useState(null);
+  const [editDraft, setEditDraft] = useState({ name: '', icon: '', prompt: '' });
+
+  const updatePrompts = (newPrompts) => {
+    onSettingsChange({
+      target: { name: 'screenshot_prompts', value: JSON.stringify(newPrompts) }
+    });
+  };
+
+  const handleAddPrompt = () => {
+    const newItem = { name: 'New Action', icon: '🔍', prompt: '' };
+    updatePrompts([...prompts, newItem]);
+    setEditingIdx(prompts.length);
+    setEditDraft({ ...newItem });
+  };
+
+  const handleDeletePrompt = (idx) => {
+    const updated = prompts.filter((_, i) => i !== idx);
+    updatePrompts(updated);
+    if (editingIdx === idx) { setEditingIdx(null); }
+    else if (editingIdx > idx) { setEditingIdx(editingIdx - 1); }
+  };
+
+  const handleEditPrompt = (idx) => {
+    setEditingIdx(idx);
+    setEditDraft({ ...prompts[idx] });
+  };
+
+  const handleSaveEdit = () => {
+    if (editingIdx === null) return;
+    const updated = [...prompts];
+    updated[editingIdx] = { ...editDraft };
+    updatePrompts(updated);
+    setEditingIdx(null);
+  };
+
+  const handleCancelEdit = () => {
+    setEditingIdx(null);
+  };
+
+  const handleCheckboxChange = (e) => {
+    const { name, checked } = e.target;
+    onSettingsChange({
+      target: { name, value: checked }
+    });
+  };
+
+  return (
+    <>
+      {/* Title */}
+      <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+        <div className="text-base font-semibold text-slate-800">
+          Screenshot
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+        <div className="space-y-4">
+          {/* Screenshot Hotkey */}
+          <Card title="Screenshot Hotkey" description="Global shortcut to trigger screenshot capture">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="text-sm font-medium text-slate-700">Capture Screenshot</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  Press this shortcut anywhere to start a screenshot capture.
+                </div>
+              </div>
+              <div className="w-48">
+                <SettingsHotkeyInput
+                  name="screenshotHotkey"
+                  value={settings.screenshotHotkey || ''}
+                  onChange={onSettingsChange}
+                />
+              </div>
+            </div>
+          </Card>
+
+          {/* Hide Windows */}
+          <Card title="Capture Behavior" description="Configure how screenshots are taken">
+            <div className="flex items-center justify-between">
+              <div className="flex-1">
+                <div className="text-sm font-medium text-slate-700">Hide Windows Before Capture</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  Hide all PetGPT windows before taking a screenshot so they don't appear in the captured image.
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer">
+                <input
+                  type="checkbox"
+                  name="screenshot_hide_windows"
+                  checked={settings.screenshot_hide_windows !== false && settings.screenshot_hide_windows !== 'false'}
+                  onChange={handleCheckboxChange}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+              </label>
+            </div>
+          </Card>
+
+          {/* Quick Prompts */}
+          <Card title="Quick Actions" description="Custom toolbar buttons shown after selecting a screenshot area. Each button sends the screenshot with a preset prompt to a new chat tab.">
+            <div className="space-y-2">
+              {prompts.length === 0 && (
+                <div className="text-sm text-slate-400 text-center py-3">
+                  No quick actions configured. Click "Add" to create one.
+                </div>
+              )}
+
+              {prompts.map((item, idx) => (
+                <div key={idx}>
+                  {editingIdx === idx ? (
+                    // 编辑模式
+                    <div className="border border-blue-200 rounded-lg p-3 bg-blue-50/50 space-y-2">
+                      <div className="flex gap-2">
+                        <div className="w-16">
+                          <label className="text-xs text-slate-500">Icon</label>
+                          <Input
+                            value={editDraft.icon}
+                            onChange={(e) => setEditDraft(d => ({ ...d, icon: e.target.value }))}
+                            className="text-center text-lg"
+                            maxLength={2}
+                          />
+                        </div>
+                        <div className="flex-1">
+                          <label className="text-xs text-slate-500">Name</label>
+                          <Input
+                            value={editDraft.name}
+                            onChange={(e) => setEditDraft(d => ({ ...d, name: e.target.value }))}
+                            placeholder="e.g. Translate"
+                          />
+                        </div>
+                      </div>
+                      <div>
+                        <label className="text-xs text-slate-500">Prompt</label>
+                        <Textarea
+                          value={editDraft.prompt}
+                          onChange={(e) => setEditDraft(d => ({ ...d, prompt: e.target.value }))}
+                          placeholder="e.g. Please translate the text in this screenshot to English"
+                          rows={3}
+                        />
+                      </div>
+                      <div className="flex justify-end gap-2">
+                        <Button variant="ghost" onClick={handleCancelEdit} className="text-xs px-3 py-1">Cancel</Button>
+                        <Button variant="primary" onClick={handleSaveEdit} className="text-xs px-3 py-1">Done</Button>
+                      </div>
+                    </div>
+                  ) : (
+                    // 列表模式
+                    <div className="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-50 group">
+                      <span className="text-xl w-8 text-center shrink-0">{item.icon || '📋'}</span>
+                      <div className="flex-1 min-w-0">
+                        <div className="text-sm font-medium text-slate-700 truncate">{item.name}</div>
+                        <div className="text-xs text-slate-400 truncate">{item.prompt || '(no prompt)'}</div>
+                      </div>
+                      <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                          onClick={() => handleEditPrompt(idx)}
+                          className="p-1.5 rounded hover:bg-slate-200 text-slate-500"
+                          title="Edit"
+                        >
+                          <FaPen className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => handleDeletePrompt(idx)}
+                          className="p-1.5 rounded hover:bg-red-100 text-slate-500 hover:text-red-500"
+                          title="Delete"
+                        >
+                          <FaTrash className="w-3 h-3" />
+                        </button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+
+              <button
+                onClick={handleAddPrompt}
+                className="w-full flex items-center justify-center gap-2 py-2 text-sm text-blue-500 hover:text-blue-600 hover:bg-blue-50 rounded-lg border border-dashed border-blue-200 transition-colors"
+              >
+                <FaPlus className="w-3 h-3" /> Add Quick Action
+              </button>
+            </div>
+          </Card>
+
+          <div className="pt-2">
+            <Button
+              type="button"
+              variant="primary"
+              disabled={saving}
+              onClick={onSave}
+              className="w-full py-3"
+            >
+              {saving ? (
+                <span className="flex items-center gap-2">
+                  <FaSpinner className="animate-spin w-4 h-4" />
+                  Saving...
+                </span>
+              ) : "Save Screenshot Settings"}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+};
+
 // ==================== Sidebar Navigation ====================
 
 const tabGroups = [
@@ -3241,6 +3463,7 @@ const tabGroups = [
       { id: 'defaults', label: 'Defaults', icon: FaGear },
       { id: 'preferences', label: 'Preferences', icon: FaSliders },
       { id: 'hotkeys', label: 'Hotkeys', icon: FaKeyboard },
+      { id: 'screenshot', label: 'Screenshot', icon: FaCamera },
       { id: 'ui', label: 'UI', icon: FaPalette },
     ]
   }
@@ -3477,7 +3700,7 @@ const ManagementPage = () => {
     try {
       await saveSettingsHook(localSettings);
       tauri.updateWindowSizePreset(localSettings.windowSize);
-      tauri.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey);
+      tauri.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey, localSettings.screenshotHotkey);
       
       // 同步偏好设置到 Rust 后端
       if (localSettings.chatFollowsCharacter !== undefined) {
@@ -3503,6 +3726,7 @@ const ManagementPage = () => {
       case 'defaults': return 'Defaults';
       case 'preferences': return 'Preferences';
       case 'hotkeys': return 'Keyboard Shortcuts';
+      case 'screenshot': return 'Screenshot';
       case 'ui': return 'UI Settings';
       case 'skins': return 'Skins';
       default: return 'Settings';
@@ -3558,6 +3782,14 @@ const ManagementPage = () => {
             )}
             {activeTab === 'preferences' && (
               <PreferencesPanel 
+                settings={localSettings}
+                onSettingsChange={handleSettingsChange}
+                onSave={handleSaveSettings}
+                saving={saving}
+              />
+            )}
+            {activeTab === 'screenshot' && (
+              <ScreenshotPanel 
                 settings={localSettings}
                 onSettingsChange={handleSettingsChange}
                 onSave={handleSaveSettings}

@@ -103,8 +103,9 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
   );
 };
 
-import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh, MdOpenInNew, MdPlayCircle, MdAudiotrack, MdInsertDriveFile, MdCallSplit } from 'react-icons/md';
+import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh, MdOpenInNew, MdPlayCircle, MdAudiotrack, MdInsertDriveFile, MdCallSplit, MdCameraAlt } from 'react-icons/md';
 import { actionType } from '../../context/reducer';
+import { renderShareImage, copyImageToClipboard, saveImageToFile } from './ShareCardRenderer';
 
 // Helper: get mime type from file extension
 const getMimeTypeFromPath = (filePath) => {
@@ -570,6 +571,8 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
   const [editingPartIndex, setEditingPartIndex] = useState(null);
   const [editContent, setEditContent] = useState("");
   const [copiedIndex, setCopiedIndex] = useState(null);
+  const [sharingIndex, setSharingIndex] = useState(null); // 正在生成分享图片的消息 index
+  const [shareMenuIndex, setShareMenuIndex] = useState(null); // 显示分享菜单的消息 index
 
   // 新方案: 订阅 Rust TabState 更新
   useEffect(() => {
@@ -633,6 +636,39 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
     navigator.clipboard.writeText(text);
     setCopiedIndex(key);
     setTimeout(() => setCopiedIndex(null), 2000);
+  };
+
+  // ========== 分享为图片 ==========
+  const handleShareAsImage = async (msgIndex, action) => {
+    setShareMenuIndex(null);
+    setSharingIndex(msgIndex);
+    try {
+      const msg = messages[msgIndex];
+      // 找到前面最近的一条 user 消息作为提问
+      let questionMsg = null;
+      for (let i = msgIndex - 1; i >= 0; i--) {
+        if (messages[i]?.role === 'user') {
+          questionMsg = messages[i];
+          break;
+        }
+      }
+      if (!questionMsg) {
+        questionMsg = { role: 'user', content: '' };
+      }
+
+      const blob = await renderShareImage(questionMsg, msg);
+
+      if (action === 'copy') {
+        const ok = await copyImageToClipboard(blob);
+        if (ok) console.log('[Share] Image copied to clipboard');
+      } else if (action === 'save') {
+        await saveImageToFile(blob);
+      }
+    } catch (err) {
+      console.error('[Share] Failed to generate share image:', err);
+    } finally {
+      setSharingIndex(null);
+    }
   };
 
   const startEditingPart = (msgIndex, partIndex, text) => {
@@ -802,6 +838,7 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
     <div 
         ref={scrollContainerRef}
         onScroll={handleScroll}
+        onClick={() => { if (shareMenuIndex !== null) setShareMenuIndex(null); }}
         className={`flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh] ${!showTitleBar ? 'pt-11' : 'pt-2'}`}
     >
         <CompactMarkdownStyles />
@@ -892,6 +929,42 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
                         >
                             <MdCallSplit size={12} />
                         </button>
+                        {/* Share as image — 仅对 assistant 消息显示 */}
+                        {!isUser && partIndex === 0 && (
+                          <div className="relative">
+                            <button
+                              onClick={() => setShareMenuIndex(shareMenuIndex === index ? null : index)}
+                              className={`p-1 transition-colors rounded ${
+                                sharingIndex === index
+                                  ? 'text-orange-500 animate-pulse'
+                                  : 'text-gray-400 hover:text-orange-500'
+                              }`}
+                              title="Share as image"
+                              disabled={sharingIndex !== null}
+                            >
+                              <MdCameraAlt size={12} />
+                            </button>
+                            {shareMenuIndex === index && (
+                              <div
+                                className="absolute left-0 bottom-6 bg-white rounded-lg shadow-lg border border-gray-200 py-1 z-50 whitespace-nowrap"
+                                onClick={(e) => e.stopPropagation()}
+                              >
+                                <button
+                                  onClick={() => handleShareAsImage(index, 'copy')}
+                                  className="flex items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 w-full text-left"
+                                >
+                                  <MdContentCopy size={12} /> Copy as image
+                                </button>
+                                <button
+                                  onClick={() => handleShareAsImage(index, 'save')}
+                                  className="flex items-center gap-2 px-3 py-1.5 text-xs text-gray-700 hover:bg-gray-100 w-full text-left"
+                                >
+                                  <MdOpenInNew size={12} /> Save as image
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        )}
                         <button
                             onClick={() => handleDeletePart(index, partIndex)}
                             className="p-1 text-gray-400 hover:text-red-500 transition-colors rounded"

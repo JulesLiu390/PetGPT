@@ -362,6 +362,41 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     }
   }, []);
 
+  // 待注入的截图数据（用于 newTab 场景）
+  const pendingScreenshotRef = useRef(null);
+
+  // 当 activeTabId 变化时，检查是否有待注入的截图
+  useEffect(() => {
+    if (!activeTabId || !pendingScreenshotRef.current) return;
+    
+    const { screenshot, prompt } = pendingScreenshotRef.current;
+    pendingScreenshotRef.current = null;
+    
+    // 延迟注入，确保新 Tab 已完全初始化
+    setTimeout(() => {
+      setAttachments(prev => [...prev, {
+        type: 'image_url',
+        url: screenshot.data,
+        path: screenshot.path,
+        name: screenshot.name,
+        mime_type: 'image/png',
+        data: screenshot.data
+      }]);
+      
+      if (prompt) {
+        setUserText(prompt);
+        setTimeout(() => {
+          if (inputRef.current) {
+            const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
+            inputRef.current.dispatchEvent(enterEvent);
+          }
+        }, 150);
+      } else {
+        setTimeout(() => inputRef.current?.focus(), 50);
+      }
+    }, 300);
+  }, [activeTabId]);
+
   // 监听截图选择结果事件
   useEffect(() => {
     let unlisten = null;
@@ -369,12 +404,24 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     
     const setup = async () => {
       const unlistenFn = await listen('screenshot-with-prompt', (event) => {
-        const { prompt, promptName, screenshot } = event.payload;
-        console.log('[Screenshot] Received selection:', promptName || 'Direct send');
+        const { prompt, promptName, screenshot, newTab } = event.payload;
+        console.log('[Screenshot] Received selection:', promptName || 'Direct send', newTab ? '(new tab)' : '');
         
         if (!screenshot) return;
         
-        // 添加截图到附件
+        if (newTab) {
+          // 新 Tab 模式：存储待注入数据，然后触发新 Tab 创建
+          pendingScreenshotRef.current = { screenshot, prompt };
+          
+          // 触发新 Tab 创建（复用当前 Tab 的 petId）
+          const petId = activePetId;
+          if (petId) {
+            tauri.sendCharacterId(petId);
+          }
+          return;
+        }
+        
+        // 当前 Tab 模式
         setAttachments(prev => [...prev, {
           type: 'image_url',
           url: screenshot.data,
@@ -384,10 +431,8 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
           data: screenshot.data
         }]);
         
-        // 如果有 prompt，设置文本并自动发送
         if (prompt) {
           setUserText(prompt);
-          // 延迟触发发送
           setTimeout(() => {
             if (inputRef.current) {
               const enterEvent = new KeyboardEvent('keydown', { key: 'Enter', bubbles: true });
@@ -395,14 +440,12 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
             }
           }, 100);
         } else {
-          // 无 prompt，聚焦输入框让用户添加文字
           setTimeout(() => {
             inputRef.current?.focus();
           }, 50);
         }
       });
       
-      // 如果在 setup 完成前组件已卸载，立即清理
       if (cancelled) {
         unlistenFn();
       } else {
@@ -416,7 +459,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       cancelled = true;
       if (unlisten) unlisten();
     };
-  }, []);
+  }, [activePetId]);
 
   // 修改后的：点击按钮时复制对话内容
   const handleShare = () => {

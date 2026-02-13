@@ -565,13 +565,13 @@ export const updateWindowSizePreset = async (size) => {
   }
 };
 
-export const updateShortcuts = async (programHotkey, dialogHotkey) => {
+export const updateShortcuts = async (programHotkey, dialogHotkey, screenshotHotkey = '') => {
   if (isElectron()) {
     return window.electron.updateShortcuts(programHotkey, dialogHotkey);
   }
   if (isTauri()) {
     const { invoke } = await getTauriApi();
-    return invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey });
+    return invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey, shortcut3: screenshotHotkey });
   }
 };
 
