@@ -180,6 +180,26 @@ export const getConversationsByPet = (petId) => invoke('get_conversations_by_pet
 export const getConversationById = (id) => invoke('get_conversation', { id });
 
 /**
+ * 搜索对话（标题+消息内容）
+ * @param {string} query - 搜索关键词
+ * @returns {Promise<Array>} 搜索结果数组，每项含 conversation, matchType, snippet, messageRole
+ */
+export const searchConversations = async (query) => {
+  if (!query || !query.trim()) return [];
+  const results = await invoke('search_conversations', { query: query.trim() });
+  // 为每个结果补充 petName
+  const pets = await getPets();
+  const petMap = Object.fromEntries(pets.map(p => [p._id, p.name]));
+  return results.map(r => ({
+    ...r,
+    conversation: {
+      ...r.conversation,
+      petName: petMap[r.conversation.petId] || '未知角色',
+    },
+  }));
+};
+
+/**
  * 获取会话及其消息历史
  * @param {string} id - 会话 ID
  * @returns {Promise<Object>} 包含 history 字段的会话对象
@@ -640,6 +660,28 @@ export const updatePetUserMemory = async (petId, key, value) => {
   return updatePet(petId, { userMemory: JSON.stringify(updatedMemory) });
 };
 
+// ==================== Workspace (File-based Personality/Memory) ====================
+
+export const workspaceRead = async (petId, path) => {
+  return invoke('workspace_read', { petId, path });
+};
+
+export const workspaceWrite = async (petId, path, content) => {
+  return invoke('workspace_write', { petId, path, content });
+};
+
+export const workspaceEdit = async (petId, path, oldText, newText) => {
+  return invoke('workspace_edit', { petId, path, oldText, newText });
+};
+
+export const workspaceEnsureDefaultFiles = async (petId, petName) => {
+  return invoke('workspace_ensure_default_files', { petId, petName });
+};
+
+export const workspaceFileExists = async (petId, path) => {
+  return invoke('workspace_file_exists', { petId, path });
+};
+
 // Model Configs (alias to pets with model type)
 export const getModelConfigs = async () => {
   const pets = await getPets();
@@ -786,6 +828,7 @@ const tauri = {
   getOrphanConversations,
   transferConversation,
   transferAllConversations,
+  searchConversations,
   
   // Messages
   getMessages,
@@ -913,6 +956,13 @@ const tauri = {
   
   // Pet Image
   readPetImage,
+  
+  // Workspace (File-based Personality/Memory)
+  workspaceRead,
+  workspaceWrite,
+  workspaceEdit,
+  workspaceEnsureDefaultFiles,
+  workspaceFileExists,
   
   // Dragging
   startDragging,

@@ -181,4 +181,143 @@ impl Database {
         )?;
         Ok(rows)
     }
+
+    /// 搜索对话：同时匹配标题和消息内容
+    /// 返回 (标题匹配的对话, 内容匹配的对话+消息片段)
+    pub fn search_conversations(&self, query: &str) -> Result<Vec<SearchResult>> {
+        let conn = self.conn.lock().unwrap();
+        let like_pattern = format!("%{}%", query);
+
+        // 1) 标题匹配
+        let mut title_stmt = conn.prepare(
+            "SELECT c.id, c.pet_id, c.title, c.created_at, c.updated_at,
+                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count
+             FROM conversations c
+             LEFT JOIN pets p ON c.pet_id = p.id
+             WHERE (p.is_deleted IS NULL OR p.is_deleted = 0)
+               AND c.title LIKE ?1
+             ORDER BY c.updated_at DESC
+             LIMIT 20"
+        )?;
+
+        let title_matches: Vec<SearchResult> = title_stmt.query_map(params![like_pattern], |row| {
+            Ok(SearchResult {
+                conversation: Conversation {
+                    id: row.get(0)?,
+                    pet_id: row.get(1)?,
+                    title: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    message_count: row.get(5)?,
+                },
+                match_type: "title".to_string(),
+                snippet: None,
+                message_role: None,
+            })
+        })?.collect::<Result<Vec<_>>>()?;
+
+        // 2) 消息内容匹配（排除已在标题匹配中的对话）
+        let title_matched_ids: Vec<String> = title_matches.iter().map(|r| r.conversation.id.clone()).collect();
+        
+        // 构建排除条件
+        let exclude_clause = if title_matched_ids.is_empty() {
+            String::new()
+        } else {
+            let placeholders: Vec<String> = title_matched_ids.iter().enumerate()
+                .map(|(i, _)| format!("?{}", i + 2))
+                .collect();
+            format!(" AND c.id NOT IN ({})", placeholders.join(","))
+        };
+
+        let content_sql = format!(
+            "SELECT DISTINCT c.id, c.pet_id, c.title, c.created_at, c.updated_at,
+                    (SELECT COUNT(*) FROM messages m2 WHERE m2.conversation_id = c.id) as message_count,
+                    m.content, m.role
+             FROM messages m
+             JOIN conversations c ON m.conversation_id = c.id
+             LEFT JOIN pets p ON c.pet_id = p.id
+             WHERE (p.is_deleted IS NULL OR p.is_deleted = 0)
+               AND m.content LIKE ?1
+               {}
+             GROUP BY c.id
+             ORDER BY c.updated_at DESC
+             LIMIT 20",
+            exclude_clause
+        );
+
+        let mut content_stmt = conn.prepare(&content_sql)?;
+        
+        // 构建参数列表
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        param_values.push(Box::new(like_pattern.clone()));
+        for id in &title_matched_ids {
+            param_values.push(Box::new(id.clone()));
+        }
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+
+        let content_matches: Vec<SearchResult> = content_stmt.query_map(
+            params_refs.as_slice(),
+            |row| {
+                let content: String = row.get(6)?;
+                let role: String = row.get(7)?;
+                // 提取关键词周围的片段（前后各 40 字符）
+                let snippet = extract_snippet(&content, query, 40);
+                Ok(SearchResult {
+                    conversation: Conversation {
+                        id: row.get(0)?,
+                        pet_id: row.get(1)?,
+                        title: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        message_count: row.get(5)?,
+                    },
+                    match_type: "content".to_string(),
+                    snippet: Some(snippet),
+                    message_role: Some(role),
+                })
+            }
+        )?.collect::<Result<Vec<_>>>()?;
+
+        let mut results = title_matches;
+        results.extend(content_matches);
+        Ok(results)
+    }
+}
+
+/// 搜索结果
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchResult {
+    pub conversation: Conversation,
+    pub match_type: String,       // "title" | "content"
+    pub snippet: Option<String>,  // 消息内容片段（仅 content 匹配时）
+    pub message_role: Option<String>, // 消息角色（仅 content 匹配时）
+}
+
+/// 从内容中提取关键词周围的片段
+fn extract_snippet(content: &str, query: &str, context_chars: usize) -> String {
+    let lower_content = content.to_lowercase();
+    let lower_query = query.to_lowercase();
+    
+    if let Some(pos) = lower_content.find(&lower_query) {
+        let start = if pos > context_chars { pos - context_chars } else { 0 };
+        let end = std::cmp::min(pos + query.len() + context_chars, content.len());
+        
+        // 确保不切断 UTF-8 字符
+        let safe_start = content.floor_char_boundary(start);
+        let safe_end = content.ceil_char_boundary(end);
+        
+        let mut snippet = String::new();
+        if safe_start > 0 { snippet.push_str("…"); }
+        snippet.push_str(&content[safe_start..safe_end]);
+        if safe_end < content.len() { snippet.push_str("…"); }
+        snippet
+    } else {
+        // 没找到匹配（不应该发生），返回前80字符
+        let end = std::cmp::min(80, content.len());
+        let safe_end = content.ceil_char_boundary(end);
+        let mut s = content[..safe_end].to_string();
+        if safe_end < content.len() { s.push_str("…"); }
+        s
+    }
 }

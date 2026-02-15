@@ -260,6 +260,10 @@ const LongTermMemoryResponseSchema = z.object({
   value: z.string(),
 });
 
+/**
+ * @deprecated 已被 workspace 模块的 MEMORY.md + function calling 替代。
+ * AI 现在通过 edit 工具直接管理记忆文件，无需额外 LLM 调用。
+ */
 export const longTimeMemory = async (message, apiFormat, apiKey, model, baseURL) => {
   const systemContent = "你是一个逻辑判断机器人，用于提取对话中的重要信息（如用户的个人信息（姓名、职业、学校、公司等）），或者用户想让你（记住）的事情。";
   const prompt = `你是一个用户记忆提取器，只需要判断下面这句话是否值得被长期记住，并给出重要性评分（0 到 1 之间）：\n\n"${message}"\n\n返回如下 JSON 格式：\n{ "isImportant": true/false, "score": 0.xx, "key":"Name（sample）", "value":"Jules(sample)" }`;
@@ -348,6 +352,10 @@ export const longTimeMemory = async (message, apiFormat, apiKey, model, baseURL)
   }
 };
 
+/**
+ * @deprecated 已被 workspace 模块的 USER.md + function calling 替代。
+ * AI 现在通过 edit 工具直接管理用户画像文件，无需额外 LLM 调用。
+ */
 export const processMemory = async (configStr, apiFormat, apiKey, model, baseURL) => {
   // 解析配置
   let config;

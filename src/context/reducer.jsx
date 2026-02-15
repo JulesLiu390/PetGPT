@@ -30,6 +30,8 @@ export const actionType = {
     // 时间注入管理
     UPDATE_TIME_INJECTION: "UPDATE_TIME_INJECTION",
     SET_API_PROVIDERS: "SET_API_PROVIDERS",
+    // 搜索高亮
+    SET_SEARCH_HIGHLIGHT: "SET_SEARCH_HIGHLIGHT",
 }
 
 const reducer = (state, action) => {
@@ -291,6 +293,11 @@ const reducer = (state, action) => {
                     ...state.lastTimeInjection,
                     [action.conversationId]: action.timestamp
                 }
+            };
+        case actionType.SET_SEARCH_HIGHLIGHT:
+            return {
+                ...state,
+                searchHighlight: action.payload || null,
             };
         default :
         console.log(state);

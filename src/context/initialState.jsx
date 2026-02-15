@@ -11,4 +11,5 @@ export const initialState = {
     // { conversationId: timestamp }
     lastTimeInjection: {},
     apiProviders: [], // 全局可用 API 服务商列表
+    searchHighlight: null, // 搜索高亮关键词
 }

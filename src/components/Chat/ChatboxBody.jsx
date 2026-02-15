@@ -6,11 +6,29 @@ import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import * as tauri from '../../utils/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown } from 'react-icons/md';
+import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown, MdClear } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
 // import { AiFillChrome } from 'react-icons/ai';
 // import ChatboxTabBar from './ChatboxTabBar';
+
+// 关键词高亮组件
+const HighlightText = ({ text, keyword }) => {
+  if (!keyword || !text) return <>{text}</>;
+  const escaped = keyword.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const parts = text.split(new RegExp(`(${escaped})`, 'gi'));
+  return (
+    <>
+      {parts.map((part, i) =>
+        part.toLowerCase() === keyword.toLowerCase() ? (
+          <mark key={i} className="bg-yellow-200 text-yellow-900 rounded-sm px-0.5">{part}</mark>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
+};
 
 export const Chatbox = () => {
   // 方案 C: 使用 Rust 内存缓存管理消息
@@ -31,6 +49,14 @@ export const Chatbox = () => {
   const [showAssistantDropdown, setShowAssistantDropdown] = useState(false); // 底部 assistant 下拉菜单
   // Per-tab chatbody status for "Memory updating" display
   const [chatbodyStatuses, setChatbodyStatuses] = useState({}); // { conversationId: status }
+
+  // 搜索状态
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [searchActive, setSearchActive] = useState(false);
+  const searchInputRef = useRef(null);
+  const searchTimerRef = useRef(null);
   
   // Tab State - declare early so we can use activeTabId
   const [tabs, setTabs] = useState([]);
@@ -85,6 +111,50 @@ export const Chatbox = () => {
       setOrphanConversations([]);
     }
   }, []);
+
+  // 搜索对话（防抖 300ms）
+  const handleSearchChange = useCallback((value) => {
+    setSearchQuery(value);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+    if (!value.trim()) {
+      setSearchResults([]);
+      setIsSearching(false);
+      return;
+    }
+    setIsSearching(true);
+    searchTimerRef.current = setTimeout(async () => {
+      try {
+        const results = await tauri.searchConversations(value);
+        setSearchResults(results);
+      } catch (err) {
+        console.error('[Search] error:', err);
+        setSearchResults([]);
+      } finally {
+        setIsSearching(false);
+      }
+    }, 300);
+  }, []);
+
+  // 清除搜索
+  const clearSearch = useCallback(() => {
+    setSearchQuery('');
+    setSearchResults([]);
+    setSearchActive(false);
+    setIsSearching(false);
+    if (searchTimerRef.current) clearTimeout(searchTimerRef.current);
+  }, []);
+
+  // 点击搜索结果
+  const handleSearchResultClick = useCallback((result) => {
+    const conv = result.conversation;
+    // 将搜索关键词存入 dispatch，方便 MessageArea 高亮
+    if (result.matchType === 'content' && searchQuery.trim()) {
+      dispatch({ type: actionType.SET_SEARCH_HIGHLIGHT, payload: searchQuery.trim() });
+    }
+    // handleItemClick is declared later; works because callback runs after render
+    handleItemClickRef.current?.(conv);
+    clearSearch();
+  }, [searchQuery, dispatch, clearSearch]);
 
   // ============ Tab 快捷键设置 ============
   // 检测平台，决定默认修饰键
@@ -552,6 +622,10 @@ export const Chatbox = () => {
     });
   };
 
+  // Ref for search result click to avoid circular dependency
+  const handleItemClickRef = useRef(handleItemClick);
+  useEffect(() => { handleItemClickRef.current = handleItemClick; });
+
   // 从某条消息处创建分支（复制该消息及之前的所有消息到新对话）
   const handleBranchFromMessage = async (sourceConvId, messageIndex) => {
     try {
@@ -894,14 +968,95 @@ export const Chatbox = () => {
 
         {/* Search */}
         <div className="px-3 pb-2 pt-2">
-            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-200/50 rounded-md text-gray-500 text-xs">
-                <MdSearch className="text-sm" />
-                <span>Search</span>
+          {searchActive ? (
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-white rounded-md border border-blue-300 text-xs shadow-sm">
+              <MdSearch className="text-sm text-blue-500 flex-shrink-0" />
+              <input
+                ref={searchInputRef}
+                type="text"
+                value={searchQuery}
+                onChange={(e) => handleSearchChange(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Escape') clearSearch(); }}
+                placeholder="搜索对话..."
+                className="flex-1 bg-transparent outline-none text-gray-700 placeholder-gray-400"
+                autoFocus
+              />
+              {(searchQuery || isSearching) && (
+                <MdClear
+                  onClick={clearSearch}
+                  className="text-sm text-gray-400 hover:text-gray-600 cursor-pointer flex-shrink-0"
+                />
+              )}
             </div>
+          ) : (
+            <div
+              onClick={() => { setSearchActive(true); setTimeout(() => searchInputRef.current?.focus(), 50); }}
+              className="flex items-center gap-2 px-3 py-1.5 bg-gray-200/50 rounded-md text-gray-500 text-xs cursor-pointer hover:bg-gray-200/80 transition-colors"
+            >
+              <MdSearch className="text-sm" />
+              <span>搜索</span>
+            </div>
+          )}
         </div>
 
-        {/* List */}
+        {/* List / Search Results */}
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
+          {searchActive && searchQuery.trim() ? (
+            /* === 搜索结果 === */
+            <>
+              {isSearching ? (
+                <div className="px-3 py-4 text-xs text-gray-400 text-center">搜索中...</div>
+              ) : searchResults.length === 0 ? (
+                <div className="px-3 py-4 text-xs text-gray-400 text-center">无匹配结果</div>
+              ) : (
+                <>
+                  {/* 标题匹配 */}
+                  {searchResults.filter(r => r.matchType === 'title').length > 0 && (
+                    <>
+                      <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
+                        标题匹配
+                      </div>
+                      {searchResults.filter(r => r.matchType === 'title').map((result) => (
+                        <div
+                          key={`title-${result.conversation._id}`}
+                          onClick={() => handleSearchResultClick(result)}
+                          className="group flex flex-col p-2 rounded-lg hover:bg-blue-50 cursor-pointer transition-colors"
+                        >
+                          <span className="text-sm text-[#0d0d0d] truncate">
+                            <HighlightText text={result.conversation.title || '无标题'} keyword={searchQuery} />
+                          </span>
+                          <span className="text-[10px] text-gray-400 mt-0.5">{result.conversation.petName}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                  {/* 内容匹配 */}
+                  {searchResults.filter(r => r.matchType === 'content').length > 0 && (
+                    <>
+                      <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 mt-2">
+                        消息匹配
+                      </div>
+                      {searchResults.filter(r => r.matchType === 'content').map((result) => (
+                        <div
+                          key={`content-${result.conversation._id}`}
+                          onClick={() => handleSearchResultClick(result)}
+                          className="group flex flex-col p-2 rounded-lg hover:bg-blue-50 cursor-pointer transition-colors"
+                        >
+                          <span className="text-sm text-[#0d0d0d] truncate">{result.conversation.title || '无标题'}</span>
+                          <span className="text-[10px] text-gray-500 mt-0.5 line-clamp-2 leading-relaxed">
+                            <HighlightText text={result.snippet || ''} keyword={searchQuery} />
+                          </span>
+                          <span className="text-[10px] text-gray-400 mt-0.5">{result.conversation.petName}</span>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </>
+              )}
+            </>
+          ) : (
+            /* === 正常对话列表 === */
+            <>
           <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
             Recent
           </div>
@@ -940,6 +1095,8 @@ export const Chatbox = () => {
                 </div>
               ))}
             </>
+          )}
+          </>
           )}
         </div>
 

@@ -3,12 +3,14 @@ mod mcp;
 mod message_cache;
 mod tab_state;
 mod llm;
+mod workspace;
 
 use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
 use message_cache::TabMessageCache;
 use tab_state::TabState;
 use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation};
+use workspace::WorkspaceEngine;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::collections::HashMap;
@@ -28,6 +30,9 @@ type LlmCancelState = Arc<LlmStreamCancellation>;
 
 // Type alias for MCP manager state
 type McpState = Arc<tokio::sync::RwLock<McpManager>>;
+
+// Type alias for workspace state
+type WorkspaceFileState = Arc<WorkspaceEngine>;
 
 #[allow(unused_imports)]
 use tauri::WebviewWindow;
@@ -216,6 +221,11 @@ fn transfer_conversation(db: State<DbState>, conversationId: String, newPetId: S
 #[allow(non_snake_case)]
 fn transfer_all_conversations(db: State<DbState>, oldPetId: String, newPetId: String) -> Result<usize, String> {
     db.transfer_all_conversations(&oldPetId, &newPetId).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn search_conversations(db: State<DbState>, query: String) -> Result<Vec<conversations::SearchResult>, String> {
+    db.search_conversations(&query).map_err(|e| e.to_string())
 }
 
 // ============ Message Commands ============
@@ -2187,6 +2197,11 @@ pub fn run() {
             // Initialize new tab state manager (Rust-owned state)
             app.manage(TabState::new());
 
+            // Initialize workspace engine for file-based personality/memory
+            let workspace_dir = app_data_dir.join("workspace");
+            let workspace_engine: WorkspaceFileState = Arc::new(WorkspaceEngine::new(workspace_dir));
+            app.manage(workspace_engine);
+
             // Apply vibrancy effect to chat window only (macOS only)
             #[cfg(target_os = "macos")]
             {
@@ -2453,6 +2468,7 @@ pub fn run() {
             get_orphan_conversations,
             transfer_conversation,
             transfer_all_conversations,
+            search_conversations,
             // Message commands
             get_messages,
             create_message,
@@ -2568,6 +2584,12 @@ pub fn run() {
             llm_cancel_stream,
             llm_cancel_all_streams,
             llm_reset_cancellation,
+            // Workspace commands
+            workspace::workspace_read,
+            workspace::workspace_write,
+            workspace::workspace_edit,
+            workspace::workspace_ensure_default_files,
+            workspace::workspace_file_exists,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

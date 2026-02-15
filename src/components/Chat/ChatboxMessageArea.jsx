@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useLayoutEffect, useState, useCallback } from 'react';
 import { useStateValue } from '../../context/StateProvider';
+import { actionType } from '../../context/reducer';
 import * as tauri from '../../utils/tauri';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -104,7 +105,6 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
 };
 
 import { MdDelete, MdEdit, MdCheck, MdClose, MdContentCopy, MdRefresh, MdOpenInNew, MdPlayCircle, MdAudiotrack, MdInsertDriveFile, MdCallSplit, MdCameraAlt } from 'react-icons/md';
-import { actionType } from '../../context/reducer';
 import { renderShareImage, copyImageToClipboard, saveImageToFile } from './ShareCardRenderer';
 
 // Helper: get mime type from file extension
@@ -369,7 +369,7 @@ const MessagePartContent = ({ part, isUser }) => {
 const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTitleBar = true, onBranchFromMessage }) => {
   const stateValue = useStateValue();
   const [state, dispatch] = stateValue || [{}, () => {}];
-  const { currentConversationId, liveToolCalls = {} } = state;
+  const { currentConversationId, liveToolCalls = {}, searchHighlight } = state;
   
   // 新方案: 使用 Rust-owned TabState（包含 messages 和 is_thinking）
   const [tabState, setTabState] = useState({ messages: [], is_thinking: false });
@@ -832,6 +832,106 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
     };
   }, [activeConvId]);
 
+  // ========== 搜索高亮逻辑 ==========
+  const highlightCleanupRef = useRef(null);
+  
+  // 清除高亮
+  const clearHighlights = useCallback(() => {
+    if (highlightCleanupRef.current) {
+      highlightCleanupRef.current();
+      highlightCleanupRef.current = null;
+    }
+  }, []);
+
+  // 关闭搜索高亮
+  const dismissSearchHighlight = useCallback(() => {
+    clearHighlights();
+    dispatch({ type: actionType.SET_SEARCH_HIGHLIGHT, payload: null });
+  }, [dispatch, clearHighlights]);
+
+  // 搜索高亮：DOM 标记 + 滚动到第一个匹配
+  useEffect(() => {
+    clearHighlights();
+    if (!searchHighlight || !scrollContainerRef.current) return;
+
+    // 延迟执行，等待 DOM 渲染完成
+    const timer = setTimeout(() => {
+      const container = scrollContainerRef.current;
+      if (!container) return;
+
+      const keyword = searchHighlight.toLowerCase();
+      const marks = [];
+
+      // 遍历所有文本节点
+      const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT, null);
+      const matchingNodes = [];
+      
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        const text = node.textContent || '';
+        if (text.toLowerCase().includes(keyword)) {
+          matchingNodes.push(node);
+        }
+      }
+
+      // 高亮匹配的文本节点
+      for (const node of matchingNodes) {
+        const text = node.textContent || '';
+        const lowerText = text.toLowerCase();
+        let lastIndex = 0;
+        const fragments = [];
+
+        let matchStart;
+        while ((matchStart = lowerText.indexOf(keyword, lastIndex)) !== -1) {
+          // 前段文本
+          if (matchStart > lastIndex) {
+            fragments.push(document.createTextNode(text.slice(lastIndex, matchStart)));
+          }
+          // 高亮部分
+          const mark = document.createElement('mark');
+          mark.className = 'search-highlight-mark';
+          mark.style.backgroundColor = '#fef08a';
+          mark.style.color = '#854d0e';
+          mark.style.borderRadius = '2px';
+          mark.style.padding = '0 1px';
+          mark.textContent = text.slice(matchStart, matchStart + keyword.length);
+          fragments.push(mark);
+          marks.push(mark);
+          lastIndex = matchStart + keyword.length;
+        }
+
+        // 剩余文本
+        if (lastIndex < text.length) {
+          fragments.push(document.createTextNode(text.slice(lastIndex)));
+        }
+
+        if (fragments.length > 0 && node.parentNode) {
+          const wrapper = document.createDocumentFragment();
+          fragments.forEach(f => wrapper.appendChild(f));
+          node.parentNode.replaceChild(wrapper, node);
+        }
+      }
+
+      // 滚动到第一个高亮
+      if (marks.length > 0) {
+        marks[0].scrollIntoView({ behavior: 'smooth', block: 'center' });
+      }
+
+      // 存储清理函数
+      highlightCleanupRef.current = () => {
+        // 把 mark 元素替换回纯文本
+        const allMarks = container.querySelectorAll('mark.search-highlight-mark');
+        allMarks.forEach(mark => {
+          const textNode = document.createTextNode(mark.textContent || '');
+          mark.parentNode?.replaceChild(textNode, mark);
+        });
+        // 合并相邻文本节点
+        container.normalize();
+      };
+    }, 200);
+
+    return () => clearTimeout(timer);
+  }, [searchHighlight, messages, clearHighlights]);
 
 
   return (
@@ -839,9 +939,25 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
         ref={scrollContainerRef}
         onScroll={handleScroll}
         onClick={() => { if (shareMenuIndex !== null) setShareMenuIndex(null); }}
-        className={`flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh] ${!showTitleBar ? 'pt-11' : 'pt-2'}`}
+        className={`flex-1 w-full max-w-full overflow-y-auto px-4 py-2 max-h-[80vh] ${!showTitleBar ? 'pt-11' : 'pt-2'} relative`}
     >
         <CompactMarkdownStyles />
+
+        {/* 搜索高亮提示条 */}
+        {searchHighlight && (
+          <div className="sticky top-0 z-10 flex items-center justify-between bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-1.5 mb-2 text-xs shadow-sm">
+            <span className="text-yellow-800">
+              搜索: <strong>{searchHighlight}</strong>
+            </span>
+            <button
+              onClick={dismissSearchHighlight}
+              className="text-yellow-600 hover:text-yellow-800 ml-2 font-bold"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
         {Array.isArray(messages) && messages.map((msg, index) => {
         if (!msg) return null; // Skip null/undefined messages
         const isUser = msg.role === 'user';

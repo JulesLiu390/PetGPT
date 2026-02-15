@@ -8,6 +8,7 @@ import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
+import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -320,7 +321,8 @@ export const callLLMWithTools = async ({
   mcpTools,
   options = {},
   onToolCall,
-  onToolResult
+  onToolResult,
+  builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
 }) => {
   const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
@@ -429,7 +431,12 @@ export const callLLMWithTools = async ({
       let isError = false;
       let toolResult;
       try {
-        toolResult = await executeToolByName(call.name, call.arguments);
+        // Check if this is a builtin tool (read/write/edit)
+        if (isBuiltinTool(call.name) && builtinToolContext) {
+          toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+        } else {
+          toolResult = await executeToolByName(call.name, call.arguments);
+        }
         if (toolResult && toolResult.error) {
           isError = true;
         }
@@ -514,7 +521,8 @@ export const callLLMStreamWithTools = async ({
   onChunk,
   onToolCall,
   onToolResult,
-  abortSignal
+  abortSignal,
+  builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
 }) => {
   const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
@@ -766,7 +774,14 @@ export const callLLMStreamWithTools = async ({
         if (abortSignal?.aborted) {
           throw new Error('Tool execution cancelled');
         }
-        toolResult = await executeToolByName(call.name, call.arguments);
+        
+        // Check if this is a builtin tool (read/write/edit)
+        if (isBuiltinTool(call.name) && builtinToolContext) {
+          toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+        } else {
+          toolResult = await executeToolByName(call.name, call.arguments);
+        }
+        
         if (toolResult && toolResult.error) {
           isError = true;
         }

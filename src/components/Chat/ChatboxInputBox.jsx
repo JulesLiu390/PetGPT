@@ -4,7 +4,8 @@ import { actionType } from '../../context/reducer';
 import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera } from "react-icons/fa6";
 import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
-import { promptSuggestion, callOpenAILib, callOpenAILibStream, longTimeMemory, processMemory } from '../../utils/openai';
+import { promptSuggestion, callOpenAILib, callOpenAILibStream } from '../../utils/openai';
+import { buildSystemPrompt, getBuiltinToolDefinitions, migrateFromOldSystem } from '../../utils/promptBuilder';
 import { MdOutlineCancel } from "react-icons/md";
 import { SiQuicktype } from "react-icons/si";
 import { useMcpTools } from '../../utils/mcp/useMcpTools';
@@ -627,7 +628,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
-  const [userMemory, setUserMemory] = useState(null);
   const [founctionModel, setFounctionModel] = useState(null);
   const [system, setSystem] = useState(null);
   const [firstCharacter, setFirstCharacter] = useState(null)
@@ -876,19 +876,16 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
             thisModel = functionModelInfo;
           }
 
+          // 确保工作区默认文件存在（SOUL.md, USER.md）并迁移旧数据
           try {
-            const memoryJson = await tauri.getPetUserMemory(characterId);
-            const memory = JSON.stringify(memoryJson);
-            const getUserMemory = await processMemory(
-              memory,
-              getApiFormat(thisModel),
-              thisModel.modelApiKey,
-              thisModel.modelName,
-              thisModel.modelUrl
+            await migrateFromOldSystem(
+              assistant._id || characterId,
+              assistant.name || 'Pet',
+              assistant.systemInstruction || assistant.personality || '',
+              assistant.userMemory || ''
             );
-            setUserMemory(getUserMemory);
-          } catch (memoryError) {
-            console.error("加载用户记忆失败:", memoryError);
+          } catch (wsError) {
+            console.error("初始化工作区文件失败:", wsError);
           }
         } else {
           console.error("Pet not found for ID:", characterId);
@@ -1294,78 +1291,29 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       }
 
       if (!isDefaultPersonality) {
-        if (memoryEnabled) {
-          const index = await longTimeMemory(_userText, 
-            getApiFormat(thisModel),
-            thisModel.modelApiKey,
-            thisModel.modelName,
-            thisModel.modelUrl
-          );
-          let getUserMemory = "";
-          if (index.isImportant === true) {
-            await tauri.updatePetUserMemory(petInfo._id, index.key, index.value);
-            tauri.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
-            const memoryJson = await tauri.getPetUserMemory(petInfo._id);
-            const memory = JSON.stringify(memoryJson);
-            getUserMemory = await processMemory(
-              memory,
-              getApiFormat(thisModel),
-              thisModel.modelApiKey,
-              thisModel.modelName,
-              thisModel.modelUrl
-            );
-            setUserMemory(getUserMemory);
-          }
-          let systemContent = timeContext ? `${timeContext}\n\n` : '';
-          systemContent += `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n关于用户的信息设定如下:\n${userMemory}\n`;
-          systemContent += "请在回答中保持角色特点和用户设定。";
-          const systemPrompt = { role: "system", content: systemContent };
-          
-          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
-        } else {
-          let systemContent = timeContext ? `${timeContext}\n\n` : '';
-          systemContent += `你现在扮演的角色设定如下：\n${petInfo?.systemInstruction}\n`;
-          systemContent += "请在回答中保持角色特点。";
-          const systemPrompt = { role: "system", content: systemContent };
-          
-          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
-        }
+        // 新方案: 使用 buildSystemPrompt 从 SOUL.md/USER.md/MEMORY.md 构建 system prompt
+        const systemContent = await buildSystemPrompt({
+          petId: petInfo._id,
+          memoryEnabled,
+          timeContext: timeContext || undefined,
+        });
+        const systemPrompt = { role: "system", content: systemContent };
+        fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content }];
       } else {
+        // Default personality: 简单的 helpful assistant + 时间上下文
+        let systemContent = timeContext ? `${timeContext}\n\n` : '';
         if (memoryEnabled) {
-          const index = await longTimeMemory(_userText, 
-            getApiFormat(thisModel),
-            thisModel.modelApiKey,
-            thisModel.modelName,
-            thisModel.modelUrl
-          );
-          let getUserMemory = "";
-          if (index.isImportant === true) {
-            await tauri.updatePetUserMemory(petInfo._id, index.key, index.value);
-            tauri.updateChatbodyStatus(index.key + ":" + index.value, sendingConversationId);
-            const memoryJson = await tauri.getPetUserMemory(petInfo._id);
-            const memory = JSON.stringify(memoryJson);
-            getUserMemory = await processMemory(
-              memory,
-              getApiFormat(thisModel),
-              thisModel.modelApiKey,
-              thisModel.modelName,
-              thisModel.modelUrl
-            );
-            setUserMemory(getUserMemory);
-          }
-          let systemContent = timeContext ? `${timeContext}\n\n` : '';
-          systemContent += `关于用户的信息设定如下, 请在需要使用的时候根据用户设定回答:\n${userMemory}\n`;
-          systemContent += "You are a helpful assisatant";
-          const systemPrompt = { role: "system", content: systemContent };
-          
-          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
-        } else {
-          let systemContent = timeContext ? `${timeContext}\n\n` : '';
-          systemContent += `You are a helpful assisatant`;
-          const systemPrompt = { role: "system", content: systemContent };
-          
-          fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content   }];
+          // 即使是 default personality，记忆 ON 时也读取 USER.md/MEMORY.md
+          const memoryPrompt = await buildSystemPrompt({
+            petId: petInfo._id,
+            memoryEnabled: true,
+            timeContext: timeContext || undefined,
+          });
+          systemContent = memoryPrompt;
         }
+        systemContent += '\nYou are a helpful assistant.';
+        const systemPrompt = { role: "system", content: systemContent };
+        fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content }];
       }
       
       if (attachments.length > 0) {
@@ -1381,8 +1329,15 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     // 检查是否启用了 MCP 工具
     const mcpEnabled = enabledMcpServers.size > 0;
 
-    // 如果启用了 MCP 工具，在 system prompt 中添加工具使用指导
-    if (mcpEnabled && hasTools && mcpTools.length > 0) {
+    // 获取内置工具定义（read/write/edit）
+    const builtinTools = getBuiltinToolDefinitions(memoryEnabled);
+    
+    // 合并 MCP 工具和内置工具
+    const allMcpTools = [...(mcpEnabled && hasTools ? mcpTools : [])];
+    const allToolsForLLM = allMcpTools.length > 0 || builtinTools.length > 0;
+
+    // 添加工具使用指导到 system prompt
+    if (allToolsForLLM) {
       const toolGuidance = `
 
 ## Tool Usage Guidelines
@@ -1402,7 +1357,6 @@ When using tools, please follow these guidelines:
           content: fullMessages[systemMsgIndex].content + toolGuidance
         };
       } else {
-        // 如果没有 system 消息，在开头添加一个
         fullMessages.unshift({
           role: 'system',
           content: toolGuidance.trim()
@@ -1410,28 +1364,40 @@ When using tools, please follow these guidelines:
       }
     }
 
-    // 调试日志：检查 MCP 状态
-    console.log('[ChatboxInputBox] MCP Debug:', {
+    // 调试日志
+    console.log('[ChatboxInputBox] Tools Debug:', {
       mcpEnabled,
-      enabledMcpServersSize: enabledMcpServers.size,
-      enabledMcpServers: Array.from(enabledMcpServers),
-      hasTools,
-      mcpToolsLength: mcpTools.length,
-      mcpToolNames: mcpTools.map(t => t.name)
+      builtinToolCount: builtinTools.length,
+      mcpToolCount: allMcpTools.length,
+      allToolsForLLM,
+      memoryEnabled
     });
 
-    // 根据是否启用 MCP 工具选择不同的调用方式
-    if (mcpEnabled && hasTools && mcpTools.length > 0) {
-      console.log('[ChatboxInputBox] Calling LLM with MCP tools:', mcpTools.length, 'tools available');
+    // 使用工具调用模式（内置工具始终可用 + 可选 MCP 工具）
+    if (allToolsForLLM) {
+      // 合并工具列表：MCP 工具 + 内置工具（内置工具作为已转换的 OpenAI 格式直接追加）
+      const combinedTools = [...allMcpTools];
+      // 内置工具以 "raw" 形式添加，toolConverter 会处理格式转换
+      // 但由于内置工具已经是 function 定义格式，我们需要将它们也作为 mcpTools 传入
+      // 创建虚拟的 MCP 工具格式供 convertToolsForLLM 处理
+      const builtinAsMcpTools = builtinTools.map(t => ({
+        name: t.function.name,
+        description: t.function.description,
+        inputSchema: t.function.parameters,
+        serverName: null  // 无服务器前缀，标记为内置工具
+      }));
+      const allToolsArray = [...combinedTools, ...builtinAsMcpTools];
+
+      console.log('[ChatboxInputBox] Calling LLM with tools:', allToolsArray.length, 'tools available');
       
       try {
-        const mcpResult = await callLLMStreamWithTools({
+        const toolResult = await callLLMStreamWithTools({
           messages: fullMessages,
           apiFormat: getApiFormat(thisModel),
           apiKey: thisModel.modelApiKey,
           model: thisModel.modelName,
           baseUrl: thisModel.modelUrl,
-          mcpTools: mcpTools,
+          mcpTools: allToolsArray,
           options: {},
           onChunk: (deltaText, fullText) => {
             dispatch({ 
@@ -1441,8 +1407,7 @@ When using tools, please follow these guidelines:
             });
           },
           onToolCall: (toolName, args, toolCallId) => {
-            console.log('[MCP] Tool called:', toolName, args);
-            // Dispatch to add tool call to live display
+            console.log('[Tools] Tool called:', toolName, args);
             dispatch({
               type: actionType.ADD_TOOL_CALL,
               conversationId: sendingConversationId || 'temp',
@@ -1456,8 +1421,7 @@ When using tools, please follow these guidelines:
             });
           },
           onToolResult: (toolName, result, toolCallId, isError) => {
-            console.log('[MCP] Tool result:', toolName, result?.slice?.(0, 100));
-            // Update tool call status
+            console.log('[Tools] Tool result:', toolName, result?.slice?.(0, 100));
             dispatch({
               type: actionType.UPDATE_TOOL_CALL,
               conversationId: sendingConversationId || 'temp',
@@ -1469,18 +1433,21 @@ When using tools, please follow these guidelines:
               }
             });
           },
-          abortSignal: controller.signal
+          abortSignal: controller.signal,
+          builtinToolContext: {
+            petId: petInfo._id,
+            memoryEnabled
+          }
         });
         
         reply = {
-          content: mcpResult.content,
-          mood: 'normal',  // MCP 模式暂不支持情绪检测
-          toolCallHistory: mcpResult.toolCallHistory
+          content: toolResult.content,
+          mood: 'normal',
+          toolCallHistory: toolResult.toolCallHistory
         };
         
-        console.log('[ChatboxInputBox] MCP call completed with', mcpResult.toolCallHistory?.length || 0, 'tool calls');
+        console.log('[ChatboxInputBox] Tool call completed with', toolResult.toolCallHistory?.length || 0, 'tool calls');
         
-        // Clear live tool calls after a short delay to let user see final status
         setTimeout(() => {
           dispatch({
             type: actionType.CLEAR_TOOL_CALLS,
@@ -1488,10 +1455,9 @@ When using tools, please follow these guidelines:
           });
         }, 2000);
       } catch (error) {
-        console.error('[ChatboxInputBox] MCP call failed:', error);
+        console.error('[ChatboxInputBox] Tool call failed:', error);
         reply = { content: `Error: ${error.message}`, mood: 'normal' };
         
-        // Clear tool calls on error too
         dispatch({
           type: actionType.CLEAR_TOOL_CALLS,
           conversationId: sendingConversationId || 'temp'
