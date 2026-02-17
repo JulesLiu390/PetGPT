@@ -356,7 +356,8 @@ impl McpHttpClient {
             return Err("Operation cancelled".to_string());
         }
 
-        log::info!("[MCP-HTTP][{}] Calling tool: {} with args: {:?}", self.server_name, name, arguments);
+        log::info!("[MCP-HTTP][{}] Calling tool: {}", self.server_name, name);
+        log::debug!("[MCP-HTTP][{}] Tool args: {:?}", self.server_name, arguments);
 
         let params = ToolCallParams {
             name: name.to_string(),
@@ -373,7 +374,7 @@ impl McpHttpClient {
             return Err("Operation cancelled".to_string());
         }
 
-        log::info!("[MCP-HTTP][{}] Tool result: {:?}", self.server_name, result);
+        log::info!("[MCP-HTTP][{}] Tool result: {}", self.server_name, format_tool_result(&result));
         Ok(result)
     }
 

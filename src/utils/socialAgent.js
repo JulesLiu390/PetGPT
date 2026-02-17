@@ -243,6 +243,9 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '' }
  * @param {Object} params.promptConfig - { socialPersonaPrompt, replyStrategyPrompt, atMustReply, botQQ }
  * @param {Map} params.watermarks - 水位线 Map (target -> lastMessageId)
  * @param {Map} params.sentCache - 本地发送消息缓存 (target -> Array)
+ * @param {Object} [params.prefetchedData] - 从 batch_get_recent_context 预取的数据
+ *   { target, target_type, compressed_summary, message_count, messages: [...], group_name }
+ *   如果提供，跳过 MCP 调用直接使用
  * @returns {Promise<{action: 'skipped'|'silent'|'replied'|'error', detail?: string}>}
  */
 async function pollTarget({
@@ -254,72 +257,78 @@ async function pollTarget({
   promptConfig,
   watermarks,
   sentCache,
+  prefetchedData,
 }) {
-  const toolName = `${mcpServerName}__get_recent_context`;
-  
-  // 1. 获取最新消息
-  let rawResult;
-  try {
-    rawResult = await executeToolByName(toolName, {
-      target,
-      target_type: targetType,
-      limit: 15,
-    });
-  } catch (e) {
-    addLog('error', `Failed to get messages for ${targetType}:${target}`, e.message);
-    return { action: 'error', detail: e.message };
-  }
-  
-  if (rawResult?.error) {
-    addLog('error', `MCP error for ${target}`, rawResult.error);
-    return { action: 'error', detail: rawResult.error };
-  }
-  
-  // 2. 解析 MCP 返回的结构化数据（按消息关联图片）
-  //    新版 QQ MCP 返回 content 数组：
-  //      [0] TextContent: 元数据 JSON { target, target_type, compressed_summary, message_count, group_name }
-  //      [1..N] TextContent: 逐条消息 JSON { message_id, timestamp, sender_id, sender_name, content, is_at_me }
-  //      每条 TextContent 后紧跟该消息关联的 ImageContent（0 或多张）
-  const contentItems = rawResult.content || [];
-  
   let metadata = {};
   let groupName = target;
   let compressedSummary = null;
-  let individualMessages = [];  // 逐条消息对象（含 _images）
-  let lastMsg = null;           // 用于关联紧随其后的 ImageContent
-  let metadataParsed = false;
+  let individualMessages = [];
   
-  for (const item of contentItems) {
-    if (item.type === 'text') {
-      try {
-        const parsed = JSON.parse(item.text);
-        if (!metadataParsed) {
-          // 第一个 text 项是元数据
-          metadata = parsed;
-          groupName = metadata.group_name || metadata.friend_name || target;
-          compressedSummary = metadata.compressed_summary || null;
-          metadataParsed = true;
-        } else if (parsed.sender_id && parsed.content !== undefined) {
-          // 逐条消息
-          parsed._images = [];  // 初始化每条消息的图片数组
-          individualMessages.push(parsed);
-          lastMsg = parsed;
-        }
-      } catch {
-        // 非 JSON 文本段，跳过
+  if (prefetchedData) {
+    // ── 批量预取路径：数据已从 batch_get_recent_context 获取 ──
+    if (prefetchedData.error) {
+      addLog('error', `MCP batch error for ${target}`, prefetchedData.error);
+      return { action: 'error', detail: prefetchedData.error };
+    }
+    metadata = prefetchedData;
+    groupName = prefetchedData.group_name || prefetchedData.friend_name || target;
+    compressedSummary = prefetchedData.compressed_summary || null;
+    // messages 是 dict 数组 { sender_id, sender_name, content, is_at_me, is_self, image_urls, ... }
+    for (const msg of (prefetchedData.messages || [])) {
+      const images = (msg.image_urls || []).map(url => ({ data: url, mimeType: 'image/jpeg' }));
+      individualMessages.push({ ...msg, _images: images });
+    }
+  } else {
+    // ── 单次拉取路径（兼容旧调用方式） ──
+    const toolName = `${mcpServerName}__get_recent_context`;
+    let rawResult;
+    try {
+      rawResult = await executeToolByName(toolName, {
+        target,
+        target_type: targetType,
+        limit: Math.max(5, Math.round(10 * Math.sqrt((config?.pollingInterval || 60)))),
+      });
+    } catch (e) {
+      addLog('error', `Failed to get messages for ${targetType}:${target}`, e.message);
+      return { action: 'error', detail: e.message };
+    }
+    if (rawResult?.error) {
+      addLog('error', `MCP error for ${target}`, rawResult.error);
+      return { action: 'error', detail: rawResult.error };
+    }
+    // 解析 MCP 返回（content 数组: metadata TextContent + 逐条消息 TextContent + ImageContent）
+    const contentItems = rawResult.content || [];
+    let lastMsg = null;
+    let metadataParsed = false;
+    for (const item of contentItems) {
+      if (item.type === 'text') {
+        try {
+          const parsed = JSON.parse(item.text);
+          if (!metadataParsed) {
+            metadata = parsed;
+            groupName = metadata.group_name || metadata.friend_name || target;
+            compressedSummary = metadata.compressed_summary || null;
+            metadataParsed = true;
+          } else if (parsed.sender_id && parsed.content !== undefined) {
+            parsed._images = [];
+            individualMessages.push(parsed);
+            lastMsg = parsed;
+          }
+        } catch { /* skip */ }
+      } else if (item.type === 'image' && lastMsg) {
+        lastMsg._images.push({ data: item.data, mimeType: item.mimeType || 'image/jpeg' });
       }
-    } else if (item.type === 'image' && lastMsg) {
-      // 图片紧跟在其所属消息后面，挂载到该消息
-      lastMsg._images.push({ data: item.data, mimeType: item.mimeType || 'image/jpeg' });
     }
   }
   
-  // 按消息下载图片 URL 为 base64
+  // 解析图片 URL 为 base64
   let totalImageCount = 0;
   for (const msg of individualMessages) {
-    if (msg._images.length > 0) {
+    if (msg._images && msg._images.length > 0) {
       msg._images = await resolveImageUrls(msg._images);
       totalImageCount += msg._images.length;
+    } else {
+      msg._images = [];
     }
   }
   if (totalImageCount > 0) {
@@ -701,73 +710,186 @@ export async function startSocialLoop(config, onStatusChange) {
   };
   
   const intervalMs = (config.pollingInterval || 60) * 1000;
-  // 每个 target 独立的 timeout ID，互不阻塞
-  const targetTimeouts = new Map();
+  const atInstantReply = config.atInstantReply !== false; // 默认开启
+  // 批量轮询间隔：开启@瞬回时快速轮询(1s)，否则按用户配置
+  const BATCH_POLL_INTERVAL_MS = atInstantReply ? 1000 : intervalMs;
+  // 动态 limit：L = max(5, round(k * sqrt(T)))，k=10
+  const dynamicLimit = Math.max(5, Math.round(10 * Math.sqrt(BATCH_POLL_INTERVAL_MS / 1000)));
+  
+  // per-target 上次 LLM 调用时间（冷却计时，@me 不受限制）
+  const lastLlmCallTime = new Map();
   // 用于区分新旧循环的 generation ID，stopSocialLoop 后立即 start 时防止旧闭包继续调度
   const loopGeneration = Symbol('loopGen');
+  let loopTimeoutId = null;
   
-  // 为单个 target 创建独立的轮询循环（含独立计时）
-  const startTargetLoop = (target, targetType, staggerMs = 0) => {
-    const label = `${targetType}:${target}`;
+  /**
+   * 解析 batch_get_recent_context 的 MCP 返回
+   * MCP 工具返回 dict 会被包装成单个 TextContent
+   * @returns {Array<Object>} 每个 target 的数据 dict
+   */
+  const parseBatchResult = (rawResult) => {
+    const contentItems = rawResult?.content || [];
+    for (const item of contentItems) {
+      if (item.type === 'text') {
+        try {
+          const parsed = JSON.parse(item.text);
+          if (parsed.results && Array.isArray(parsed.results)) {
+            return parsed.results;
+          }
+          // 如果直接就是 results 数组（兼容）
+          if (Array.isArray(parsed)) return parsed;
+        } catch { /* skip */ }
+      }
+    }
+    return [];
+  };
+  
+  /**
+   * 对单个 target 的预取数据做变化检测（不调 MCP，纯本地）
+   * 返回 { changed, hasAtMe, hash } 或 null 表示跳过
+   */
+  const detectChange = (targetData, target) => {
+    if (targetData.error) return null;
+    const messages = targetData.messages || [];
+    const otherMessages = messages.filter(m => !m.is_self);
+    const otherText = otherMessages
+      .map(m => `${m.sender_name}:${m.content}`)
+      .join('\n').trim();
+    const currentHash = otherText.length < 10
+      ? null
+      : `${otherText.length}:${otherText.slice(-200)}`;
+    if (currentHash === null) return null;
     
-    const runOnce = async () => {
-      // 检查循环是否仍属于本次启动（防止 stop→start 竞态）
+    const prevWm = watermarks.get(target) ?? null;
+    const changed = prevWm === null || currentHash !== prevWm.hash;
+    const isFirstRun = prevWm === null;
+    const hasAtMe = messages.some(m => m.is_at_me && !m.is_self);
+    return { changed, hasAtMe, hash: currentHash, isFirstRun };
+  };
+  
+  /**
+   * 统一批量轮询：一次拉取所有 target → 本地分群处理
+   */
+  const runBatchPoll = async () => {
+    if (!activeLoop || activeLoop._generation !== loopGeneration) return;
+    
+    const t0 = Date.now();
+    const batchToolName = `${config.mcpServerName}__batch_get_recent_context`;
+    
+    // 1. 一次 MCP 调用获取所有 target 数据
+    let targetResults = [];
+    try {
+      const batchArgs = {
+        targets: targets.map(t => ({ target: t.target, target_type: t.targetType })),
+        limit: dynamicLimit,
+      };
+      const rawResult = await executeToolByName(batchToolName, batchArgs, { timeout: 10000 });
+      targetResults = parseBatchResult(rawResult);
+    } catch (e) {
+      addLog('error', 'Batch poll failed', e.message);
+      scheduleBatchPoll();
+      return;
+    }
+    
+    if (targetResults.length === 0) {
+      addLog('debug', 'Batch poll returned empty results');
+      scheduleBatchPoll();
+      return;
+    }
+    
+    // 2. 逐 target 本地处理（变化检测 + 冷却 + LLM 调用）— 并发执行
+    const pollTasks = [];
+    for (const targetData of targetResults) {
       if (!activeLoop || activeLoop._generation !== loopGeneration) return;
-      const t0 = Date.now();
-      try {
-        await pollTarget({
-          target,
-          targetType,
-          mcpServerName: config.mcpServerName,
-          llmConfig,
-          petId: config.petId,
-          promptConfig,
-          watermarks,
-          sentCache: sentMessagesCache,
-        });
-      } catch (e) {
-        addLog('error', `Unexpected error polling ${label}`, e.message);
-      }
-      const elapsed = Date.now() - t0;
-      addLog('debug', `${label} poll completed in ${elapsed}ms`);
       
-      // 调度下一次（独立计时，从本次开始算）
-      if (activeLoop && activeLoop._generation === loopGeneration) {
-        const tid = setTimeout(runOnce, intervalMs);
-        targetTimeouts.set(target, tid);
+      const target = targetData.target;
+      const targetType = targetData.target_type || 'group';
+      const label = `${targetType}:${target}`;
+      
+      const detection = detectChange(targetData, target);
+      if (!detection) continue; // 无消息 / 错误
+      
+      const { changed, hasAtMe, hash, isFirstRun } = detection;
+      
+      // 首次运行：设水位线，不调 LLM
+      if (isFirstRun) {
+        watermarks.set(target, { hash });
+        addLog('info', `${label} first run, watermark set (skip LLM)`);
+        continue;
       }
-    };
+      
+      if (!changed) continue; // 无新内容
+      
+      // 决定是否调用 LLM
+      const now = Date.now();
+      const sinceLastLlm = now - (lastLlmCallTime.get(target) || 0);
+      const cooldownPassed = sinceLastLlm >= intervalMs;
+      
+      if (hasAtMe) {
+        // @me → 立即回复（无视冷却）
+        addLog('info', `⚡ @me detected in ${label}, triggering instant reply`);
+      } else if (!cooldownPassed) {
+        // 有新消息但冷却中 → 跳过，不更新水位线，让消息积累到冷却结束
+        continue;
+      }
+      
+      // 创建并发任务
+      pollTasks.push((async () => {
+        try {
+          const result = await pollTarget({
+            target,
+            targetType,
+            mcpServerName: config.mcpServerName,
+            llmConfig,
+            petId: config.petId,
+            promptConfig,
+            watermarks,
+            sentCache: sentMessagesCache,
+            prefetchedData: targetData,
+          });
+          // 只有成功处理（replied/silent）才记录 LLM 调用时间
+          if (result.action === 'replied' || result.action === 'silent') {
+            lastLlmCallTime.set(target, Date.now());
+          }
+        } catch (e) {
+          addLog('error', `Unexpected error polling ${label}`, e.message);
+        }
+      })());
+    }
     
-    // 首次执行（可错开启动，避免所有 target 同时发起请求）
-    if (staggerMs > 0) {
-      const tid = setTimeout(runOnce, staggerMs);
-      targetTimeouts.set(target, tid);
-    } else {
-      runOnce(); // 立即启动
+    // 等待所有并发 pollTarget 完成
+    if (pollTasks.length > 0) {
+      await Promise.all(pollTasks);
+    }
+    
+    const elapsed = Date.now() - t0;
+    addLog('debug', `Batch poll completed in ${elapsed}ms for ${targetResults.length} targets`);
+    
+    // 3. 调度下一次
+    scheduleBatchPoll();
+  };
+  
+  const scheduleBatchPoll = () => {
+    if (activeLoop && activeLoop._generation === loopGeneration) {
+      loopTimeoutId = setTimeout(runBatchPoll, BATCH_POLL_INTERVAL_MS);
     }
   };
   
-  // 并发启动所有 target，每个间隔 200ms 错开，减轻瞬时并发压力
-  const STAGGER_MS = 200;
-  
-  // 必须在启动 target 循环之前设置 activeLoop，
-  // 否则 stagger=0 的首个 target 同步执行 runOnce() 时 activeLoop 仍为 null 会被跳过
+  // 设置 activeLoop
   activeLoop = {
     petId: config.petId,
     config,
-    targetTimeouts,
     _generation: loopGeneration,
     _scheduleCleanup: () => {
-      for (const [, tid] of targetTimeouts) {
-        clearTimeout(tid);
+      if (loopTimeoutId !== null) {
+        clearTimeout(loopTimeoutId);
+        loopTimeoutId = null;
       }
-      targetTimeouts.clear();
     },
   };
   
-  targets.forEach(({ target, targetType }, index) => {
-    startTargetLoop(target, targetType, index * STAGGER_MS);
-  });
+  // 启动批量轮询
+  runBatchPoll();
   
   onStatusChange?.(true);
   addLog('info', 'Social loop started successfully');

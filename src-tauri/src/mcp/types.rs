@@ -358,3 +358,54 @@ pub struct CallToolResponse {
     #[serde(default)]
     pub error: Option<String>,
 }
+
+// ============================================
+// Logging Helpers
+// ============================================
+
+/// Format a ToolCallResult into a concise one-line summary for logging.
+///
+/// Example output:
+///   `ok, 3 items (2 text, 1 image), preview: "{"results": [{"target":..."`
+///   `ERROR, 1 item (1 text), preview: "Group 123 is not monitored"`
+pub fn format_tool_result(result: &ToolCallResult) -> String {
+    let status = if result.is_error { "ERROR" } else { "ok" };
+    let total = result.content.len();
+
+    let mut text_count = 0u32;
+    let mut image_count = 0u32;
+    let mut resource_count = 0u32;
+    let mut first_text: Option<&str> = None;
+
+    for item in &result.content {
+        match item {
+            ToolContent::Text { text } => {
+                text_count += 1;
+                if first_text.is_none() {
+                    first_text = Some(text.as_str());
+                }
+            }
+            ToolContent::Image { .. } => image_count += 1,
+            ToolContent::Resource { .. } => resource_count += 1,
+        }
+    }
+
+    // Build type breakdown
+    let mut parts = Vec::new();
+    if text_count > 0 { parts.push(format!("{} text", text_count)); }
+    if image_count > 0 { parts.push(format!("{} image", image_count)); }
+    if resource_count > 0 { parts.push(format!("{} resource", resource_count)); }
+    let breakdown = parts.join(", ");
+
+    // Truncated preview of first text content
+    let preview = match first_text {
+        Some(t) => {
+            let clean: String = t.chars().filter(|c| !c.is_control()).collect();
+            let truncated = if clean.len() > 150 { format!("{}…", &clean[..150]) } else { clean };
+            format!(", preview: \"{}\"", truncated)
+        }
+        None => String::new(),
+    };
+
+    format!("{}, {} item{} ({}){}", status, total, if total != 1 { "s" } else { "" }, breakdown, preview)
+}

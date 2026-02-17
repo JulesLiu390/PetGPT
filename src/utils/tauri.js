@@ -453,6 +453,7 @@ export const mcp = {
   }),
   cancelAllToolCalls: () => invoke('mcp_cancel_all_tool_calls'),
   resetCancellation: () => invoke('mcp_reset_cancellation'),
+  setSamplingConfig: (serverId, config) => invoke('mcp_set_sampling_config', { serverId, config }),
 };
 
 // ==================== File Operations ====================
