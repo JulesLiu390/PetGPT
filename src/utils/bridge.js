@@ -2275,6 +2275,17 @@ export const mcp = {
       return invoke('mcp_reset_cancellation');
     }
   },
+
+  // 设置 MCP Sampling LLM 配置（服务端→客户端的 LLM 调用）
+  setSamplingConfig: async (serverId, config) => {
+    if (isTauri()) {
+      const { invoke } = await getTauriApi();
+      return invoke('mcp_set_sampling_config', {
+        serverId,
+        config: config || null,
+      });
+    }
+  },
   
   testServer: async (config) => {
     if (isElectron()) {

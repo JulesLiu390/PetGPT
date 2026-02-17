@@ -3,6 +3,7 @@ import { useNavigate, useLocation } from "react-router-dom";
 import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash, FaFile, FaDownload, FaCamera } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
 import { MdClose } from "react-icons/md";
+import { GiPenguin } from "react-icons/gi";
 import { LuMaximize2 } from "react-icons/lu";
 import TitleBar from "../components/UI/TitleBar";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Label, Badge, Checkbox } from "../components/UI/ui";
@@ -14,6 +15,8 @@ import { useSettings } from "../utils/useSettings";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
 import { useStateValue } from "../context/StateProvider";
 import { actionType } from "../context/reducer";
+import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
+import { emit, listen } from '@tauri-apps/api/event';
 
 // 预加载所有内置皮肤图片
 import JulesNormal from "../assets/Jules-normal.png";
@@ -3444,6 +3447,469 @@ const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
   );
 };
 
+// ==================== Social Agent Panel ====================
+
+const SocialPanel = ({ assistants, apiProviders }) => {
+  const [selectedPetId, setSelectedPetId] = useState('');
+  const [config, setConfig] = useState({
+    petId: '',
+    mcpServerName: '',
+    apiProviderId: '',
+    modelName: '',
+    pollingInterval: 60,
+    watchedGroups: [],
+    watchedFriends: [],
+    socialPersonaPrompt: '',
+    replyStrategyPrompt: '',
+    atMustReply: true,
+    botQQ: '',
+  });
+  const [mcpServers, setMcpServers] = useState([]);
+  const [saving, setSaving] = useState(false);
+  const [socialActive, setSocialActive] = useState(false);
+  const [logs, setLogs] = useState([]);
+  const [showLogs, setShowLogs] = useState(false);
+  const [groupsText, setGroupsText] = useState('');
+  const [friendsText, setFriendsText] = useState('');
+
+  // Load MCP servers list
+  useEffect(() => {
+    const loadServers = async () => {
+      try {
+        const serverList = await tauri.mcp.getServers();
+        setMcpServers(serverList || []);
+      } catch (e) {
+        console.error('Failed to load MCP servers:', e);
+      }
+    };
+    loadServers();
+  }, []);
+
+  // Listen for social status changes from character window
+  useEffect(() => {
+    let unlisten;
+    const setup = async () => {
+      unlisten = await listen('social-status-changed', (event) => {
+        const { active, petId } = event.payload;
+        if (petId === selectedPetId || !selectedPetId) {
+          setSocialActive(active);
+        }
+      });
+      // Query current status on mount
+      emit('social-query-status');
+    };
+    setup();
+    return () => { unlisten?.(); };
+  }, [selectedPetId]);
+
+  // Listen for log responses from character window
+  useEffect(() => {
+    let unlisten;
+    const setup = async () => {
+      unlisten = await listen('social-logs-response', (event) => {
+        setLogs(event.payload || []);
+      });
+    };
+    setup();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // Refresh logs periodically when visible
+  useEffect(() => {
+    if (!showLogs) return;
+    emit('social-query-logs');
+    const interval = setInterval(() => emit('social-query-logs'), 3000);
+    return () => clearInterval(interval);
+  }, [showLogs]);
+
+  // Load config when pet changes
+  useEffect(() => {
+    if (!selectedPetId) return;
+    const load = async () => {
+      const saved = await loadSocialConfig(selectedPetId);
+      if (saved) {
+        setConfig({ ...saved, petId: selectedPetId });
+        setGroupsText((saved.watchedGroups || []).join(', '));
+        setFriendsText((saved.watchedFriends || []).join(', '));
+      } else {
+        setConfig(prev => ({
+          ...prev,
+          petId: selectedPetId,
+          mcpServerName: '',
+          apiProviderId: '',
+          modelName: '',
+          pollingInterval: 60,
+          watchedGroups: [],
+          watchedFriends: [],
+          socialPersonaPrompt: '',
+          replyStrategyPrompt: '',
+          atMustReply: true,
+          injectBehaviorGuidelines: true,
+          botQQ: '',
+          ownerQQ: '',
+          ownerName: '',
+          enabledMcpServers: [],
+        }));
+        setGroupsText('');
+        setFriendsText('');
+      }
+      // Query status from character window
+      emit('social-query-status');
+    };
+    load();
+  }, [selectedPetId]);
+
+  // Auto-select first assistant
+  useEffect(() => {
+    if (assistants.length > 0 && !selectedPetId) {
+      setSelectedPetId(assistants[0]._id);
+    }
+  }, [assistants, selectedPetId]);
+
+  const handleConfigChange = (field, value) => {
+    setConfig(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      const configToSave = {
+        ...config,
+        petId: selectedPetId,
+        watchedGroups: groupsText.split(',').map(s => s.trim()).filter(Boolean),
+        watchedFriends: friendsText.split(',').map(s => s.trim()).filter(Boolean),
+      };
+      await saveSocialConfig(selectedPetId, configToSave);
+      setConfig(configToSave);
+      // 如果循环正在运行，通知 character 窗口用新配置重启
+      if (socialActive) {
+        emit('social-config-updated', configToSave);
+      }
+    } catch (e) {
+      console.error('Failed to save social config:', e);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleToggle = async () => {
+    if (socialActive) {
+      // Send stop event to character window
+      emit('social-stop');
+    } else {
+      const configToStart = {
+        ...config,
+        petId: selectedPetId,
+        watchedGroups: groupsText.split(',').map(s => s.trim()).filter(Boolean),
+        watchedFriends: friendsText.split(',').map(s => s.trim()).filter(Boolean),
+      };
+      // Save config first, then send start event to character window
+      await saveSocialConfig(selectedPetId, configToStart);
+      setConfig(configToStart);
+      emit('social-start', configToStart);
+    }
+  };
+
+  // Resolve available models for selected provider
+  const selectedProvider = apiProviders.find(p => (p._id || p.id) === config.apiProviderId);
+  const providerModels = selectedProvider?.cachedModels || [];
+
+  return (
+    <>
+      {/* Title */}
+      <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
+        <div className="text-base font-semibold text-slate-800">
+          Social Agent
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowLogs(!showLogs)}
+            className="px-3 py-1.5 text-xs font-medium rounded-lg border border-slate-200 text-slate-600 hover:bg-slate-50"
+          >
+            {showLogs ? 'Hide Logs' : 'Show Logs'}
+          </button>
+          <button
+            onClick={handleToggle}
+            disabled={!selectedPetId}
+            className={`px-3 py-1.5 text-xs font-medium rounded-lg ${
+              socialActive 
+                ? 'bg-red-500 text-white hover:bg-red-600' 
+                : 'bg-cyan-500 text-white hover:bg-cyan-600'
+            } disabled:opacity-50`}
+          >
+            {socialActive ? 'Stop' : 'Start'}
+          </button>
+        </div>
+      </div>
+
+      {/* Content */}
+      <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
+        <div className="space-y-4">
+          {/* Assistant Selector */}
+          <Card title="Assistant" description="Select which assistant powers the social agent">
+            <FormGroup label="Assistant">
+              <Select
+                value={selectedPetId}
+                onChange={(e) => setSelectedPetId(e.target.value)}
+              >
+                <option value="">Select an assistant...</option>
+                {assistants.map(a => (
+                  <option key={a._id} value={a._id}>{a.name}</option>
+                ))}
+              </Select>
+            </FormGroup>
+          </Card>
+
+          {/* LLM Configuration */}
+          <Card title="LLM" description="API provider and model for social decisions">
+            <div className="space-y-3">
+              <FormGroup label="API Provider">
+                <Select
+                  value={config.apiProviderId}
+                  onChange={(e) => {
+                    handleConfigChange('apiProviderId', e.target.value);
+                    handleConfigChange('modelName', '');
+                  }}
+                >
+                  <option value="">Select provider...</option>
+                  {apiProviders.map(p => (
+                    <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                  ))}
+                </Select>
+              </FormGroup>
+              <FormGroup label="Model">
+                {providerModels.length > 0 ? (
+                  <Select
+                    value={config.modelName}
+                    onChange={(e) => handleConfigChange('modelName', e.target.value)}
+                  >
+                    <option value="">Select model...</option>
+                    {providerModels.map(m => {
+                      const modelId = typeof m === 'string' ? m : m.id;
+                      return <option key={modelId} value={modelId}>{modelId}</option>;
+                    })}
+                  </Select>
+                ) : (
+                  <Input
+                    value={config.modelName}
+                    onChange={(e) => handleConfigChange('modelName', e.target.value)}
+                    placeholder="e.g. gpt-4o-mini"
+                  />
+                )}
+              </FormGroup>
+            </div>
+          </Card>
+
+          {/* MCP Server */}
+          <Card title="MCP Server" description="The QQ MCP server to use for messaging">
+            <FormGroup label="Server">
+              <Select
+                value={config.mcpServerName}
+                onChange={(e) => handleConfigChange('mcpServerName', e.target.value)}
+              >
+                <option value="">Select server...</option>
+                {mcpServers.map(s => (
+                  <option key={s._id} value={s.name}>{s.name}</option>
+                ))}
+              </Select>
+            </FormGroup>
+            <FormGroup label="Bot QQ Number" hint="Your bot's QQ number, used to detect @mentions">
+              <Input
+                value={config.botQQ}
+                onChange={(e) => handleConfigChange('botQQ', e.target.value)}
+                placeholder="e.g. 3825478002"
+              />
+            </FormGroup>
+            <FormGroup label="Owner QQ Number" hint="Your personal QQ number, so the bot can recognize you in group chat">
+              <Input
+                value={config.ownerQQ}
+                onChange={(e) => handleConfigChange('ownerQQ', e.target.value)}
+                placeholder="e.g. 123456789"
+              />
+            </FormGroup>
+            <FormGroup label="Owner Name" hint="Your QQ display name or nickname">
+              <Input
+                value={config.ownerName}
+                onChange={(e) => handleConfigChange('ownerName', e.target.value)}
+                placeholder="e.g. Jules"
+              />
+            </FormGroup>
+          </Card>
+
+          {/* Additional MCP Servers */}
+          {mcpServers.filter(s => s.name !== config.mcpServerName).length > 0 && (
+            <Card title="Additional MCP Tools" description="Enable extra MCP servers whose tools the agent can use">
+              <div className="space-y-2">
+                {mcpServers.filter(s => s.name !== config.mcpServerName).map(s => (
+                  <div key={s._id} className="flex items-center justify-between">
+                    <div className="text-sm text-slate-700">{s.name}</div>
+                    <label className="relative inline-flex items-center cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={(config.enabledMcpServers || []).includes(s.name)}
+                        onChange={(e) => {
+                          const prev = config.enabledMcpServers || [];
+                          if (e.target.checked) {
+                            handleConfigChange('enabledMcpServers', [...prev, s.name]);
+                          } else {
+                            handleConfigChange('enabledMcpServers', prev.filter(n => n !== s.name));
+                          }
+                        }}
+                        className="sr-only peer"
+                      />
+                      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                    </label>
+                  </div>
+                ))}
+              </div>
+            </Card>
+          )}
+
+          {/* Targets */}
+          <Card title="Watch Targets" description="QQ groups and friends to monitor">
+            <div className="space-y-3">
+              <FormGroup label="Groups" hint="Comma-separated group numbers">
+                <Input
+                  value={groupsText}
+                  onChange={(e) => setGroupsText(e.target.value)}
+                  placeholder="e.g. 1059558644, 123456789"
+                />
+              </FormGroup>
+              <FormGroup label="Friends" hint="Comma-separated QQ numbers">
+                <Input
+                  value={friendsText}
+                  onChange={(e) => setFriendsText(e.target.value)}
+                  placeholder="e.g. 100001, 100002"
+                />
+              </FormGroup>
+            </div>
+          </Card>
+
+          {/* Polling */}
+          <Card title="Polling" description="How often to check for new messages">
+            <div className="space-y-3">
+              <FormGroup label="Interval (seconds)">
+                <Input
+                  type="number"
+                  min={10}
+                  max={600}
+                  value={config.pollingInterval}
+                  onChange={(e) => handleConfigChange('pollingInterval', parseInt(e.target.value) || 60)}
+                />
+              </FormGroup>
+
+            </div>
+          </Card>
+
+          {/* Prompt Configuration */}
+          <Card title="Prompts" description="Customize social behavior and reply strategy">
+            <div className="space-y-3">
+              <FormGroup label="Social Persona" hint="Additional persona instructions for social context">
+                <Textarea
+                  rows={3}
+                  value={config.socialPersonaPrompt}
+                  onChange={(e) => handleConfigChange('socialPersonaPrompt', e.target.value)}
+                  placeholder="e.g. 你是群里的活跃成员，喜欢用emoji..."
+                />
+              </FormGroup>
+              <FormGroup label="Reply Strategy" hint="Rules for when to reply vs stay silent">
+                <Textarea
+                  rows={3}
+                  value={config.replyStrategyPrompt}
+                  onChange={(e) => handleConfigChange('replyStrategyPrompt', e.target.value)}
+                  placeholder="Leave empty for default: reply only when mentioned or topic is interesting"
+                />
+              </FormGroup>
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="text-sm font-medium text-slate-700">@Mention Must Reply</div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Always reply when someone @mentions the bot
+                  </div>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.atMustReply !== false}
+                    onChange={(e) => handleConfigChange('atMustReply', e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                </label>
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="flex-1">
+                  <div className="text-sm font-medium text-slate-700">Behavior Guidelines</div>
+                  <div className="text-xs text-slate-500 mt-0.5">
+                    Inject built-in social behavior rules (be genuine, quality over quantity, etc.)
+                  </div>
+                </div>
+                <label className="relative inline-flex items-center cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={config.injectBehaviorGuidelines !== false}
+                    onChange={(e) => handleConfigChange('injectBehaviorGuidelines', e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                </label>
+              </div>
+            </div>
+          </Card>
+
+          {/* Save Button */}
+          <div className="flex justify-end pb-4">
+            <Button 
+              variant="primary" 
+              onClick={handleSave} 
+              disabled={saving || !selectedPetId}
+            >
+              {saving ? <FaSpinner className="animate-spin w-4 h-4 mr-1" /> : <FaCheck className="w-4 h-4 mr-1" />}
+              Save Configuration
+            </Button>
+          </div>
+
+          {/* Logs */}
+          {showLogs && (
+            <Card 
+              title="Logs" 
+              description="Recent social agent activity"
+              action={
+                <button 
+                  onClick={() => { emit('social-clear-logs'); setLogs([]); }}
+                  className="text-xs text-slate-500 hover:text-red-500"
+                >
+                  Clear
+                </button>
+              }
+            >
+              <div className="max-h-64 overflow-y-auto text-xs font-mono space-y-0.5">
+                {logs.length === 0 ? (
+                  <div className="text-slate-400 text-center py-4">No logs yet</div>
+                ) : (
+                  [...logs].reverse().map((log, i) => (
+                    <div key={i} className={`py-0.5 ${
+                      log.level === 'error' ? 'text-red-600' : 
+                      log.level === 'warn' ? 'text-amber-600' : 'text-slate-600'
+                    }`}>
+                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      {' '}
+                      <span className="font-semibold">[{log.level}]</span>
+                      {' '}
+                      {log.message}
+                      {log.details && <span className="text-slate-400"> — {typeof log.details === 'string' ? log.details : JSON.stringify(log.details)}</span>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          )}
+        </div>
+      </div>
+    </>
+  );
+};
+
 // ==================== Sidebar Navigation ====================
 
 const tabGroups = [
@@ -3454,6 +3920,7 @@ const tabGroups = [
       { id: 'api', label: 'API', icon: FaKey },
       { id: 'models', label: 'Models', icon: FaList },
       { id: 'mcp', label: 'MCP', icon: FaPlug },
+      { id: 'social', label: 'Social', icon: GiPenguin },
       { id: 'skins', label: 'Skins', icon: FaShirt },
     ]
   },
@@ -3723,6 +4190,7 @@ const ManagementPage = () => {
       case 'api': return 'API Providers';
       case 'models': return 'Models';
       case 'mcp': return 'MCP Servers';
+      case 'social': return 'Social Agent';
       case 'defaults': return 'Defaults';
       case 'preferences': return 'Preferences';
       case 'hotkeys': return 'Keyboard Shortcuts';
@@ -3761,6 +4229,7 @@ const ManagementPage = () => {
             {activeTab === 'models' && <ModelsPanel />}
             {activeTab === 'mcp' && <McpServersPanel />}
             {activeTab === 'skins' && <SkinsPanel />}
+            {activeTab === 'social' && <SocialPanel assistants={assistants} apiProviders={apiProviders} />}
             {activeTab === 'defaults' && (
               <DefaultsPanel 
                 settings={localSettings}

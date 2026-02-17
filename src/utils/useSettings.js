@@ -71,7 +71,6 @@ export const useSettings = () => {
   // 监听设置更新事件
   useEffect(() => {
     const cleanup = tauri.onSettingsUpdated((payload) => {
-      console.log('[useSettings] Settings updated:', payload);
       if (payload?.key && payload?.value !== undefined) {
         // 单个设置更新
         try {

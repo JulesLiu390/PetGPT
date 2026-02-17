@@ -6,7 +6,7 @@ mod llm;
 mod workspace;
 
 use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
-use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent};
+use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent, SamplingLlmConfig};
 use message_cache::TabMessageCache;
 use tab_state::TabState;
 use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation};
@@ -59,16 +59,8 @@ fn emit_to_all(app: AppHandle, event: String, payload: JsonValue) -> Result<(), 
         }
     }
 
-    // 尝试发送到每个已知窗口
-    let windows = ["chat", "character", "manage"];
-    for label in windows {
-        if let Some(window) = app.get_webview_window(label) {
-            let _ = window.emit(&event, payload.clone());
-        }
-    }
-
-    // 也用 app.emit 广播一次
-    app.emit(&event, payload.clone()).map_err(|e| e.to_string())
+    // 使用 app.emit 广播到所有窗口（只广播一次，避免重复）
+    app.emit(&event, payload).map_err(|e| e.to_string())
 }
 
 /// 获取并清除待处理的 character-id
@@ -972,6 +964,16 @@ async fn mcp_reset_cancellation(
 }
 
 #[tauri::command]
+async fn mcp_set_sampling_config(
+    mcp: State<'_, McpState>,
+    server_id: String,
+    config: Option<SamplingLlmConfig>,
+) -> Result<(), String> {
+    let manager = mcp.read().await;
+    manager.set_sampling_config(&server_id, config).await
+}
+
+#[tauri::command]
 async fn mcp_test_server(
     transport: Option<String>,
     command: Option<String>,
@@ -1513,6 +1515,53 @@ fn read_pet_image(app: AppHandle, fileName: String) -> Result<String, String> {
 fn get_uploads_path(app: AppHandle) -> Result<String, String> {
     let uploads_dir = get_uploads_dir(&app)?;
     Ok(uploads_dir.to_string_lossy().to_string())
+}
+
+// ============ URL Download (bypass CORS) ============
+
+#[derive(serde::Serialize)]
+struct DownloadedImage {
+    data: String,      // raw base64 (no data: prefix)
+    mime_type: String,
+}
+
+/// Download a URL and return base64 data + mime_type.
+/// Used by the frontend to fetch images from external servers (e.g. QQ)
+/// that block browser cross-origin requests.
+#[tauri::command]
+async fn download_url_as_base64(url: String) -> Result<DownloadedImage, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let resp = client.get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download {}: {}", url, e))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("HTTP {} for {}", resp.status(), url));
+    }
+
+    // Get content-type from response, fall back to image/jpeg
+    let mime_type = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .split(';')
+        .next()
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let bytes = resp.bytes()
+        .await
+        .map_err(|e| format!("Failed to read response body: {}", e))?;
+
+    let data = BASE64.encode(&bytes);
+
+    Ok(DownloadedImage { data, mime_type })
 }
 
 // ============ Window Management Commands ============
@@ -2517,12 +2566,14 @@ pub fn run() {
             mcp_test_server,
             mcp_cancel_all_tool_calls,
             mcp_reset_cancellation,
+            mcp_set_sampling_config,
             // File handling commands
             save_file,
             save_image_to_path,
             copy_image_to_clipboard,
             read_upload,
             get_uploads_path,
+            download_url_as_base64,
             // Screenshot commands
             take_screenshot,
             capture_region,

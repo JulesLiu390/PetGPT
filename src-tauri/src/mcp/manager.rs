@@ -80,6 +80,17 @@ impl McpClientWrapper {
             McpClientWrapper::Http(c) => c.read_resource(uri).await,
         }
     }
+
+    /// Set LLM config for MCP Sampling (server→client LLM calls)
+    pub fn set_sampling_config(&self, config: Option<SamplingLlmConfig>) {
+        match self {
+            McpClientWrapper::Stdio(c) => c.set_sampling_config(config),
+            McpClientWrapper::Http(_) => {
+                // HTTP transport doesn't support sampling yet
+                log::debug!("[McpClientWrapper] set_sampling_config ignored for HTTP client");
+            }
+        }
+    }
 }
 
 pub struct McpManager {
@@ -364,6 +375,16 @@ impl McpManager {
     pub async fn is_server_running(&self, server_id: &str) -> bool {
         let clients = self.clients.read().await;
         clients.get(server_id).map(|c| c.is_connected()).unwrap_or(false)
+    }
+
+    /// Set sampling LLM config for a specific server
+    pub async fn set_sampling_config(&self, server_id: &str, config: Option<SamplingLlmConfig>) -> Result<(), String> {
+        let clients = self.clients.read().await;
+        let client = clients.get(server_id)
+            .ok_or_else(|| format!("Server {} not found or not running", server_id))?;
+        client.set_sampling_config(config);
+        log::info!("[MCPManager] Sampling config set for server: {}", server_id);
+        Ok(())
     }
 
     /// Get list of running server IDs

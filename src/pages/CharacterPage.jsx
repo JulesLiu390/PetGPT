@@ -2,10 +2,12 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
 import { FaPlug } from "react-icons/fa6";
+import { GiPenguin } from "react-icons/gi";
 import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
 import { getSafeMood, EMOTION_MOODS, SYSTEM_STATES, ALL_MOODS, getRandomIdleState } from '../utils/moodDetector';
+import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs } from '../utils/socialAgent';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
@@ -116,6 +118,18 @@ export const Character = () => {
   const [isChatVisible, setIsChatVisible] = useState(false);
   const [imageName, setImageName] = useState("Jules");
   const [currentPetId, setCurrentPetId] = useState(null);
+  
+  // 社交代理激活状态
+  const [socialActive, setSocialActive] = useState(false);
+  
+  // 当 currentPetId 变化时，同步社交循环状态
+  useEffect(() => {
+    if (currentPetId) {
+      setSocialActive(isSocialActiveForPet(currentPetId));
+    } else {
+      setSocialActive(false);
+    }
+  }, [currentPetId]);
   
   // 表情恢复定时器（情绪 -> normal）
   const moodResetTimerRef = useRef(null);
@@ -665,6 +679,98 @@ export const Character = () => {
     tauri.changeManageWindow('mcp');
   };
 
+  const handleToggleSocial = async () => {
+    resetIdleTimer();
+    const { emit: emitEvent } = await import('@tauri-apps/api/event');
+    if (socialActive) {
+      stopSocialLoop();
+      setSocialActive(false);
+      emitEvent('social-status-changed', { active: false, petId: currentPetId });
+    } else {
+      if (!currentPetId) return;
+      const config = await loadSocialConfig(currentPetId);
+      if (!config) {
+        // 没有配置，打开社交设置面板
+        tauri.openManageWindowWithTab('social');
+        return;
+      }
+      const started = await startSocialLoop(config, (active) => {
+        setSocialActive(active);
+        emitEvent('social-status-changed', { active, petId: currentPetId });
+      });
+      setSocialActive(started);
+      emitEvent('social-status-changed', { active: started, petId: currentPetId });
+    }
+  };
+
+  // 监听来自其他窗口的社交控制事件（ManagementPage SocialPanel）
+  useEffect(() => {
+    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated;
+    let cancelled = false;
+    const setup = async () => {
+      const { listen: listenEvent, emit: emitEvent } = await import('@tauri-apps/api/event');
+      if (cancelled) return;
+      
+      unlistenStart = await listenEvent('social-start', async (event) => {
+        const config = event.payload;
+        if (!config?.petId) return;
+        const started = await startSocialLoop(config, (active) => {
+          setSocialActive(active);
+          emitEvent('social-status-changed', { active, petId: config.petId });
+        });
+        setSocialActive(started);
+        emitEvent('social-status-changed', { active: started, petId: config.petId });
+      });
+
+      unlistenStop = await listenEvent('social-stop', () => {
+        const status = getSocialStatus();
+        stopSocialLoop();
+        setSocialActive(false);
+        emitEvent('social-status-changed', { active: false, petId: status.petId });
+      });
+
+      unlistenQuery = await listenEvent('social-query-status', () => {
+        const status = getSocialStatus();
+        emitEvent('social-status-changed', { active: status.active, petId: status.petId });
+      });
+
+      unlistenQueryLogs = await listenEvent('social-query-logs', () => {
+        emitEvent('social-logs-response', getSocialLogs());
+      });
+
+      unlistenClearLogs = await listenEvent('social-clear-logs', () => {
+        clearSocialLogs();
+        emitEvent('social-logs-response', []);
+      });
+
+      // 配置更新时热重启循环
+      unlistenConfigUpdated = await listenEvent('social-config-updated', async (event) => {
+        const newConfig = event.payload;
+        if (!newConfig?.petId) return;
+        const status = getSocialStatus();
+        if (!status.active || status.petId !== newConfig.petId) return;
+        // 用新配置重启循环
+        const started = await startSocialLoop(newConfig, (active) => {
+          setSocialActive(active);
+          emitEvent('social-status-changed', { active, petId: newConfig.petId });
+        });
+        setSocialActive(started);
+        emitEvent('social-status-changed', { active: started, petId: newConfig.petId });
+      });
+    };
+    setup();
+
+    return () => {
+      cancelled = true;
+      unlistenStart?.();
+      unlistenStop?.();
+      unlistenQuery?.();
+      unlistenQueryLogs?.();
+      unlistenClearLogs?.();
+      unlistenConfigUpdated?.();
+    };
+  }, []);
+
   // ========== 混合拖动方案 + 双击打扰系统 ==========
   const dragState = useRef({
     isMouseDown: false,
@@ -864,6 +970,11 @@ export const Character = () => {
               onClick={handleClickMcp}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
+            <GiPenguin
+              title="QQ Agent"
+              onClick={handleToggleSocial}
+              className={`${socialActive ? 'text-cyan-400' : 'text-gray-100'} hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer`}
+            />
             <IoIosSettings
               title="Settings"
               onClick={handleClickSettings}
@@ -878,8 +989,9 @@ export const Character = () => {
         className="flex-1 w-full flex items-center justify-center cursor-grab active:cursor-grabbing"
         onMouseDown={handleCharacterMouseDown}
       >
+        {imgSrc && (
         <img
-          src={imgSrc || ""}
+          src={imgSrc}
           draggable="false"
           alt=" "
           className="w-full pointer-events-none
@@ -891,6 +1003,7 @@ export const Character = () => {
       select-none
           "
         />
+        )}
       </div>
     </div>
   );

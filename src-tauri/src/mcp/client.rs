@@ -10,10 +10,17 @@ use std::thread;
 use tokio::sync::{mpsc, oneshot};
 
 use super::types::*;
+use crate::llm::{LlmClient, LlmRequest, ChatMessage, MessageContent, Role, ApiFormat};
 
 const PROTOCOL_VERSION: &str = "2024-11-05";
 const REQUEST_TIMEOUT_MS: u64 = 60000; // Increased to 60s for long tool calls
 const TOOL_CALL_TIMEOUT_MS: u64 = 300000; // 5 minutes for tool calls
+
+/// Incoming server→client request that needs async processing
+struct SamplingJob {
+    request_id: serde_json::Value,
+    params: SamplingCreateMessageParams,
+}
 
 pub struct McpClient {
     server_id: String,
@@ -41,6 +48,9 @@ pub struct McpClient {
     cancelled: Arc<AtomicBool>,
     // Error state for propagating process failures
     last_error: Arc<Mutex<Option<String>>>,
+    
+    // Sampling support — LLM config for responding to server sampling requests
+    sampling_config: Arc<Mutex<Option<SamplingLlmConfig>>>,
 }
 
 impl McpClient {
@@ -68,7 +78,15 @@ impl McpClient {
             resources: Arc::new(Mutex::new(Vec::new())),
             cancelled: Arc::new(AtomicBool::new(false)),
             last_error: Arc::new(Mutex::new(None)),
+            sampling_config: Arc::new(Mutex::new(None)),
         }
+    }
+    
+    /// Set the LLM configuration used for MCP Sampling responses
+    pub fn set_sampling_config(&self, config: Option<SamplingLlmConfig>) {
+        *self.sampling_config.lock().unwrap() = config;
+        log::info!("[MCP][{}] Sampling config {}", self.server_name, 
+            if self.sampling_config.lock().unwrap().is_some() { "set" } else { "cleared" });
     }
     
     /// Cancel pending operations
@@ -187,6 +205,8 @@ impl McpClient {
         let server_name_stdout = self.server_name.clone();
         let is_connected_stdout = self.is_connected.clone();
         let last_error_stdout = self.last_error.clone();
+        let sampling_config_clone = self.sampling_config.clone();
+        let stdin_tx_for_sampling = self.stdin_tx.clone();
         
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
@@ -195,6 +215,66 @@ impl McpClient {
                     Ok(line) => {
                         let trimmed = line.trim();
                         if trimmed.is_empty() {
+                            continue;
+                        }
+                        
+                        // First: try to detect if this is an incoming request from server
+                        // (has "method" and "id" fields — server→client request like sampling)
+                        if let Ok(incoming) = serde_json::from_str::<JsonRpcIncomingRequest>(trimmed) {
+                            log::info!("[MCP][{}] Incoming server request: {} (id={:?})", 
+                                server_name_stdout, incoming.method, incoming.id);
+                            
+                            if incoming.method == "sampling/createMessage" {
+                                // Handle sampling request
+                                let config = sampling_config_clone.lock().unwrap().clone();
+                                let stdin_tx = stdin_tx_for_sampling.lock().unwrap().clone();
+                                let req_id = incoming.id.clone();
+                                let server_name_for_sampling = server_name_stdout.clone();
+                                
+                                if let (Some(config), Some(stdin_tx)) = (config, stdin_tx) {
+                                    if let Some(params_val) = incoming.params {
+                                        match serde_json::from_value::<SamplingCreateMessageParams>(params_val) {
+                                            Ok(params) => {
+                                                // Spawn async task to handle sampling
+                                                let job = SamplingJob { request_id: req_id, params };
+                                                std::thread::spawn(move || {
+                                                    let rt = tokio::runtime::Builder::new_current_thread()
+                                                        .enable_all()
+                                                        .build()
+                                                        .unwrap();
+                                                    rt.block_on(async move {
+                                                        handle_sampling_job(
+                                                            &server_name_for_sampling, 
+                                                            job, 
+                                                            &config, 
+                                                            &stdin_tx
+                                                        ).await;
+                                                    });
+                                                });
+                                            }
+                                            Err(e) => {
+                                                log::error!("[MCP][{}] Failed to parse sampling params: {}", 
+                                                    server_name_stdout, e);
+                                                // Send error response
+                                                send_jsonrpc_error_sync(&stdin_tx_for_sampling, &req_id, -32602, 
+                                                    &format!("Invalid sampling params: {}", e));
+                                            }
+                                        }
+                                    } else {
+                                        send_jsonrpc_error_sync(&stdin_tx_for_sampling, &req_id, -32602, 
+                                            "Missing params in sampling request");
+                                    }
+                                } else {
+                                    log::warn!("[MCP][{}] Sampling requested but no LLM config set", server_name_stdout);
+                                    send_jsonrpc_error_sync(&stdin_tx_for_sampling, &req_id, -32603, 
+                                        "Sampling not configured: no LLM config available");
+                                }
+                            } else {
+                                log::warn!("[MCP][{}] Unhandled server request: {}", server_name_stdout, incoming.method);
+                                // Send method-not-found error
+                                send_jsonrpc_error_sync(&stdin_tx_for_sampling, &incoming.id, -32601, 
+                                    &format!("Method not found: {}", incoming.method));
+                            }
                             continue;
                         }
                         
@@ -619,6 +699,132 @@ impl McpClient {
             resources: self.get_resources(),
             server_info: self.get_server_info(),
             error: self.get_last_error(),
+        }
+    }
+}
+
+/// Send a JSON-RPC error response synchronously (from the stdout reader thread context)
+fn send_jsonrpc_error_sync(
+    stdin_tx: &Arc<Mutex<Option<mpsc::Sender<String>>>>,
+    request_id: &serde_json::Value,
+    code: i32,
+    message: &str,
+) {
+    let response = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": request_id,
+        "error": {
+            "code": code,
+            "message": message,
+        }
+    });
+    if let Ok(msg) = serde_json::to_string(&response) {
+        if let Some(tx) = stdin_tx.lock().unwrap().as_ref() {
+            let _ = tx.try_send(msg + "\n");
+        }
+    }
+}
+
+/// Handle a sampling/createMessage request by calling LLM
+async fn handle_sampling_job(
+    server_name: &str,
+    job: SamplingJob,
+    config: &SamplingLlmConfig,
+    stdin_tx: &mpsc::Sender<String>,
+) {
+    log::info!("[MCP][{}] Handling sampling request (id={:?}, {} messages)", 
+        server_name, job.request_id, job.params.messages.len());
+    
+    // Convert MCP sampling messages to LLM messages
+    let mut llm_messages: Vec<ChatMessage> = Vec::new();
+    
+    // Add system prompt if provided
+    if let Some(ref system_prompt) = job.params.system_prompt {
+        llm_messages.push(ChatMessage {
+            role: Role::System,
+            content: MessageContent::Text(system_prompt.clone()),
+            tool_call_history: None,
+        });
+    }
+    
+    // Convert sampling messages
+    for msg in &job.params.messages {
+        let role = match msg.role.as_str() {
+            "assistant" => Role::Assistant,
+            _ => Role::User,
+        };
+        let content = match &msg.content {
+            SamplingContent::Text { text } => MessageContent::Text(text.clone()),
+            SamplingContent::Image { data, .. } => {
+                // For images, include as text description (simplified)
+                MessageContent::Text(format!("[Image data: {} bytes]", data.len()))
+            }
+        };
+        llm_messages.push(ChatMessage {
+            role,
+            content,
+            tool_call_history: None,
+        });
+    }
+    
+    // Build LLM request
+    let api_format = ApiFormat::from(config.api_format.as_str());
+    let llm_request = LlmRequest {
+        conversation_id: format!("sampling-{}", server_name),
+        messages: llm_messages,
+        api_format,
+        api_key: config.api_key.clone(),
+        model: config.model.clone(),
+        base_url: config.base_url.clone(),
+        temperature: job.params.temperature.map(|t| t as f32),
+        max_tokens: job.params.max_tokens.or(Some(4096)),
+        stream: false,
+    };
+    
+    // Call LLM
+    let llm_client = LlmClient::new();
+    match llm_client.call(&llm_request).await {
+        Ok(llm_response) => {
+            log::info!("[MCP][{}] Sampling LLM response: {} chars", 
+                server_name, llm_response.content.len());
+            
+            // Build MCP sampling response
+            let result = SamplingCreateMessageResult {
+                role: "assistant".to_string(),
+                content: SamplingContent::Text { text: llm_response.content },
+                model: config.model.clone(),
+                stop_reason: Some("endTurn".to_string()),
+            };
+            
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": job.request_id,
+                "result": result,
+            });
+            
+            if let Ok(msg) = serde_json::to_string(&response) {
+                if let Err(e) = stdin_tx.send(msg + "\n").await {
+                    log::error!("[MCP][{}] Failed to send sampling response: {}", server_name, e);
+                }
+            }
+        }
+        Err(e) => {
+            log::error!("[MCP][{}] Sampling LLM call failed: {}", server_name, e);
+            
+            let response = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": job.request_id,
+                "error": {
+                    "code": -32603,
+                    "message": format!("LLM call failed: {}", e),
+                }
+            });
+            
+            if let Ok(msg) = serde_json::to_string(&response) {
+                if let Err(e) = stdin_tx.send(msg + "\n").await {
+                    log::error!("[MCP][{}] Failed to send sampling error: {}", server_name, e);
+                }
+            }
         }
     }
 }

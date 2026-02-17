@@ -223,17 +223,47 @@ export const parseStreamChunk = (chunk) => {
 };
 
 /**
- * 格式化工具结果消息
+ * 格式化工具结果消息（支持多模态：图片等）
  * 
  * @param {string} toolCallId - 工具调用 ID
- * @param {*} result - 工具执行结果
+ * @param {*} result - 工具执行结果（文本）
+ * @param {Array<{data: string, mimeType: string}>} images - 可选的图片数组
  * @returns {Object} OpenAI tool message
  */
-export const formatToolResultMessage = (toolCallId, result) => ({
-  role: "tool",
-  tool_call_id: toolCallId,
-  content: typeof result === 'string' ? result : JSON.stringify(result)
-});
+export const formatToolResultMessage = (toolCallId, result, images = []) => {
+  const textContent = typeof result === 'string' ? result : JSON.stringify(result);
+  
+  // 没有图片时，返回纯文本内容
+  if (!images || images.length === 0) {
+    return {
+      role: "tool",
+      tool_call_id: toolCallId,
+      content: textContent
+    };
+  }
+  
+  // 有图片时，构建多模态内容数组 (text + image_url parts)
+  const content = [{ type: "text", text: textContent }];
+  
+  for (const img of images) {
+    let url;
+    if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
+      url = img.data;
+    } else if (img.data.startsWith('data:')) {
+      url = img.data;
+    } else {
+      // raw base64 → data URI
+      url = `data:${img.mimeType};base64,${img.data}`;
+    }
+    content.push({ type: "image_url", image_url: { url } });
+  }
+  
+  return {
+    role: "tool",
+    tool_call_id: toolCallId,
+    content
+  };
+};
 
 /**
  * 创建带有工具调用的 assistant 消息

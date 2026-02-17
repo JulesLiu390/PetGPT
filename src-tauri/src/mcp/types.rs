@@ -256,6 +256,83 @@ pub struct ServerStatus {
 // Frontend API Types
 // ============================================
 
+// ============================================
+// MCP Sampling Types (Server → Client)
+// ============================================
+
+/// Sampling configuration — LLM credentials for handling sampling/createMessage
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingLlmConfig {
+    pub api_key: String,
+    pub model: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// "openai_compatible" or "gemini_official"
+    #[serde(default = "default_api_format_str")]
+    pub api_format: String,
+}
+
+fn default_api_format_str() -> String {
+    "openai_compatible".to_string()
+}
+
+/// MCP sampling/createMessage request params
+/// Ref: https://spec.modelcontextprotocol.io/specification/client/sampling/
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SamplingCreateMessageParams {
+    pub messages: Vec<SamplingMessage>,
+    #[serde(default)]
+    pub system_prompt: Option<String>,
+    #[serde(default)]
+    pub model_preferences: Option<serde_json::Value>,
+    #[serde(default)]
+    pub include_context: Option<String>,
+    #[serde(default)]
+    pub max_tokens: Option<u32>,
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    #[serde(default)]
+    pub stop_sequences: Option<Vec<String>>,
+    #[serde(default)]
+    pub metadata: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingMessage {
+    pub role: String,  // "user" or "assistant"
+    pub content: SamplingContent,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum SamplingContent {
+    Text { text: String },
+    Image { data: String, #[serde(rename = "mimeType")] mime_type: String },
+}
+
+/// MCP sampling/createMessage response
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SamplingCreateMessageResult {
+    pub role: String,
+    pub content: SamplingContent,
+    pub model: String,
+    #[serde(rename = "stopReason", default)]
+    pub stop_reason: Option<String>,
+}
+
+/// Incoming JSON-RPC request from server (for server → client methods like sampling)
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JsonRpcIncomingRequest {
+    pub jsonrpc: String,
+    pub id: serde_json::Value,  // can be number or string
+    pub method: String,
+    #[serde(default)]
+    pub params: Option<serde_json::Value>,
+}
+
+// ============================================
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct McpToolInfo {

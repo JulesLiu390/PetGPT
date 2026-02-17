@@ -123,10 +123,10 @@ export const convertMessages = async (messages) => {
   const regularMessages = [];
   
   for (const msg of messages) {
-    // 检查是否已经是 Gemini 格式（带有 functionCall 或 functionResponse 的 parts）
+    // 检查是否已经是 Gemini 格式（带有 functionCall、functionResponse 或 inline_data 的 parts）
     if ((msg.role === 'model' || msg.role === 'user') && msg.parts && Array.isArray(msg.parts)) {
-      const hasFunctionPart = msg.parts.some(p => p.functionCall || p.functionResponse);
-      if (hasFunctionPart) {
+      const hasSpecialPart = msg.parts.some(p => p.functionCall || p.functionResponse || p.inline_data);
+      if (hasSpecialPart) {
         geminiFormatMessages.push({ index: messages.indexOf(msg), msg });
         continue;
       }

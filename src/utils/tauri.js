@@ -461,6 +461,13 @@ export const saveFile = ({ fileName, fileData, mimeType }) => invoke('save_file'
 export const readUpload = (fileName) => invoke('read_upload', { fileName });
 export const getUploadsPath = () => invoke('get_uploads_path');
 
+/**
+ * 通过 Rust 后端下载 URL 并返回 base64（绕过浏览器 CORS 限制）
+ * @param {string} url - 要下载的 URL
+ * @returns {Promise<{data: string, mime_type: string}>} base64 数据和 MIME 类型
+ */
+export const downloadUrlAsBase64 = (url) => invoke('download_url_as_base64', { url });
+
 // ==================== Screenshot ====================
 
 /**

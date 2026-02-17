@@ -8,6 +8,7 @@ import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
+import { downloadUrlAsBase64 } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
@@ -150,7 +151,7 @@ export const executeMcpTool = async (serverName, toolName, args, options = {}) =
     return result;
   } catch (error) {
     console.error(`[MCP] Tool execution failed:`, error);
-    return { error: error.message };
+    return { error: typeof error === 'string' ? error : (error?.message || String(error)) };
   }
 };
 
@@ -204,7 +205,7 @@ export const executeToolByName = async (toolName, args, options = {}) => {
     return result;
   } catch (error) {
     console.error(`[MCP] Tool execution failed:`, error);
-    return { error: error.message };
+    return { error: typeof error === 'string' ? error : (error?.message || String(error)) };
   }
 };
 
@@ -242,6 +243,105 @@ export const formatToolResult = (result) => {
   }
   
   return JSON.stringify(result, null, 2);
+};
+
+/**
+ * 从工具结果中提取媒体内容（图片等）
+ * 
+ * MCP 标准 image content: { type: "image", data: "base64...", mimeType: "image/png" }
+ * 
+ * @param {*} result - MCP 工具返回的原始结果
+ * @returns {{ text: string, images: Array<{data: string, mimeType: string}> }}
+ */
+export const extractMediaFromToolResult = (result) => {
+  const images = [];
+  
+  if (!result || !result.content || !Array.isArray(result.content)) {
+    return { text: formatToolResult(result), images };
+  }
+  
+  const textParts = [];
+  for (const item of result.content) {
+    if (item.type === 'text') {
+      textParts.push(item.text);
+    } else if (item.type === 'image') {
+      if (item.data) {
+        images.push({
+          data: item.data,
+          mimeType: item.mimeType || 'image/jpeg'
+        });
+        textParts.push('[Image]');
+      }
+    } else if (item.type === 'resource') {
+      textParts.push(`[Resource: ${item.resource?.uri}]`);
+    } else {
+      textParts.push(JSON.stringify(item));
+    }
+  }
+  
+  return { text: textParts.join('\n'), images };
+};
+
+/**
+ * 将图片数据转换为 Gemini inline_data 格式
+ * 如果是 HTTP URL，尝试下载并转换为 base64
+ * 
+ * @param {string} data - base64 数据或 URL
+ * @param {string} mimeType - MIME 类型
+ * @returns {Promise<{ inline_data: { mime_type: string, data: string } } | null>}
+ */
+const toGeminiInlineData = async (data, mimeType) => {
+  // raw base64 (most common for MCP image content)
+  if (!data.startsWith('http://') && !data.startsWith('https://') && !data.startsWith('data:')) {
+    return { inline_data: { mime_type: mimeType, data } };
+  }
+  
+  // data URI → extract base64
+  if (data.startsWith('data:')) {
+    const match = data.match(/^data:([^;]+);base64,(.+)$/);
+    if (match) {
+      return { inline_data: { mime_type: match[1], data: match[2] } };
+    }
+    return null;
+  }
+  
+  // HTTP URL → download via Tauri backend (bypasses CORS)
+  try {
+    const result = await downloadUrlAsBase64(data);
+    return { inline_data: { mime_type: result.mime_type || mimeType, data: result.data } };
+  } catch (e) {
+    console.warn('[MCP] Failed to download image for Gemini:', data, e);
+    return null;
+  }
+};
+
+/**
+ * 将图片数组中的 URL 通过 Tauri 后端下载转换为 base64
+ * 避免浏览器 CORS 限制（如 QQ 多媒体服务器）
+ * 
+ * @param {Array<{data: string, mimeType: string}>} images
+ * @returns {Promise<Array<{data: string, mimeType: string}>>}
+ */
+export const resolveImageUrls = async (images) => {
+  if (!images || images.length === 0) return images;
+  
+  const resolved = [];
+  for (const img of images) {
+    if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
+      try {
+        const result = await downloadUrlAsBase64(img.data);
+        resolved.push({ data: result.data, mimeType: result.mime_type || img.mimeType });
+        console.log('[MCP] Downloaded image via backend:', img.data.substring(0, 80) + '...');
+      } catch (e) {
+        console.warn('[MCP] Failed to download image via backend:', img.data.substring(0, 80), e);
+        // Keep original URL as fallback
+        resolved.push(img);
+      }
+    } else {
+      resolved.push(img);
+    }
+  }
+  return resolved;
 };
 
 /**
@@ -310,6 +410,7 @@ export const executeToolCalls = async (toolCalls) => {
  * @param {Object} config.options
  * @param {Function} config.onToolCall - 工具调用回调 (toolName, args) => void
  * @param {Function} config.onToolResult - 工具结果回调 (toolName, result) => void
+ * @param {Function} config.toolArgTransform - (name, args) => args — transform tool args before execution
  * @returns {Promise<{content: string, toolCallHistory: Array}>}
  */
 export const callLLMWithTools = async ({
@@ -322,6 +423,8 @@ export const callLLMWithTools = async ({
   options = {},
   onToolCall,
   onToolResult,
+  toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
+  toolArgTransform, // (name, args) => args — transform tool args before execution
   builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
 }) => {
   const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
@@ -424,6 +527,11 @@ export const callLLMWithTools = async ({
         console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
       }
       
+      // Apply arg transform before onToolCall notification
+      if (toolArgTransform) {
+        call.arguments = toolArgTransform(call.name, call.arguments) ?? call.arguments;
+      }
+      
       if (onToolCall) {
         onToolCall(call.name, call.arguments, toolCallId);
       }
@@ -431,11 +539,30 @@ export const callLLMWithTools = async ({
       let isError = false;
       let toolResult;
       try {
-        // Check if this is a builtin tool (read/write/edit)
-        if (isBuiltinTool(call.name) && builtinToolContext) {
-          toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
-        } else {
-          toolResult = await executeToolByName(call.name, call.arguments);
+        // Check toolCallFilter first (allows caller to reject specific calls)
+        if (toolCallFilter) {
+          const filterError = toolCallFilter(call.name, call.arguments);
+          if (filterError) {
+            console.log(`[MCP] Tool call filtered: ${call.name} — ${filterError}`);
+            isError = true;
+            toolResult = { error: filterError };
+          }
+        }
+        
+        if (!toolResult) {
+          // Validate tool name against declared tools to prevent LLM hallucinating undeclared tool calls
+          const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
+          const isBuiltin = isBuiltinTool(call.name);
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin}`);
+          if (!isBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+            console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
+            isError = true;
+            toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
+          } else if (isBuiltin && builtinToolContext) {
+            toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else {
+            toolResult = await executeToolByName(call.name, call.arguments);
+          }
         }
         if (toolResult && toolResult.error) {
           isError = true;
@@ -446,12 +573,15 @@ export const callLLMWithTools = async ({
       }
       
       const formattedResult = formatToolResult(toolResult);
+      const { images: rawImages } = extractMediaFromToolResult(toolResult);
+      const toolImages = await resolveImageUrls(rawImages);
       
       toolCallHistory.push({
         id: toolCallId,
         name: call.name,
         arguments: call.arguments,
-        result: formattedResult
+        result: formattedResult,
+        images: toolImages
       });
       
       if (onToolResult) {
@@ -477,16 +607,42 @@ export const callLLMWithTools = async ({
           result: toolCallHistory[toolCallHistory.length - result.toolCalls.length + i]?.result || '[Skipped due to iteration limit]'
         }))
       ));
+      
+      // Gemini: 工具结果中的图片需要作为额外的 user 消息注入 (functionResponse 不支持 inline_data)
+      const allToolImages = [];
+      for (let i = 0; i < result.toolCalls.length; i++) {
+        const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
+        const entry = toolCallHistory[historyIndex];
+        if (entry?.images?.length > 0) {
+          allToolImages.push(...entry.images);
+        }
+      }
+      if (allToolImages.length > 0) {
+        const imageParts = [{ text: '以下是上述工具返回的图片：' }];
+        for (const img of allToolImages) {
+          const inlinePart = await toGeminiInlineData(img.data, img.mimeType);
+          if (inlinePart) {
+            imageParts.push(inlinePart);
+          } else {
+            imageParts.push({ text: `[Image failed to load]` });
+          }
+        }
+        if (imageParts.length > 1) {
+          currentMessages.push({ role: 'user', parts: imageParts });
+        }
+      }
     } else {
-      // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息
+      // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息（支持多模态）
       currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls));
       
       for (let i = 0; i < result.toolCalls.length; i++) {
         const call = result.toolCalls[i];
         const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
+        const entry = toolCallHistory[historyIndex];
         currentMessages.push(openaiAdapter.formatToolResultMessage(
           call.id,
-          toolCallHistory[historyIndex]?.result || '[Skipped due to iteration limit]'
+          entry?.result || '[Skipped due to iteration limit]',
+          entry?.images
         ));
       }
     }
@@ -521,6 +677,8 @@ export const callLLMStreamWithTools = async ({
   onChunk,
   onToolCall,
   onToolResult,
+  toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
+  toolArgTransform, // (name, args) => args — transform tool args before execution
   abortSignal,
   builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
 }) => {
@@ -763,6 +921,11 @@ export const callLLMStreamWithTools = async ({
         console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
       }
       
+      // Apply arg transform before onToolCall notification
+      if (toolArgTransform) {
+        call.arguments = toolArgTransform(call.name, call.arguments) ?? call.arguments;
+      }
+      
       if (onToolCall) {
         onToolCall(call.name, call.arguments, toolCallId);
       }
@@ -775,11 +938,29 @@ export const callLLMStreamWithTools = async ({
           throw new Error('Tool execution cancelled');
         }
         
-        // Check if this is a builtin tool (read/write/edit)
-        if (isBuiltinTool(call.name) && builtinToolContext) {
-          toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
-        } else {
-          toolResult = await executeToolByName(call.name, call.arguments);
+        // Check toolCallFilter first (allows caller to reject specific calls)
+        if (toolCallFilter) {
+          const filterError = toolCallFilter(call.name, call.arguments);
+          if (filterError) {
+            console.log(`[MCP] Tool call filtered: ${call.name} — ${filterError}`);
+            isError = true;
+            toolResult = { error: filterError };
+          }
+        }
+        
+        if (!toolResult) {
+          // Validate tool name against declared tools
+          const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
+          const isBuiltin = isBuiltinTool(call.name);
+          if (!isBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+            console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
+            isError = true;
+            toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
+          } else if (isBuiltin && builtinToolContext) {
+            toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else {
+            toolResult = await executeToolByName(call.name, call.arguments);
+          }
         }
         
         if (toolResult && toolResult.error) {
@@ -803,12 +984,15 @@ export const callLLMStreamWithTools = async ({
       }
       
       const formattedResult = formatToolResult(toolResult);
+      const { images: rawImages } = extractMediaFromToolResult(toolResult);
+      const toolImages = await resolveImageUrls(rawImages);
       
       toolCallHistory.push({
         id: toolCallId,
         name: call.name,
         arguments: call.arguments,
-        result: formattedResult
+        result: formattedResult,
+        images: toolImages
       });
       
       if (onToolResult) {
@@ -831,15 +1015,42 @@ export const callLLMStreamWithTools = async ({
       
       currentMessages.push(modelMessage);
       currentMessages.push(responseMessage);
+      
+      // Gemini: 工具结果中的图片需要作为额外的 user 消息注入 (functionResponse 不支持 inline_data)
+      const allToolImages = [];
+      for (let i = 0; i < collectedToolCalls.length; i++) {
+        const historyIndex = toolCallHistory.length - collectedToolCalls.length + i;
+        const entry = toolCallHistory[historyIndex];
+        if (entry?.images?.length > 0) {
+          allToolImages.push(...entry.images);
+        }
+      }
+      if (allToolImages.length > 0) {
+        const imageParts = [{ text: '以下是上述工具返回的图片：' }];
+        for (const img of allToolImages) {
+          const inlinePart = await toGeminiInlineData(img.data, img.mimeType);
+          if (inlinePart) {
+            imageParts.push(inlinePart);
+          } else {
+            imageParts.push({ text: `[Image failed to load]` });
+          }
+        }
+        if (imageParts.length > 1) {
+          currentMessages.push({ role: 'user', parts: imageParts });
+        }
+      }
     } else {
+      // OpenAI 格式：支持多模态 tool 消息（图片作为 image_url parts）
       currentMessages.push(openaiAdapter.createAssistantToolCallMessage(collectedToolCalls));
       
       for (let i = 0; i < collectedToolCalls.length; i++) {
         const call = collectedToolCalls[i];
         const historyIndex = toolCallHistory.length - collectedToolCalls.length + i;
+        const entry = toolCallHistory[historyIndex];
         currentMessages.push(openaiAdapter.formatToolResultMessage(
           call.id,
-          toolCallHistory[historyIndex].result
+          entry.result,
+          entry.images
         ));
       }
     }
@@ -858,6 +1069,8 @@ export default {
   executeMcpTool,
   executeToolByName,
   formatToolResult,
+  extractMediaFromToolResult,
+  resolveImageUrls,
   convertToolsForLLM,
   executeToolCalls,
   callLLMWithTools,
