@@ -739,6 +739,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const [detectedProvider, setDetectedProvider] = useState(null);
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
   const [autoDetectProgress, setAutoDetectProgress] = useState("");
+  const [showApiKey, setShowApiKey] = useState(false);
   
   // 当 API Key 改变时，尝试检测服务商并自动填充
   useEffect(() => {
@@ -972,13 +973,24 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
       {/* API Key with auto-detect hint */}
       <FormGroup>
         <Label required>API Key</Label>
-        <Input
-          type="password"
-          name="apiKey"
-          value={formData.apiKey}
-          onChange={handleChange}
-          placeholder="sk-... or AIza..."
-        />
+        <div className="relative">
+          <Input
+            type={showApiKey ? "text" : "password"}
+            name="apiKey"
+            value={formData.apiKey}
+            onChange={handleChange}
+            placeholder="sk-... or AIza..."
+            className="pr-10"
+          />
+          <button
+            type="button"
+            onClick={() => setShowApiKey(!showApiKey)}
+            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+            tabIndex={-1}
+          >
+            {showApiKey ? <FaEyeSlash className="w-4 h-4" /> : <FaEye className="w-4 h-4" />}
+          </button>
+        </div>
         <div className="mt-2 flex items-center gap-2">
           <Button
             type="button"
@@ -1353,6 +1365,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
   const [testing, setTesting] = useState(false);
   const [testResult, setTestResult] = useState(null);
   const [saving, setSaving] = useState(false);
+  const [showApiKey, setShowApiKey] = useState(false);
 
   // 构建配置对象
   const buildConfig = () => {
@@ -1592,12 +1605,23 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
           
           <FormGroup>
             <Label>API Key</Label>
-            <Input
-              type="password"
-              value={apiKey}
-              onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
-              placeholder="Optional authentication key"
-            />
+            <div className="relative">
+              <Input
+                type={showApiKey ? "text" : "password"}
+                value={apiKey}
+                onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
+                placeholder="Optional authentication key"
+                className="pr-10"
+              />
+              <button
+                type="button"
+                onClick={() => setShowApiKey(!showApiKey)}
+                className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+                tabIndex={-1}
+              >
+                {showApiKey ? <FaEyeSlash className="w-4 h-4" /> : <FaEye className="w-4 h-4" />}
+              </button>
+            </div>
           </FormGroup>
         </>
       )}
