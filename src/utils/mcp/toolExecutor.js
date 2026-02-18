@@ -10,6 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64 } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
+import { isSocialBuiltinTool, executeSocialBuiltinTool } from '../workspace/socialToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -553,13 +554,16 @@ export const callLLMWithTools = async ({
           // Validate tool name against declared tools to prevent LLM hallucinating undeclared tool calls
           const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
           const isBuiltin = isBuiltinTool(call.name);
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin}`);
-          if (!isBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+          const isSocialBuiltin = isSocialBuiltinTool(call.name);
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialBuiltin=${isSocialBuiltin}`);
+          if (!isBuiltin && !isSocialBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
             toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
           } else if (isBuiltin && builtinToolContext) {
             toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSocialBuiltin && builtinToolContext) {
+            toolResult = await executeSocialBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }

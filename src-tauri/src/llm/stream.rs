@@ -150,8 +150,8 @@ async fn stream_openai(
                             // 验证 URL 格式
                             let url = &image_url.url;
                             if !url.starts_with("data:") && !url.starts_with("http") {
-                                log::warn!("[LLM] Invalid image_url format (not base64 or http): {}", 
-                                    if url.len() > 100 { &url[..100] } else { url });
+                                let url_preview: String = url.chars().take(100).collect();
+                                log::warn!("[LLM] Invalid image_url format (not base64 or http): {}", url_preview);
                             }
                             serde_json::json!({
                                 "type": "image_url",

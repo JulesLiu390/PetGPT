@@ -197,10 +197,14 @@ impl LlmClient {
             .await
             .map_err(|e| format!("JSON parse error: {}", e))?;
 
-        let content = gemini_response["candidates"][0]["content"]["parts"][0]["text"]
-            .as_str()
-            .unwrap_or("")
-            .to_string();
+        let content = if let Some(parts) = gemini_response["candidates"][0]["content"]["parts"].as_array() {
+            parts.iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        } else {
+            String::new()
+        };
 
         Ok(LlmResponse {
             content,

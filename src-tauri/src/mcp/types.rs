@@ -401,7 +401,10 @@ pub fn format_tool_result(result: &ToolCallResult) -> String {
     let preview = match first_text {
         Some(t) => {
             let clean: String = t.chars().filter(|c| !c.is_control()).collect();
-            let truncated = if clean.len() > 150 { format!("{}…", &clean[..150]) } else { clean };
+            let truncated = if clean.chars().count() > 50 {
+                let end = clean.char_indices().nth(50).map(|(i, _)| i).unwrap_or(clean.len());
+                format!("{}…", &clean[..end])
+            } else { clean };
             format!(", preview: \"{}\"", truncated)
         }
         None => String::new(),

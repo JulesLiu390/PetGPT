@@ -7,6 +7,36 @@
 
 import { readSoulFile, readUserFile, readMemoryFile, truncateContent } from './promptBuilder';
 import { formatCurrentTime } from './timeInjection';
+import * as tauri from './tauri';
+import { SOCIAL_MEMORY_MAX_CHARS } from './workspace/socialToolExecutor';
+
+/** 社交记忆截断上限 */
+const SOCIAL_MEMORY_TRUNCATE = SOCIAL_MEMORY_MAX_CHARS;
+
+/**
+ * 安全读取社交记忆文件
+ */
+export async function readSocialMemoryFile(petId) {
+  try {
+    const content = await tauri.workspaceRead(petId, 'social/SOCIAL_MEMORY.md');
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 社交记忆三档引导指令
+ */
+function socialMemoryGuidance(content) {
+  if (!content) {
+    return '你还没有社交长期记忆。当在群聊中遇到值得长期记住的信息时（群友关系、重要事件、习惯偏好等），使用 social_write 工具创建记忆。';
+  }
+  if (content.length > SOCIAL_MEMORY_TRUNCATE * 0.8) {
+    return '你的社交记忆快满了。请整理社交记忆，移除过时内容，合并重复信息。使用 social_edit 或 social_write 工具更新。';
+  }
+  return '遇到值得长期记住的社交信息时，使用 social_edit 工具更新社交记忆。定期整理，保持精炼。';
+}
 
 /**
  * 构建社交代理的 system prompt
@@ -17,6 +47,7 @@ import { formatCurrentTime } from './timeInjection';
  * @param {string} params.replyStrategyPrompt - 用户配置的回复决策规则
  * @param {boolean} params.atMustReply - 被@时是否必须回复
  * @param {string} [params.targetName] - 当前监听目标名称（群名/好友名）
+ * @param {string} [params.targetId] - 当前监听目标 ID（群号/好友QQ号）
  * @param {string} params.botQQ - 自己的 QQ 号（用于识别 @me）
  * @param {string} [params.ownerQQ] - 主人的 QQ 号
  * @param {string} [params.ownerName] - 主人的 QQ 名/昵称
@@ -29,6 +60,7 @@ export async function buildSocialPrompt({
   replyStrategyPrompt = '',
   atMustReply = true,
   targetName = '',
+  targetId = '',
   botQQ = '',
   ownerQQ = '',
   ownerName = '',
@@ -66,6 +98,17 @@ export async function buildSocialPrompt({
     sections.push(memoryTruncated);
   }
 
+  // === 社交长期记忆（social/SOCIAL_MEMORY.md，可读写） ===
+  const socialMemoryContent = await readSocialMemoryFile(petId);
+  const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_MEMORY_TRUNCATE);
+  sections.push('# 社交记忆');
+  if (socialMemoryTruncated) {
+    sections.push(socialMemoryTruncated);
+  } else {
+    sections.push('（空）');
+  }
+  sections.push(socialMemoryGuidance(socialMemoryContent));
+
   // === 主人识别 ===
   if (ownerQQ || ownerName) {
     sections.push('# USER识别');
@@ -83,7 +126,7 @@ export async function buildSocialPrompt({
 
   // === 社交角色说明 ===
   sections.push('# 社交模式');
-  sections.push(buildSocialModeInstruction(targetName, botQQ));
+  sections.push(buildSocialModeInstruction(targetName, targetId, botQQ));
 
   // === 回复策略 ===
   sections.push('# 回复策略');
@@ -117,8 +160,8 @@ export async function buildSocialPrompt({
 /**
  * 构建社交模式说明
  */
-function buildSocialModeInstruction(targetName, botQQ) {
-  const target = targetName ? `"${targetName}"` : '一个聊天';
+function buildSocialModeInstruction(targetName, targetId, botQQ) {
+  const target = targetName && targetId ? `"${targetName}"（${targetId}）` : targetName ? `"${targetName}"` : '一个聊天';
   const qqInfo = botQQ ? `你的 QQ 号是 ${botQQ}。` : '';
   const selfRecognition = botQQ 
     ? `
@@ -174,12 +217,22 @@ const DEFAULT_REPLY_STRATEGY = `你不需要回复每一条消息。沉默是你
 /**
  * 工具使用说明
  */
-const TOOL_INSTRUCTION = `回复方式：
+const TOOL_INSTRUCTION = `⚠️ 重要：你的纯文本输出不会被发送到群聊。想说话就必须调用 send_message 工具，这是唯一的发送方式。直接输出的文本只有你自己能看到。
+
+回复方式：
 - 调用 send_message 时只需提供 content 参数（回复内容），target 和 target_type 会自动填充，不要自己填写
 - 每次调用 send_message 回复一条消息，针对一个人或一个话题
 - 可以多次调用 send_message 来分别回复不同的 @me 或不同话题
 - 回复完所有想回的之后，输出"[沉默]"结束
-- 如果完全不想回复，直接回答"[沉默]"即可，不要调用任何工具`;
+- 不想回复时，只输出"[沉默]"两个字，不要调用任何工具
+- 除了"[沉默]"之外，不要输出任何其他纯文本 — 你说的话不会送达群聊
+
+社交记忆工具：
+- social_read：读取你的社交长期记忆（无需参数）
+- social_write(content)：覆盖写入社交长期记忆
+- social_edit(oldText, newText)：精确替换社交记忆中的文本
+- 用这些工具记住重要的社交信息：群友关系、重要事件、习惯偏好、群内梗等
+- 不要每次都写，只在遇到真正值得长期记住的信息时才更新`;
 
 /**
  * 内置行为准则 — 开启时每次注入

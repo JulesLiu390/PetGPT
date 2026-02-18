@@ -8,6 +8,7 @@
 import { buildSocialPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
+import { getSocialBuiltinToolDefinitions } from './workspace/socialToolExecutor';
 import * as tauri from './tauri';
 
 // ============ 状态 ============
@@ -431,6 +432,7 @@ async function pollTarget({
     replyStrategyPrompt: promptConfig.replyStrategyPrompt,
     atMustReply: promptConfig.atMustReply,
     targetName: groupName,
+    targetId: target,
     botQQ: promptConfig.botQQ,
     ownerQQ: promptConfig.ownerQQ,
     ownerName: promptConfig.ownerName,
@@ -503,6 +505,16 @@ async function pollTarget({
     addLog('warn', 'Failed to get MCP tools, proceeding without tools', e.message);
   }
   
+  // 6.5 合并社交内置工具（social_read / social_write / social_edit）
+  const socialBuiltinDefs = getSocialBuiltinToolDefinitions();
+  const socialToolsAsMcp = socialBuiltinDefs.map(t => ({
+    name: t.function.name,
+    description: t.function.description,
+    inputSchema: t.function.parameters,
+    serverName: null, // 无 server 前缀 = 内置工具标识
+  }));
+  mcpTools = [...mcpTools, ...socialToolsAsMcp];
+  
   // 7. 调用 LLM（非流式，带工具循环）
   let sendMessageSuccess = false;
   let sendCount = 0;
@@ -516,6 +528,7 @@ async function pollTarget({
       baseUrl: llmConfig.baseUrl,
       mcpTools,
       options: { temperature: 0.7 },
+      builtinToolContext: { petId, memoryEnabled: true },
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -525,7 +538,12 @@ async function pollTarget({
       },
 
       onToolCall: (name, args) => {
-        addLog('info', `LLM called tool: ${name}`, JSON.stringify(args).substring(0, 200));
+        // 社交记忆写入用特殊 level 标记
+        if (name === 'social_write' || name === 'social_edit') {
+          addLog('memory', `🧠 社交记忆更新: ${name}`, JSON.stringify(args).substring(0, 300));
+        } else {
+          addLog('info', `LLM called tool: ${name}`, JSON.stringify(args).substring(0, 200));
+        }
         // 暂存 send_message 的 content，等 onToolResult 确认成功后写入缓存
         if (name.includes('send_message')) {
           pendingSendContent = args?.content || '';
@@ -533,7 +551,11 @@ async function pollTarget({
       },
       onToolResult: (name, result, _id, isError) => {
         const preview = typeof result === 'string' ? result.substring(0, 100) : JSON.stringify(result).substring(0, 100);
-        addLog(isError ? 'error' : 'info', `Tool result: ${name}`, preview);
+        if ((name === 'social_write' || name === 'social_edit') && !isError) {
+          addLog('memory', `✅ 社交记忆已保存`, preview);
+        } else {
+          addLog(isError ? 'error' : 'info', `Tool result: ${name}`, preview);
+        }
         // 追踪 send_message 是否真正成功（结果中不含 error/失败标记）
         if (name.includes('send_message') && !isError) {
           const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
@@ -585,6 +607,175 @@ async function pollTarget({
     addLog('error', `LLM call failed for ${target}`, e.message);
     return { action: 'error', detail: e.message };
   }
+}
+
+// ============ 社交记忆辅助 ============
+
+const COMPRESS_META_PATH = 'social/compress_meta.json';
+const KNOWN_TARGETS_PATH = 'social/targets.json';
+
+/**
+ * 持久化已知 target 列表
+ */
+async function persistKnownTargets(petId, targetSet) {
+  try {
+    await tauri.workspaceWrite(petId, KNOWN_TARGETS_PATH, JSON.stringify([...targetSet]));
+  } catch (e) {
+    console.warn('[Social] Failed to persist known targets', e);
+  }
+}
+
+/**
+ * 加载已知 target 列表
+ */
+async function loadKnownTargets(petId) {
+  try {
+    const raw = await tauri.workspaceRead(petId, KNOWN_TARGETS_PATH);
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr : []);
+  } catch {
+    return new Set();
+  }
+}
+
+/**
+ * 读取压缩元数据
+ */
+async function loadCompressMeta(petId) {
+  try {
+    const raw = await tauri.workspaceRead(petId, COMPRESS_META_PATH);
+    return JSON.parse(raw);
+  } catch {
+    return { lastCompressTime: null };
+  }
+}
+
+/**
+ * 保存压缩元数据
+ */
+async function saveCompressMeta(petId, meta) {
+  try {
+    await tauri.workspaceWrite(petId, COMPRESS_META_PATH, JSON.stringify(meta));
+  } catch (e) {
+    console.warn('[Social] Failed to save compress meta', e);
+  }
+}
+
+/**
+ * 解析群缓冲文件内容，按日期分组
+ * 每条格式: ## {ISO timestamp}\n{content}\n
+ * @returns {Map<string, string[]>} dateStr -> entries[]
+ */
+function parseBufferByDate(content) {
+  const groups = new Map();
+  if (!content) return groups;
+  const sections = content.split(/\n(?=## \d{4}-\d{2}-\d{2})/);
+  for (const section of sections) {
+    const trimmed = section.trim();
+    if (!trimmed) continue;
+    // 提取时间戳行
+    const match = trimmed.match(/^## (\d{4}-\d{2}-\d{2})/);
+    if (match) {
+      const dateStr = match[1];
+      const arr = groups.get(dateStr) || [];
+      arr.push(trimmed);
+      groups.set(dateStr, arr);
+    }
+  }
+  return groups;
+}
+
+/**
+ * 执行每日压缩
+ * 读取所有群缓冲文件 → 按天分组 → 逐天 LLM 压缩 → 写入 DAILY → 清空已压缩内容
+ */
+async function runDailyCompress(petId, llmConfig, targetSet) {
+  addLog('info', '📦 Starting daily compression...');
+  const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
+  
+  // 收集所有群的所有非今天的数据，按天分组
+  // key: dateStr, value: Array<{ target, entries[] }>
+  const dayGroups = new Map();
+  
+  for (const target of targetSet) {
+    const bufferPath = `social/GROUP_${target}.md`;
+    let content;
+    try {
+      content = await tauri.workspaceRead(petId, bufferPath);
+    } catch { continue; } // 文件不存在
+    if (!content || !content.trim()) continue;
+    
+    const dateMap = parseBufferByDate(content);
+    for (const [dateStr, entries] of dateMap) {
+      if (dateStr === today) continue; // 今天的不压缩
+      if (!dayGroups.has(dateStr)) dayGroups.set(dateStr, []);
+      dayGroups.get(dateStr).push({ target, entries });
+    }
+  }
+  
+  if (dayGroups.size === 0) {
+    addLog('info', 'No past-day data to compress');
+    return;
+  }
+  
+  // 逐天压缩
+  for (const [dateStr, targetEntries] of [...dayGroups.entries()].sort()) {
+    // 拼接当天所有群的所有摘要
+    let combined = `# ${dateStr} 社交记录\n\n`;
+    for (const { target, entries } of targetEntries) {
+      combined += `## 群/好友 ${target}\n`;
+      combined += entries.join('\n') + '\n\n';
+    }
+    
+    // LLM 压缩
+    try {
+      const compressPrompt = `你是一个信息压缩助手。请将以下一天的社交聊天记录摘要压缩成精炼的每日总结。
+保留关键事件、重要对话、群友动态，去除重复和琐碎内容。
+输出纯文本，不需要 markdown 格式标题。控制在 500 字以内。
+
+${combined}`;
+      
+      const result = await callLLMWithTools({
+        messages: [
+          { role: 'system', content: '你是一个精简信息的助手。' },
+          { role: 'user', content: compressPrompt },
+        ],
+        apiFormat: llmConfig.apiFormat,
+        apiKey: llmConfig.apiKey,
+        model: llmConfig.modelName,
+        baseUrl: llmConfig.baseUrl,
+        mcpTools: [],
+        options: { temperature: 0.3 },
+      });
+      
+      const dailyContent = `# ${dateStr} 社交日报\n\n${result.content || '（压缩失败）'}\n`;
+      const dailyPath = `social/DAILY_${dateStr}.md`;
+      await tauri.workspaceWrite(petId, dailyPath, dailyContent);
+      addLog('info', `📝 Compressed daily log: ${dailyPath}`);
+    } catch (e) {
+      addLog('error', `Failed to compress daily log for ${dateStr}`, e.message);
+      continue; // 压缩失败不清空，下次重试
+    }
+    
+    // 从各群缓冲中删除已压缩日期的条目（保留今天的）
+    for (const { target } of targetEntries) {
+      const bufferPath = `social/GROUP_${target}.md`;
+      try {
+        const content = await tauri.workspaceRead(petId, bufferPath);
+        const dateMap = parseBufferByDate(content);
+        dateMap.delete(dateStr); // 删除已压缩日期
+        // 重写文件（只保留未压缩的日期条目）
+        const remaining = [...dateMap.values()].flat().join('\n\n');
+        await tauri.workspaceWrite(petId, bufferPath, remaining);
+      } catch (e) {
+        addLog('warn', `Failed to clean buffer for ${target} date ${dateStr}`, e.message);
+      }
+    }
+  }
+  
+  // 更新压缩元数据
+  await saveCompressMeta(petId, { lastCompressTime: new Date().toISOString() });
+  addLog('info', '📦 Daily compression completed');
 }
 
 // ============ 循环引擎 ============
@@ -718,9 +909,14 @@ export async function startSocialLoop(config, onStatusChange) {
   
   // per-target 上次 LLM 调用时间（冷却计时，@me 不受限制）
   const lastLlmCallTime = new Map();
+  // 已知 target 列表（用于每日压缩时遍历群缓冲文件）
+  const knownTargets = new Set();
+  // 上次 append 到群缓冲的 compressed_summary（用于去重，避免累积摘要重复写入）
+  const lastAppendedSummary = new Map();
   // 用于区分新旧循环的 generation ID，stopSocialLoop 后立即 start 时防止旧闭包继续调度
   const loopGeneration = Symbol('loopGen');
   let loopTimeoutId = null;
+  let dailyCompressTimeoutId = null; // 每日压缩定时器
   
   /**
    * 解析 batch_get_recent_context 的 MCP 返回
@@ -820,6 +1016,27 @@ export async function startSocialLoop(config, onStatusChange) {
       
       if (!changed) continue; // 无新内容
       
+      // 自动 append compressed_summary 到每群缓冲文件（去重：跳过与上次相同的摘要）
+      if (targetData.compressed_summary) {
+        const prevSummary = lastAppendedSummary.get(target);
+        if (targetData.compressed_summary !== prevSummary) {
+          const bufferPath = `social/GROUP_${target}.md`;
+          const timestamp = new Date().toISOString();
+          const entry = `\n## ${timestamp}\n${targetData.compressed_summary}\n`;
+          try {
+            let existing = '';
+            try { existing = await tauri.workspaceRead(config.petId, bufferPath) || ''; } catch { /* 文件不存在 */ }
+            await tauri.workspaceWrite(config.petId, bufferPath, existing + entry);
+            lastAppendedSummary.set(target, targetData.compressed_summary);
+            // 维护已知 target 列表
+            knownTargets.add(target);
+            await persistKnownTargets(config.petId, knownTargets);
+          } catch (e) {
+            addLog('warn', `Failed to append group buffer for ${target}`, e.message);
+          }
+        }
+      }
+      
       // 决定是否调用 LLM
       const now = Date.now();
       const sinceLastLlm = now - (lastLlmCallTime.get(target) || 0);
@@ -885,8 +1102,65 @@ export async function startSocialLoop(config, onStatusChange) {
         clearTimeout(loopTimeoutId);
         loopTimeoutId = null;
       }
+      if (dailyCompressTimeoutId !== null) {
+        clearTimeout(dailyCompressTimeoutId);
+        dailyCompressTimeoutId = null;
+      }
     },
   };
+  
+  // === 启动时：加载已知 targets + 检查并执行待处理的每日压缩 ===
+  (async () => {
+    try {
+      const loaded = await loadKnownTargets(config.petId);
+      for (const t of loaded) knownTargets.add(t);
+      // 也把当前配置的 targets 加入
+      for (const t of targets) knownTargets.add(t.target);
+      
+      // 检查是否有过去日期的群缓冲需要压缩
+      if (knownTargets.size > 0) {
+        await runDailyCompress(config.petId, llmConfig, knownTargets);
+      }
+    } catch (e) {
+      addLog('warn', 'Startup compression check failed', e.message);
+    }
+  })();
+  
+  // === 调度每日 23:55 定时压缩 ===
+  const scheduleDailyCompressTimer = () => {
+    if (!activeLoop || activeLoop._generation !== loopGeneration) return;
+    
+    const now = new Date();
+    // 计算今天 23:55 的时间点
+    const target2355 = new Date(now);
+    target2355.setHours(23, 55, 0, 0);
+    
+    let msUntilTarget;
+    if (now >= target2355) {
+      // 已经过了今天 23:55，调度到明天 23:55
+      const tomorrow2355 = new Date(target2355);
+      tomorrow2355.setDate(tomorrow2355.getDate() + 1);
+      msUntilTarget = tomorrow2355.getTime() - now.getTime();
+    } else {
+      msUntilTarget = target2355.getTime() - now.getTime();
+    }
+    
+    addLog('info', `Next daily compression scheduled in ${Math.round(msUntilTarget / 60000)} minutes`);
+    
+    dailyCompressTimeoutId = setTimeout(async () => {
+      if (!activeLoop || activeLoop._generation !== loopGeneration) return;
+      addLog('info', '⏰ 23:55 daily compression triggered');
+      try {
+        await runDailyCompress(config.petId, llmConfig, knownTargets);
+      } catch (e) {
+        addLog('error', 'Daily compression timer failed', e.message);
+      }
+      // 压缩完成后调度下一次（明天 23:55）
+      scheduleDailyCompressTimer();
+    }, msUntilTarget);
+  };
+  
+  scheduleDailyCompressTimer();
   
   // 启动批量轮询
   runBatchPoll();
