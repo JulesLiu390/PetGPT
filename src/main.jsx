@@ -18,6 +18,18 @@ if (isMac) {
   document.documentElement.dataset.platform = 'windows';
 }
 
+// 设置窗口类型 data 属性，用于 Linux 上区分需要不透明背景的窗口
+const hash = window.location.hash.replace('#', '') || '/';
+if (hash.startsWith('/character')) {
+  document.documentElement.dataset.window = 'character';
+} else if (hash.startsWith('/manage')) {
+  document.documentElement.dataset.window = 'manage';
+} else if (hash.startsWith('/screenshot')) {
+  document.documentElement.dataset.window = 'screenshot';
+} else {
+  document.documentElement.dataset.window = 'chat';
+}
+
 const root = ReactDOM.createRoot(document.getElementById('root'));
 
 root.render(
