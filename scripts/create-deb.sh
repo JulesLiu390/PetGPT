@@ -64,7 +64,6 @@ check_dependencies() {
     # Check for Tauri Linux build dependencies (libraries)
     local libs=(
         "libwebkit2gtk-4.1-dev"
-        "libappindicator3-dev"
         "librsvg2-dev"
     )
     for lib in "${libs[@]}"; do
@@ -72,6 +71,12 @@ check_dependencies() {
             missing+=("$lib")
         fi
     done
+
+    # Check for appindicator (either ayatana or legacy)
+    if ! dpkg -s "libayatana-appindicator3-dev" &>/dev/null 2>&1 && \
+       ! dpkg -s "libappindicator3-dev" &>/dev/null 2>&1; then
+        missing+=("libayatana-appindicator3-dev")
+    fi
 
     if [ ${#missing[@]} -ne 0 ]; then
         echo -e "${RED}❌ Missing dependencies: ${missing[*]}${NC}"
