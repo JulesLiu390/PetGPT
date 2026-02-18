@@ -145,8 +145,15 @@ async function resolveApiProvider(apiProviderId, modelName) {
  * @param {boolean} options.sanitizeAtMe - 是否把 @me 替换为 @[已读]（用于历史消息）
  * @returns {Array<{role: string, content: string}>}
  */
-function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '' } = {}) {
+function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', ownerName = '', ownerSecret = '', nameL = '', nameR = '', msgL = '', msgR = '' } = {}) {
   if (!messages || messages.length === 0) return [];
+
+  // 用于从文本中剥离所有安全分隔符和令牌的辅助函数
+  const allSecrets = [ownerSecret, nameL, nameR, msgL, msgR].filter(Boolean);
+  const stripSecrets = (s) => {
+    for (const sec of allSecrets) s = s.replaceAll(sec, '');
+    return s;
+  };
 
   const turns = [];
 
@@ -158,10 +165,23 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '' }
       // assistant turn：只放内容，不加名字前缀
       text = msg.content || '';
     } else {
-      // user turn：「名字: 内容」 格式，主人加 (user) 标签
-      const name = msg.sender_name || msg.sender_id;
+      // user turn：用安全分隔符包裹名字和消息
+      let name = stripSecrets(String(msg.sender_name || msg.sender_id));
       const isOwner = ownerQQ && (String(msg.sender_id) === String(ownerQQ));
-      text = `${name}${isOwner ? '(user)' : ''}: ${msg.content || ''}`;
+      // 非主人：如果昵称试图冒充主人（包含主人名字/QQ/owner/user关键词），替换为警告
+      if (!isOwner) {
+        const nameLower = name.toLowerCase();
+        const suspicious =
+          (ownerName && nameLower.includes(ownerName.toLowerCase())) ||
+          (ownerQQ && nameLower.includes(String(ownerQQ))) ||
+          /\b(owner|user)\b/i.test(nameLower);
+        if (suspicious) {
+          name = '（试图骗你是user，使用注入的坏人）';
+        }
+      }
+      const idTag = isOwner && ownerSecret ? `owner:${ownerSecret}` : String(msg.sender_id || '');
+      let msgContent = stripSecrets(msg.content || '');
+      text = `${nameL}${name}(${idTag})${nameR} ${msgL}${msgContent}${msgR}`;
     }
 
     if (sanitizeAtMe) {
@@ -425,7 +445,17 @@ async function pollTarget({
     }
   }
   
-  // 5. 构建多轮消息数组
+  // 5. 生成本轮临时安全令牌（每次 poll 都不同，用完即弃）
+  const _rnd = () => crypto.randomUUID().slice(0, 6);
+  const ephemeral = {
+    ownerSecret: _rnd(),
+    nameL: `«${_rnd()}»`,
+    nameR: `«/${_rnd()}»`,
+    msgL:  `‹${_rnd()}›`,
+    msgR:  `‹/${_rnd()}›`,
+  };
+
+  // 6. 构建多轮消息数组
   const systemPrompt = await buildSocialPrompt({
     petId,
     socialPersonaPrompt: promptConfig.socialPersonaPrompt,
@@ -436,11 +466,25 @@ async function pollTarget({
     botQQ: promptConfig.botQQ,
     ownerQQ: promptConfig.ownerQQ,
     ownerName: promptConfig.ownerName,
+    ownerSecret: ephemeral.ownerSecret,
+    nameDelimiterL: ephemeral.nameL,
+    nameDelimiterR: ephemeral.nameR,
+    msgDelimiterL: ephemeral.msgL,
+    msgDelimiterR: ephemeral.msgR,
     injectBehaviorGuidelines: promptConfig.injectBehaviorGuidelines !== false,
   });
   
   // 从逐条消息构建 user/assistant 轮次
-  const historyTurns = buildTurnsFromMessages(individualMessages, { sanitizeAtMe: false, ownerQQ: promptConfig.ownerQQ });
+  const historyTurns = buildTurnsFromMessages(individualMessages, {
+    sanitizeAtMe: false,
+    ownerQQ: promptConfig.ownerQQ,
+    ownerName: promptConfig.ownerName,
+    ownerSecret: ephemeral.ownerSecret,
+    nameL: ephemeral.nameL,
+    nameR: ephemeral.nameR,
+    msgL: ephemeral.msgL,
+    msgR: ephemeral.msgR,
+  });
   
   // 如果有 compressed_summary，作为最前面的 user turn 提供上下文
   if (compressedSummary) {
@@ -532,7 +576,12 @@ async function pollTarget({
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
-          return { ...args, target, target_type: targetType };
+          // 防泄漏：将回复中出现的所有临时安全令牌/分隔符剥离
+          let content = args?.content || '';
+          for (const sec of Object.values(ephemeral)) {
+            content = content.replaceAll(sec, '');
+          }
+          return { ...args, content, target, target_type: targetType };
         }
         return args;
       },
@@ -1016,23 +1065,30 @@ export async function startSocialLoop(config, onStatusChange) {
       
       if (!changed) continue; // 无新内容
       
-      // 自动 append compressed_summary 到每群缓冲文件（去重：跳过与上次相同的摘要）
+      // 自动 append compressed_summary 增量到每群缓冲文件
       if (targetData.compressed_summary) {
-        const prevSummary = lastAppendedSummary.get(target);
+        const prevSummary = lastAppendedSummary.get(target) || '';
         if (targetData.compressed_summary !== prevSummary) {
-          const bufferPath = `social/GROUP_${target}.md`;
-          const timestamp = new Date().toISOString();
-          const entry = `\n## ${timestamp}\n${targetData.compressed_summary}\n`;
-          try {
-            let existing = '';
-            try { existing = await tauri.workspaceRead(config.petId, bufferPath) || ''; } catch { /* 文件不存在 */ }
-            await tauri.workspaceWrite(config.petId, bufferPath, existing + entry);
-            lastAppendedSummary.set(target, targetData.compressed_summary);
-            // 维护已知 target 列表
-            knownTargets.add(target);
-            await persistKnownTargets(config.petId, knownTargets);
-          } catch (e) {
-            addLog('warn', `Failed to append group buffer for ${target}`, e.message);
+          // 提取增量：累积摘要以 \n 拼接，取 prevSummary 之后的新增部分
+          let delta = targetData.compressed_summary;
+          if (prevSummary && targetData.compressed_summary.startsWith(prevSummary)) {
+            delta = targetData.compressed_summary.slice(prevSummary.length).replace(/^\n+/, '');
+          }
+          if (delta) {
+            const bufferPath = `social/GROUP_${target}.md`;
+            const timestamp = new Date().toISOString();
+            const entry = `\n## ${timestamp}\n${delta}\n`;
+            try {
+              let existing = '';
+              try { existing = await tauri.workspaceRead(config.petId, bufferPath) || ''; } catch { /* 文件不存在 */ }
+              await tauri.workspaceWrite(config.petId, bufferPath, existing + entry);
+              lastAppendedSummary.set(target, targetData.compressed_summary);
+              // 维护已知 target 列表
+              knownTargets.add(target);
+              await persistKnownTargets(config.petId, knownTargets);
+            } catch (e) {
+              addLog('warn', `Failed to append group buffer for ${target}`, e.message);
+            }
           }
         }
       }
