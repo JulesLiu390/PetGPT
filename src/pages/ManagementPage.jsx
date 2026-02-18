@@ -3646,6 +3646,41 @@ const SocialPanel = ({ assistants, apiProviders }) => {
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
         <div className="space-y-4">
+          {/* Logs */}
+          {showLogs && (
+            <Card 
+              title="Logs" 
+              description="Recent social agent activity"
+              action={
+                <button 
+                  onClick={() => { emit('social-clear-logs'); setLogs([]); }}
+                  className="text-xs text-slate-500 hover:text-red-500"
+                >
+                  Clear
+                </button>
+              }
+            >
+              <div className="max-h-64 overflow-y-auto text-xs font-mono space-y-0.5">
+                {logs.length === 0 ? (
+                  <div className="text-slate-400 text-center py-4">No logs yet</div>
+                ) : (
+                  [...logs].reverse().map((log, i) => (
+                    <div key={i} className={`py-0.5 ${
+                      log.level === 'error' ? 'text-red-600' : 
+                      log.level === 'warn' ? 'text-amber-600' : 'text-slate-600'
+                    }`}>
+                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      {' '}
+                      <span className="font-semibold">[{log.level}]</span>
+                      {' '}
+                      {log.message}
+                      {log.details && <span className="text-slate-400"> — {typeof log.details === 'string' ? log.details : JSON.stringify(log.details)}</span>}
+                    </div>
+                  ))
+                )}
+              </div>
+            </Card>
+          )}
           {/* Assistant Selector */}
           <Card title="Assistant" description="Select which assistant powers the social agent">
             <FormGroup label="Assistant">
@@ -3886,42 +3921,6 @@ const SocialPanel = ({ assistants, apiProviders }) => {
               Save Configuration
             </Button>
           </div>
-
-          {/* Logs */}
-          {showLogs && (
-            <Card 
-              title="Logs" 
-              description="Recent social agent activity"
-              action={
-                <button 
-                  onClick={() => { emit('social-clear-logs'); setLogs([]); }}
-                  className="text-xs text-slate-500 hover:text-red-500"
-                >
-                  Clear
-                </button>
-              }
-            >
-              <div className="max-h-64 overflow-y-auto text-xs font-mono space-y-0.5">
-                {logs.length === 0 ? (
-                  <div className="text-slate-400 text-center py-4">No logs yet</div>
-                ) : (
-                  [...logs].reverse().map((log, i) => (
-                    <div key={i} className={`py-0.5 ${
-                      log.level === 'error' ? 'text-red-600' : 
-                      log.level === 'warn' ? 'text-amber-600' : 'text-slate-600'
-                    }`}>
-                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                      {' '}
-                      <span className="font-semibold">[{log.level}]</span>
-                      {' '}
-                      {log.message}
-                      {log.details && <span className="text-slate-400"> — {typeof log.details === 'string' ? log.details : JSON.stringify(log.details)}</span>}
-                    </div>
-                  ))
-                )}
-              </div>
-            </Card>
-          )}
         </div>
       </div>
     </>
