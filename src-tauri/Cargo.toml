@@ -51,7 +51,6 @@ thiserror = "1.0"
 base64 = "0.22"
 image = "0.25"
 url = "2.5"
-lazy_static = "1.4"
 
 # Window effects
 window-vibrancy = "0.5"
@@ -60,3 +59,7 @@ window-vibrancy = "0.5"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2"
+
+# Linux specific
+[target.'cfg(target_os = "linux")'.dependencies]
+image = "0.25"

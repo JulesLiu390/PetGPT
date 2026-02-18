@@ -4,6 +4,8 @@ mod message_cache;
 mod tab_state;
 mod llm;
 mod workspace;
+mod platform;
+mod window_layout;
 
 use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent, SamplingLlmConfig};
@@ -11,8 +13,10 @@ use message_cache::TabMessageCache;
 use tab_state::TabState;
 use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation};
 use workspace::WorkspaceEngine;
+use platform::{Platform, PlatformProvider, WindowEffect};
+use window_layout::{WindowState, screen_info_from_tauri_monitor};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::Ordering;
 use std::collections::HashMap;
 use tauri::{State, Manager, AppHandle, LogicalPosition, LogicalSize, Emitter};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -34,6 +38,9 @@ type McpState = Arc<tokio::sync::RwLock<McpManager>>;
 // Type alias for workspace state
 type WorkspaceFileState = Arc<WorkspaceEngine>;
 
+// Type alias for window layout state
+type WinState = Arc<WindowState>;
+
 #[allow(unused_imports)]
 use tauri::WebviewWindow;
 
@@ -42,19 +49,13 @@ type DbState = Arc<Database>;
 
 // ============ Event Broadcasting ============
 
-// 用于存储待处理的 character-id（当 chat 窗口还没准备好时）
-use std::sync::Mutex;
-lazy_static::lazy_static! {
-    static ref PENDING_CHARACTER_ID: Mutex<Option<String>> = Mutex::new(None);
-}
-
 /// 广播事件到所有窗口
 #[tauri::command]
-fn emit_to_all(app: AppHandle, event: String, payload: JsonValue) -> Result<(), String> {
+fn emit_to_all(app: AppHandle, event: String, payload: JsonValue, win_state: State<WinState>) -> Result<(), String> {
     // 如果是 character-id 事件，存储到 pending
     if event == "character-id" {
         if let Some(id) = payload.as_str() {
-            let mut pending = PENDING_CHARACTER_ID.lock().unwrap();
+            let mut pending = win_state.pending_character_id.lock().unwrap();
             *pending = Some(id.to_string());
         }
     }
@@ -65,29 +66,22 @@ fn emit_to_all(app: AppHandle, event: String, payload: JsonValue) -> Result<(), 
 
 /// 获取并清除待处理的 character-id
 #[tauri::command]
-fn get_pending_character_id() -> Option<String> {
-    let mut pending = PENDING_CHARACTER_ID.lock().unwrap();
+fn get_pending_character_id(win_state: State<WinState>) -> Option<String> {
+    let mut pending = win_state.pending_character_id.lock().unwrap();
     pending.take()
 }
 
-/// 设置 chat 窗口的 vibrancy 效果（macOS only）
+/// 设置 chat 窗口的 vibrancy 效果（跨平台）
 #[tauri::command]
 fn set_vibrancy_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
-    #[cfg(target_os = "macos")]
-    {
-        use window_vibrancy::{apply_vibrancy, clear_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-        
-        if let Some(chat_window) = app.get_webview_window("chat") {
-            if enabled {
-                let _ = apply_vibrancy(
-                    &chat_window, 
-                    NSVisualEffectMaterial::FullScreenUI, 
-                    Some(NSVisualEffectState::Active), 
-                    Some(16.0)
-                );
-            } else {
-                let _ = clear_vibrancy(&chat_window);
-            }
+    if let Some(chat_window) = app.get_webview_window("chat") {
+        if enabled {
+            Platform::apply_window_effect(
+                &chat_window,
+                &WindowEffect::Vibrancy { radius: 16.0 },
+            )?;
+        } else {
+            Platform::clear_window_effect(&chat_window)?;
         }
     }
     Ok(())
@@ -1125,119 +1119,10 @@ fn save_image_to_path(filePath: String, base64Data: String) -> Result<(), String
 
 // ============ Screenshot Commands ============
 
-/// macOS 原生截图 FFI — 直接调用 CoreGraphics，避免 screencapture 进程开销
-#[cfg(target_os = "macos")]
-mod screenshot_mac {
-    use std::ffi::c_void;
-
-    #[link(name = "CoreGraphics", kind = "framework")]
-    extern "C" {
-        fn CGMainDisplayID() -> u32;
-        fn CGDisplayCreateImage(display: u32) -> *mut c_void;
-        fn CGImageGetWidth(image: *const c_void) -> usize;
-        fn CGImageGetHeight(image: *const c_void) -> usize;
-        fn CGImageGetBytesPerRow(image: *const c_void) -> usize;
-        fn CGImageGetDataProvider(image: *const c_void) -> *const c_void;
-        fn CGDataProviderCopyData(provider: *const c_void) -> *const c_void;
-    }
-
-    #[link(name = "CoreFoundation", kind = "framework")]
-    extern "C" {
-        fn CFDataGetLength(data: *const c_void) -> isize;
-        fn CFDataGetBytePtr(data: *const c_void) -> *const u8;
-        fn CFRelease(cf: *const c_void);
-    }
-
-    /// 截取主显示器全屏，返回 (BGRA 原始像素数据, 宽, 高)
-    /// 保留原始 BGRA 格式，避免逐像素转换开销（~150ms on 5.6M pixels）
-    pub fn capture_screen() -> Result<(Vec<u8>, u32, u32), String> {
-        unsafe {
-            let display_id = CGMainDisplayID();
-            let cg_image = CGDisplayCreateImage(display_id);
-            if cg_image.is_null() {
-                return Err("CGDisplayCreateImage 返回 null（可能需要屏幕录制权限）".to_string());
-            }
-
-            let width = CGImageGetWidth(cg_image) as u32;
-            let height = CGImageGetHeight(cg_image) as u32;
-            let bytes_per_row = CGImageGetBytesPerRow(cg_image);
-
-            let provider = CGImageGetDataProvider(cg_image);
-            let cf_data = CGDataProviderCopyData(provider);
-            if cf_data.is_null() {
-                CFRelease(cg_image);
-                return Err("无法从 CGImage 获取像素数据".to_string());
-            }
-
-            let data_len = CFDataGetLength(cf_data) as usize;
-            let data_ptr = CFDataGetBytePtr(cf_data);
-            let raw_bytes = std::slice::from_raw_parts(data_ptr, data_len);
-
-            // 保留原始 BGRA 格式，仅去除行对齐 padding（如果有的话）
-            let stride = width as usize * 4;
-            let bgra = if bytes_per_row == stride {
-                // 无 padding，直接 memcpy
-                raw_bytes[..stride * height as usize].to_vec()
-            } else {
-                // 有行对齐 padding，逐行拷贝紧凑数据
-                let mut buf = Vec::with_capacity(stride * height as usize);
-                for y in 0..height as usize {
-                    let row_start = y * bytes_per_row;
-                    buf.extend_from_slice(&raw_bytes[row_start..row_start + stride]);
-                }
-                buf
-            };
-
-            CFRelease(cf_data);
-            CFRelease(cg_image);
-
-            Ok((bgra, width, height))
-        }
-    }
-
-    /// 将 BGRA 数据写为 BMP 文件（零编码成本：文件头 + 原始像素直写）
-    /// BMP 原生就是 BGRA 存储，与 macOS 截屏数据完全匹配
-    pub fn write_bmp(path: &std::path::Path, bgra: &[u8], width: u32, height: u32) -> Result<(), String> {
-        use std::io::Write;
-
-        let row_size = (width * 4) as usize;
-        let pixel_data_size = row_size * height as usize;
-        let file_size = 54 + pixel_data_size as u32;
-
-        let mut file = std::fs::File::create(path)
-            .map_err(|e| format!("Failed to create BMP file: {}", e))?;
-
-        // BMP File Header (14 bytes)
-        file.write_all(b"BM").map_err(|e| e.to_string())?;
-        file.write_all(&file_size.to_le_bytes()).map_err(|e| e.to_string())?;
-        file.write_all(&[0u8; 4]).map_err(|e| e.to_string())?; // reserved
-        file.write_all(&54u32.to_le_bytes()).map_err(|e| e.to_string())?; // pixel data offset
-
-        // DIB Header - BITMAPINFOHEADER (40 bytes)
-        file.write_all(&40u32.to_le_bytes()).map_err(|e| e.to_string())?; // header size
-        file.write_all(&width.to_le_bytes()).map_err(|e| e.to_string())?;
-        // BMP 存储是 bottom-up，用负高度表示 top-down（避免翻转像素）
-        file.write_all(&(-(height as i32)).to_le_bytes()).map_err(|e| e.to_string())?;
-        file.write_all(&1u16.to_le_bytes()).map_err(|e| e.to_string())?; // planes
-        file.write_all(&32u16.to_le_bytes()).map_err(|e| e.to_string())?; // bits per pixel
-        file.write_all(&[0u8; 24]).map_err(|e| e.to_string())?; // compression + rest zeros
-
-        // Pixel data — BGRA 直写，零编码
-        file.write_all(&bgra[..pixel_data_size]).map_err(|e| e.to_string())?;
-
-        Ok(())
-    }
-}
-
-/// 全屏截图的缓存 — 存储原始 BGRA 像素数据（与 macOS 原生格式一致，避免转换开销）
-lazy_static::lazy_static! {
-    static ref SCREENSHOT_CACHE: Mutex<Option<(Vec<u8>, u32, u32)>> = Mutex::new(None);
-}
-
 /// 截取全屏并打开选区窗口
-/// CGDisplay FFI 截屏 + BMP 直写预览（零编码开销）
+/// 使用平台抽象层 (Platform) 截屏 + BMP 直写预览
 #[tauri::command]
-fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
+fn take_screenshot(app: AppHandle, db: State<DbState>, win_state: State<WinState>) -> Result<(), String> {
     println!("[Screenshot] Taking full screen capture...");
     let t0 = std::time::Instant::now();
 
@@ -1266,19 +1151,18 @@ fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
 
     let t1 = std::time::Instant::now();
 
-    // 2. CGDisplay FFI 截屏（返回原始 BGRA 数据，无格式转换）
-    #[cfg(target_os = "macos")]
-    let (bgra_data, width, height) = screenshot_mac::capture_screen()?;
-    #[cfg(not(target_os = "macos"))]
-    return Err("Screenshot is only supported on macOS".to_string());
+    // 2. 平台截屏（返回原始 BGRA 数据，无格式转换）
+    let screenshot_data = Platform::capture_screen()?;
+    let width = screenshot_data.width;
+    let height = screenshot_data.height;
 
     let t2 = std::time::Instant::now();
-    println!("[Screenshot] CGDisplay capture: {}ms, {}x{}, {} bytes BGRA",
-        t2.duration_since(t1).as_millis(), width, height, bgra_data.len());
+    println!("[Screenshot] Platform capture: {}ms, {}x{}, {} bytes BGRA",
+        t2.duration_since(t1).as_millis(), width, height, screenshot_data.bgra.len());
 
-    // 3. BMP 直写预览文件（零编码：文件头 + BGRA 像素 memcpy）
+    // 3. BMP 直写预览文件
     let preview_path = get_uploads_dir(&app)?.join("_screenshot_preview.bmp");
-    screenshot_mac::write_bmp(&preview_path, &bgra_data, width, height)?;
+    Platform::write_preview(&screenshot_data, &preview_path)?;
     let preview_path_str = preview_path.to_string_lossy().to_string();
 
     let t3 = std::time::Instant::now();
@@ -1286,8 +1170,8 @@ fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
 
     // 4. 缓存 BGRA 原始数据（capture_region 裁剪时再局部转 RGBA）
     {
-        let mut cache = SCREENSHOT_CACHE.lock().unwrap();
-        *cache = Some((bgra_data, width, height));
+        let mut cache = win_state.screenshot_cache.lock().unwrap();
+        *cache = Some((screenshot_data.bgra, width, height));
     }
 
     // 5. 获取 scale factor 和逻辑尺寸
@@ -1295,7 +1179,7 @@ fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
         .ok()
         .flatten()
         .map(|m| m.scale_factor())
-        .unwrap_or(2.0);
+        .unwrap_or_else(|| Platform::default_scale_factor());
     let logical_width = (width as f64 / scale_factor) as u32;
     let logical_height = (height as f64 / scale_factor) as u32;
 
@@ -1318,7 +1202,7 @@ fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
 
     // 7. 记住哪些窗口需要恢复
     {
-        let mut pending = PENDING_RESTORE_WINDOWS.lock().unwrap();
+        let mut pending = win_state.pending_restore_windows.lock().unwrap();
         *pending = was_visible.iter()
             .filter(|(_, v)| *v)
             .map(|(l, _)| l.to_string())
@@ -1329,19 +1213,15 @@ fn take_screenshot(app: AppHandle, db: State<DbState>) -> Result<(), String> {
     Ok(())
 }
 
-lazy_static::lazy_static! {
-    static ref PENDING_RESTORE_WINDOWS: Mutex<Vec<String>> = Mutex::new(Vec::new());
-}
-
 /// 裁剪指定区域并返回结果（优化：直接使用缓存的 RGBA 数据，无需解码）
 #[tauri::command]
-fn capture_region(app: AppHandle, x: u32, y: u32, width: u32, height: u32) -> Result<serde_json::Value, String> {
+fn capture_region(app: AppHandle, x: u32, y: u32, width: u32, height: u32, win_state: State<WinState>) -> Result<serde_json::Value, String> {
     println!("[Screenshot] Cropping region: ({}, {}) {}x{}", x, y, width, height);
     let t0 = std::time::Instant::now();
 
     // 1. 从缓存取出 BGRA 原始数据
     let (bgra_data, full_w, full_h) = {
-        let cache = SCREENSHOT_CACHE.lock().unwrap();
+        let cache = win_state.screenshot_cache.lock().unwrap();
         cache.clone().ok_or("No screenshot in cache")?
     };
 
@@ -1402,19 +1282,19 @@ fn capture_region(app: AppHandle, x: u32, y: u32, width: u32, height: u32) -> Re
 
     // 9. 恢复之前隐藏的窗口
     {
-        let labels = PENDING_RESTORE_WINDOWS.lock().unwrap().clone();
+        let labels = win_state.pending_restore_windows.lock().unwrap().clone();
         for label in labels {
             if let Some(win) = app.get_webview_window(&label) {
                 let _ = win.show();
             }
         }
-        let mut pending = PENDING_RESTORE_WINDOWS.lock().unwrap();
+        let mut pending = win_state.pending_restore_windows.lock().unwrap();
         pending.clear();
     }
 
     // 10. 清除截图缓存
     {
-        let mut cache = SCREENSHOT_CACHE.lock().unwrap();
+        let mut cache = win_state.screenshot_cache.lock().unwrap();
         *cache = None;
     }
 
@@ -1430,7 +1310,7 @@ fn capture_region(app: AppHandle, x: u32, y: u32, width: u32, height: u32) -> Re
 
 /// 取消截图（隐藏窗口，恢复之前状态）
 #[tauri::command]
-fn cancel_screenshot(app: AppHandle) -> Result<(), String> {
+fn cancel_screenshot(app: AppHandle, win_state: State<WinState>) -> Result<(), String> {
     // 隐藏 screenshot-prompt 窗口
     if let Some(ss_win) = app.get_webview_window("screenshot-prompt") {
         let _ = ss_win.hide();
@@ -1438,19 +1318,19 @@ fn cancel_screenshot(app: AppHandle) -> Result<(), String> {
 
     // 恢复之前隐藏的窗口
     {
-        let labels = PENDING_RESTORE_WINDOWS.lock().unwrap().clone();
+        let labels = win_state.pending_restore_windows.lock().unwrap().clone();
         for label in labels {
             if let Some(win) = app.get_webview_window(&label) {
                 let _ = win.show();
             }
         }
-        let mut pending = PENDING_RESTORE_WINDOWS.lock().unwrap();
+        let mut pending = win_state.pending_restore_windows.lock().unwrap();
         pending.clear();
     }
 
     // 清除截图缓存
     {
-        let mut cache = SCREENSHOT_CACHE.lock().unwrap();
+        let mut cache = win_state.screenshot_cache.lock().unwrap();
         *cache = None;
     }
 
@@ -1652,7 +1532,9 @@ fn set_window_always_on_top(app: AppHandle, label: String, always_on_top: bool) 
 fn get_window_position(app: AppHandle, label: String) -> Result<(i32, i32), String> {
     if let Some(window) = app.get_webview_window(&label) {
         let pos = window.outer_position().map_err(|e| e.to_string())?;
-        Ok((pos.x, pos.y))
+        let sf = window.scale_factor().unwrap_or(1.0);
+        // Return logical coordinates for cross-platform consistency
+        Ok(((pos.x as f64 / sf) as i32, (pos.y as f64 / sf) as i32))
     } else {
         Err(format!("Window {} not found", label))
     }
@@ -1671,7 +1553,9 @@ fn set_window_position(app: AppHandle, label: String, x: f64, y: f64) -> Result<
 fn get_window_size(app: AppHandle, label: String) -> Result<(u32, u32), String> {
     if let Some(window) = app.get_webview_window(&label) {
         let size = window.outer_size().map_err(|e| e.to_string())?;
-        Ok((size.width, size.height))
+        let sf = window.scale_factor().unwrap_or(1.0);
+        // Return logical dimensions for cross-platform consistency
+        Ok(((size.width as f64 / sf) as u32, (size.height as f64 / sf) as u32))
     } else {
         Err(format!("Window {} not found", label))
     }
@@ -1705,31 +1589,60 @@ fn is_window_visible(app: AppHandle, label: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn get_platform_info() -> HashMap<String, String> {
+    let mut info = HashMap::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        info.insert("platform".to_string(), "macos".to_string());
+        info.insert("has_vibrancy".to_string(), "true".to_string());
+        info.insert("has_cursor_tracking".to_string(), "true".to_string());
+    }
+    #[cfg(target_os = "linux")]
+    {
+        info.insert("platform".to_string(), "linux".to_string());
+        info.insert("has_vibrancy".to_string(), "false".to_string());
+        let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default().to_lowercase();
+        let has_cursor = if session.contains("wayland") { "false" } else { "true" };
+        info.insert("has_cursor_tracking".to_string(), has_cursor.to_string());
+        info.insert("session_type".to_string(), session);
+    }
+    #[cfg(target_os = "windows")]
+    {
+        info.insert("platform".to_string(), "windows".to_string());
+        info.insert("has_vibrancy".to_string(), "true".to_string());
+        info.insert("has_cursor_tracking".to_string(), "true".to_string());
+    }
+
+    info
+}
+
+#[tauri::command]
 fn get_screen_size(app: AppHandle) -> Result<(u32, u32), String> {
     if let Some(window) = app.get_webview_window("character") {
         if let Some(monitor) = window.current_monitor().ok().flatten() {
-            let size = monitor.size();
-            return Ok((size.width, size.height));
+            let screen = screen_info_from_tauri_monitor(&monitor);
+            // Return logical work-area dimensions
+            return Ok((screen.work_area.width as u32, screen.work_area.height as u32));
         }
     }
     Err("Could not get screen size".to_string())
 }
 
-// Position character window at bottom-right of screen
+// Position character window at bottom-right of screen work area
 fn position_character_window(app: &AppHandle) {
     if let Some(character) = app.get_webview_window("character") {
         if let Some(monitor) = character.current_monitor().ok().flatten() {
-            let screen_size = monitor.size();
+            let screen = screen_info_from_tauri_monitor(&monitor);
             let scale_factor = monitor.scale_factor();
             let char_size = character.outer_size().unwrap_or(tauri::PhysicalSize { width: 160, height: 240 });
+            let char_w = char_size.width as f64 / scale_factor;
+            let char_h = char_size.height as f64 / scale_factor;
             
-            // 计算右下角位置，考虑 Dock 和菜单栏
-            // macOS 通常 Dock 高度约 70px，留出边距
-            let x = screen_size.width as i32 - char_size.width as i32 - (20.0 * scale_factor) as i32;
-            let y = screen_size.height as i32 - char_size.height as i32 - (80.0 * scale_factor) as i32;
+            let (x, y) = window_layout::position_character_bottom_right(&screen, char_w, char_h);
             
-            let _ = character.set_position(tauri::PhysicalPosition::new(x.max(0), y.max(0)));
-            println!("Character window positioned at ({}, {}), screen: {:?}", x, y, screen_size);
+            let _ = character.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+            println!("Character window positioned at ({}, {}), work_area: {:?}", x, y, screen.work_area);
         }
     }
 }
@@ -1836,7 +1749,7 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
 
 // 最大化/还原聊天窗口
 #[tauri::command]
-fn maximize_chat_window(app: AppHandle) -> Result<(), String> {
+fn maximize_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
         let is_fullscreen = chat.is_fullscreen().unwrap_or(false);
         let is_maximized = chat.is_maximized().unwrap_or(false);
@@ -1850,15 +1763,15 @@ fn maximize_chat_window(app: AppHandle) -> Result<(), String> {
             }
             chat.set_always_on_top(true).map_err(|e| e.to_string())?;
             
-            // 恢复到保存的位置和大小
-            let saved_pos = SAVED_CHAT_POSITION.lock().unwrap().take();
-            let saved_size = SAVED_CHAT_SIZE.lock().unwrap().take();
+            // 恢复到保存的位置和大小（逻辑坐标）
+            let saved_pos = win_state.saved_chat_position.lock().unwrap().take();
+            let saved_size = win_state.saved_chat_size.lock().unwrap().take();
             
             if let Some((x, y)) = saved_pos {
-                let _ = chat.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+                let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
             }
             if let Some((w, h)) = saved_size {
-                let _ = chat.set_size(tauri::Size::Physical(tauri::PhysicalSize { width: w, height: h }));
+                let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
             }
             
             // 显示角色窗口
@@ -1866,12 +1779,13 @@ fn maximize_chat_window(app: AppHandle) -> Result<(), String> {
                 let _ = character.show();
             }
         } else {
-            // 保存当前位置和大小
+            // 保存当前位置和大小（转换为逻辑坐标）
+            let sf = chat.scale_factor().unwrap_or(1.0);
             if let Ok(pos) = chat.outer_position() {
-                *SAVED_CHAT_POSITION.lock().unwrap() = Some((pos.x, pos.y));
+                *win_state.saved_chat_position.lock().unwrap() = Some((pos.x as f64 / sf, pos.y as f64 / sf));
             }
             if let Ok(size) = chat.outer_size() {
-                *SAVED_CHAT_SIZE.lock().unwrap() = Some((size.width, size.height));
+                *win_state.saved_chat_size.lock().unwrap() = Some((size.width as f64 / sf, size.height as f64 / sf));
             }
             
             // 最大化（不是全屏）
@@ -1887,20 +1801,6 @@ fn maximize_chat_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
-// 侧边栏展开/收起 - 窗口向左扩展
-const SIDEBAR_WIDTH: f64 = 256.0; // 与前端 w-64 (256px) 一致，使用逻辑像素
-static SIDEBAR_EXPANDED: AtomicBool = AtomicBool::new(false);
-// 保存展开前的原始宽度，用于收起时恢复
-static ORIGINAL_WIDTH: AtomicU32 = AtomicU32::new(0);
-// 聊天窗口是否跟随角色移动
-static CHAT_FOLLOWS_CHARACTER: AtomicBool = AtomicBool::new(true);
-
-// 保存最大化前的窗口位置和大小
-lazy_static::lazy_static! {
-    static ref SAVED_CHAT_POSITION: Mutex<Option<(i32, i32)>> = Mutex::new(None);
-    static ref SAVED_CHAT_SIZE: Mutex<Option<(u32, u32)>> = Mutex::new(None);
-}
-
 /// 偏好设置结构体
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1910,23 +1810,23 @@ struct Preferences {
 
 /// 更新偏好设置的全局状态
 #[tauri::command]
-fn update_preferences(preferences: Preferences) -> Result<(), String> {
+fn update_preferences(preferences: Preferences, win_state: State<WinState>) -> Result<(), String> {
     if let Some(value) = preferences.chat_follows_character {
-        CHAT_FOLLOWS_CHARACTER.store(value, Ordering::SeqCst);
+        win_state.chat_follows_character.store(value, Ordering::SeqCst);
         println!("[Rust] CHAT_FOLLOWS_CHARACTER updated to: {}", value);
     }
     Ok(())
 }
 
 #[tauri::command]
-fn toggle_sidebar(app: AppHandle, expanded: bool) -> Result<(), String> {
+fn toggle_sidebar(app: AppHandle, expanded: bool, win_state: State<WinState>) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
         // 如果是最大化状态，不处理窗口大小
         if chat.is_maximized().unwrap_or(false) {
             return Ok(());
         }
         
-        let sidebar_expanded = SIDEBAR_EXPANDED.load(Ordering::SeqCst);
+        let sidebar_expanded = win_state.sidebar_expanded.load(Ordering::SeqCst);
         
         // 如果状态没有变化，不做任何操作
         if expanded == sidebar_expanded {
@@ -1944,40 +1844,25 @@ fn toggle_sidebar(app: AppHandle, expanded: bool) -> Result<(), String> {
             let logical_height = size.height as f64 / scale_factor;
             
             if expanded && !sidebar_expanded {
-                // 保存展开前的原始宽度（主体区域宽度）
-                ORIGINAL_WIDTH.store(logical_width as u32, Ordering::SeqCst);
+                // 保存展开前的原始宽度
+                win_state.original_width.store(logical_width as u32, Ordering::SeqCst);
                 
-                // 展开侧边栏：窗口向左扩展，主体区域位置保持不变
-                // 新窗口左边界 = 当前左边界 - 侧边栏宽度
-                // 新窗口宽度 = 当前宽度 + 侧边栏宽度
-                let new_x = logical_x - SIDEBAR_WIDTH;
-                let new_width = logical_width + SIDEBAR_WIDTH;
+                let (new_x, new_width) = window_layout::sidebar_expand(logical_x, logical_width);
                 
-                // 同时设置位置和大小，减少闪烁
                 let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: new_x, y: logical_y }));
                 let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: new_width, height: logical_height }));
                 
-                SIDEBAR_EXPANDED.store(true, Ordering::SeqCst);
-                
-                // 展开后变为普通窗口（不置顶）
+                win_state.sidebar_expanded.store(true, Ordering::SeqCst);
                 let _ = chat.set_always_on_top(false);
             } else if !expanded && sidebar_expanded {
-                // 收起侧边栏：恢复到展开前的原始宽度
-                let original_width = ORIGINAL_WIDTH.load(Ordering::SeqCst) as f64;
-                // 如果没有保存过原始宽度（不应该发生），使用当前宽度减去侧边栏宽度
-                let new_width = if original_width > 0.0 { original_width } else { logical_width - SIDEBAR_WIDTH };
+                let original_width = win_state.original_width.load(Ordering::SeqCst) as f64;
                 
-                // 收起时：主体区域右边界保持不变
-                // 新窗口左边界 = 当前左边界 + 侧边栏宽度
-                let new_x = logical_x + SIDEBAR_WIDTH;
+                let (new_x, new_width) = window_layout::sidebar_collapse(logical_x, original_width, logical_width);
                 
-                // 同时设置位置和大小
                 let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: new_width, height: logical_height }));
                 let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: new_x, y: logical_y }));
                 
-                SIDEBAR_EXPANDED.store(false, Ordering::SeqCst);
-                
-                // 收起后恢复置顶
+                win_state.sidebar_expanded.store(false, Ordering::SeqCst);
                 let _ = chat.set_always_on_top(true);
             }
         }
@@ -1987,53 +1872,28 @@ fn toggle_sidebar(app: AppHandle, expanded: bool) -> Result<(), String> {
 
 // ============ Window Size Preset ============
 
-// 定义各窗口的基准尺寸（以 medium 为标准，与 Electron 一致）
-struct BaselineSize {
-    width: f64,
-    height: f64,
-}
-
-fn get_baseline_sizes() -> HashMap<&'static str, BaselineSize> {
-    let mut sizes = HashMap::new();
-    sizes.insert("character", BaselineSize { width: 200.0, height: 300.0 });
-    sizes.insert("chat", BaselineSize { width: 500.0, height: 400.0 });
-    sizes.insert("manage", BaselineSize { width: 640.0, height: 680.0 });
-    sizes
-}
-
-fn get_scale_factor_for_preset(preset: &str) -> f64 {
-    match preset {
-        "small" => 0.9,
-        "medium" => 1.0,
-        "large" => 1.15,
-        _ => 1.0,
-    }
-}
-
 #[tauri::command]
-fn update_window_size_preset(app: AppHandle, preset: String) -> Result<(), String> {
-    let scale = get_scale_factor_for_preset(&preset);
-    let baselines = get_baseline_sizes();
+fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<WinState>) -> Result<(), String> {
+    let scale = window_layout::get_scale_factor_for_preset(&preset);
+    let baselines = window_layout::get_baseline_sizes();
     
-    // Get screen size
-    let screen_size = if let Some(window) = app.get_webview_window("character") {
+    // Get screen work area using platform abstraction
+    let screen = if let Some(window) = app.get_webview_window("character") {
         if let Some(monitor) = window.current_monitor().ok().flatten() {
-            let size = monitor.size();
-            let sf = monitor.scale_factor();
-            (size.width as f64 / sf, size.height as f64 / sf)
+            screen_info_from_tauri_monitor(&monitor)
         } else {
-            (1920.0, 1080.0)
+            // Fallback: create a default ScreenInfo
+            Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
         }
     } else {
-        (1920.0, 1080.0)
+        Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
     };
     
-    // Update character window - positioned at bottom-right
+    // Update character window - positioned at bottom-right of work area
     if let (Some(window), Some(baseline)) = (app.get_webview_window("character"), baselines.get("character")) {
         let width = (baseline.width * scale).round();
         let height = (baseline.height * scale).round();
-        let x = screen_size.0 - width - 20.0;
-        let y = screen_size.1 - height - 80.0; // Account for dock
+        let (x, y) = window_layout::position_character_bottom_right(&screen, width, height);
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
     }
@@ -2044,8 +1904,8 @@ fn update_window_size_preset(app: AppHandle, preset: String) -> Result<(), Strin
         let chat_width = (chat_baseline.width * scale).round();
         let chat_height = (chat_baseline.height * scale).round();
         
-        // Skip if sidebar is expanded - let the sidebar logic handle sizing
-        if !SIDEBAR_EXPANDED.load(Ordering::SeqCst) {
+        // Skip if sidebar is expanded
+        if !win_state.sidebar_expanded.load(Ordering::SeqCst) {
             if let Ok(char_pos) = character.outer_position() {
                 let sf = character.scale_factor().unwrap_or(1.0);
                 let char_logical_x = char_pos.x as f64 / sf;
@@ -2053,16 +1913,19 @@ fn update_window_size_preset(app: AppHandle, preset: String) -> Result<(), Strin
                 
                 if let Ok(char_size) = character.outer_size() {
                     let char_logical_height = char_size.height as f64 / sf;
-                    let x = char_logical_x - chat_width - 50.0;
-                    let y = char_logical_y - chat_height + char_logical_height;
+                    
+                    let (x, y) = window_layout::position_chat_relative_to_character(
+                        char_logical_x, char_logical_y, char_logical_height,
+                        chat_width, chat_height,
+                    );
                     let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: chat_width, height: chat_height }));
-                    let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: x.max(0.0), y: y.max(0.0) }));
+                    let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
                 }
             }
         }
     }
     
-    // Update manage window (unified settings window)
+    // Update manage window
     if let (Some(window), Some(baseline)) = (app.get_webview_window("manage"), baselines.get("manage")) {
         let width = (baseline.width * scale).round();
         let height = (baseline.height * scale).round();
@@ -2081,46 +1944,8 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
     // Unregister all existing shortcuts
     let _ = app.global_shortcut().unregister_all();
     
-    // Helper to convert cross-platform shortcut notation
-    // Electron uses: shift+space, shift+ctrl+space
-    // Tauri expects: Shift+Space, Control+Shift+Space
-    fn normalize_shortcut(shortcut: &str) -> String {
-        shortcut
-            .split('+')
-            .map(|part| {
-                let lowered = part.trim().to_lowercase();
-                match lowered.as_str() {
-                    "ctrl" | "control" => "Control".to_string(),
-                    "cmd" | "command" | "meta" => {
-                        #[cfg(target_os = "macos")]
-                        { "Command".to_string() }
-                        #[cfg(not(target_os = "macos"))]
-                        { "Control".to_string() }
-                    },
-                    "alt" | "option" => "Alt".to_string(),
-                    "shift" => "Shift".to_string(),
-                    "space" => "Space".to_string(),
-                    "escape" | "esc" => "Escape".to_string(),
-                    "enter" | "return" => "Enter".to_string(),
-                    "tab" => "Tab".to_string(),
-                    "backspace" => "Backspace".to_string(),
-                    "delete" | "del" => "Delete".to_string(),
-                    other => {
-                        // Capitalize first letter for regular keys
-                        let mut chars = other.chars();
-                        match chars.next() {
-                            Some(c) => c.to_uppercase().chain(chars).collect(),
-                            None => String::new(),
-                        }
-                    }
-                }
-            })
-            .collect::<Vec<_>>()
-            .join("+")
-    }
-    
-    let normalized1 = normalize_shortcut(&shortcut1);
-    let normalized2 = normalize_shortcut(&shortcut2);
+    let normalized1 = window_layout::normalize_shortcut(&shortcut1);
+    let normalized2 = window_layout::normalize_shortcut(&shortcut2);
     
     log::info!("[Shortcuts] Registering: s1={} -> {}, s2={} -> {}, s3={}", shortcut1, normalized1, shortcut2, normalized2, shortcut3);
     
@@ -2129,7 +1954,6 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
         if let Ok(shortcut) = normalized1.parse::<Shortcut>() {
             let app_handle = app.clone();
             let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                // 只在按下时触发，忽略释放事件（避免触发两次）
                 if event.state != ShortcutState::Pressed {
                     return;
                 }
@@ -2153,7 +1977,6 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
         if let Ok(shortcut) = normalized2.parse::<Shortcut>() {
             let app_handle = app.clone();
             let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                // 只在按下时触发，忽略释放事件（避免触发两次）
                 if event.state != ShortcutState::Pressed {
                     return;
                 }
@@ -2173,7 +1996,7 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
     }
     
     // Register shortcut3: take screenshot
-    let normalized3 = normalize_shortcut(&shortcut3);
+    let normalized3 = window_layout::normalize_shortcut(&shortcut3);
     if !normalized3.is_empty() {
         if let Ok(shortcut) = normalized3.parse::<Shortcut>() {
             let app_handle = app.clone();
@@ -2182,9 +2005,9 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
                     return;
                 }
                 log::info!("[Shortcuts] Shortcut3 triggered (screenshot)");
-                // 调用 take_screenshot 逻辑：读取 DB 设置并截屏
                 let db = app_handle.state::<DbState>();
-                if let Err(e) = take_screenshot(app_handle.clone(), db) {
+                let ws = app_handle.state::<WinState>();
+                if let Err(e) = take_screenshot(app_handle.clone(), db, ws) {
                     log::error!("[Shortcuts] Screenshot failed: {}", e);
                 }
             });
@@ -2251,24 +2074,30 @@ pub fn run() {
             let workspace_engine: WorkspaceFileState = Arc::new(WorkspaceEngine::new(workspace_dir));
             app.manage(workspace_engine);
 
-            // Apply vibrancy effect to chat window only (macOS only)
-            #[cfg(target_os = "macos")]
-            {
-                use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
-                
-                if let Some(chat_window) = app.get_webview_window("chat") {
-                    // 使用 FullScreenUI 材质，设置为 Active 状态以保持始终透明
-                    // macOS 圆角：vibrancy 处理，前端不设置 border-radius
-                    let _ = apply_vibrancy(
-                        &chat_window, 
-                        NSVisualEffectMaterial::FullScreenUI, 
-                        Some(NSVisualEffectState::Active), 
-                        Some(16.0)
-                    );
-                }
+            // Initialize window state (replaces scattered static variables)
+            let win_state: WinState = Arc::new(WindowState::new());
+            app.manage(win_state.clone());
+
+            // Apply window effect (vibrancy on macOS, Mica on Windows, no-op on Linux)
+            if let Some(chat_window) = app.get_webview_window("chat") {
+                let _ = Platform::apply_window_effect(
+                    &chat_window,
+                    &WindowEffect::Vibrancy { radius: 16.0 },
+                );
             }
 
-            // Setup mouse hover detection for chat window (polls cursor position)
+            // Emit platform info to frontend so it can adapt UI (opacity, hover, bg)
+            {
+                let platform_info = get_platform_info();
+                let app_handle = app.handle().clone();
+                // Emit after a short delay to ensure frontend listeners are ready
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(500));
+                    let _ = app_handle.emit("platform-info", platform_info);
+                });
+            }
+
+            // Setup mouse hover detection (polls cursor position)
             {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -2279,28 +2108,21 @@ pub fn run() {
                         
                         // Check chat window
                         if let Some(chat) = app_handle.get_webview_window("chat") {
-                            // Only check if window is visible
                             if !chat.is_visible().unwrap_or(false) {
                                 if last_mouse_over_chat {
                                     last_mouse_over_chat = false;
                                     let _ = chat.emit("mouse-over-chat", false);
                                 }
-                            } else {
-                                // Get cursor position (desktop coordinates)
-                                if let Ok(cursor_pos) = chat.cursor_position() {
-                                    if let (Ok(window_pos), Ok(window_size)) = (chat.outer_position(), chat.outer_size()) {
-                                        // Check if cursor is within window bounds
-                                        let is_mouse_over = 
-                                            cursor_pos.x >= window_pos.x as f64 &&
-                                            cursor_pos.x <= (window_pos.x + window_size.width as i32) as f64 &&
-                                            cursor_pos.y >= window_pos.y as f64 &&
-                                            cursor_pos.y <= (window_pos.y + window_size.height as i32) as f64;
-                                        
-                                        // Only emit event when state changes
-                                        if is_mouse_over != last_mouse_over_chat {
-                                            last_mouse_over_chat = is_mouse_over;
-                                            let _ = chat.emit("mouse-over-chat", is_mouse_over);
-                                        }
+                            } else if let Ok(cursor_pos) = chat.cursor_position() {
+                                if let (Ok(window_pos), Ok(window_size)) = (chat.outer_position(), chat.outer_size()) {
+                                    let is_mouse_over = window_layout::is_cursor_in_window(
+                                        cursor_pos.x, cursor_pos.y,
+                                        window_pos.x as f64, window_pos.y as f64,
+                                        window_size.width as f64, window_size.height as f64,
+                                    );
+                                    if is_mouse_over != last_mouse_over_chat {
+                                        last_mouse_over_chat = is_mouse_over;
+                                        let _ = chat.emit("mouse-over-chat", is_mouse_over);
                                     }
                                 }
                             }
@@ -2310,14 +2132,11 @@ pub fn run() {
                         if let Some(character) = app_handle.get_webview_window("character") {
                             if let Ok(cursor_pos) = character.cursor_position() {
                                 if let (Ok(window_pos), Ok(window_size)) = (character.outer_position(), character.outer_size()) {
-                                    // Check if cursor is within window bounds
-                                    let is_mouse_over = 
-                                        cursor_pos.x >= window_pos.x as f64 &&
-                                        cursor_pos.x <= (window_pos.x + window_size.width as i32) as f64 &&
-                                        cursor_pos.y >= window_pos.y as f64 &&
-                                        cursor_pos.y <= (window_pos.y + window_size.height as i32) as f64;
-                                    
-                                    // Only emit event when state changes
+                                    let is_mouse_over = window_layout::is_cursor_in_window(
+                                        cursor_pos.x, cursor_pos.y,
+                                        window_pos.x as f64, window_pos.y as f64,
+                                        window_size.width as f64, window_size.height as f64,
+                                    );
                                     if is_mouse_over != last_mouse_over_character {
                                         last_mouse_over_character = is_mouse_over;
                                         let _ = character.emit("mouse-over-character", is_mouse_over);
@@ -2338,75 +2157,52 @@ pub fn run() {
                 character.on_window_event(move |event| {
                     if let tauri::WindowEvent::Moved(_) = event {
                         if let Some(character) = app_handle.get_webview_window("character") {
-                            // Get monitor info for boundary checking
+                            // Get monitor info via platform abstraction
                             if let Some(monitor) = character.current_monitor().ok().flatten() {
-                                let screen_size = monitor.size();
-                                let screen_position = monitor.position();
-                                let scale_factor = monitor.scale_factor();
+                                let screen = screen_info_from_tauri_monitor(&monitor);
+                                let sf = monitor.scale_factor();
                                 
                                 if let (Ok(char_pos), Ok(char_size)) = (character.outer_position(), character.outer_size()) {
-                                    let mut new_x = char_pos.x;
-                                    let mut new_y = char_pos.y;
-                                    let mut needs_reposition = false;
+                                    // Convert to logical coordinates
+                                    let logical_x = char_pos.x as f64 / sf;
+                                    let logical_y = char_pos.y as f64 / sf;
+                                    let logical_w = char_size.width as f64 / sf;
+                                    let logical_h = char_size.height as f64 / sf;
                                     
-                                    // Calculate screen boundaries (with some margin for visibility)
-                                    let min_visible = (50.0 * scale_factor) as i32; // At least 50 logical pixels visible
-                                    let menu_bar_height = (25.0 * scale_factor) as i32; // macOS menu bar
-                                    let dock_height = (70.0 * scale_factor) as i32; // Approximate dock height
+                                    // Clamp to work area using centralized function
+                                    let (new_x, new_y, needs_reposition) = window_layout::clamp_to_work_area(
+                                        &screen, logical_x, logical_y, logical_w, logical_h,
+                                    );
                                     
-                                    let screen_left = screen_position.x;
-                                    let screen_top = screen_position.y + menu_bar_height;
-                                    let screen_right = screen_position.x + screen_size.width as i32;
-                                    let screen_bottom = screen_position.y + screen_size.height as i32 - dock_height;
-                                    
-                                    // Check left boundary - ensure at least min_visible pixels are on screen
-                                    if char_pos.x + (char_size.width as i32) < screen_left + min_visible {
-                                        new_x = screen_left;
-                                        needs_reposition = true;
-                                    }
-                                    // Check right boundary
-                                    if char_pos.x > screen_right - min_visible {
-                                        new_x = screen_right - (char_size.width as i32);
-                                        needs_reposition = true;
-                                    }
-                                    // Check top boundary
-                                    if char_pos.y < screen_top {
-                                        new_y = screen_top;
-                                        needs_reposition = true;
-                                    }
-                                    // Check bottom boundary
-                                    if char_pos.y + (char_size.height as i32) > screen_bottom + min_visible {
-                                        new_y = screen_bottom - (char_size.height as i32);
-                                        needs_reposition = true;
-                                    }
-                                    
-                                    // Reposition if out of bounds
                                     if needs_reposition {
-                                        let _ = character.set_position(tauri::Position::Physical(
-                                            tauri::PhysicalPosition { x: new_x, y: new_y }
+                                        let _ = character.set_position(tauri::Position::Logical(
+                                            tauri::LogicalPosition { x: new_x, y: new_y }
                                         ));
                                     }
                                     
-                                    // Sync chat window position (skip if sidebar is expanded or chat follows is disabled)
-                                    if !SIDEBAR_EXPANDED.load(Ordering::SeqCst) && CHAT_FOLLOWS_CHARACTER.load(Ordering::SeqCst) {
+                                    // Sync chat window position
+                                    let ws = app_handle.state::<WinState>();
+                                    if !ws.sidebar_expanded.load(Ordering::SeqCst) && ws.chat_follows_character.load(Ordering::SeqCst) {
                                         if let Some(chat) = app_handle.get_webview_window("chat") {
-                                            // Skip if chat window is not visible
                                             if !chat.is_visible().unwrap_or(false) {
                                                 return;
                                             }
                                             
                                             if let Ok(chat_size) = chat.outer_size() {
-                                                // Use the corrected position
-                                                let final_x = if needs_reposition { new_x } else { char_pos.x };
-                                                let final_y = if needs_reposition { new_y } else { char_pos.y };
+                                                let chat_sf = chat.scale_factor().unwrap_or(sf);
+                                                let chat_w = chat_size.width as f64 / chat_sf;
+                                                let chat_h = chat_size.height as f64 / chat_sf;
                                                 
-                                                // Calculate new chat position (to the left of character, bottom-aligned with offset)
-                                                let char_bottom = final_y + char_size.height as i32;
-                                                let chat_x = final_x - chat_size.width as i32 - 20; // 20px gap
-                                                let chat_y = char_bottom - chat_size.height as i32 - 150; // Adjusted up by 150px
+                                                let final_x = if needs_reposition { new_x } else { logical_x };
+                                                let final_y = if needs_reposition { new_y } else { logical_y };
                                                 
-                                                let _ = chat.set_position(tauri::Position::Physical(
-                                                    tauri::PhysicalPosition { x: chat_x.max(0), y: chat_y.max(0) }
+                                                let (chat_x, chat_y) = window_layout::position_chat_relative_to_character(
+                                                    final_x, final_y, logical_h,
+                                                    chat_w, chat_h,
+                                                );
+                                                
+                                                let _ = chat.set_position(tauri::Position::Logical(
+                                                    tauri::LogicalPosition { x: chat_x, y: chat_y }
                                                 ));
                                             }
                                         }
@@ -2593,6 +2389,7 @@ pub fn run() {
             is_window_maximized,
             is_window_visible,
             get_screen_size,
+            get_platform_info,
             // Page navigation commands
             open_page_in_chat,
             open_settings_window,

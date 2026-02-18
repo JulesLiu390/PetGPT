@@ -27,7 +27,6 @@ dist-ssr
 
 release/
 
-# Build documentation and scripts
+# Build documentation
 documents/
-scripts/
 design/.DS_Store

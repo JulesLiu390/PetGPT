@@ -12,6 +12,10 @@ import ErrorBoundary from './components/ErrorBoundary';
 const isMac = navigator.userAgent.includes('Macintosh') || navigator.platform?.startsWith('Mac');
 if (isMac) {
   document.documentElement.dataset.platform = 'macos';
+} else if (navigator.userAgent.includes('Linux')) {
+  document.documentElement.dataset.platform = 'linux';
+} else {
+  document.documentElement.dataset.platform = 'windows';
 }
 
 const root = ReactDOM.createRoot(document.getElementById('root'));

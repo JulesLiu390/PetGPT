@@ -3531,7 +3531,6 @@ dependencies = [
  "futures",
  "image",
  "indexmap 2.12.1",
- "lazy_static",
  "log",
  "objc",
  "reqwest",

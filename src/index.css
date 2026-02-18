@@ -5,6 +5,12 @@ html, body, #root {
   overflow: clip;
 }
 
+/* Linux: no native vibrancy — use opaque background so window isn't see-through */
+[data-platform="linux"] body,
+[data-platform="linux"] #root {
+  background: #ffffff;
+}
+
 #root {
   height: 100vh;
   width: 100vw;

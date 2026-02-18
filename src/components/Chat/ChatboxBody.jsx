@@ -49,6 +49,13 @@ export const Chatbox = () => {
   const [showAssistantDropdown, setShowAssistantDropdown] = useState(false); // 底部 assistant 下拉菜单
   // Per-tab chatbody status for "Memory updating" display
   const [chatbodyStatuses, setChatbodyStatuses] = useState({}); // { conversationId: status }
+  
+  // Platform info from Rust backend for adaptive UI
+  const [platformInfo, setPlatformInfo] = useState({
+    platform: document.documentElement.dataset.platform || 'macos',
+    has_vibrancy: document.documentElement.dataset.platform === 'macos' ? 'true' : 'false',
+    has_cursor_tracking: 'true',
+  });
 
   // 搜索状态
   const [searchQuery, setSearchQuery] = useState('');
@@ -209,6 +216,18 @@ export const Chatbox = () => {
       setIsMouseOver(event.payload);
     }).then(fn => { unlisten = fn; });
     
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
+  // Listen for platform-info from Rust backend (capabilities like vibrancy, cursor tracking)
+  useEffect(() => {
+    let unlisten;
+    listen('platform-info', (event) => {
+      setPlatformInfo(event.payload);
+    }).then(fn => { unlisten = fn; });
+
     return () => {
       if (unlisten) unlisten();
     };
@@ -936,9 +955,19 @@ export const Chatbox = () => {
   }, [hotkeySettings, parseHotkey, matchesHotkey]);
 
   return (
-    <div className={`h-screen rounded-[16px] overflow-clip relative`}>
-    {/* 白色遮罩层：侧边栏关闭时 80% 透明度，打开时 100% */}
-    <div className={`absolute inset-0 bg-white transition-opacity duration-200 pointer-events-none ${sidebarOpen ? 'opacity-100' : 'opacity-80'}`} />
+    <div 
+      className={`h-screen rounded-[16px] overflow-clip relative`}
+      {...(platformInfo.has_cursor_tracking === 'false' ? {
+        onMouseEnter: () => setIsMouseOver(true),
+        onMouseLeave: () => setIsMouseOver(false),
+      } : {})}
+    >
+    {/* 白色遮罩层：侧边栏关闭时 80% 透明度（有 vibrancy 效果时），打开时或无 vibrancy 时 100% */}
+    <div className={`absolute inset-0 bg-white transition-opacity duration-200 pointer-events-none ${
+      platformInfo.has_vibrancy === 'false' 
+        ? 'opacity-100' 
+        : sidebarOpen ? 'opacity-100' : 'opacity-80'
+    }`} />
     <div className={`h-full flex group/chatwindow overflow-hidden relative`}>
       {/* Sidebar - 小窗口根据 sidebarOpen 状态显示，全屏时始终显示 */}
       <div className={`${sidebarOpen ? 'flex' : 'hidden'} lg:!flex flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
