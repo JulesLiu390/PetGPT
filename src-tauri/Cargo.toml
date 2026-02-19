@@ -64,3 +64,14 @@ objc = "0.2"
 [target.'cfg(target_os = "linux")'.dependencies]
 image = "0.25"
 libc = "0.2"
+
+[profile.dev]
+opt-level = 0
+debug = false
+incremental = true
+
+[profile.dev.package."windows-sys"]
+codegen-units = 1
+
+[profile.dev.package."windows-core"]
+codegen-units = 1

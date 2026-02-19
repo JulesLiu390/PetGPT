@@ -10,6 +10,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
+    "tauri:dev:win": "powershell -NoProfile -ExecutionPolicy Bypass -File dev-windows.ps1",
+    "tauri:build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "tauri:build": "tauri build",
     "build:dmg": "npm run tauri:build && sh scripts/create-dmg.sh"
   },
