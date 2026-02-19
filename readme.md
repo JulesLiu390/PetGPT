@@ -135,26 +135,77 @@ Flexible desktop integration:
 - **Node.js** 18+
 - **Rust** 1.77+ (for Tauri backend)
 - **npm** or **pnpm**
+- **Platform-specific:**
+  - **macOS** — Xcode Command Line Tools
+  - **Linux** — `libwebkit2gtk-4.1-dev`, `libappindicator3-dev`, etc. (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))
+  - **Windows** — Visual Studio 2022 (MSVC C++ build tools) + Windows SDK
 
 ### Setup
 
 ```bash
 # Install frontend dependencies
 npm install
+```
 
-# Run in development mode (starts both frontend and Tauri)
+### Development
+
+#### macOS / Linux
+
+```bash
 npm run tauri:dev
 ```
 
+#### Windows
+
+> Windows requires a dedicated script to set up the MSVC environment and strip conflicting PATH entries (e.g. Anaconda).
+
+```powershell
+npm run tauri:dev:win
+```
+
+The `dev-windows.ps1` script automatically cleans the PATH, sets MSVC/SDK environment variables, and starts the dev server.
+
 ### Build for Production
 
+#### macOS
+
 ```bash
-# Build the application
+# Build .app bundle
 npm run tauri:build
 
-# Build macOS DMG installer
+# Build DMG installer (Apple Silicon)
 npm run build:dmg
+
+# Build DMG installer (Intel)
+sh scripts/create-dmg-intel.sh
 ```
+
+#### Linux
+
+```bash
+# Build .deb package
+npm run tauri:build
+sh scripts/create-deb.sh
+```
+
+#### Windows
+
+```powershell
+npm run tauri:build:win
+```
+
+The `scripts/build-windows.ps1` script validates prerequisites, configures the MSVC toolchain, and compiles a release build. Output is placed in `src-tauri/target/release/bundle/` (includes `.msi` and NSIS `.exe` installers).
+
+### Build Scripts
+
+| Script | Platform | Description |
+|--------|----------|-------------|
+| `dev-windows.ps1` | Windows | Set up MSVC environment + start dev server |
+| `scripts/build-windows.ps1` | Windows | Set up MSVC environment + release build |
+| `scripts/create-dmg.sh` | macOS (ARM) | Package DMG installer |
+| `scripts/create-dmg-intel.sh` | macOS (x86) | Package Intel DMG installer |
+| `scripts/create-deb.sh` | Linux | Package .deb installer |
+| `scripts/generate-all-icons.sh` | macOS | Generate all platform icons from source images |
 
 ---
 

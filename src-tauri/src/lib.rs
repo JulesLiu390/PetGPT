@@ -2356,7 +2356,7 @@ pub fn run() {
             let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))
                 .map_err(|e| format!("Failed to load tray icon: {}", e))?;
 
-            let _tray = TrayIconBuilder::new()
+            let tray = TrayIconBuilder::new()
                 .icon(tray_icon)
                 .menu(&menu)
                 .on_menu_event(|app, event| {
@@ -2395,6 +2395,30 @@ pub fn run() {
                     }
                 })
                 .build(app)?;
+
+            // Keep tray icon alive for the entire app lifetime (Windows drops it otherwise)
+            app.manage(tray);
+
+            // Register global shortcuts from DB at startup (don't depend on frontend)
+            {
+                let db = app.state::<DbState>();
+                let s1 = db.get_setting("programHotkey")
+                    .ok().flatten().unwrap_or_default()
+                    .trim_matches('"').to_string();
+                let s2 = db.get_setting("dialogHotkey")
+                    .ok().flatten().unwrap_or_default()
+                    .trim_matches('"').to_string();
+                let s3 = db.get_setting("screenshotHotkey")
+                    .ok().flatten().unwrap_or_default()
+                    .trim_matches('"').to_string();
+
+                let s1 = if s1.is_empty() { "Shift+Space".to_string() } else { s1 };
+                let s2 = if s2.is_empty() { "Alt+Space".to_string() } else { s2 };
+
+                if let Err(e) = update_shortcuts(app.handle().clone(), s1, s2, s3) {
+                    log::error!("[Setup] Failed to register initial shortcuts: {:?}", e);
+                }
+            }
 
             if cfg!(debug_assertions) {
                 app.handle().plugin(
