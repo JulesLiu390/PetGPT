@@ -9,5 +9,20 @@
   <body>
     <div id="root"></div>
     <script type="module" src="/src/main.jsx"></script>
+    <!-- WebKitGTK NetworkProcess crash recovery: if React fails to mount, reload -->
+    <script>
+      setTimeout(function() {
+        var root = document.getElementById('root');
+        if (root && root.children.length === 0) {
+          var count = parseInt(sessionStorage.getItem('_reload') || '0');
+          if (count < 3) {
+            sessionStorage.setItem('_reload', String(count + 1));
+            location.reload();
+          }
+        } else {
+          sessionStorage.removeItem('_reload');
+        }
+      }, 3000);
+    </script>
   </body>
 </html>

@@ -956,7 +956,7 @@ export const Chatbox = () => {
 
   return (
     <div 
-      className={`h-screen rounded-[16px] overflow-clip relative`}
+      className={`h-screen rounded-[16px] overflow-clip relative bg-white`}
       {...(platformInfo.has_cursor_tracking === 'false' ? {
         onMouseEnter: () => setIsMouseOver(true),
         onMouseLeave: () => setIsMouseOver(false),

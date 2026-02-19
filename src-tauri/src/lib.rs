@@ -6,6 +6,8 @@ mod llm;
 mod workspace;
 mod platform;
 mod window_layout;
+#[cfg(target_os = "linux")]
+mod linux_shortcuts;
 
 use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent, SamplingLlmConfig};
@@ -1449,8 +1451,15 @@ async fn download_url_as_base64(url: String) -> Result<DownloadedImage, String> 
 #[tauri::command]
 fn show_chat_window(app: AppHandle) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
-        // 显示窗口时不改变位置，保持原来的位置
-        // 只有拖动角色时才会跟随移动（由 on_window_event 处理）
+        // Skip chat-follow sync for 500ms after showing, to prevent
+        // spurious Moved events from snapping chat to character.
+        let ws = app.state::<WinState>();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
+
         chat.show().map_err(|e| e.to_string())?;
         chat.set_focus().map_err(|e| e.to_string())?;
         let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": true }));
@@ -1461,6 +1470,14 @@ fn show_chat_window(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 fn hide_chat_window(app: AppHandle) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
+        // Prevent Moved events from snapping chat before hide completes
+        let ws = app.state::<WinState>();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
+
         chat.hide().map_err(|e| e.to_string())?;
         let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": false }));
     }
@@ -1472,12 +1489,26 @@ fn toggle_chat_window(app: AppHandle) -> Result<bool, String> {
     if let Some(chat) = app.get_webview_window("chat") {
         let is_visible = chat.is_visible().unwrap_or(false);
         if is_visible {
+            // Prevent Moved events from snapping chat before hide completes
+            let ws = app.state::<WinState>();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
+
             chat.hide().map_err(|e| e.to_string())?;
             let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": false }));
             Ok(false)
         } else {
-            // 显示窗口时不改变位置，保持原来的位置
-            // 只有拖动角色时才会跟随移动（由 on_window_event 处理）
+            // Skip chat-follow sync for 500ms after showing
+            let ws = app.state::<WinState>();
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
+
             chat.show().map_err(|e| e.to_string())?;
             chat.set_focus().map_err(|e| e.to_string())?;
             let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": true }));
@@ -1656,6 +1687,18 @@ fn toggle_window(app: &AppHandle, label: &str) -> Result<(), String> {
                 let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": false }));
             }
         } else {
+            // Position manage window at top-right before showing
+            if label == "manage" {
+                if let Some(monitor) = window.current_monitor().ok().flatten() {
+                    let screen = screen_info_from_tauri_monitor(&monitor);
+                    let sf = monitor.scale_factor();
+                    let size = window.outer_size().unwrap_or(tauri::PhysicalSize { width: 640, height: 680 });
+                    let w = size.width as f64 / sf;
+                    let h = size.height as f64 / sf;
+                    let (x, y) = window_layout::position_manage_center(&screen, w, h);
+                    let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+                }
+            }
             window.show().map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
             if label == "manage" {
@@ -1716,6 +1759,16 @@ fn open_manage_window_with_tab(app: AppHandle, tab: String) -> Result<String, St
             // 窗口不可见，显示并导航到指定 tab
             println!("[open_manage_window_with_tab] Window not visible, showing and navigating to tab: {}", tab);
             let _ = window.eval(&format!("window.location.hash = '/manage?tab={}'", tab));
+            // Position at top-right before showing
+            if let Some(monitor) = window.current_monitor().ok().flatten() {
+                let screen = screen_info_from_tauri_monitor(&monitor);
+                let sf = monitor.scale_factor();
+                let size = window.outer_size().unwrap_or(tauri::PhysicalSize { width: 640, height: 680 });
+                let w = size.width as f64 / sf;
+                let h = size.height as f64 / sf;
+                let (x, y) = window_layout::position_manage_center(&screen, w, h);
+                let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+            }
             window.show().map_err(|e| e.to_string())?;
             window.set_focus().map_err(|e| e.to_string())?;
             let _ = app.emit("manage-window-vis-change", serde_json::json!({ "visible": true }));
@@ -1946,18 +1999,38 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
     
     let normalized1 = window_layout::normalize_shortcut(&shortcut1);
     let normalized2 = window_layout::normalize_shortcut(&shortcut2);
+    let normalized3 = window_layout::normalize_shortcut(&shortcut3);
     
-    log::info!("[Shortcuts] Registering: s1={} -> {}, s2={} -> {}, s3={}", shortcut1, normalized1, shortcut2, normalized2, shortcut3);
+    log::info!("[Shortcuts] Registering: s1={} -> {}, s2={} -> {}, s3={} -> {}", shortcut1, normalized1, shortcut2, normalized2, shortcut3, normalized3);
     
+    // On Linux/GNOME Wayland, use GNOME custom keybindings for truly global shortcuts.
+    // X11 key grabs via XWayland don't work when a native Wayland surface has focus.
+    #[cfg(target_os = "linux")]
+    {
+        if linux_shortcuts::is_gnome() {
+            match linux_shortcuts::register_shortcuts(&normalized1, &normalized2, &normalized3) {
+                Ok(_) => log::info!("[Shortcuts] Registered via GNOME custom keybindings"),
+                Err(e) => log::error!("[Shortcuts] GNOME keybinding registration failed: {}", e),
+            }
+            // Return early on Linux/GNOME — don't register via Tauri global_shortcut
+            // (which uses XGrabKey and doesn't work when unfocused on Wayland)
+            return Ok(serde_json::json!({
+                "success": true,
+                "shortcuts": {
+                    "shortcut1": shortcut1,
+                    "shortcut2": shortcut2,
+                    "shortcut3": shortcut3
+                }
+            }));
+        }
+    }
+
     // Register shortcut1: toggle character window visibility
     if !normalized1.is_empty() {
         if let Ok(shortcut) = normalized1.parse::<Shortcut>() {
             let app_handle = app.clone();
             let _ = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
-                if event.state != ShortcutState::Pressed {
-                    return;
-                }
-                log::info!("[Shortcuts] Shortcut1 triggered (character toggle)");
+                if event.state != ShortcutState::Pressed { return; }
                 if let Some(window) = app_handle.get_webview_window("character") {
                     if window.is_visible().unwrap_or(false) {
                         let _ = window.hide();
@@ -1996,7 +2069,6 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
     }
     
     // Register shortcut3: take screenshot
-    let normalized3 = window_layout::normalize_shortcut(&shortcut3);
     if !normalized3.is_empty() {
         if let Ok(shortcut) = normalized3.parse::<Shortcut>() {
             let app_handle = app.clone();
@@ -2157,6 +2229,27 @@ pub fn run() {
                 character.on_window_event(move |event| {
                     if let tauri::WindowEvent::Moved(_) = event {
                         if let Some(character) = app_handle.get_webview_window("character") {
+                            // Skip all repositioning when the character window is hidden.
+                            // On XWayland, hidden windows can still fire Moved events
+                            // with stale/garbage positions, causing the window to "fly around."
+                            if !character.is_visible().unwrap_or(true) {
+                                return;
+                            }
+
+                            // Skip ALL repositioning during the grace period after hide/show toggle.
+                            // This prevents clamp_to_work_area from overriding the restored position.
+                            {
+                                let ws = app_handle.state::<WinState>();
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_millis() as u64;
+                                let skip_until = ws.skip_chat_sync_until.load(Ordering::SeqCst);
+                                if now_ms < skip_until {
+                                    return;
+                                }
+                            }
+
                             // Get monitor info via platform abstraction
                             if let Some(monitor) = character.current_monitor().ok().flatten() {
                                 let screen = screen_info_from_tauri_monitor(&monitor);
@@ -2180,8 +2273,25 @@ pub fn run() {
                                         ));
                                     }
                                     
-                                    // Sync chat window position
+                                    // Filter spurious Moved events: XWayland fires Moved on
+                                    // focus change even when the window didn't actually move.
+                                    // Only sync chat if character moved > 3 logical px.
                                     let ws = app_handle.state::<WinState>();
+                                    let cur_x = (logical_x * 10.0) as i32;
+                                    let cur_y = (logical_y * 10.0) as i32;
+                                    let prev_x = ws.last_char_x.swap(cur_x, Ordering::SeqCst);
+                                    let prev_y = ws.last_char_y.swap(cur_y, Ordering::SeqCst);
+                                    let dx = (cur_x.saturating_sub(prev_x)).saturating_abs();
+                                    let dy = (cur_y.saturating_sub(prev_y)).saturating_abs();
+                                    // 30 = 3.0 logical px * 10 (fixed-point scale)
+                                    let is_real_move = prev_x == i32::MIN || dx > 30 || dy > 30;
+
+                                    if !is_real_move {
+                                        return;
+                                    }
+
+                                    // Sync chat window position (only during active drag, not on spurious events)
+                                    
                                     if !ws.sidebar_expanded.load(Ordering::SeqCst) && ws.chat_follows_character.load(Ordering::SeqCst) {
                                         if let Some(chat) = app_handle.get_webview_window("chat") {
                                             if !chat.is_visible().unwrap_or(false) {
@@ -2212,6 +2322,16 @@ pub fn run() {
                         }
                     }
                 });
+            }
+
+            // Start Linux global-shortcut socket listener (GNOME custom keybindings IPC)
+            #[cfg(target_os = "linux")]
+            {
+                if linux_shortcuts::is_gnome() {
+                    if let Err(e) = linux_shortcuts::start_listener(app.handle().clone()) {
+                        log::error!("[Setup] Failed to start Linux shortcut listener: {}", e);
+                    }
+                }
             }
 
             // Setup tray menu
@@ -2248,39 +2368,27 @@ pub fn run() {
                                 let _ = chat.set_focus();
                             }
                         }
-                        "api" => {
-                            // Open API management (manage window with api tab)
+                        "api" | "assistants" | "mcp" | "settings" => {
+                            let tab = event.id.as_ref();
                             if let Some(manage) = app.get_webview_window("manage") {
-                                let _ = manage.eval("window.location.hash = '#/manage?tab=api'");
-                                let _ = manage.show();
-                                let _ = manage.set_focus();
-                            }
-                        }
-                        "assistants" => {
-                            // Open assistants selection (manage window with assistants tab)
-                            if let Some(manage) = app.get_webview_window("manage") {
-                                let _ = manage.eval("window.location.hash = '#/manage?tab=assistants'");
-                                let _ = manage.show();
-                                let _ = manage.set_focus();
-                            }
-                        }
-                        "mcp" => {
-                            // Open MCP servers (manage window with mcp tab)
-                            if let Some(manage) = app.get_webview_window("manage") {
-                                let _ = manage.eval("window.location.hash = '#/manage?tab=mcp'");
-                                let _ = manage.show();
-                                let _ = manage.set_focus();
-                            }
-                        }
-                        "settings" => {
-                            // Open settings (manage window with settings tab)
-                            if let Some(manage) = app.get_webview_window("manage") {
-                                let _ = manage.eval("window.location.hash = '#/manage?tab=settings'");
+                                let _ = manage.eval(&format!("window.location.hash = '#/manage?tab={}'", tab));
+                                // Center on screen before showing
+                                if let Some(monitor) = manage.current_monitor().ok().flatten() {
+                                    let screen = screen_info_from_tauri_monitor(&monitor);
+                                    let sf = monitor.scale_factor();
+                                    let size = manage.outer_size().unwrap_or(tauri::PhysicalSize { width: 640, height: 680 });
+                                    let w = size.width as f64 / sf;
+                                    let h = size.height as f64 / sf;
+                                    let (x, y) = window_layout::position_manage_center(&screen, w, h);
+                                    let _ = manage.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+                                }
                                 let _ = manage.show();
                                 let _ = manage.set_focus();
                             }
                         }
                         "quit" => {
+                            #[cfg(target_os = "linux")]
+                            linux_shortcuts::cleanup();
                             app.exit(0);
                         }
                         _ => {}

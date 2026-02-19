@@ -1,6 +1,6 @@
 [package]
 name = "petgpt"
-version = "0.4.0"
+version = "0.4.1"
 description = "PetGPT - AI Desktop Pet Assistant"
 authors = ["JulesLiu390"]
 license = "MIT"
@@ -63,3 +63,4 @@ objc = "0.2"
 # Linux specific
 [target.'cfg(target_os = "linux")'.dependencies]
 image = "0.25"
+libc = "0.2"

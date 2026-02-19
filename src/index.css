@@ -5,14 +5,9 @@ html, body, #root {
   overflow: clip;
 }
 
-/* Linux: no native vibrancy — use opaque background only for chat/manage windows.
-   Character and screenshot windows stay transparent so the pet floats on the desktop. */
-[data-platform="linux"][data-window="chat"] body,
-[data-platform="linux"][data-window="chat"] #root,
-[data-platform="linux"][data-window="manage"] body,
-[data-platform="linux"][data-window="manage"] #root {
-  background: #ffffff;
-}
+/* Linux: keep body/root transparent so CSS rounded corners work on chat/manage.
+   White backgrounds are applied inside the rounded containers instead.
+   Character and screenshot windows are always transparent. */
 
 #root {
   height: 100vh;

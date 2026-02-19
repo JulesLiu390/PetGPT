@@ -4,7 +4,7 @@
 
 use crate::platform::{Platform, PlatformProvider, ScreenInfo};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64};
 use std::sync::Mutex;
 
 // ============ Constants ============
@@ -19,7 +19,7 @@ const MIN_VISIBLE: f64 = 50.0;
 const CHAT_CHARACTER_GAP: f64 = 20.0;
 
 /// Vertical offset for chat relative to character bottom-alignment
-const CHAT_VERTICAL_OFFSET: f64 = 150.0;
+const CHAT_VERTICAL_OFFSET: f64 = 80.0;
 
 /// Margin from screen edges for default positioning
 const EDGE_MARGIN: f64 = 20.0;
@@ -39,6 +39,13 @@ pub struct WindowState {
     pub screenshot_cache: Mutex<Option<(Vec<u8>, u32, u32)>>,
     pub pending_restore_windows: Mutex<Vec<String>>,
     pub pending_character_id: Mutex<Option<String>>,
+    /// Epoch millis until which chat position sync should be skipped.
+    /// Set after show_chat_window to prevent Moved events from snapping chat.
+    pub skip_chat_sync_until: AtomicU64,
+    /// Last known character position (logical px * 10 for sub-pixel precision).
+    /// Used to filter spurious Moved events on XWayland.
+    pub last_char_x: AtomicI32,
+    pub last_char_y: AtomicI32,
 }
 
 impl WindowState {
@@ -52,6 +59,9 @@ impl WindowState {
             screenshot_cache: Mutex::new(None),
             pending_restore_windows: Mutex::new(Vec::new()),
             pending_character_id: Mutex::new(None),
+            skip_chat_sync_until: AtomicU64::new(0),
+            last_char_x: AtomicI32::new(i32::MIN),
+            last_char_y: AtomicI32::new(i32::MIN),
         }
     }
 }
@@ -122,6 +132,18 @@ pub fn position_chat_relative_to_character(
     let chat_x = char_x - chat_width - CHAT_CHARACTER_GAP;
     let chat_y = char_bottom - chat_height - CHAT_VERTICAL_OFFSET;
     (chat_x.max(0.0), chat_y.max(0.0))
+}
+
+/// Calculate the screen-center position for the manage/settings window.
+/// Returns (x, y) in logical coordinates.
+pub fn position_manage_center(
+    screen: &ScreenInfo,
+    manage_width: f64,
+    manage_height: f64,
+) -> (f64, f64) {
+    let x = screen.work_area.x + (screen.work_area.width - manage_width) / 2.0;
+    let y = screen.work_area.y + (screen.work_area.height - manage_height) / 2.0;
+    (x.max(screen.work_area.x), y.max(screen.work_area.y))
 }
 
 /// Clamp a window position so that at least `MIN_VISIBLE` pixels remain on screen.
