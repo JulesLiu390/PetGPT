@@ -8,7 +8,7 @@
 import { buildSocialPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialBuiltinToolDefinitions } from './workspace/socialToolExecutor';
+import { getSocialBuiltinToolDefinitions, getGroupRuleToolDefinitions, getReplyStrategyToolDefinitions, getHistoryToolDefinitions } from './workspace/socialToolExecutor';
 import * as tauri from './tauri';
 
 // ============ 状态 ============
@@ -16,8 +16,16 @@ import * as tauri from './tauri';
 /** 当前活跃的社交循环（同一时间只有一个） */
 let activeLoop = null;
 
-/** 社交日志（内存中，最多保留 200 条） */
-const socialLogs = [];
+/** 每个 target 的潜水模式 Map<target, 'normal'|'semi-lurk'|'full-lurk'> */
+const lurkModes = new Map();
+
+/** target 名称缓存 Map<target, string> —— 从 MCP 批量拉取中自动填充 */
+const targetNamesCache = new Map();
+
+/** 系统日志（无 target，最多 200 条） */
+const systemLogs = [];
+/** 每目标日志 Map<target, Array>（每个 target 最多 200 条） */
+const targetLogs = new Map();
 const MAX_LOGS = 200;
 
 /**
@@ -34,18 +42,27 @@ const sentMessagesCache = new Map();
 
 // ============ 日志 ============
 
-function addLog(level, message, details = null) {
+function addLog(level, message, details = null, target = undefined) {
   const entry = {
     timestamp: new Date().toISOString(),
     level,
     message,
     details,
+    target,
   };
-  socialLogs.push(entry);
-  if (socialLogs.length > MAX_LOGS) {
-    socialLogs.splice(0, socialLogs.length - MAX_LOGS);
+  if (target) {
+    if (!targetLogs.has(target)) targetLogs.set(target, []);
+    const arr = targetLogs.get(target);
+    arr.push(entry);
+    if (arr.length > MAX_LOGS) arr.splice(0, arr.length - MAX_LOGS);
+  } else {
+    systemLogs.push(entry);
+    if (systemLogs.length > MAX_LOGS) systemLogs.splice(0, systemLogs.length - MAX_LOGS);
   }
-  
+
+  // Don't console.log poll entries (they are aggregated and verbose)
+  if (level === 'poll') return;
+
   const prefix = `[Social][${level.toUpperCase()}]`;
   if (level === 'error') {
     console.error(prefix, message, details || '');
@@ -61,14 +78,18 @@ function addLog(level, message, details = null) {
  * @returns {Array} 日志条目数组
  */
 export function getSocialLogs() {
-  return [...socialLogs];
+  const all = [...systemLogs];
+  for (const arr of targetLogs.values()) all.push(...arr);
+  all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+  return all;
 }
 
 /**
  * 清空社交日志
  */
 export function clearSocialLogs() {
-  socialLogs.length = 0;
+  systemLogs.length = 0;
+  targetLogs.clear();
 }
 
 // ============ 配置加载 ============
@@ -99,6 +120,38 @@ export async function saveSocialConfig(petId, config) {
   await tauri.updateSettings({
     [`social_config_${petId}`]: JSON.stringify(config)
   });
+}
+
+/**
+ * 加载持久化的 lurk modes
+ * @param {string} petId
+ * @returns {Promise<Object|null>} { [target]: mode }
+ */
+async function loadLurkModes(petId) {
+  try {
+    const allSettings = await tauri.getSettings();
+    const raw = allSettings[`social_lurk_modes_${petId}`];
+    if (!raw) return null;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch (e) {
+    console.warn('[Social] Failed to load lurk modes for', petId, e);
+    return null;
+  }
+}
+
+/**
+ * 持久化 lurk modes
+ * @param {string} petId
+ * @param {Object} modes - { [target]: mode }
+ */
+async function saveLurkModes(petId, modes) {
+  try {
+    await tauri.updateSettings({
+      [`social_lurk_modes_${petId}`]: JSON.stringify(modes)
+    });
+  } catch (e) {
+    console.warn('[Social] Failed to save lurk modes', e);
+  }
 }
 
 // ============ API Provider 解析 ============
@@ -261,12 +314,14 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
  * @param {string} params.mcpServerName - MCP 服务器名称
  * @param {Object} params.llmConfig - { apiKey, baseUrl, apiFormat, modelName }
  * @param {string} params.petId
- * @param {Object} params.promptConfig - { socialPersonaPrompt, replyStrategyPrompt, atMustReply, botQQ }
+ * @param {Object} params.promptConfig - { socialPersonaPrompt, atMustReply, agentCanEditStrategy, botQQ }
  * @param {Map} params.watermarks - 水位线 Map (target -> lastMessageId)
  * @param {Map} params.sentCache - 本地发送消息缓存 (target -> Array)
  * @param {Object} [params.prefetchedData] - 从 batch_get_recent_context 预取的数据
  *   { target, target_type, compressed_summary, message_count, messages: [...], group_name }
  *   如果提供，跳过 MCP 调用直接使用
+ * @param {Set<string>} [params.consumedAtMeIds] - 已消费的 @me message_id 集合，用于消毒旧 @me
+ * @param {'normal'|'semi-lurk'|'full-lurk'} [params.lurkMode='normal'] - 潜水模式
  * @returns {Promise<{action: 'skipped'|'silent'|'replied'|'error', detail?: string}>}
  */
 async function pollTarget({
@@ -279,6 +334,8 @@ async function pollTarget({
   watermarks,
   sentCache,
   prefetchedData,
+  consumedAtMeIds,
+  lurkMode: pollLurkMode = 'normal',
 }) {
   let metadata = {};
   let groupName = target;
@@ -288,7 +345,7 @@ async function pollTarget({
   if (prefetchedData) {
     // ── 批量预取路径：数据已从 batch_get_recent_context 获取 ──
     if (prefetchedData.error) {
-      addLog('error', `MCP batch error for ${target}`, prefetchedData.error);
+      addLog('error', `MCP batch error for ${target}`, prefetchedData.error, target);
       return { action: 'error', detail: prefetchedData.error };
     }
     metadata = prefetchedData;
@@ -310,11 +367,11 @@ async function pollTarget({
         limit: Math.max(5, Math.round(10 * Math.sqrt((config?.pollingInterval || 60)))),
       });
     } catch (e) {
-      addLog('error', `Failed to get messages for ${targetType}:${target}`, e.message);
+      addLog('error', `Failed to get messages for ${targetType}:${target}`, e.message, target);
       return { action: 'error', detail: e.message };
     }
     if (rawResult?.error) {
-      addLog('error', `MCP error for ${target}`, rawResult.error);
+      addLog('error', `MCP error for ${target}`, rawResult.error, target);
       return { action: 'error', detail: rawResult.error };
     }
     // 解析 MCP 返回（content 数组: metadata TextContent + 逐条消息 TextContent + ImageContent）
@@ -353,7 +410,7 @@ async function pollTarget({
     }
   }
   if (totalImageCount > 0) {
-    addLog('info', `Resolved ${totalImageCount} image(s) across ${individualMessages.filter(m => m._images.length > 0).length} message(s)`);
+    addLog('info', `Resolved ${totalImageCount} image(s) across ${individualMessages.filter(m => m._images.length > 0).length} message(s)`, null, target);
   }
   
   // 2.5 注入本地发送缓存中的 bot 消息（MCP 同会话可能不返回 is_self 消息）
@@ -387,7 +444,7 @@ async function pollTarget({
     if (injected > 0) {
       // 按时间排序
       individualMessages.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-      addLog('info', `Injected ${injected} cached bot message(s) for ${target}`);
+      addLog('info', `Injected ${injected} cached bot message(s) for ${target}`, null, target);
     }
     
     // 清理已过期的缓存（早于当前窗口最早消息的）
@@ -414,7 +471,7 @@ async function pollTarget({
   
   if (currentHash === null) {
     if (previousWatermark === null) {
-      addLog('info', `${targetType}:${target} no messages found, skipping`);
+      addLog('info', `${targetType}:${target} no messages found, skipping`, null, target);
     }
     return { action: 'skipped', detail: 'empty result' };
   }
@@ -429,7 +486,7 @@ async function pollTarget({
   // 首次运行：记住当前水位线，但不调用 LLM（不回复历史消息）
   if (isFirstRun) {
     watermarks.set(target, pendingWatermark);
-    addLog('info', `${targetType}:${target} first run, ${individualMessages.length} messages, watermark set (skip LLM)`);
+    addLog('info', `${targetType}:${target} first run, ${individualMessages.length} messages, watermark set (skip LLM)`, null, target);
     return { action: 'skipped', detail: 'first run — watermark initialized' };
   }
   
@@ -439,9 +496,9 @@ async function pollTarget({
     try {
       const compressToolName = `${mcpServerName}__compress_context`;
       await executeToolByName(compressToolName, { target, target_type: targetType }, { timeout: 15000 });
-      addLog('info', `Triggered compress_context for ${target} (${messageCount} messages)`);
+      addLog('info', `Triggered compress_context for ${target} (${messageCount} messages)`, null, target);
     } catch (e) {
-      addLog('warn', `compress_context failed/timeout for ${target}`, e.message);
+      addLog('warn', `compress_context failed/timeout for ${target}`, e.message, target);
     }
   }
   
@@ -459,7 +516,6 @@ async function pollTarget({
   const systemPrompt = await buildSocialPrompt({
     petId,
     socialPersonaPrompt: promptConfig.socialPersonaPrompt,
-    replyStrategyPrompt: promptConfig.replyStrategyPrompt,
     atMustReply: promptConfig.atMustReply,
     targetName: groupName,
     targetId: target,
@@ -472,8 +528,20 @@ async function pollTarget({
     msgDelimiterL: ephemeral.msgL,
     msgDelimiterR: ephemeral.msgR,
     injectBehaviorGuidelines: promptConfig.injectBehaviorGuidelines !== false,
+    agentCanEditStrategy: promptConfig.agentCanEditStrategy === true,
+    lurkMode: pollLurkMode,
   });
   
+  // 消毒已消费的 @me：让 LLM 不再看到旧 @me 触发信号
+  if (consumedAtMeIds && consumedAtMeIds.size > 0) {
+    for (const msg of individualMessages) {
+      if (msg.is_at_me && !msg.is_self && msg.message_id && consumedAtMeIds.has(msg.message_id)) {
+        msg.content = (msg.content || '').replaceAll('@me', '@[已读]');
+        msg.is_at_me = false;
+      }
+    }
+  }
+
   // 从逐条消息构建 user/assistant 轮次
   const historyTurns = buildTurnsFromMessages(individualMessages, {
     sanitizeAtMe: false,
@@ -516,13 +584,13 @@ async function pollTarget({
   // 检查最新消息是否有 @me
   const hasAtMe = individualMessages.some(m => m.is_at_me);
   if (hasAtMe) {
-    addLog('info', `${targetType}:${target} has @me in messages`);
+    addLog('info', `${targetType}:${target} has @me in messages`, null, target);
   }
   
   // 如果其他人没有新消息（只有 bot 自己的），跳过
   if (otherMessages.length === 0) {
     watermarks.set(target, pendingWatermark);
-    addLog('info', `${targetType}:${target} only bot messages, skipping`);
+    addLog('info', `${targetType}:${target} only bot messages, skipping`, null, target);
     return { action: 'skipped', detail: 'only bot messages' };
   }
   
@@ -545,8 +613,12 @@ async function pollTarget({
       (t.serverName === mcpServerName && t.name === 'send_message') ||
       (extraServers.has(t.serverName) && t.serverName !== mcpServerName)
     );
+    // full-lurk: 移除 send_message，只保留观察类工具
+    if (pollLurkMode === 'full-lurk') {
+      mcpTools = mcpTools.filter(t => t.name !== 'send_message');
+    }
   } catch (e) {
-    addLog('warn', 'Failed to get MCP tools, proceeding without tools', e.message);
+    addLog('warn', 'Failed to get MCP tools, proceeding without tools', e.message, target);
   }
   
   // 6.5 合并社交内置工具（social_read / social_write / social_edit）
@@ -557,8 +629,59 @@ async function pollTarget({
     inputSchema: t.function.parameters,
     serverName: null, // 无 server 前缀 = 内置工具标识
   }));
-  mcpTools = [...mcpTools, ...socialToolsAsMcp];
+
+  // 6.6 合并群规则内置工具（group_rule_read / group_rule_write / group_rule_edit）
+  const groupRuleDefs = getGroupRuleToolDefinitions();
+  const groupRuleToolsAsMcp = groupRuleDefs.map(t => ({
+    name: t.function.name,
+    description: t.function.description,
+    inputSchema: t.function.parameters,
+    serverName: null,
+  }));
+
+  mcpTools = [...mcpTools, ...socialToolsAsMcp, ...groupRuleToolsAsMcp];
+
+  // 6.7 合并回复策略工具（仅在 agentCanEditStrategy 开启时注入，full-lurk 下禁用）
+  if (promptConfig.agentCanEditStrategy && pollLurkMode !== 'full-lurk') {
+    const replyStrategyDefs = getReplyStrategyToolDefinitions();
+    const replyStrategyToolsAsMcp = replyStrategyDefs.map(t => ({
+      name: t.function.name,
+      description: t.function.description,
+      inputSchema: t.function.parameters,
+      serverName: null,
+    }));
+    mcpTools = [...mcpTools, ...replyStrategyToolsAsMcp];
+  }
+
+  // 6.8 合并历史查询工具（history_read / daily_read / daily_list，所有模式均可用）
+  const historyDefs = getHistoryToolDefinitions();
+  const historyToolsAsMcp = historyDefs.map(t => ({
+    name: t.function.name,
+    description: t.function.description,
+    inputSchema: t.function.parameters,
+    serverName: null,
+  }));
+  mcpTools = [...mcpTools, ...historyToolsAsMcp];
   
+  // -- Poll data collection for aggregated log entry --
+  const pollChatMessages = otherMessages.map(m => ({
+    sender: m.sender_name,
+    content: (m.content || '').substring(0, 200),
+    isAtMe: m.is_at_me,
+  }));
+  const pollToolCalls = [];
+  const pollLlmIters = [];  // every LLM iteration: { content, reasoning, iteration, toolNames }
+  const pollSentMessages = []; // content of successful send_message calls
+  const emitPollLog = (action) => {
+    addLog('poll', `Poll: ${action}`, {
+      chatMessages: pollChatMessages,
+      llmIters: pollLlmIters,
+      sentMessages: pollSentMessages,
+      toolCalls: pollToolCalls,
+      action,
+    }, target);
+  };
+
   // 7. 调用 LLM（非流式，带工具循环）
   let sendMessageSuccess = false;
   let sendCount = 0;
@@ -572,7 +695,7 @@ async function pollTarget({
       baseUrl: llmConfig.baseUrl,
       mcpTools,
       options: { temperature: 0.7 },
-      builtinToolContext: { petId, memoryEnabled: true },
+      builtinToolContext: { petId, targetId: target, memoryEnabled: true },
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -586,12 +709,20 @@ async function pollTarget({
         return args;
       },
 
+      onLLMText: (iter) => {
+        pollLlmIters.push(iter);
+      },
       onToolCall: (name, args) => {
+        pollToolCalls.push({ name, args: JSON.stringify(args).substring(0, 300) });
         // 社交记忆写入用特殊 level 标记
         if (name === 'social_write' || name === 'social_edit') {
-          addLog('memory', `🧠 社交记忆更新: ${name}`, JSON.stringify(args).substring(0, 300));
+          addLog('memory', `🧠 社交记忆更新: ${name}`, JSON.stringify(args).substring(0, 300), target);
+        } else if (name === 'group_rule_write' || name === 'group_rule_edit') {
+          addLog('memory', `📋 群规则更新: ${name}`, JSON.stringify(args).substring(0, 300), target);
+        } else if (name === 'reply_strategy_edit') {
+          addLog('memory', `📐 回复策略更新: ${name}`, JSON.stringify(args).substring(0, 300), target);
         } else {
-          addLog('info', `LLM called tool: ${name}`, JSON.stringify(args).substring(0, 200));
+          addLog('info', `LLM called tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
         }
         // 暂存 send_message 的 content，等 onToolResult 确认成功后写入缓存
         if (name.includes('send_message')) {
@@ -600,10 +731,15 @@ async function pollTarget({
       },
       onToolResult: (name, result, _id, isError) => {
         const preview = typeof result === 'string' ? result.substring(0, 100) : JSON.stringify(result).substring(0, 100);
+        // Track tool result in poll collector
+        if (pollToolCalls.length > 0 && pollToolCalls[pollToolCalls.length - 1].name === name) {
+          pollToolCalls[pollToolCalls.length - 1].result = preview;
+          pollToolCalls[pollToolCalls.length - 1].isError = isError;
+        }
         if ((name === 'social_write' || name === 'social_edit') && !isError) {
-          addLog('memory', `✅ 社交记忆已保存`, preview);
+          addLog('memory', `✅ 社交记忆已保存`, preview, target);
         } else {
-          addLog(isError ? 'error' : 'info', `Tool result: ${name}`, preview);
+          addLog(isError ? 'error' : 'info', `Tool result: ${name}`, preview, target);
         }
         // 追踪 send_message 是否真正成功（结果中不含 error/失败标记）
         if (name.includes('send_message') && !isError) {
@@ -611,6 +747,8 @@ async function pollTarget({
           if (!resultStr.includes('"success": false') && !resultStr.includes('"success":false')) {
             sendMessageSuccess = true;
             sendCount++;
+            // Record sent content for poll log
+            if (pendingSendContent) pollSentMessages.push(pendingSendContent);
             
             // 将成功发送的消息记入本地缓存
             if (pendingSendContent) {
@@ -626,7 +764,7 @@ async function pollTarget({
               const arr = sentCache.get(target) || [];
               arr.push({ content: pendingSendContent, timestamp: msgTs, message_id: msgId });
               sentCache.set(target, arr);
-              addLog('info', `Cached sent message for ${target}: ${pendingSendContent.substring(0, 50)}...`);
+              addLog('info', `Cached sent message for ${target}: ${pendingSendContent.substring(0, 50)}...`, null, target);
             }
             pendingSendContent = null; // 重置
           }
@@ -639,21 +777,25 @@ async function pollTarget({
     if (sendMessageSuccess || !result.toolCallHistory?.some(t => t.name.includes('send_message'))) {
       watermarks.set(target, pendingWatermark);
     } else {
-      addLog('warn', `send_message failed, watermark NOT updated for ${target} (will retry next poll)`);
+      addLog('warn', `send_message failed, watermark NOT updated for ${target} (will retry next poll)`, null, target);
     }
     
     if (sendMessageSuccess) {
-      addLog('info', `✅ Replied to ${targetType}:${target}`, result.content?.substring(0, 100));
+      emitPollLog('replied');
+      addLog('info', `✅ Replied to ${targetType}:${target}`, result.content?.substring(0, 100), target);
       return { action: 'replied', detail: result.content };
     } else if (result.toolCallHistory?.some(t => t.name.includes('send_message'))) {
-      addLog('warn', `⚠️ Tried to reply but send failed for ${targetType}:${target}`, result.content?.substring(0, 100));
+      emitPollLog('send_failed');
+      addLog('warn', `⚠️ Tried to reply but send failed for ${targetType}:${target}`, result.content?.substring(0, 100), target);
       return { action: 'send_failed', detail: result.content };
     } else {
-      addLog('info', `😶 Silent for ${targetType}:${target}`, result.content?.substring(0, 50));
+      emitPollLog('silent');
+      addLog('info', `😶 Silent for ${targetType}:${target}`, result.content?.substring(0, 50), target);
       return { action: 'silent', detail: result.content };
     }
   } catch (e) {
-    addLog('error', `LLM call failed for ${target}`, e.message);
+    emitPollLog('error');
+    addLog('error', `LLM call failed for ${target}`, e.message, target);
     return { action: 'error', detail: e.message };
   }
 }
@@ -817,7 +959,7 @@ ${combined}`;
         const remaining = [...dateMap.values()].flat().join('\n\n');
         await tauri.workspaceWrite(petId, bufferPath, remaining);
       } catch (e) {
-        addLog('warn', `Failed to clean buffer for ${target} date ${dateStr}`, e.message);
+        addLog('warn', `Failed to clean buffer for ${target} date ${dateStr}`, e.message, target);
       }
     }
   }
@@ -841,8 +983,8 @@ ${combined}`;
  * @param {string[]} config.watchedGroups
  * @param {string[]} config.watchedFriends
  * @param {string} config.socialPersonaPrompt
- * @param {string} config.replyStrategyPrompt
  * @param {boolean} config.atMustReply
+ * @param {boolean} [config.agentCanEditStrategy]
  * @param {string} config.botQQ
  * @param {Function} [onStatusChange] - 状态变化回调 (active: boolean) => void
  */
@@ -851,6 +993,23 @@ export async function startSocialLoop(config, onStatusChange) {
   stopSocialLoop();
   
   addLog('info', `Starting social loop for pet: ${config.petId}`);
+  
+  // 恢复持久化的 lurk modes
+  try {
+    const savedModes = await loadLurkModes(config.petId);
+    if (savedModes && typeof savedModes === 'object') {
+      for (const [target, mode] of Object.entries(savedModes)) {
+        if (['semi-lurk', 'full-lurk'].includes(mode)) {
+          lurkModes.set(target, mode);
+        }
+      }
+      if (lurkModes.size > 0) {
+        addLog('info', `Restored lurk modes for ${lurkModes.size} target(s)`);
+      }
+    }
+  } catch (e) {
+    addLog('warn', 'Failed to restore lurk modes', e.message);
+  }
   
   // 确保 MCP 服务器已启动
   try {
@@ -940,9 +1099,9 @@ export async function startSocialLoop(config, onStatusChange) {
   
   const promptConfig = {
     socialPersonaPrompt: config.socialPersonaPrompt || '',
-    replyStrategyPrompt: config.replyStrategyPrompt || '',
     atMustReply: config.atMustReply !== false,
     injectBehaviorGuidelines: config.injectBehaviorGuidelines !== false,
+    agentCanEditStrategy: config.agentCanEditStrategy === true,
     botQQ: config.botQQ || '',
     ownerQQ: config.ownerQQ || '',
     ownerName: config.ownerName || '',
@@ -962,9 +1121,14 @@ export async function startSocialLoop(config, onStatusChange) {
   const knownTargets = new Set();
   // 上次 append 到群缓冲的 compressed_summary（用于去重，避免累积摘要重复写入）
   const lastAppendedSummary = new Map();
+  // 已消费的 @me message_id：每条 @me 只触发一次瞬回，防止旧 @me 反复绕过冷却
+  const consumedAtMe = new Map(); // target → Set<message_id>
+  // Fetcher → Processor 共享数据缓冲：target → { data: targetData, fetchedAt: number }
+  const dataBuffer = new Map();
+  // Fetcher 的定时器 ID
+  let fetcherTimeoutId = null;
   // 用于区分新旧循环的 generation ID，stopSocialLoop 后立即 start 时防止旧闭包继续调度
   const loopGeneration = Symbol('loopGen');
-  let loopTimeoutId = null;
   let dailyCompressTimeoutId = null; // 每日压缩定时器
   
   /**
@@ -1008,20 +1172,34 @@ export async function startSocialLoop(config, onStatusChange) {
     const prevWm = watermarks.get(target) ?? null;
     const changed = prevWm === null || currentHash !== prevWm.hash;
     const isFirstRun = prevWm === null;
-    const hasAtMe = messages.some(m => m.is_at_me && !m.is_self);
-    return { changed, hasAtMe, hash: currentHash, isFirstRun };
+
+    // 只对未消费的 @me 触发瞬回（同一条 @me 只能触发一次）
+    const consumed = consumedAtMe.get(target) || new Set();
+    // 清理已滑出窗口的旧 ID，防止 Set 无限增长
+    const windowIds = new Set(messages.map(m => m.message_id).filter(Boolean));
+    for (const id of consumed) {
+      if (!windowIds.has(id)) consumed.delete(id);
+    }
+    const newAtMeMessages = messages.filter(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
+    const hasAtMe = newAtMeMessages.length > 0;
+    const atMeIds = newAtMeMessages.map(m => m.message_id);
+
+    return { changed, hasAtMe, atMeIds, hash: currentHash, isFirstRun };
   };
   
+  // ============ 层1: Fetcher — 定时 batch 拉取，写入 dataBuffer ============
+
   /**
-   * 统一批量轮询：一次拉取所有 target → 本地分群处理
+   * fetcherLoop: 每 BATCH_POLL_INTERVAL_MS 执行一次
+   * 职责：batch 拉取所有 target 数据 → 写入 dataBuffer + 处理 compressed_summary append
+   * 不做冷却/LLM 决策，不阻塞
    */
-  const runBatchPoll = async () => {
+  const fetcherLoop = async () => {
     if (!activeLoop || activeLoop._generation !== loopGeneration) return;
     
     const t0 = Date.now();
     const batchToolName = `${config.mcpServerName}__batch_get_recent_context`;
     
-    // 1. 一次 MCP 调用获取所有 target 数据
     let targetResults = [];
     try {
       const batchArgs = {
@@ -1031,45 +1209,34 @@ export async function startSocialLoop(config, onStatusChange) {
       const rawResult = await executeToolByName(batchToolName, batchArgs, { timeout: 10000 });
       targetResults = parseBatchResult(rawResult);
     } catch (e) {
-      addLog('error', 'Batch poll failed', e.message);
-      scheduleBatchPoll();
+      addLog('error', 'Fetcher: batch poll failed', e.message);
+      scheduleFetcher();
       return;
     }
     
     if (targetResults.length === 0) {
-      addLog('debug', 'Batch poll returned empty results');
-      scheduleBatchPoll();
+      addLog('debug', 'Fetcher: batch poll returned empty results');
+      scheduleFetcher();
       return;
     }
     
-    // 2. 逐 target 本地处理（变化检测 + 冷却 + LLM 调用）— 并发执行
-    const pollTasks = [];
+    // 逐 target 写入 dataBuffer + append compressed_summary
     for (const targetData of targetResults) {
-      if (!activeLoop || activeLoop._generation !== loopGeneration) return;
-      
       const target = targetData.target;
-      const targetType = targetData.target_type || 'group';
-      const label = `${targetType}:${target}`;
       
-      const detection = detectChange(targetData, target);
-      if (!detection) continue; // 无消息 / 错误
-      
-      const { changed, hasAtMe, hash, isFirstRun } = detection;
-      
-      // 首次运行：设水位线，不调 LLM
-      if (isFirstRun) {
-        watermarks.set(target, { hash });
-        addLog('info', `${label} first run, watermark set (skip LLM)`);
-        continue;
+      // 缓存 target 名称（群名/好友名）
+      const name = targetData.group_name || targetData.friend_name;
+      if (name && name !== target) {
+        targetNamesCache.set(target, name);
       }
       
-      if (!changed) continue; // 无新内容
+      // 写入共享缓冲（Processor 会读取）
+      dataBuffer.set(target, { data: targetData, fetchedAt: Date.now() });
       
       // 自动 append compressed_summary 增量到每群缓冲文件
       if (targetData.compressed_summary) {
         const prevSummary = lastAppendedSummary.get(target) || '';
         if (targetData.compressed_summary !== prevSummary) {
-          // 提取增量：累积摘要以 \n 拼接，取 prevSummary 之后的新增部分
           let delta = targetData.compressed_summary;
           if (prevSummary && targetData.compressed_summary.startsWith(prevSummary)) {
             delta = targetData.compressed_summary.slice(prevSummary.length).replace(/^\n+/, '');
@@ -1083,32 +1250,103 @@ export async function startSocialLoop(config, onStatusChange) {
               try { existing = await tauri.workspaceRead(config.petId, bufferPath) || ''; } catch { /* 文件不存在 */ }
               await tauri.workspaceWrite(config.petId, bufferPath, existing + entry);
               lastAppendedSummary.set(target, targetData.compressed_summary);
-              // 维护已知 target 列表
               knownTargets.add(target);
               await persistKnownTargets(config.petId, knownTargets);
             } catch (e) {
-              addLog('warn', `Failed to append group buffer for ${target}`, e.message);
+              addLog('warn', `Failed to append group buffer for ${target}`, e.message, target);
             }
           }
         }
       }
-      
-      // 决定是否调用 LLM
-      const now = Date.now();
-      const sinceLastLlm = now - (lastLlmCallTime.get(target) || 0);
-      const cooldownPassed = sinceLastLlm >= intervalMs;
-      
-      if (hasAtMe) {
-        // @me → 立即回复（无视冷却）
-        addLog('info', `⚡ @me detected in ${label}, triggering instant reply`);
-      } else if (!cooldownPassed) {
-        // 有新消息但冷却中 → 跳过，不更新水位线，让消息积累到冷却结束
-        continue;
-      }
-      
-      // 创建并发任务
-      pollTasks.push((async () => {
+    }
+    
+    const elapsed = Date.now() - t0;
+    addLog('debug', `Fetcher completed in ${elapsed}ms for ${targetResults.length} targets`);
+    
+    scheduleFetcher();
+  };
+  
+  const scheduleFetcher = () => {
+    if (activeLoop && activeLoop._generation === loopGeneration) {
+      fetcherTimeoutId = setTimeout(fetcherLoop, BATCH_POLL_INTERVAL_MS);
+    }
+  };
+
+  // ============ 层2: Processor — 每个 target 独立循环 ============
+
+  /**
+   * processorLoop: 每个 target 独立运行的 async 循环
+   * 从 dataBuffer 读取最新数据 → detectChange → 冷却/@me 决策 → pollTarget
+   * 各 target 互不阻塞：群A的LLM调用130s不影响群B检测@me
+   */
+  const processorLoop = async (target, targetType) => {
+    const label = `${targetType}:${target}`;
+    // 给每个 processor 加点随机延迟，避免同时启动全部 LLM 调用
+    await new Promise(r => setTimeout(r, Math.random() * 2000));
+
+    while (activeLoop && activeLoop._generation === loopGeneration) {
+      try {
+        // 从 dataBuffer 读最新数据
+        const buffered = dataBuffer.get(target);
+        if (!buffered || !buffered.data) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        
+        const targetData = buffered.data;
+        const detection = detectChange(targetData, target);
+        
+        if (!detection) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        
+        const { changed, hasAtMe, hash, isFirstRun } = detection;
+        
+        // 首次运行：设水位线，不调 LLM
+        if (isFirstRun) {
+          watermarks.set(target, { hash });
+          addLog('info', `${label} first run, watermark set (skip LLM)`, null, target);
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        
+        if (!changed) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        
+        // ── 潜水模式（per-target） ──
+        const targetLurkMode = lurkModes.get(target) || 'normal';
+        // semi-lurk 的有效模式：@me → normal（正常回复），非 @me → full-lurk（观察学习）
+        const effectiveLurkMode = targetLurkMode === 'semi-lurk'
+          ? (hasAtMe ? 'normal' : 'full-lurk')
+          : targetLurkMode;
+
+        // 决定是否调用 LLM
+        const now = Date.now();
+        const sinceLastLlm = now - (lastLlmCallTime.get(target) || 0);
+        // full-lurk / semi-lurk 观察态: 冷却周期 ×3（降低观察频率）
+        const effectiveInterval = effectiveLurkMode === 'full-lurk' ? intervalMs * 3 : intervalMs;
+        const cooldownPassed = sinceLastLlm >= effectiveInterval;
+        
+        if (hasAtMe) {
+          // @me → 立即回复（无视冷却），并标记这些 @me 为已消费
+          const consumed = consumedAtMe.get(target) || new Set();
+          for (const id of detection.atMeIds) consumed.add(id);
+          consumedAtMe.set(target, consumed);
+          addLog('info', `⚡ @me detected in ${label} (${detection.atMeIds.length} new), triggering instant reply`, null, target);
+        } else if (!cooldownPassed) {
+          // 有新消息但冷却中 → 等待，不更新水位线，让消息积累
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        
+        // 调用 pollTarget（串行，本 target 同时只有一个 LLM 调用）
         try {
+          // 收集当前 target 已消费的所有 @me id，传给 pollTarget 用于消毒
+          const allConsumed = consumedAtMe.get(target) || new Set();
+          
           const result = await pollTarget({
             target,
             targetType,
@@ -1119,33 +1357,27 @@ export async function startSocialLoop(config, onStatusChange) {
             watermarks,
             sentCache: sentMessagesCache,
             prefetchedData: targetData,
+            consumedAtMeIds: allConsumed,
+            lurkMode: effectiveLurkMode,
           });
           // 只有成功处理（replied/silent）才记录 LLM 调用时间
           if (result.action === 'replied' || result.action === 'silent') {
             lastLlmCallTime.set(target, Date.now());
           }
         } catch (e) {
-          addLog('error', `Unexpected error polling ${label}`, e.message);
+          addLog('error', `Unexpected error in processor ${label}`, e.message, target);
         }
-      })());
+        
+        // LLM 调用完成后短暂等待再继续下一轮检测
+        await new Promise(r => setTimeout(r, 1000));
+        
+      } catch (e) {
+        addLog('error', `Processor ${label} loop error`, e.message, target);
+        await new Promise(r => setTimeout(r, 3000)); // 出错后等久一点
+      }
     }
     
-    // 等待所有并发 pollTarget 完成
-    if (pollTasks.length > 0) {
-      await Promise.all(pollTasks);
-    }
-    
-    const elapsed = Date.now() - t0;
-    addLog('debug', `Batch poll completed in ${elapsed}ms for ${targetResults.length} targets`);
-    
-    // 3. 调度下一次
-    scheduleBatchPoll();
-  };
-  
-  const scheduleBatchPoll = () => {
-    if (activeLoop && activeLoop._generation === loopGeneration) {
-      loopTimeoutId = setTimeout(runBatchPoll, BATCH_POLL_INTERVAL_MS);
-    }
+    addLog('debug', `Processor ${label} stopped`, null, target);
   };
   
   // 设置 activeLoop
@@ -1154,9 +1386,9 @@ export async function startSocialLoop(config, onStatusChange) {
     config,
     _generation: loopGeneration,
     _scheduleCleanup: () => {
-      if (loopTimeoutId !== null) {
-        clearTimeout(loopTimeoutId);
-        loopTimeoutId = null;
+      if (fetcherTimeoutId !== null) {
+        clearTimeout(fetcherTimeoutId);
+        fetcherTimeoutId = null;
       }
       if (dailyCompressTimeoutId !== null) {
         clearTimeout(dailyCompressTimeoutId);
@@ -1218,8 +1450,13 @@ export async function startSocialLoop(config, onStatusChange) {
   
   scheduleDailyCompressTimer();
   
-  // 启动批量轮询
-  runBatchPoll();
+  // 启动层 1: Fetcher 循环（每 1s batch 拉取）
+  fetcherLoop();
+  
+  // 启动层 2: 每个 target 独立的 Processor 循环
+  for (const t of targets) {
+    processorLoop(t.target, t.targetType); // fire-and-forget, 各跑各的
+  }
   
   onStatusChange?.(true);
   addLog('info', 'Social loop started successfully');
@@ -1231,11 +1468,64 @@ export async function startSocialLoop(config, onStatusChange) {
  */
 export function stopSocialLoop() {
   if (activeLoop) {
+    // 持久化 lurk modes 在清空之前
+    if (lurkModes.size > 0) {
+      saveLurkModes(activeLoop.petId, Object.fromEntries(lurkModes));
+    }
     activeLoop._scheduleCleanup?.();
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
     sentMessagesCache.clear();
+    lurkModes.clear();
+    targetNamesCache.clear();
   }
+}
+
+/**
+ * 设置指定 target 的潜水模式
+ * @param {string} target - 群号/QQ号
+ * @param {'normal'|'semi-lurk'|'full-lurk'} mode
+ */
+export function setLurkMode(target, mode) {
+  if (!target || !['normal', 'semi-lurk', 'full-lurk'].includes(mode)) return;
+  const prev = lurkModes.get(target) || 'normal';
+  if (mode === 'normal') {
+    lurkModes.delete(target);
+  } else {
+    lurkModes.set(target, mode);
+  }
+  if (prev !== mode) {
+    addLog('info', `Lurk mode [${target}]: ${prev} → ${mode}`, null, target);
+    // 持久化
+    if (activeLoop?.petId) {
+      saveLurkModes(activeLoop.petId, Object.fromEntries(lurkModes));
+    }
+  }
+}
+
+/**
+ * 获取指定 target 的潜水模式
+ * @param {string} target
+ * @returns {'normal'|'semi-lurk'|'full-lurk'}
+ */
+export function getLurkMode(target) {
+  return lurkModes.get(target) || 'normal';
+}
+
+/**
+ * 获取所有 target 的潜水模式（用于 UI 同步）
+ * @returns {Object<string, string>}
+ */
+export function getLurkModes() {
+  return Object.fromEntries(lurkModes);
+}
+
+/**
+ * 获取 target 名称缓存（群名/好友名）—— 用于 UI 显示
+ * @returns {Object<string, string>} { targetId: displayName }
+ */
+export function getTargetNames() {
+  return Object.fromEntries(targetNamesCache);
 }
 
 /**
@@ -1246,6 +1536,7 @@ export function getSocialStatus() {
   return {
     active: activeLoop !== null,
     petId: activeLoop?.petId || null,
+    lurkModes: Object.fromEntries(lurkModes),
   };
 }
 
@@ -1267,4 +1558,8 @@ export default {
   isSocialActiveForPet,
   getSocialLogs,
   clearSocialLogs,
+  setLurkMode,
+  getLurkMode,
+  getLurkModes,
+  getTargetNames,
 };

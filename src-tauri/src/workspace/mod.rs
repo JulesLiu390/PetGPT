@@ -7,6 +7,7 @@ pub use engine::WorkspaceEngine;
 
 use std::sync::Arc;
 use tauri::State;
+use std::process::Command as StdCommand;
 
 /// Type alias for workspace state managed by Tauri
 pub type WorkspaceState = Arc<WorkspaceEngine>;
@@ -72,4 +73,73 @@ pub fn workspace_file_exists(
     path: String,
 ) -> Result<bool, String> {
     Ok(workspace.file_exists(&pet_id, &path))
+}
+
+/// Get the absolute filesystem path of a file in the pet's workspace.
+/// Ensures the file exists first; creates parent dirs and an empty file if needed.
+#[tauri::command]
+pub fn workspace_get_path(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+    ensure_exists: Option<bool>,
+) -> Result<String, String> {
+    // Use write with empty-string fallback to ensure the file & dirs exist
+    if ensure_exists.unwrap_or(false) && !workspace.file_exists(&pet_id, &path) {
+        workspace.write(&pet_id, &path, "").map_err(|e| e.to_string())?;
+    }
+    // resolve_safe_path is private, so we reconstruct the path the same way
+    let full = workspace.get_full_path(&pet_id, &path).map_err(|e| e.to_string())?;
+    full.to_str()
+        .map(|s| s.to_string())
+        .ok_or_else(|| "Path contains invalid UTF-8".to_string())
+}
+
+/// Open a workspace file in the system default editor
+#[tauri::command]
+pub fn workspace_open_file(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+    default_content: Option<String>,
+) -> Result<(), String> {
+    // Ensure file exists and has content (create/fill with default content if needed)
+    let needs_content = if workspace.file_exists(&pet_id, &path) {
+        // File exists but might be empty
+        workspace.read(&pet_id, &path)
+            .map(|c| c.trim().is_empty())
+            .unwrap_or(false)
+    } else {
+        true
+    };
+    if needs_content {
+        let content = default_content.unwrap_or_default();
+        if !content.is_empty() {
+            workspace.write(&pet_id, &path, &content).map_err(|e| e.to_string())?;
+        } else if !workspace.file_exists(&pet_id, &path) {
+            workspace.write(&pet_id, &path, "").map_err(|e| e.to_string())?;
+        }
+    }
+    let full = workspace.get_full_path(&pet_id, &path).map_err(|e| e.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    StdCommand::new("open")
+        .arg(&full)
+        .spawn()
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
+    #[cfg(target_os = "linux")]
+    StdCommand::new("xdg-open")
+        .arg(&full)
+        .spawn()
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    StdCommand::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(&full)
+        .spawn()
+        .map_err(|e| format!("Failed to open file: {}", e))?;
+
+    Ok(())
 }

@@ -10,7 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64 } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialBuiltinTool, executeSocialBuiltinTool } from '../workspace/socialToolExecutor.js';
+import { isSocialBuiltinTool, executeSocialBuiltinTool, isGroupRuleBuiltinTool, executeGroupRuleBuiltinTool, isReplyStrategyBuiltinTool, executeReplyStrategyBuiltinTool, isHistoryBuiltinTool, executeHistoryBuiltinTool } from '../workspace/socialToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -424,6 +424,7 @@ export const callLLMWithTools = async ({
   options = {},
   onToolCall,
   onToolResult,
+  onLLMText,        // (text, iterationIndex) => void — called with LLM text each iteration (including intermediate rounds with tool calls)
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
   builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
@@ -488,10 +489,22 @@ export const callLLMWithTools = async ({
     const data = await response.json();
     const result = adapter.parseResponse(data);
     
+    // Emit LLM text for every iteration (including empty — caller decides what to show)
+    if (onLLMText) {
+      const toolNames = (result.toolCalls || []).map(tc => tc.name);
+      onLLMText({
+        content: result.content || '',
+        reasoning: result.reasoningContent || '',
+        iteration: totalIterations,
+        toolNames,
+      });
+    }
+    
     // 如果没有工具调用，返回结果
     if (!result.toolCalls || result.toolCalls.length === 0) {
       return {
         content: result.content,
+        reasoningContent: result.reasoningContent,
         toolCallHistory
       };
     }
@@ -555,8 +568,11 @@ export const callLLMWithTools = async ({
           const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
           const isBuiltin = isBuiltinTool(call.name);
           const isSocialBuiltin = isSocialBuiltinTool(call.name);
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialBuiltin=${isSocialBuiltin}`);
-          if (!isBuiltin && !isSocialBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+          const isGroupRuleBuiltin = isGroupRuleBuiltinTool(call.name);
+          const isReplyStrategyBuiltin = isReplyStrategyBuiltinTool(call.name);
+          const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialBuiltin=${isSocialBuiltin} isGroupRule=${isGroupRuleBuiltin} isReplyStrategy=${isReplyStrategyBuiltin} isHistory=${isHistoryBuiltin}`);
+          if (!isBuiltin && !isSocialBuiltin && !isGroupRuleBuiltin && !isReplyStrategyBuiltin && !isHistoryBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
             toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
@@ -564,6 +580,12 @@ export const callLLMWithTools = async ({
             toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isSocialBuiltin && builtinToolContext) {
             toolResult = await executeSocialBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isGroupRuleBuiltin && builtinToolContext) {
+            toolResult = await executeGroupRuleBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isReplyStrategyBuiltin && builtinToolContext) {
+            toolResult = await executeReplyStrategyBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isHistoryBuiltin && builtinToolContext) {
+            toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }

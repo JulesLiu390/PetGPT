@@ -7,7 +7,7 @@ import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
 import { getSafeMood, EMOTION_MOODS, SYSTEM_STATES, ALL_MOODS, getRandomIdleState } from '../utils/moodDetector';
-import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs } from '../utils/socialAgent';
+import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, getTargetNames } from '../utils/socialAgent';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
@@ -681,31 +681,12 @@ export const Character = () => {
 
   const handleToggleSocial = async () => {
     resetIdleTimer();
-    const { emit: emitEvent } = await import('@tauri-apps/api/event');
-    if (socialActive) {
-      stopSocialLoop();
-      setSocialActive(false);
-      emitEvent('social-status-changed', { active: false, petId: currentPetId });
-    } else {
-      if (!currentPetId) return;
-      const config = await loadSocialConfig(currentPetId);
-      if (!config) {
-        // 没有配置，打开社交设置面板
-        tauri.openManageWindowWithTab('social');
-        return;
-      }
-      const started = await startSocialLoop(config, (active) => {
-        setSocialActive(active);
-        emitEvent('social-status-changed', { active, petId: currentPetId });
-      });
-      setSocialActive(started);
-      emitEvent('social-status-changed', { active: started, petId: currentPetId });
-    }
+    tauri.openSocialWindow(); // toggle show/hide
   };
 
   // 监听来自其他窗口的社交控制事件（ManagementPage SocialPanel）
   useEffect(() => {
-    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated;
+    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenQueryTargetNames;
     let cancelled = false;
     const setup = async () => {
       const { listen: listenEvent, emit: emitEvent } = await import('@tauri-apps/api/event');
@@ -716,22 +697,22 @@ export const Character = () => {
         if (!config?.petId) return;
         const started = await startSocialLoop(config, (active) => {
           setSocialActive(active);
-          emitEvent('social-status-changed', { active, petId: config.petId });
+          emitEvent('social-status-changed', { active, petId: config.petId, lurkModes: getLurkModes() });
         });
         setSocialActive(started);
-        emitEvent('social-status-changed', { active: started, petId: config.petId });
+        emitEvent('social-status-changed', { active: started, petId: config.petId, lurkModes: getLurkModes() });
       });
 
       unlistenStop = await listenEvent('social-stop', () => {
         const status = getSocialStatus();
         stopSocialLoop();
         setSocialActive(false);
-        emitEvent('social-status-changed', { active: false, petId: status.petId });
+        emitEvent('social-status-changed', { active: false, petId: status.petId, lurkModes: {} });
       });
 
       unlistenQuery = await listenEvent('social-query-status', () => {
         const status = getSocialStatus();
-        emitEvent('social-status-changed', { active: status.active, petId: status.petId });
+        emitEvent('social-status-changed', { active: status.active, petId: status.petId, lurkModes: status.lurkModes });
       });
 
       unlistenQueryLogs = await listenEvent('social-query-logs', () => {
@@ -743,6 +724,18 @@ export const Character = () => {
         emitEvent('social-logs-response', []);
       });
 
+      // 潜水模式切换（per-target）
+      unlistenSetLurkMode = await listenEvent('social-set-lurk-mode', (event) => {
+        const { target, mode } = event.payload || {};
+        setLurkMode(target, mode);
+        emitEvent('social-lurk-mode-changed', { target, lurkModes: getLurkModes() });
+      });
+
+      // target 名称查询
+      unlistenQueryTargetNames = await listenEvent('social-query-target-names', () => {
+        emitEvent('social-target-names-response', getTargetNames());
+      });
+
       // 配置更新时热重启循环
       unlistenConfigUpdated = await listenEvent('social-config-updated', async (event) => {
         const newConfig = event.payload;
@@ -752,10 +745,10 @@ export const Character = () => {
         // 用新配置重启循环
         const started = await startSocialLoop(newConfig, (active) => {
           setSocialActive(active);
-          emitEvent('social-status-changed', { active, petId: newConfig.petId });
+          emitEvent('social-status-changed', { active, petId: newConfig.petId, lurkModes: getLurkModes() });
         });
         setSocialActive(started);
-        emitEvent('social-status-changed', { active: started, petId: newConfig.petId });
+        emitEvent('social-status-changed', { active: started, petId: newConfig.petId, lurkModes: getLurkModes() });
       });
     };
     setup();
@@ -768,6 +761,8 @@ export const Character = () => {
       unlistenQueryLogs?.();
       unlistenClearLogs?.();
       unlistenConfigUpdated?.();
+      unlistenSetLurkMode?.();
+      unlistenQueryTargetNames?.();
     };
   }, []);
 

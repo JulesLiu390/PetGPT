@@ -513,6 +513,8 @@ export const openManageWindow = () => invoke('open_manage_window');
 export const openManageWindowWithTab = (tab) => invoke('open_manage_window_with_tab', { tab });
 export const hideManageWindow = () => invoke('hide_manage_window');
 export const hideSettingsWindow = () => invoke('hide_settings_window');
+export const openSocialWindow = () => invoke('open_social_window');
+export const hideSocialWindow = () => invoke('hide_social_window');
 
 /**
  * 隐藏指定窗口
@@ -688,6 +690,14 @@ export const workspaceEnsureDefaultFiles = async (petId, petName) => {
 
 export const workspaceFileExists = async (petId, path) => {
   return invoke('workspace_file_exists', { petId, path });
+};
+
+export const workspaceGetPath = async (petId, path, ensureExists = false) => {
+  return invoke('workspace_get_path', { petId, path, ensureExists });
+};
+
+export const workspaceOpenFile = async (petId, path, defaultContent = '') => {
+  return invoke('workspace_open_file', { petId, path, defaultContent });
 };
 
 // Model Configs (alias to pets with model type)
@@ -971,6 +981,8 @@ const tauri = {
   workspaceEdit,
   workspaceEnsureDefaultFiles,
   workspaceFileExists,
+  workspaceGetPath,
+  workspaceOpenFile,
   
   // Dragging
   startDragging,

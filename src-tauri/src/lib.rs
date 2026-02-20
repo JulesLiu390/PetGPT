@@ -1796,6 +1796,18 @@ fn hide_settings_window(app: AppHandle) -> Result<(), String> {
     hide_manage_window(app)
 }
 
+#[tauri::command]
+fn open_social_window(app: AppHandle) -> Result<(), String> {
+    toggle_window(&app, "social")
+}
+
+#[tauri::command]
+fn hide_social_window(app: AppHandle) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("social") {
+        window.hide().map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
 
 
 
@@ -2530,6 +2542,9 @@ pub fn run() {
             // Hide window commands
             hide_manage_window,
             hide_settings_window,
+            // Social window commands
+            open_social_window,
+            hide_social_window,
             // Chat window controls
             maximize_chat_window,
             toggle_sidebar,
@@ -2570,6 +2585,8 @@ pub fn run() {
             workspace::workspace_edit,
             workspace::workspace_ensure_default_files,
             workspace::workspace_file_exists,
+            workspace::workspace_get_path,
+            workspace::workspace_open_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

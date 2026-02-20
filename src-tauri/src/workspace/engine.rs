@@ -283,6 +283,11 @@ impl WorkspaceEngine {
             Err(_) => false,
         }
     }
+
+    /// Get the full safe path for a file in the pet's workspace (public wrapper)
+    pub fn get_full_path(&self, pet_id: &str, path: &str) -> Result<PathBuf, WorkspaceError> {
+        self.resolve_safe_path(pet_id, path)
+    }
 }
 
 // ============ Utility Functions ============

@@ -73,6 +73,21 @@
         "skipTaskbar": true,
         "acceptFirstMouse": true,
         "focus": true
+      },
+      {
+        "label": "social",
+        "title": "Social Agent",
+        "url": "/#/social",
+        "width": 700,
+        "height": 750,
+        "minWidth": 500,
+        "minHeight": 400,
+        "resizable": true,
+        "decorations": false,
+        "transparent": true,
+        "visible": false,
+        "alwaysOnTop": true,
+        "acceptFirstMouse": true
       }
     ],
     "security": {

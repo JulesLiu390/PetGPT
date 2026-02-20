@@ -167,6 +167,8 @@ export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl
 export const parseResponse = (responseJson) => {
   const message = responseJson.choices?.[0]?.message;
   const content = message?.content || '';
+  // Extract reasoning_content (DeepSeek / o1 / Claude etc.)
+  const reasoningContent = message?.reasoning_content || message?.reasoning || '';
   
   // 解析工具调用
   let toolCalls = null;
@@ -180,6 +182,7 @@ export const parseResponse = (responseJson) => {
   
   return {
     content,
+    reasoningContent: reasoningContent || undefined,
     toolCalls,
     finishReason: responseJson.choices?.[0]?.finish_reason,
     usage: responseJson.usage,
