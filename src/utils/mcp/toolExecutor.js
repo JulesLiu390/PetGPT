@@ -10,7 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64 } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialBuiltinTool, executeSocialBuiltinTool, isGroupRuleBuiltinTool, executeGroupRuleBuiltinTool, isReplyStrategyBuiltinTool, executeReplyStrategyBuiltinTool, isHistoryBuiltinTool, executeHistoryBuiltinTool } from '../workspace/socialToolExecutor.js';
+import { isSocialBuiltinTool, executeSocialBuiltinTool, isGroupRuleBuiltinTool, executeGroupRuleBuiltinTool, isReplyStrategyBuiltinTool, executeReplyStrategyBuiltinTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool } from '../workspace/socialToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -571,8 +571,9 @@ export const callLLMWithTools = async ({
           const isGroupRuleBuiltin = isGroupRuleBuiltinTool(call.name);
           const isReplyStrategyBuiltin = isReplyStrategyBuiltinTool(call.name);
           const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialBuiltin=${isSocialBuiltin} isGroupRule=${isGroupRuleBuiltin} isReplyStrategy=${isReplyStrategyBuiltin} isHistory=${isHistoryBuiltin}`);
-          if (!isBuiltin && !isSocialBuiltin && !isGroupRuleBuiltin && !isReplyStrategyBuiltin && !isHistoryBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+          const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialBuiltin=${isSocialBuiltin} isGroupRule=${isGroupRuleBuiltin} isReplyStrategy=${isReplyStrategyBuiltin} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin}`);
+          if (!isBuiltin && !isSocialBuiltin && !isGroupRuleBuiltin && !isReplyStrategyBuiltin && !isHistoryBuiltin && !isGroupLogBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
             toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
@@ -586,6 +587,8 @@ export const callLLMWithTools = async ({
             toolResult = await executeReplyStrategyBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isHistoryBuiltin && builtinToolContext) {
             toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isGroupLogBuiltin && builtinToolContext) {
+            toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }

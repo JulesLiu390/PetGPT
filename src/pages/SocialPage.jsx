@@ -22,7 +22,8 @@ export default function SocialPage() {
     mcpServerName: '',
     apiProviderId: '',
     modelName: '',
-    pollingInterval: 60,
+    replyInterval: 0,
+    observerInterval: 180,
     watchedGroups: [],
     watchedFriends: [],
     socialPersonaPrompt: '',
@@ -173,13 +174,12 @@ export default function SocialPage() {
           mcpServerName: '',
           apiProviderId: '',
           modelName: '',
-          pollingInterval: 60,
+          replyInterval: 0,
+          observerInterval: 180,
           watchedGroups: [],
           watchedFriends: [],
           socialPersonaPrompt: '',
           atMustReply: true,
-          injectBehaviorGuidelines: true,
-          atInstantReply: true,
           botQQ: '',
           ownerQQ: '',
           ownerName: '',
@@ -468,35 +468,27 @@ export default function SocialPage() {
                 </div>
               </Card>
 
-              {/* Polling */}
-              <Card title="Polling" description="How often to check for new messages">
+              {/* Processing Intervals */}
+              <Card title="Processing Intervals" description="How often each processor calls LLM per group">
                 <div className="space-y-3">
-                  <FormGroup label="Interval (seconds)">
+                  <FormGroup label="Reply Interval (seconds)" hint="Min time between Reply LLM calls per group (0 = instant)">
                     <Input
                       type="number"
-                      min={3}
+                      min={0}
                       max={600}
-                      value={config.pollingInterval}
-                      onChange={(e) => handleConfigChange('pollingInterval', parseInt(e.target.value) || 60)}
+                      value={config.replyInterval ?? 0}
+                      onChange={(e) => handleConfigChange('replyInterval', parseInt(e.target.value) || 0)}
                     />
                   </FormGroup>
-                  <div className="flex items-center justify-between">
-                    <div className="flex-1">
-                      <div className="text-sm font-medium text-slate-700">Instant @Reply</div>
-                      <div className="text-xs text-slate-500 mt-0.5">
-                        Check for @mentions every 3s and reply immediately
-                      </div>
-                    </div>
-                    <label className="relative inline-flex items-center cursor-pointer">
-                      <input
-                        type="checkbox"
-                        checked={config.atInstantReply !== false}
-                        onChange={(e) => handleConfigChange('atInstantReply', e.target.checked)}
-                        className="sr-only peer"
-                      />
-                      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-                    </label>
-                  </div>
+                  <FormGroup label="Observer Interval (seconds)" hint="Min time between Observer LLM calls per group">
+                    <Input
+                      type="number"
+                      min={10}
+                      max={3600}
+                      value={config.observerInterval ?? 180}
+                      onChange={(e) => handleConfigChange('observerInterval', parseInt(e.target.value) || 180)}
+                    />
+                  </FormGroup>
                 </div>
               </Card>
 
@@ -541,12 +533,6 @@ export default function SocialPage() {
                     checked={config.atMustReply !== false}
                     onChange={(v) => handleConfigChange('atMustReply', v)}
                   />
-                  <ToggleRow
-                    label="Behavior Guidelines"
-                    hint="Inject built-in social behavior rules (be genuine, quality over quantity, etc.)"
-                    checked={config.injectBehaviorGuidelines !== false}
-                    onChange={(v) => handleConfigChange('injectBehaviorGuidelines', v)}
-                  />
                 </div>
               </Card>
 
@@ -566,103 +552,123 @@ export default function SocialPage() {
         )}
 
         {/* ========== Log Section (always visible, superset feature) ========== */}
-        <div className="flex-1 min-h-0 flex flex-col">
-          {/* Log Tab Bar */}
-          <div className="flex items-center gap-1 px-4 py-2 border-b border-slate-100 overflow-x-auto shrink-0">
-            <LogTab
+        <div className="flex-1 min-h-0 flex flex-row">
+          {/* ── Left Sidebar: target list ── */}
+          <div className="w-40 shrink-0 border-r border-slate-200/60 flex flex-col overflow-hidden bg-slate-50/30">
+            {/* Fixed: All + System */}
+            <SidebarItem
               active={logFilter === 'all'}
               onClick={() => setLogFilter('all')}
               label="All"
               count={logs.length}
             />
-            <LogTab
+            <SidebarItem
               active={logFilter === 'system'}
               onClick={() => setLogFilter('system')}
               label="System"
               count={logs.filter(l => !l.target).length}
             />
-            {watchedTargets.map(t => (
-              <LogTab
-                key={t.id}
-                active={logFilter === t.id}
-                onClick={() => setLogFilter(t.id)}
-                label={t.label}
-                count={logs.filter(l => l.target === t.id).length}
-              />
-            ))}
-            {/* Clear button */}
-            <div className="ml-auto shrink-0">
+
+            {/* Separator */}
+            {watchedTargets.length > 0 && <div className="border-t border-slate-200/60 mx-2 my-1" />}
+
+            {/* Scrollable target list */}
+            <div className="flex-1 overflow-y-auto">
+              {watchedTargets.map(t => {
+                const mode = lurkModes[t.id] || 'normal';
+                const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
+                const displayName = targetNames[t.id] || t.id;
+                return (
+                  <SidebarItem
+                    key={t.id}
+                    active={logFilter === t.id}
+                    onClick={() => setLogFilter(t.id)}
+                    label={displayName}
+                    count={logs.filter(l => l.target === t.id).length}
+                    lurkIcon={socialActive ? lurkIcon : null}
+                    onLurkClick={socialActive ? () => {
+                      const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
+                      setTargetLurkMode(t.id, next);
+                    } : null}
+                  />
+                );
+              })}
+            </div>
+
+            {/* Clear logs */}
+            <div className="border-t border-slate-200/60 p-1.5">
               <button
                 onClick={() => { emit('social-clear-logs'); setLogs([]); }}
-                className="text-xs text-slate-400 hover:text-red-500 px-2 py-1"
+                className="w-full text-[10px] text-slate-400 hover:text-red-500 py-1 rounded hover:bg-red-50 transition-colors"
               >
-                Clear
+                Clear Logs
               </button>
             </div>
           </div>
 
-          {/* Lurk Mode Bar (shown when a target tab is selected & agent is active) */}
-          {socialActive && selectedTarget && (() => {
-            const currentMode = lurkModes[selectedTarget] || 'normal';
-            const currentOpt = LURK_OPTIONS.find(o => o.mode === currentMode) || LURK_OPTIONS[0];
-            return (
-            <div className="flex items-center gap-1.5 px-4 py-1.5 border-b border-slate-100 bg-slate-50/60">
-              <span className="text-xs text-slate-400 mr-1 shrink-0">{currentOpt.icon} {currentOpt.label}</span>
-              {LURK_OPTIONS.map(opt => {
-                const isActive = (lurkModes[selectedTarget] || 'normal') === opt.mode;
+          {/* ── Right: toolbar + log content ── */}
+          <div className="flex-1 min-w-0 flex flex-col">
+            {/* Content Toggle Bar + Lurk indicator */}
+            <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 bg-white/60 shrink-0">
+              <span className="text-xs text-slate-400 mr-0.5 shrink-0">Show:</span>
+              <ToggleBtn active={showChat} onClick={() => setShowChat(!showChat)} icon="💬" label="Chat" />
+              <ToggleBtn active={showLlm} onClick={() => setShowLlm(!showLlm)} icon="🧠" label="LLM" />
+              <ToggleBtn active={showTools} onClick={() => setShowTools(!showTools)} icon="🔧" label="Tools" />
+              <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
+              {/* Lurk mode buttons for selected target */}
+              {socialActive && selectedTarget && (() => {
+                const currentMode = lurkModes[selectedTarget] || 'normal';
                 return (
-                  <button
-                    key={opt.mode}
-                    onClick={() => setTargetLurkMode(selectedTarget, opt.mode)}
-                    className={`px-2.5 py-1 text-xs font-medium rounded-md border transition-colors ${
-                      isActive ? opt.activeCls : `${opt.cls} hover:opacity-80`
-                    }`}
-                  >
-                    {opt.icon} {opt.label}
-                  </button>
-                );
-              })}
-            </div>
-            );
-          })()}
-
-          {/* Content Toggle Bar */}
-          <div className="flex items-center gap-1.5 px-4 py-1.5 border-b border-slate-100 bg-white/60">
-            <span className="text-xs text-slate-400 mr-1 shrink-0">Show:</span>
-            <ToggleBtn active={showChat} onClick={() => setShowChat(!showChat)} icon="💬" label="Chat" />
-            <ToggleBtn active={showLlm} onClick={() => setShowLlm(!showLlm)} icon="🧠" label="LLM" />
-            <ToggleBtn active={showTools} onClick={() => setShowTools(!showTools)} icon="🔧" label="Tools" />
-            <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
-          </div>
-
-          {/* Log Content */}
-          <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
-            {filteredLogs.length === 0 ? (
-              <div className="text-slate-400 text-center py-8">No logs yet</div>
-            ) : (
-              [...filteredLogs].reverse().map((log, i) => (
-                log.level === 'poll' ? (
-                  <PollEntry key={i} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
-                ) : (
-                  <div key={i} className={`py-0.5 ${
-                    log.level === 'error' ? 'text-red-600' :
-                    log.level === 'warn' ? 'text-amber-600' :
-                    log.level === 'memory' ? 'text-purple-600' :
-                    'text-slate-600'
-                  }`}>
-                    <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                    {' '}
-                    <span className="font-semibold">[{log.level}]</span>
-                    {log.target && logFilter === 'all' && (
-                      <span className="text-cyan-500 ml-1">[{log.target}]</span>
-                    )}
-                    {' '}
-                    {log.message}
-                    {log.details && <span className="text-slate-400"> — {typeof log.details === 'string' ? log.details : JSON.stringify(log.details)}</span>}
+                  <div className="ml-auto flex items-center gap-1 shrink-0">
+                    {LURK_OPTIONS.map(opt => {
+                      const isActive = currentMode === opt.mode;
+                      return (
+                        <button
+                          key={opt.mode}
+                          onClick={() => setTargetLurkMode(selectedTarget, opt.mode)}
+                          className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                            isActive ? opt.activeCls : `${opt.cls} hover:opacity-80`
+                          }`}
+                          title={opt.label}
+                        >
+                          {opt.icon}
+                        </button>
+                      );
+                    })}
                   </div>
-                )
-              ))
-            )}
+                );
+              })()}
+            </div>
+
+            {/* Log Content */}
+            <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
+              {filteredLogs.length === 0 ? (
+                <div className="text-slate-400 text-center py-8">No logs yet</div>
+              ) : (
+                [...filteredLogs].reverse().map((log, i) => (
+                  log.level === 'poll' ? (
+                    <PollEntry key={i} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
+                  ) : (
+                    <div key={i} className={`py-0.5 ${
+                      log.level === 'error' ? 'text-red-600' :
+                      log.level === 'warn' ? 'text-amber-600' :
+                      log.level === 'memory' ? 'text-purple-600' :
+                      'text-slate-600'
+                    }`}>
+                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      {' '}
+                      <span className="font-semibold">[{log.level}]</span>
+                      {log.target && logFilter === 'all' && (
+                        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+                      )}
+                      {' '}
+                      {log.message}
+                      {log.details && <span className="text-slate-400"> — {typeof log.details === 'string' ? log.details : JSON.stringify(log.details)}</span>}
+                    </div>
+                  )
+                ))
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -692,23 +698,33 @@ function ToggleRow({ label, hint, checked, onChange }) {
   );
 }
 
-function LogTab({ active, onClick, label, count }) {
+function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick }) {
   return (
-    <button
+    <div
       onClick={onClick}
-      className={`shrink-0 px-2.5 py-1 text-xs font-medium rounded-md transition-colors ${
+      className={`flex items-center gap-1.5 px-2.5 py-1.5 cursor-pointer text-xs transition-colors ${
         active
-          ? 'bg-cyan-50 text-cyan-700 border border-cyan-200'
-          : 'text-slate-500 hover:text-slate-700 hover:bg-slate-50 border border-transparent'
+          ? 'bg-cyan-50 text-cyan-700 border-r-2 border-cyan-400'
+          : 'text-slate-600 hover:bg-slate-100/80'
       }`}
+      title={label}
     >
-      {label}
+      {lurkIcon && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onLurkClick?.(); }}
+          className="shrink-0 hover:scale-125 transition-transform text-sm leading-none"
+          title="Click to cycle lurk mode"
+        >
+          {lurkIcon}
+        </button>
+      )}
+      <span className="truncate flex-1 font-medium">{label}</span>
       {count > 0 && (
-        <span className={`ml-1 ${active ? 'text-cyan-500' : 'text-slate-400'}`}>
+        <span className={`shrink-0 tabular-nums text-[10px] ${active ? 'text-cyan-500' : 'text-slate-400'}`}>
           {count}
         </span>
       )}
-    </button>
+    </div>
   );
 }
 
@@ -729,6 +745,7 @@ function ToggleBtn({ active, onClick, icon, label }) {
 
 function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
   const [llmExpanded, setLlmExpanded] = useState(false);
+  const [promptExpanded, setPromptExpanded] = useState(false);
   const d = log.details || {};
   const actionColors = {
     replied: 'text-green-600',
@@ -749,6 +766,9 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
         <span className={`font-semibold ${actionColors[d.action] || 'text-slate-600'}`}>
           {actionIcons[d.action] || '📊'} {d.action || 'poll'}
         </span>
+        {d.role && (
+          <span className="text-indigo-400 text-[10px] uppercase">{d.role === 'observer' ? '👁 Observer' : '💬 Reply'}</span>
+        )}
         {log.target && logFilter === 'all' && (
           <span className="text-cyan-500">[{log.target}]</span>
         )}
@@ -766,6 +786,34 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
           )}
         </div>
       )}
+      {showLlm && d.inputPrompt?.length > 0 && (() => {
+        // Format prompt messages for display
+        const promptLines = d.inputPrompt.map((m, i) => {
+          const roleLabel = m.role === 'system' ? '🔧 system' : m.role === 'assistant' ? '🤖 assistant' : '👤 user';
+          const content = typeof m.content === 'string'
+            ? m.content
+            : (m.content || []).map(p => p.type === 'text' ? p.text : `[image]`).join('\n');
+          return `── ${roleLabel} ──\n${content}`;
+        }).join('\n\n');
+        return (
+          <div className="ml-2 mt-0.5">
+            <div className="flex items-center gap-2">
+              <span className="text-slate-400 text-[10px] uppercase tracking-wider">📝 Input Prompt ({d.inputPrompt.length} turns)</span>
+              <button
+                onClick={() => setPromptExpanded(!promptExpanded)}
+                className="text-[10px] text-indigo-500 hover:text-indigo-700 font-medium"
+              >
+                {promptExpanded ? 'Collapse' : 'Expand'}
+              </button>
+            </div>
+            {promptExpanded && (
+              <div className="text-slate-600 whitespace-pre-wrap break-words max-h-96 overflow-y-auto bg-slate-50/80 rounded p-1.5 mt-0.5 border border-slate-100 text-[11px] font-mono">
+                {promptLines}
+              </div>
+            )}
+          </div>
+        );
+      })()}
       {showLlm && (() => {
         const iters = d.llmIters || [];
         const sent = d.sentMessages || [];
@@ -775,7 +823,7 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
           const parts = [];
           if (it.reasoning) parts.push(`[Reasoning] ${it.reasoning}`);
           if (it.content) parts.push(it.content);
-          if (it.toolNames?.length > 0 && parts.length === 0) {
+          if (it.toolNames?.length > 0) {
             parts.push(`(→ ${it.toolNames.join(', ')})`);
           }
           return { iteration: it.iteration, text: parts.join('\n'), hasContent: parts.length > 0, toolNames: it.toolNames || [] };

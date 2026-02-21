@@ -23,14 +23,17 @@ const GROUP_BUFFER_PATH_PREFIX = 'social/GROUP_';
 const DAILY_PATH_PREFIX = 'social/DAILY_';
 const HISTORY_TOOL_NAMES = new Set(['history_read', 'daily_read', 'daily_list']);
 
+const KNOWN_TARGETS_PATH = 'social/targets.json';
+const GROUP_LOG_TOOL_NAMES = new Set(['group_log_list', 'group_log_read']);
+
 /** 历史查询返回最大字符数 */
 export const HISTORY_READ_MAX_CHARS = 8000;
 
 /** 社交记忆文件最大字符数 */
-export const SOCIAL_MEMORY_MAX_CHARS = 10000;
+export const SOCIAL_MEMORY_MAX_CHARS = 20000;
 
 /** 群规则文件最大字符数 */
-export const GROUP_RULE_MAX_CHARS = 5000;
+export const GROUP_RULE_MAX_CHARS = 10000;
 
 /** 回复策略文件最大字符数 */
 export const REPLY_STRATEGY_MAX_CHARS = 5000;
@@ -63,6 +66,13 @@ export function isReplyStrategyBuiltinTool(toolName) {
  */
 export function isHistoryBuiltinTool(toolName) {
   return HISTORY_TOOL_NAMES.has(toolName);
+}
+
+/**
+ * 检查工具名是否为跨群日志内置工具
+ */
+export function isGroupLogBuiltinTool(toolName) {
+  return GROUP_LOG_TOOL_NAMES.has(toolName);
 }
 
 /** 获取群规则文件路径 */
@@ -653,5 +663,165 @@ export async function executeHistoryBuiltinTool(toolName, args, context) {
       return executeDailyList(petId);
     default:
       return { error: `未知的历史查询工具: ${toolName}` };
+  }
+}
+
+// ============ 跨群日志工具 ============
+
+/**
+ * 获取跨群日志工具的 function calling 定义
+ */
+export function getGroupLogToolDefinitions() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'group_log_list',
+        description: '列出所有有日志记录的群（群号+群名）。用于了解当前监控了哪些群。',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'group_log_read',
+        description: '搜索指定群的原始日志（Observer 每轮记录的消息摘要）。支持同时查询多个群。不传 query 则返回最新日志内容。',
+        parameters: {
+          type: 'object',
+          properties: {
+            targets: {
+              type: 'array',
+              items: { type: 'string' },
+              description: '要查询的群号列表（可从 group_log_list 获取）',
+            },
+            query: {
+              type: 'string',
+              description: '搜索关键词（可选，不传则返回最新内容）',
+            },
+            start_time: {
+              type: 'string',
+              description: '起始时间，ISO 8601 格式（可选，不传则不限起始时间）',
+            },
+            end_time: {
+              type: 'string',
+              description: '结束时间，ISO 8601 格式（可选，不传则默认为当前时间）',
+            },
+          },
+          required: ['targets'],
+        },
+      },
+    },
+  ];
+}
+
+/**
+ * 执行 group_log_list：列出所有有记录的群
+ */
+async function executeGroupLogList(petId) {
+  try {
+    const raw = await tauri.workspaceRead(petId, KNOWN_TARGETS_PATH);
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr) || arr.length === 0) {
+      return { content: [{ type: 'text', text: '（暂无群日志记录）' }] };
+    }
+    const lines = arr.map(item => {
+      if (typeof item === 'string') return `- ${item}`;
+      return item.name ? `- ${item.id}（${item.name}）` : `- ${item.id}`;
+    });
+    return { content: [{ type: 'text', text: `已记录的群：\n${lines.join('\n')}` }] };
+  } catch {
+    return { content: [{ type: 'text', text: '（暂无群日志记录）' }] };
+  }
+}
+
+/**
+ * 执行 group_log_read：搜索指定群的日志
+ */
+async function executeGroupLogRead(petId, args) {
+  const { targets, query, start_time, end_time } = args;
+  if (!targets || !Array.isArray(targets) || targets.length === 0) {
+    return { error: '缺少 targets 参数（群号数组）' };
+  }
+
+  const startDate = start_time ? new Date(start_time) : null;
+  const endDate = end_time ? new Date(end_time) : new Date();
+  if (start_time && isNaN(startDate.getTime())) return { error: 'start_time 格式无效' };
+  if (end_time && isNaN(endDate.getTime())) return { error: 'end_time 格式无效' };
+
+  const queryLower = query ? query.toLowerCase() : null;
+  let totalChars = 0;
+  const results = [];
+
+  for (const target of targets) {
+    const bufferPath = `${GROUP_BUFFER_PATH_PREFIX}${target}.md`;
+    let content;
+    try {
+      content = await tauri.workspaceRead(petId, bufferPath);
+    } catch { continue; }
+    if (!content || !content.trim()) continue;
+
+    const sections = parseGroupBuffer(content);
+
+    // Filter by time range + optional query
+    let matched = sections;
+    if (startDate || endDate) {
+      matched = matched.filter(s => {
+        if (startDate && s.timestamp < startDate) return false;
+        if (endDate && s.timestamp > endDate) return false;
+        return true;
+      });
+    }
+    if (queryLower) {
+      matched = matched.filter(s => s.text.toLowerCase().includes(queryLower));
+    }
+
+    if (matched.length === 0) continue;
+
+    // 取最新的部分（从尾部截取），受总字符数限制
+    let groupResult = '';
+    for (let i = matched.length - 1; i >= 0; i--) {
+      const entry = matched[i].text + '\n\n';
+      if (totalChars + groupResult.length + entry.length > HISTORY_READ_MAX_CHARS) break;
+      groupResult = entry + groupResult;
+    }
+
+    if (groupResult.trim()) {
+      results.push(`【${target}】\n${groupResult.trim()}`);
+      totalChars += groupResult.length;
+    }
+
+    if (totalChars >= HISTORY_READ_MAX_CHARS) break;
+  }
+
+  if (results.length === 0) {
+    const hint = queryLower ? `包含"${query}"的` : '';
+    return { content: [{ type: 'text', text: `在指定群中未找到${hint}日志记录。` }] };
+  }
+
+  return { content: [{ type: 'text', text: results.join('\n\n') }] };
+}
+
+/**
+ * 执行跨群日志内置工具
+ */
+export async function executeGroupLogBuiltinTool(toolName, args, context) {
+  const { petId } = context;
+  if (!petId) {
+    return { error: '缺少 petId，无法执行跨群日志操作。' };
+  }
+
+  console.log(`[GroupLog] Executing ${toolName}`, { petId });
+
+  switch (toolName) {
+    case 'group_log_list':
+      return executeGroupLogList(petId);
+    case 'group_log_read':
+      return executeGroupLogRead(petId, args);
+    default:
+      return { error: `未知的跨群日志工具: ${toolName}` };
   }
 }

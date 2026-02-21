@@ -3481,7 +3481,8 @@ const SocialPanel = ({ assistants, apiProviders }) => {
     mcpServerName: '',
     apiProviderId: '',
     modelName: '',
-    pollingInterval: 60,
+    replyInterval: 0,
+    observerInterval: 180,
     watchedGroups: [],
     watchedFriends: [],
     socialPersonaPrompt: '',
@@ -3564,13 +3565,12 @@ const SocialPanel = ({ assistants, apiProviders }) => {
           mcpServerName: '',
           apiProviderId: '',
           modelName: '',
-          pollingInterval: 60,
+          replyInterval: 0,
+          observerInterval: 180,
           watchedGroups: [],
           watchedFriends: [],
           socialPersonaPrompt: '',
           atMustReply: true,
-          injectBehaviorGuidelines: true,
-          atInstantReply: true,
           botQQ: '',
           ownerQQ: '',
           ownerName: '',
@@ -3846,36 +3846,27 @@ const SocialPanel = ({ assistants, apiProviders }) => {
             </div>
           </Card>
 
-          {/* Polling */}
-          <Card title="Polling" description="How often to check for new messages">
+          {/* Processing Intervals */}
+          <Card title="Processing Intervals" description="How often each processor calls LLM per group">
             <div className="space-y-3">
-              <FormGroup label="Interval (seconds)">
+              <FormGroup label="Reply Interval (seconds)" hint="Min time between Reply LLM calls per group (0 = instant)">
                 <Input
                   type="number"
-                  min={3}
+                  min={0}
                   max={600}
-                  value={config.pollingInterval}
-                  onChange={(e) => handleConfigChange('pollingInterval', parseInt(e.target.value) || 60)}
+                  value={config.replyInterval ?? 0}
+                  onChange={(e) => handleConfigChange('replyInterval', parseInt(e.target.value) || 0)}
                 />
               </FormGroup>
-              <div className="flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-slate-700">Instant @Reply</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    Check for @mentions every 3s and reply immediately
-                  </div>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={config.atInstantReply !== false}
-                    onChange={(e) => handleConfigChange('atInstantReply', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-                </label>
-              </div>
-
+              <FormGroup label="Observer Interval (seconds)" hint="Min time between Observer LLM calls per group">
+                <Input
+                  type="number"
+                  min={10}
+                  max={3600}
+                  value={config.observerInterval ?? 180}
+                  onChange={(e) => handleConfigChange('observerInterval', parseInt(e.target.value) || 180)}
+                />
+              </FormGroup>
             </div>
           </Card>
 
@@ -3937,23 +3928,6 @@ const SocialPanel = ({ assistants, apiProviders }) => {
                     type="checkbox"
                     checked={config.atMustReply !== false}
                     onChange={(e) => handleConfigChange('atMustReply', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-                </label>
-              </div>
-              <div className="flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-slate-700">Behavior Guidelines</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    Inject built-in social behavior rules (be genuine, quality over quantity, etc.)
-                  </div>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={config.injectBehaviorGuidelines !== false}
-                    onChange={(e) => handleConfigChange('injectBehaviorGuidelines', e.target.checked)}
                     className="sr-only peer"
                   />
                   <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
