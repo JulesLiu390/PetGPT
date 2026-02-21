@@ -44,6 +44,7 @@ export default function SocialPage() {
   const [showConfig, setShowConfig] = useState(false);
   const [lurkModes, setLurkModes] = useState({}); // { [target]: 'normal'|'semi-lurk'|'full-lurk' }
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
+  const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
 
   // ── Poll content visibility toggles ──
   const [showChat, setShowChat] = useState(true);
@@ -95,10 +96,11 @@ export default function SocialPage() {
     let unlisten;
     const setup = async () => {
       unlisten = await listen('social-status-changed', (event) => {
-        const { active, petId, lurkModes: lm } = event.payload;
+        const { active, petId, lurkModes: lm, pausedTargets: pt } = event.payload;
         if (petId === selectedPetId || !selectedPetId) {
           setSocialActive(active);
           if (lm) setLurkModes(lm);
+          if (pt) setPausedTargets(pt);
         }
       });
       emit('social-query-status');
@@ -120,12 +122,46 @@ export default function SocialPage() {
     return () => { unlisten?.(); };
   }, []);
 
-  // ── Listen for log responses ──
+  // ── Listen for target paused changes ──
+  useEffect(() => {
+    let unlisten;
+    const setup = async () => {
+      unlisten = await listen('social-target-paused-changed', (event) => {
+        const { pausedTargets: pt } = event.payload || {};
+        if (pt) setPausedTargets(pt);
+      });
+    };
+    setup();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // ── Listen for full log responses (initial load / clear) ──
   useEffect(() => {
     let unlisten;
     const setup = async () => {
       unlisten = await listen('social-logs-response', (event) => {
-        setLogs(event.payload || []);
+        const payload = event.payload || [];
+        // Full load comes pre-sorted from getSocialLogs(); ensure stable order
+        payload.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+        setLogs(payload);
+      });
+    };
+    setup();
+    return () => { unlisten?.(); };
+  }, []);
+
+  // ── Listen for incremental log entries (real-time push) ──
+  useEffect(() => {
+    let unlisten;
+    const UI_MAX_LOGS = 2000;
+    const setup = async () => {
+      unlisten = await listen('social-log-entry', (event) => {
+        const entry = event.payload;
+        if (!entry) return;
+        setLogs(prev => {
+          const next = [...prev, entry];
+          return next.length > UI_MAX_LOGS ? next.slice(next.length - UI_MAX_LOGS) : next;
+        });
       });
     };
     setup();
@@ -147,14 +183,13 @@ export default function SocialPage() {
     return () => { unlisten?.(); };
   }, []);
 
-  // ── Refresh logs + target names periodically ──
+  // ── Initial full log load + periodic target names refresh ──
   useEffect(() => {
-    emit('social-query-logs');
+    emit('social-query-logs'); // one-time full load on mount
     emit('social-query-target-names');
     const interval = setInterval(() => {
-      emit('social-query-logs');
-      emit('social-query-target-names');
-    }, 3000);
+      emit('social-query-target-names'); // only names, logs are pushed incrementally
+    }, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -255,17 +290,25 @@ export default function SocialPage() {
     }),
   ];
 
-  // Filter logs
-  const filteredLogs = logs.filter(log => {
-    // Target filter
+  // Precompute log counts by target (O(N) once instead of O(N×M) per render)
+  const logCountByTarget = useMemo(() => {
+    const counts = {};
+    for (const log of logs) {
+      if (log.target) counts[log.target] = (counts[log.target] || 0) + 1;
+    }
+    return counts;
+  }, [logs]);
+
+  // Memoized filtered + reversed logs
+  const filteredLogs = useMemo(() => logs.filter(log => {
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
-    // Poll entries always pass (content toggles handled in render)
     if (log.level === 'poll') return true;
-    // System toggle controls non-poll entries
     if (!showSystem) return false;
     return true;
-  });
+  }), [logs, logFilter, showSystem]);
+
+  const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
 
   // ── Close handler ──
   const handleClose = () => {
@@ -280,6 +323,10 @@ export default function SocialPage() {
   ];
   const setTargetLurkMode = (target, mode) => {
     emit('social-set-lurk-mode', { target, mode });
+  };
+  const toggleTargetPaused = (target) => {
+    const isPaused = pausedTargets[target] || false;
+    emit('social-set-target-paused', { target, paused: !isPaused });
   };
   // Which target is selected in the log filter (not 'all'/'system')
   const selectedTarget = logFilter !== 'all' && logFilter !== 'system' ? logFilter : null;
@@ -578,18 +625,21 @@ export default function SocialPage() {
                 const mode = lurkModes[t.id] || 'normal';
                 const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
                 const displayName = targetNames[t.id] || t.id;
+                const isPaused = pausedTargets[t.id] || false;
                 return (
                   <SidebarItem
                     key={t.id}
                     active={logFilter === t.id}
                     onClick={() => setLogFilter(t.id)}
                     label={displayName}
-                    count={logs.filter(l => l.target === t.id).length}
+                    count={logCountByTarget[t.id] || 0}
                     lurkIcon={socialActive ? lurkIcon : null}
                     onLurkClick={socialActive ? () => {
                       const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
                       setTargetLurkMode(t.id, next);
                     } : null}
+                    paused={socialActive ? isPaused : false}
+                    onPauseClick={socialActive ? () => toggleTargetPaused(t.id) : null}
                   />
                 );
               })}
@@ -618,8 +668,21 @@ export default function SocialPage() {
               {/* Lurk mode buttons for selected target */}
               {socialActive && selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
+                const isPaused = pausedTargets[selectedTarget] || false;
                 return (
                   <div className="ml-auto flex items-center gap-1 shrink-0">
+                    <button
+                      onClick={() => toggleTargetPaused(selectedTarget)}
+                      className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                        isPaused
+                          ? 'bg-red-500 text-white border-red-500'
+                          : 'bg-emerald-50 text-emerald-700 border-emerald-300 hover:opacity-80'
+                      }`}
+                      title={isPaused ? 'Resume processing' : 'Pause processing'}
+                    >
+                      {isPaused ? '⏸️ Paused' : '▶️ Running'}
+                    </button>
+                    <div className="w-px h-4 bg-slate-200 mx-0.5" />
                     {LURK_OPTIONS.map(opt => {
                       const isActive = currentMode === opt.mode;
                       return (
@@ -642,14 +705,14 @@ export default function SocialPage() {
 
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
-              {filteredLogs.length === 0 ? (
+              {reversedFilteredLogs.length === 0 ? (
                 <div className="text-slate-400 text-center py-8">No logs yet</div>
               ) : (
-                [...filteredLogs].reverse().map((log, i) => (
+                reversedFilteredLogs.map((log) => (
                   log.level === 'poll' ? (
-                    <PollEntry key={i} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
+                    <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
                   ) : (
-                    <div key={i} className={`py-0.5 ${
+                    <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
                       log.level === 'warn' ? 'text-amber-600' :
                       log.level === 'memory' ? 'text-purple-600' :
@@ -698,7 +761,7 @@ function ToggleRow({ label, hint, checked, onChange }) {
   );
 }
 
-function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick }) {
+function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick }) {
   return (
     <div
       onClick={onClick}
@@ -706,9 +769,18 @@ function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick }) {
         active
           ? 'bg-cyan-50 text-cyan-700 border-r-2 border-cyan-400'
           : 'text-slate-600 hover:bg-slate-100/80'
-      }`}
+      }${paused ? ' opacity-50' : ''}`}
       title={label}
     >
+      {onPauseClick && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onPauseClick(); }}
+          className="shrink-0 hover:scale-125 transition-transform text-sm leading-none"
+          title={paused ? 'Resume' : 'Pause'}
+        >
+          {paused ? '⏸' : '▶'}
+        </button>
+      )}
       {lurkIcon && (
         <button
           onClick={(e) => { e.stopPropagation(); onLurkClick?.(); }}

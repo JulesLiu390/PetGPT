@@ -7,7 +7,7 @@ import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
 import { getSafeMood, EMOTION_MOODS, SYSTEM_STATES, ALL_MOODS, getRandomIdleState } from '../utils/moodDetector';
-import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, getTargetNames } from '../utils/socialAgent';
+import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames } from '../utils/socialAgent';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
@@ -686,7 +686,7 @@ export const Character = () => {
 
   // 监听来自其他窗口的社交控制事件（ManagementPage SocialPanel）
   useEffect(() => {
-    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenQueryTargetNames;
+    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenSetTargetPaused, unlistenQueryTargetNames;
     let cancelled = false;
     const setup = async () => {
       const { listen: listenEvent, emit: emitEvent } = await import('@tauri-apps/api/event');
@@ -697,10 +697,10 @@ export const Character = () => {
         if (!config?.petId) return;
         const started = await startSocialLoop(config, (active) => {
           setSocialActive(active);
-          emitEvent('social-status-changed', { active, petId: config.petId, lurkModes: getLurkModes() });
+          emitEvent('social-status-changed', { active, petId: config.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
         });
         setSocialActive(started);
-        emitEvent('social-status-changed', { active: started, petId: config.petId, lurkModes: getLurkModes() });
+        emitEvent('social-status-changed', { active: started, petId: config.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
       });
 
       unlistenStop = await listenEvent('social-stop', () => {
@@ -712,7 +712,7 @@ export const Character = () => {
 
       unlistenQuery = await listenEvent('social-query-status', () => {
         const status = getSocialStatus();
-        emitEvent('social-status-changed', { active: status.active, petId: status.petId, lurkModes: status.lurkModes });
+        emitEvent('social-status-changed', { active: status.active, petId: status.petId, lurkModes: status.lurkModes, pausedTargets: status.pausedTargets });
       });
 
       unlistenQueryLogs = await listenEvent('social-query-logs', () => {
@@ -731,6 +731,13 @@ export const Character = () => {
         emitEvent('social-lurk-mode-changed', { target, lurkModes: getLurkModes() });
       });
 
+      // 暂停/恢复单群处理（per-target）
+      unlistenSetTargetPaused = await listenEvent('social-set-target-paused', (event) => {
+        const { target, paused } = event.payload || {};
+        setTargetPaused(target, paused);
+        emitEvent('social-target-paused-changed', { target, pausedTargets: getPausedTargets() });
+      });
+
       // target 名称查询
       unlistenQueryTargetNames = await listenEvent('social-query-target-names', () => {
         emitEvent('social-target-names-response', getTargetNames());
@@ -745,10 +752,10 @@ export const Character = () => {
         // 用新配置重启循环
         const started = await startSocialLoop(newConfig, (active) => {
           setSocialActive(active);
-          emitEvent('social-status-changed', { active, petId: newConfig.petId, lurkModes: getLurkModes() });
+          emitEvent('social-status-changed', { active, petId: newConfig.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
         });
         setSocialActive(started);
-        emitEvent('social-status-changed', { active: started, petId: newConfig.petId, lurkModes: getLurkModes() });
+        emitEvent('social-status-changed', { active: started, petId: newConfig.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
       });
     };
     setup();
@@ -762,6 +769,7 @@ export const Character = () => {
       unlistenClearLogs?.();
       unlistenConfigUpdated?.();
       unlistenSetLurkMode?.();
+      unlistenSetTargetPaused?.();
       unlistenQueryTargetNames?.();
     };
   }, []);

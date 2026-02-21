@@ -19,6 +19,9 @@ let activeLoop = null;
 /** 每个 target 的潜水模式 Map<target, 'normal'|'semi-lurk'|'full-lurk'> */
 const lurkModes = new Map();
 
+/** 每个 target 的暂停状态 Map<target, boolean> —— 暂停后 Observer 和 Reply 均跳过 */
+const pausedTargets = new Map();
+
 /** target 名称缓存 Map<target, string> —— 从 MCP 批量拉取中自动填充 */
 const targetNamesCache = new Map();
 
@@ -27,6 +30,7 @@ const systemLogs = [];
 /** 每目标日志 Map<target, Array>（每个 target 最多 200 条） */
 const targetLogs = new Map();
 const MAX_LOGS = 200;
+let _logIdCounter = 0;
 
 /**
  * 本地发送消息缓存
@@ -44,6 +48,7 @@ const sentMessagesCache = new Map();
 
 function addLog(level, message, details = null, target = undefined) {
   const entry = {
+    id: _logIdCounter++,
     timestamp: new Date().toISOString(),
     level,
     message,
@@ -59,6 +64,8 @@ function addLog(level, message, details = null, target = undefined) {
     systemLogs.push(entry);
     if (systemLogs.length > MAX_LOGS) systemLogs.splice(0, systemLogs.length - MAX_LOGS);
   }
+  // Incremental push to all windows (SocialPage lives in a different webview)
+  tauri.emitToAll('social-log-entry', entry);
 
   // Don't console.log poll entries (they are aggregated and verbose)
   if (level === 'poll') return;
@@ -1306,6 +1313,12 @@ export async function startSocialLoop(config, onStatusChange) {
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
+        // ── 暂停检查 ──
+        if (pausedTargets.get(target)) {
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        
         const buf = dataBuffer.get(target);
         if (!buf || buf.messages.length === 0) {
           await new Promise(r => setTimeout(r, 2000));
@@ -1402,6 +1415,12 @@ export async function startSocialLoop(config, onStatusChange) {
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
+        // ── 暂停检查 ──
+        if (pausedTargets.get(target)) {
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        
         const buf = dataBuffer.get(target);
         if (!buf || buf.messages.length === 0) {
           await new Promise(r => setTimeout(r, 1000));
@@ -1600,6 +1619,7 @@ export function stopSocialLoop() {
     activeLoop = null;
     sentMessagesCache.clear();
     lurkModes.clear();
+    pausedTargets.clear();
     targetNamesCache.clear();
   }
 }
@@ -1644,6 +1664,32 @@ export function getLurkModes() {
 }
 
 /**
+ * 设置指定 target 的暂停状态
+ * @param {string} target - 群号/QQ号
+ * @param {boolean} paused
+ */
+export function setTargetPaused(target, paused) {
+  if (!target) return;
+  const prev = pausedTargets.get(target) || false;
+  if (paused) {
+    pausedTargets.set(target, true);
+  } else {
+    pausedTargets.delete(target);
+  }
+  if (prev !== !!paused) {
+    addLog('info', `Target [${target}] ${paused ? '⏸️ paused' : '▶️ resumed'}`, null, target);
+  }
+}
+
+/**
+ * 获取所有 target 的暂停状态
+ * @returns {Object<string, boolean>}
+ */
+export function getPausedTargets() {
+  return Object.fromEntries(pausedTargets);
+}
+
+/**
  * 获取 target 名称缓存（群名/好友名）—— 用于 UI 显示
  * @returns {Object<string, string>} { targetId: displayName }
  */
@@ -1660,6 +1706,7 @@ export function getSocialStatus() {
     active: activeLoop !== null,
     petId: activeLoop?.petId || null,
     lurkModes: Object.fromEntries(lurkModes),
+    pausedTargets: Object.fromEntries(pausedTargets),
   };
 }
 
@@ -1684,5 +1731,7 @@ export default {
   setLurkMode,
   getLurkMode,
   getLurkModes,
+  setTargetPaused,
+  getPausedTargets,
   getTargetNames,
 };
