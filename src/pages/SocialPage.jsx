@@ -136,13 +136,21 @@ export default function SocialPage() {
   }, []);
 
   // ── Listen for full log responses (initial load / clear) ──
+  // ── Dedup set for incremental log entries ──
+  const seenLogIdsRef = React.useRef(new Set());
+
+  // ── Listen for full log responses (initial load / clear) ──
   useEffect(() => {
     let unlisten;
     const setup = async () => {
       unlisten = await listen('social-logs-response', (event) => {
         const payload = event.payload || [];
-        // Full load comes pre-sorted from getSocialLogs(); ensure stable order
-        payload.sort((a, b) => (a.id ?? 0) - (b.id ?? 0));
+        // Rebuild dedup set from full load
+        const ids = seenLogIdsRef.current;
+        ids.clear();
+        for (const log of payload) {
+          if (log.id != null) ids.add(log.id);
+        }
         setLogs(payload);
       });
     };
@@ -158,9 +166,22 @@ export default function SocialPage() {
       unlisten = await listen('social-log-entry', (event) => {
         const entry = event.payload;
         if (!entry) return;
+        // O(1) dedup via Set
+        const ids = seenLogIdsRef.current;
+        if (entry.id != null && ids.has(entry.id)) return; // already seen
+        if (entry.id != null) ids.add(entry.id);
         setLogs(prev => {
           const next = [...prev, entry];
-          return next.length > UI_MAX_LOGS ? next.slice(next.length - UI_MAX_LOGS) : next;
+          if (next.length > UI_MAX_LOGS) {
+            // Trim oldest entries and remove their ids from dedup set
+            const trimmed = next.slice(next.length - UI_MAX_LOGS);
+            const trimmedIds = next.slice(0, next.length - UI_MAX_LOGS);
+            for (const t of trimmedIds) {
+              if (t.id != null) ids.delete(t.id);
+            }
+            return trimmed;
+          }
+          return next;
         });
       });
     };
@@ -290,24 +311,31 @@ export default function SocialPage() {
     }),
   ];
 
+  // Unified sorted logs — single sort, all downstream consumers benefit
+  const sortedLogs = useMemo(() =>
+    [...logs].sort((a, b) => (a.id ?? 0) - (b.id ?? 0)),
+    [logs]
+  );
+
   // Precompute log counts by target (O(N) once instead of O(N×M) per render)
   const logCountByTarget = useMemo(() => {
     const counts = {};
-    for (const log of logs) {
+    for (const log of sortedLogs) {
       if (log.target) counts[log.target] = (counts[log.target] || 0) + 1;
     }
     return counts;
-  }, [logs]);
+  }, [sortedLogs]);
 
-  // Memoized filtered + reversed logs
-  const filteredLogs = useMemo(() => logs.filter(log => {
+  // Memoized filtered logs (based on sorted data)
+  const filteredLogs = useMemo(() => sortedLogs.filter(log => {
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [logs, logFilter, showSystem]);
+  }), [sortedLogs, logFilter, showSystem]);
 
+  // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
 
   // ── Close handler ──
