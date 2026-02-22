@@ -390,19 +390,23 @@ export const DEFAULT_REPLY_STRATEGY = `你不需要回复每一条消息。沉�
  */
 function buildReplyToolInstruction(targetName, targetId) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : targetId;
-  return `⚠️ 重要：你的纯文本输出不会被发送到群聊。想说话就必须调用 send_message 工具，这是唯一的发送方式。直接输出的文本只有你自己能看到。
-⚠️ 你当前在：${groupLabel}。你的一切回复和工具操作都只针对这个群。
+  return `⚠️ 你当前在：${groupLabel}。你的一切回复和工具操作都只针对这个群。
 
-⚠️ 发送前必须检查：在调用 send_message 之前，先回顾上方的 assistant 消息（你之前说过的话）。如果你想说的内容已经说过了，或者意思相近，直接输出"[沉默]"，不要重复发送。你可以先用纯文本写下你的思考过程（不会发到群里），确认不重复后再调用 send_message。
+🚨 最重要的规则：你的纯文本输出【不会】被发送到群聊。群友看不到你的纯文本。想说话就【必须】调用 send_message 工具，这是唯一的发送方式。
 
-回复方式：
+你的工作流程（严格按步骤执行）：
+1. 回顾上方 assistant 消息（你之前说过的话），判断是否有新内容值得说
+2. 如果不想回复 → 直接输出纯文本"[沉默]"，结束
+3. 如果想回复 → 调用 send_message 工具发送（这是消息到达群聊的唯一方式）→ 然后输出"[沉默]"结束
+
+⚠️ 常见错误：直接输出你想说的话而不调用 send_message。这样做群友【完全看不到】你的回复，等于白说。一定要走 send_message 工具。
+
+回复规则：
 - 🚫 一次调用严格只能使用一次 send_message 工具。如果需要回复多个人或多个话题，把内容合并到一条消息里发送（可以用换行分隔），而不是多次调用 send_message。
 - 调用 send_message 时只需提供 content 参数（回复内容），target 和 target_type 会自动填充，不要自己填写
 - send_message 默认会将长消息自动切分为多条发送。如果内容是需要完整展示的长文本（如代码、搜索结果、详细解释），可以传 split_content=false 保持为一条完整消息
 - send_message 的返回结果中会附带最近的群消息（包括你自己的回复，标注为 [bot(你自己)]）。请仔细查看，避免重复表达相同观点
-- 回复完后，直接输出纯文本"[沉默]"结束，不要再调用任何工具
-- 不想回复时，不要调用 send_message，直接输出纯文本"[沉默]"两个字即可。🚫 严禁用 send_message 发送"[沉默]"——"[沉默]"是你的内部指令，不是群消息
-- 除了"[沉默]"之外，不要输出任何其他纯文本 — 你说的话不会送达群聊
+- 🚫 严禁用 send_message 发送"[沉默]"——"[沉默]"是你的内部指令，不是群消息
 
 历史查询工具（只读）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
@@ -416,7 +420,7 @@ function buildReplyToolInstruction(targetName, targetId) {
 
 ⚠️ 你没有群规则和社交记忆的写入工具。群档案的维护由独立的观察者负责，你只需专注于回复决策。
 
-⚠️ 【再次提醒】发送前必须回顾上方 assistant 消息，确认你想说的内容没有说过。可以先用纯文本写下思考（不会发到群里），确认不重复后再调用 send_message。如果已经说过类似的话，直接输出"[沉默]"。`;
+⚠️ 【再次提醒】想说话 → 必须调用 send_message 工具。直接输出纯文本群友看不到。发送前先回顾上方 assistant 消息，确认没有重复。如果已经说过类似的话，直接输出"[沉默]"。`;
 }
 
 export default { buildSocialPrompt };

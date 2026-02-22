@@ -524,10 +524,26 @@ async function pollTarget({
     addLog('info', `${targetType}:${target} has @me in messages`, null, target);
   }
   
-  // 确保最后一条是 user（LLM 需要回复 user 消息）
-  if (historyTurns.length > 0 && historyTurns[historyTurns.length - 1].role === 'assistant') {
-    historyTurns.push({ role: 'user', content: '（以上是所有的对话历史，请决定是否回复。不想回复的话回答"[沉默]"。需要回复请使用 send_message 工具，且只能调用一次。注意：回复前先检查上方 assistant 消息，如果你已经表达过类似观点，直接回答"[沉默]"。）' });
+  // ── 防复读：根据末尾 turn 类型注入不同提示 ──
+  const lastTurn = historyTurns.length > 0 ? historyTurns[historyTurns.length - 1] : null;
+  if (lastTurn && lastTurn.role === 'assistant') {
+    // 位置 A：在 bot 最后的 assistant turn 内容上追加醒目标记
+    const selfWarning = '\n[⚠️ 这是你自己的回复。如果你还有没说完的话可以继续，但如果观点已经表达完整就不要重复了。]';
+    if (typeof lastTurn.content === 'string') {
+      lastTurn.content += selfWarning;
+    } else if (Array.isArray(lastTurn.content)) {
+      // 多模态数组：找最后一个 text part 追加
+      for (let i = lastTurn.content.length - 1; i >= 0; i--) {
+        if (lastTurn.content[i].type === 'text') {
+          lastTurn.content[i].text += selfWarning;
+          break;
+        }
+      }
+    }
+    // 位置 B（末尾=assistant）：提示注意复读，但允许补充未说完的内容
+    historyTurns.push({ role: 'user', content: '（以上对话的最后几条是你自己的发言，之后没有新的群友消息。请判断：1. 如果你还有想说但没说完的内容，可以继续补充。 2. 但如果你的观点已经表达完整，或者想说的话和上面重复，请回答"[沉默]"。⚠️ 提醒：想发消息必须调用 send_message 工具，直接输出纯文本群友看不到。不想回复请回答"[沉默]"。需要回复请使用 send_message 工具，且只能调用一次。）' });
   }
+  // 末尾=user 时不额外注入 prompt，群友消息本身就是最好的回复信号
   
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -708,6 +724,29 @@ async function pollTarget({
       addLog('warn', `⚠️ Tried to reply but send failed for ${targetType}:${target}`, result.content?.substring(0, 100), target);
       return { action: 'send_failed', detail: result.content };
     } else {
+      // LLM 没调 send_message — 检查是否想说话但忘了用工具
+      const text = (result.content || '').trim();
+      const isTrueSilent = !text || text === '[沉默]' || text.includes('[沉默]');
+      
+      if (!isTrueSilent && text.length > 2 && role !== 'observer') {
+        // LLM 输出了实际内容但没调 send_message → 补发
+        try {
+          const sendToolName = `${mcpServerName}__send_message`;
+          await executeToolByName(sendToolName, { content: text, target, target_type: targetType }, { timeout: 10000 });
+          sendMessageSuccess = true;
+          if (newWatermarkId) watermarks.set(target, newWatermarkId);
+          // 缓存发送记录
+          const arr = sentCache.get(target) || [];
+          arr.push({ content: text, timestamp: new Date().toISOString() });
+          sentCache.set(target, arr);
+          emitPollLog('replied');
+          addLog('info', `✅ Auto-sent for ${targetType}:${target} (LLM forgot tool): ${text.substring(0, 80)}`, null, target);
+          return { action: 'replied', detail: text };
+        } catch (e) {
+          addLog('warn', `Auto-send fallback failed for ${target}: ${e.message}`, null, target);
+        }
+      }
+      
       emitPollLog('silent');
       addLog('info', `😶 Silent for ${targetType}:${target}`, result.content?.substring(0, 50), target);
       return { action: 'silent', detail: result.content };
@@ -1377,9 +1416,17 @@ export async function startSocialLoop(config, onStatusChange) {
           if (result.action !== 'error') {
             lastObserveTime.set(target, Date.now());
             // Observer 处理完后触发 compress（如果旧消息超过阈值）
+            // 必须用较早的水位线判断，和 trimBufferOldMessages 一致
+            // 否则当 Reply 水位线落后时，Observer 会无限触发 compress
             const obsWmId = observerWatermarks.get(target);
-            const obsWmIdx = obsWmId ? buf.messages.findIndex(m => m.message_id === obsWmId) : -1;
-            const oldCount = obsWmIdx >= 0 ? obsWmIdx : 0;
+            const repWmId = replyWatermarks.get(target);
+            let earlierWmIdx = -1;
+            for (let i = 0; i < buf.messages.length; i++) {
+              if (buf.messages[i].message_id === obsWmId || buf.messages[i].message_id === repWmId) {
+                if (earlierWmIdx === -1 || i < earlierWmIdx) earlierWmIdx = i;
+              }
+            }
+            const oldCount = earlierWmIdx >= 0 ? earlierWmIdx : 0;
             if (oldCount > BUFFER_COMPRESS_THRESHOLD) {
               const compressToolName = `${config.mcpServerName}__compress_context`;
               const tt = targetType || 'group';
