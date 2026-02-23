@@ -541,7 +541,7 @@ async function pollTarget({
       }
     }
     // 位置 B（末尾=assistant）：提示注意复读，但允许补充未说完的内容
-    historyTurns.push({ role: 'user', content: '（以上对话的最后几条是你自己的发言，之后没有新的群友消息。请判断：1. 如果你还有想说但没说完的内容，可以继续补充。 2. 但如果你的观点已经表达完整，或者想说的话和上面重复，请回答"[沉默]"。⚠️ 提醒：想发消息必须调用 send_message 工具，直接输出纯文本群友看不到。不想回复请回答"[沉默]"。需要回复请使用 send_message 工具，且只能调用一次。）' });
+    historyTurns.push({ role: 'user', content: '（以上对话的最后几条是你自己的发言，之后没有新的群友消息。请判断：1. 如果你还有想说但没说完的内容，可以继续补充。 2. 但如果你的观点已经表达完整，或者想说的话和上面重复，请回答"[沉默]：<理由>"。⚠️ 提醒：想发消息必须调用 send_message 工具，直接输出纯文本群友看不到。不想回复请回答"[沉默]：<理由>"。需要回复请使用 send_message 工具，且只能调用一次。）' });
   }
   // 末尾=user 时不额外注入 prompt，群友消息本身就是最好的回复信号
   
@@ -615,6 +615,7 @@ async function pollTarget({
   };
 
   // 7. 调用 LLM（非流式，带工具循环）
+  addLog('info', `🤖 ${role === 'observer' ? 'Observer' : 'Reply'} LLM starting for ${target} (turns=${messages.length}, hasAtMe=${individualMessages.some(m => m.is_at_me)})`, null, target);
   let sendMessageSuccess = false;
   let sendCount = 0;
   let pendingSendContent = null; // 暂存 send_message 的 content 参数
@@ -729,19 +730,44 @@ async function pollTarget({
       const isTrueSilent = !text || text === '[沉默]' || text.includes('[沉默]');
       
       if (!isTrueSilent && text.length > 2 && role !== 'observer') {
-        // LLM 输出了实际内容但没调 send_message → 补发
+        // LLM 输出了实际内容但没调 send_message → 补发（先句内去重）
+        // 句内去重：按中英文标点拆句，去掉连续重复段
+        const dedup = (s) => {
+          // 按句末标点拆分，保留分隔符
+          const parts = s.split(/(?<=[。！？!?\n])\s*/).filter(p => p.trim());
+          if (parts.length <= 1) {
+            // 无标点 → 尝试按空格拆分（处理 "X X" 模式）
+            const words = s.split(/\s+/).filter(w => w);
+            if (words.length >= 2) {
+              const half = Math.ceil(words.length / 2);
+              const first = words.slice(0, half).join(' ');
+              const second = words.slice(half).join(' ');
+              if (first === second) return first;
+            }
+            return s;
+          }
+          const out = [parts[0]];
+          for (let i = 1; i < parts.length; i++) {
+            if (parts[i].trim() !== parts[i - 1].trim()) out.push(parts[i]);
+          }
+          return out.join('');
+        };
+        const cleanText = dedup(text);
+        if (cleanText !== text) {
+          addLog('info', `🔁 Auto-send dedup: "${text.substring(0, 60)}" → "${cleanText.substring(0, 60)}"`, null, target);
+        }
         try {
           const sendToolName = `${mcpServerName}__send_message`;
-          await executeToolByName(sendToolName, { content: text, target, target_type: targetType }, { timeout: 10000 });
+          await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType }, { timeout: 10000 });
           sendMessageSuccess = true;
           if (newWatermarkId) watermarks.set(target, newWatermarkId);
           // 缓存发送记录
           const arr = sentCache.get(target) || [];
-          arr.push({ content: text, timestamp: new Date().toISOString() });
+          arr.push({ content: cleanText, timestamp: new Date().toISOString() });
           sentCache.set(target, arr);
           emitPollLog('replied');
-          addLog('info', `✅ Auto-sent for ${targetType}:${target} (LLM forgot tool): ${text.substring(0, 80)}`, null, target);
-          return { action: 'replied', detail: text };
+          addLog('info', `✅ Auto-sent for ${targetType}:${target} (LLM forgot tool): ${cleanText.substring(0, 80)}`, null, target);
+          return { action: 'replied', detail: cleanText };
         } catch (e) {
           addLog('warn', `Auto-send fallback failed for ${target}: ${e.message}`, null, target);
         }
@@ -1350,6 +1376,8 @@ export async function startSocialLoop(config, onStatusChange) {
     // 随机延迟，避免同时启动
     await new Promise(r => setTimeout(r, Math.random() * 3000 + 1000));
 
+    let llmRunning = false;   // 本 target observer 的 LLM 是否正在执行
+
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
         // ── 暂停检查 ──
@@ -1388,6 +1416,12 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
+        // ── LLM 正在执行 → 跳过本轮 ──
+        if (llmRunning) {
+          await new Promise(r => setTimeout(r, 2000));
+          continue;
+        }
+        
         // Observer 冷却
         const now = Date.now();
         const sinceLastObserve = now - (lastObserveTime.get(target) || 0);
@@ -1396,48 +1430,54 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
-        try {
-          const result = await pollTarget({
-            target,
-            targetType,
-            mcpServerName: config.mcpServerName,
-            llmConfig,
-            petId: config.petId,
-            promptConfig,
-            watermarks: observerWatermarks,
-            sentCache: sentMessagesCache,
-            bufferMessages: buf.messages,
-            compressedSummary: buf.compressedSummary,
-            groupName: buf.metadata?.group_name || buf.metadata?.friend_name || target,
-            consumedAtMeIds: new Set(), // Observer 不消费 @me
-            lurkMode: 'full-lurk',      // Observer 始终使用观察模式
-            role: 'observer',
-          });
+        // ── 异步启动 LLM（不阻塞检测循环） ──
+        llmRunning = true;
+        const snapshotBuf = dataBuffer.get(target);
+        
+        pollTarget({
+          target,
+          targetType,
+          mcpServerName: config.mcpServerName,
+          llmConfig,
+          petId: config.petId,
+          promptConfig,
+          watermarks: observerWatermarks,
+          sentCache: sentMessagesCache,
+          bufferMessages: snapshotBuf ? snapshotBuf.messages : buf.messages,
+          compressedSummary: snapshotBuf ? snapshotBuf.compressedSummary : buf.compressedSummary,
+          groupName: (snapshotBuf || buf).metadata?.group_name || (snapshotBuf || buf).metadata?.friend_name || target,
+          consumedAtMeIds: new Set(), // Observer 不消费 @me
+          lurkMode: 'full-lurk',      // Observer 始终使用观察模式
+          role: 'observer',
+        }).then(result => {
           if (result.action !== 'error') {
             lastObserveTime.set(target, Date.now());
             // Observer 处理完后触发 compress（如果旧消息超过阈值）
-            // 必须用较早的水位线判断，和 trimBufferOldMessages 一致
-            // 否则当 Reply 水位线落后时，Observer 会无限触发 compress
-            const obsWmId = observerWatermarks.get(target);
-            const repWmId = replyWatermarks.get(target);
-            let earlierWmIdx = -1;
-            for (let i = 0; i < buf.messages.length; i++) {
-              if (buf.messages[i].message_id === obsWmId || buf.messages[i].message_id === repWmId) {
-                if (earlierWmIdx === -1 || i < earlierWmIdx) earlierWmIdx = i;
+            const currentBuf = dataBuffer.get(target);
+            if (currentBuf) {
+              const obsWmId = observerWatermarks.get(target);
+              const repWmId = replyWatermarks.get(target);
+              let earlierWmIdx = -1;
+              for (let i = 0; i < currentBuf.messages.length; i++) {
+                if (currentBuf.messages[i].message_id === obsWmId || currentBuf.messages[i].message_id === repWmId) {
+                  if (earlierWmIdx === -1 || i < earlierWmIdx) earlierWmIdx = i;
+                }
+              }
+              const oldCount = earlierWmIdx >= 0 ? earlierWmIdx : 0;
+              if (oldCount > BUFFER_COMPRESS_THRESHOLD) {
+                const compressToolName = `${config.mcpServerName}__compress_context`;
+                const tt = targetType || 'group';
+                executeToolByName(compressToolName, { target, target_type: tt }, { timeout: 15000 })
+                  .then(() => addLog('info', `compress_context triggered for ${target} (${oldCount} old msgs > ${BUFFER_COMPRESS_THRESHOLD})`, null, target))
+                  .catch(e => addLog('warn', `compress_context failed for ${target}`, e.message, target));
               }
             }
-            const oldCount = earlierWmIdx >= 0 ? earlierWmIdx : 0;
-            if (oldCount > BUFFER_COMPRESS_THRESHOLD) {
-              const compressToolName = `${config.mcpServerName}__compress_context`;
-              const tt = targetType || 'group';
-              executeToolByName(compressToolName, { target, target_type: tt }, { timeout: 15000 })
-                .then(() => addLog('info', `compress_context triggered for ${target} (${oldCount} old msgs > ${BUFFER_COMPRESS_THRESHOLD})`, null, target))
-                .catch(e => addLog('warn', `compress_context failed for ${target}`, e.message, target));
-            }
           }
-        } catch (e) {
+        }).catch(e => {
           addLog('error', `Observer ${label} error`, e.message, target);
-        }
+        }).finally(() => {
+          llmRunning = false;
+        });
         
         await new Promise(r => setTimeout(r, 2000));
       } catch (e) {
@@ -1460,6 +1500,9 @@ export async function startSocialLoop(config, onStatusChange) {
     const label = `${targetType}:${target}`;
     await new Promise(r => setTimeout(r, Math.random() * 2000));
 
+    let llmRunning = false;   // 本 target 的 LLM 是否正在执行
+    let lastLoggedNewCount = 0; // 上次日志记录的新消息条数（去重用）
+
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
         // ── 暂停检查 ──
@@ -1474,7 +1517,7 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
-        // Reply 使用独立水位线
+        // ── 检测变化（每 1s 无论 LLM 是否运行都执行） ──
         const detection = detectChange(target, replyWatermarks);
         
         if (!detection) {
@@ -1482,18 +1525,38 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
-        const { changed, hasAtMe, isFirstRun } = detection;
+        const { changed, hasAtMe, isFirstRun, newCount } = detection;
+        
+        // ── 检测日志：仅当新消息条数变化时记录 ──
+        if (changed && newCount > 0 && newCount !== lastLoggedNewCount) {
+          addLog('info', `📨 Reply ${label}: +${newCount} new messages${hasAtMe ? ' (has @me)' : ''}${llmRunning ? ' [LLM busy]' : ''}`, null, target);
+          lastLoggedNewCount = newCount;
+        }
         
         if (isFirstRun) {
-          // 首次：设水位线为 buffer 最后一条消息
-          const lastMsg = buf.messages[buf.messages.length - 1];
-          if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          addLog('info', `${label} reply first run, watermark set`, null, target);
+          // 检查 buffer 中是否有未消费的 @me
+          const consumed = consumedAtMe.get(target) || new Set();
+          const pendingAtMe = buf.messages.some(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
+          
+          if (!pendingAtMe) {
+            // 无 @me → 正常跳过，设水位线到末尾
+            const lastMsg = buf.messages[buf.messages.length - 1];
+            if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
+            addLog('info', `${label} reply first run, watermark set`, null, target);
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          }
+          // 有 @me → 不设水位线，让代码继续走到 pollTarget 正常处理
+          addLog('info', `${label} reply first run, has pending @me — processing`, null, target);
+        }
+        
+        if (!changed) {
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
         
-        if (!changed) {
+        // ── LLM 正在执行 → 跳过本轮，等下次检测 ──
+        if (llmRunning) {
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
@@ -1532,28 +1595,34 @@ export async function startSocialLoop(config, onStatusChange) {
           consumedAtMe.set(target, consumed);
         }
         
-        try {
-          const allConsumed = consumedAtMe.get(target) || new Set();
-          const result = await pollTarget({
-            target,
-            targetType,
-            mcpServerName: config.mcpServerName,
-            llmConfig,
-            petId: config.petId,
-            promptConfig,
-            watermarks: replyWatermarks,
-            sentCache: sentMessagesCache,
-            bufferMessages: buf.messages,
-            compressedSummary: buf.compressedSummary,
-            groupName: buf.metadata?.group_name || buf.metadata?.friend_name || target,
-            consumedAtMeIds: allConsumed,
-            lurkMode: 'normal',       // Reply 始终使用正常回复模式
-            role: 'reply',
-          });
+        // ── 异步启动 LLM（不阻塞检测循环） ──
+        llmRunning = true;
+        const allConsumed = consumedAtMe.get(target) || new Set();
+        const snapshotBuf = dataBuffer.get(target);   // 快照当前 buffer 引用
+        
+        pollTarget({
+          target,
+          targetType,
+          mcpServerName: config.mcpServerName,
+          llmConfig,
+          petId: config.petId,
+          promptConfig,
+          watermarks: replyWatermarks,
+          sentCache: sentMessagesCache,
+          bufferMessages: snapshotBuf ? snapshotBuf.messages : buf.messages,
+          compressedSummary: snapshotBuf ? snapshotBuf.compressedSummary : buf.compressedSummary,
+          groupName: (snapshotBuf || buf).metadata?.group_name || (snapshotBuf || buf).metadata?.friend_name || target,
+          consumedAtMeIds: allConsumed,
+          lurkMode: 'normal',       // Reply 始终使用正常回复模式
+          role: 'reply',
+        }).then(() => {
           if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
-        } catch (e) {
-          addLog('error', `Reply ${label} error`, e.message, target);
-        }
+        }).catch(e => {
+          addLog('error', `Reply ${label} LLM error`, e.message, target);
+        }).finally(() => {
+          llmRunning = false;
+          lastLoggedNewCount = 0; // 重置，下轮检测重新记录
+        });
         
         await new Promise(r => setTimeout(r, 1000));
       } catch (e) {
