@@ -1182,11 +1182,12 @@ export async function startSocialLoop(config, onStatusChange) {
   const WILLINGNESS_TAGS = [
     { level: 1, key: '不想理' },
     { level: 2, key: '无感' },
+    { level: 2, key: '等回复' },
     { level: 3, key: '有点想说' },
     { level: 4, key: '想聊' },
     { level: 5, key: '忍不住' },
   ];
-  const WILLINGNESS_RE = /\[(不想理|无感|有点想说|想聊|忍不住)[：:][^\]]*\]/;
+  const WILLINGNESS_RE = /\[(不想理|无感|等回复|有点想说|想聊|忍不住)[：:][^\]]*\]/;
   const parseWillingness = (rawText) => {
     const m = rawText.match(WILLINGNESS_RE);
     if (!m) return { level: 0, label: '', thought: rawText.trim() };

@@ -5,7 +5,7 @@
 <h1 align="center">🐾 PetGPT</h1>
 
 <p align="center">
-  <strong>AI Desktop Pet Assistant</strong> — A lightweight, cross-platform desktop companion powered by large language models.
+  <strong>AI Desktop Pet Assistant with Autonomous Social Agent</strong> — A lightweight, cross-platform desktop companion powered by large language models, capable of independently participating in group chats.
 </p>
 
 ---
@@ -114,12 +114,67 @@ Flexible desktop integration:
 - **Session Persistence** — Resume conversations after app restart
 - **Orphan Recovery** — Transfer chats from deleted assistants to new ones
 
+### 🤝 Social Agent — Autonomous Group Chat Participation
+
+PetGPT can autonomously join and participate in messaging platform group chats as an independent social agent. Currently supports **QQ** (via [Amadeus-QQ-MCP](https://github.com/JulesLiu390/Amadeus-QQ-MCP)), with **Telegram**, **WhatsApp**, and more platforms planned.
+
+#### Architecture: 4-Layer Processing Pipeline
+
+Each monitored group runs **three independent loops** concurrently:
+
+| Layer | Role | Description |
+|-------|------|-------------|
+| **Fetcher** | Data Ingestion | Batch-polls all targets on a fixed interval, writes raw messages into a shared in-memory buffer |
+| **Observer** | Memory & Archival | Reads the message stream in read-only lurk mode; maintains per-group rule files (`GROUP_RULE_{id}.md`) and a global social memory (`SOCIAL_MEMORY.md`) — no sending |
+| **Reply** | Response Decision | Detects new messages via watermark comparison; decides whether to speak or stay silent; sends via `send_message` tool call |
+| **Intent** | Inner Monologue | Per-group independent thought loop; evaluates the character's subjective reaction to ongoing conversations and outputs a 5-tier willingness score |
+
+#### Intent System — 5-Tier Willingness
+
+The Intent loop produces a continuous inner monologue for each group, rating the character's desire to speak:
+
+| Tier | Tag | Meaning |
+|------|-----|---------|
+| 1 | `[不想理]` | Zero interest, will not speak |
+| 2 | `[无感]` | Aware of the topic, but irrelevant |
+| 3 | `[有点想说]` | A thought surfaces, but could stay silent |
+| 4 | `[想聊]` | Has something to say, wants to join |
+| 5 | `[忍不住]` | Must speak, can't hold back |
+
+Tiers 1–2 → sleep (no reply triggered). Tiers 3–5 → active (reply loop considers speaking). The intent is injected into the Reply prompt's final user message for maximum recency attention.
+
+#### Lurk Modes
+
+Each target can be independently set to one of three modes:
+
+| Mode | Reply Behavior | Observer | Intent |
+|------|---------------|----------|--------|
+| `normal` | Full participation | ✅ | Evaluates on every new message |
+| `semi-lurk` | Only responds when @mentioned | ✅ | 1-min cooldown between evaluations |
+| `full-lurk` | Silent — no replies | ✅ | 1-min cooldown between evaluations |
+
+All modes share the same Observer loop for continuous memory archival. Intent prompts are mode-aware — the LLM knows whether the character can speak, influencing its thought output.
+
+#### Double-Slot Catchup Queue
+
+Messages arriving while the Reply LLM is running are tracked by a background watcher (2s interval). Up to 2 catchup rounds are queued, ensuring recent messages are not missed without running indefinitely.
+
+#### Platform Support
+
+| Platform | Status | Integration |
+|----------|--------|-------------|
+| **QQ** | ✅ Supported | Via [Amadeus-QQ-MCP](https://github.com/JulesLiu390/Amadeus-QQ-MCP) (OneBot v11 → native MCP tool calls) |
+| **Telegram** | 🔜 Planned | — |
+| **WhatsApp** | 🔜 Planned | — |
+| **Discord** | 🔜 Planned | — |
+
 ---
 
 ## 🗂️ Table of Contents
 
 - [Download](#-download)
 - [Features](#-features)
+- [Social Agent](#-social-agent--autonomous-group-chat-participation)
 - [Keyboard Shortcuts](#️-keyboard-shortcuts)
 - [Development Guide](#-development-guide)
 - [Project Structure](#-project-structure)
