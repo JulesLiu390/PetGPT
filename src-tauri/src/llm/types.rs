@@ -111,6 +111,9 @@ pub struct LlmRequest {
     pub max_tokens: Option<u32>,
     #[serde(default)]
     pub stream: bool,
+    /// 结构化输出格式 (OpenAI: response_format, Gemini: responseMimeType + responseSchema)
+    #[serde(default)]
+    pub response_format: Option<serde_json::Value>,
 }
 
 /// LLM 响应
@@ -153,6 +156,9 @@ pub struct OpenAIRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
     pub stream: bool,
+    /// 结构化输出 response_format
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub response_format: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]

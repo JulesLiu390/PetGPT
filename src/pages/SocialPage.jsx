@@ -31,6 +31,7 @@ export default function SocialPage() {
     agentCanEditStrategy: false,
     atMustReply: true,
     botQQ: '',
+    intentModelName: '',
   });
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -51,6 +52,7 @@ export default function SocialPage() {
   const [showLlm, setShowLlm] = useState(false);
   const [showTools, setShowTools] = useState(true);
   const [showSystem, setShowSystem] = useState(true);
+  const [showIntent, setShowIntent] = useState(true);
 
   // ── Load assistants + providers ──
   useEffect(() => {
@@ -328,12 +330,14 @@ export default function SocialPage() {
 
   // Memoized filtered logs (based on sorted data)
   const filteredLogs = useMemo(() => sortedLogs.filter(log => {
+    // Intent logs have target — apply target filter normally
+    if (log.level === 'intent') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [sortedLogs, logFilter, showSystem]);
+  }), [sortedLogs, logFilter, showSystem, showIntent]);
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
@@ -456,6 +460,30 @@ export default function SocialPage() {
                     )}
                   </FormGroup>
                 </div>
+              </Card>
+
+              {/* Intent Model */}
+              <Card title="Intent Model" description="Separate model for intent analysis (optional, defaults to main model)">
+                <FormGroup label="Model">
+                  {providerModels.length > 0 ? (
+                    <Select
+                      value={config.intentModelName}
+                      onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
+                    >
+                      <option value="">Same as main model</option>
+                      {providerModels.map(m => {
+                        const modelId = typeof m === 'string' ? m : m.id;
+                        return <option key={modelId} value={modelId}>{modelId}</option>;
+                      })}
+                    </Select>
+                  ) : (
+                    <Input
+                      value={config.intentModelName}
+                      onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
+                      placeholder="Leave empty to use main model"
+                    />
+                  )}
+                </FormGroup>
               </Card>
 
               {/* MCP Server */}
@@ -693,6 +721,7 @@ export default function SocialPage() {
               <ToggleBtn active={showLlm} onClick={() => setShowLlm(!showLlm)} icon="🧠" label="LLM" />
               <ToggleBtn active={showTools} onClick={() => setShowTools(!showTools)} icon="🔧" label="Tools" />
               <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
+              <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
               {/* Lurk mode buttons for selected target */}
               {socialActive && selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
@@ -739,11 +768,14 @@ export default function SocialPage() {
                 reversedFilteredLogs.map((log) => (
                   log.level === 'poll' ? (
                     <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
+                  ) : log.level === 'intent' ? (
+                    <IntentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
                       log.level === 'warn' ? 'text-amber-600' :
                       log.level === 'memory' ? 'text-purple-600' :
+                      log.level === 'intent' ? 'text-purple-500' :
                       'text-slate-600'
                     }`}>
                       <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
@@ -768,6 +800,36 @@ export default function SocialPage() {
 }
 
 // ==================== Helper Components ====================
+
+function IntentLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = !!log.details;
+  return (
+    <div className="py-0.5 text-purple-500">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold">[{log.level}]</span>
+      {log.target && logFilter === 'all' && (
+        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+      )}
+      {' '}
+      {log.message}
+      {hasDetails && (
+        <button
+          onClick={() => setExpanded(v => !v)}
+          className="ml-1.5 text-purple-400 hover:text-purple-300 transition-colors"
+        >
+          {expanded ? '▾' : '▸'}
+        </button>
+      )}
+      {hasDetails && expanded && (
+        <div className="mt-0.5 ml-4 pl-2 border-l-2 border-purple-300/40 text-purple-400 whitespace-pre-wrap break-words">
+          {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function ToggleRow({ label, hint, checked, onChange }) {
   return (

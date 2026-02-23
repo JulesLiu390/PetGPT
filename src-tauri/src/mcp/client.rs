@@ -780,6 +780,7 @@ async fn handle_sampling_job(
         temperature: job.params.temperature.map(|t| t as f32),
         max_tokens: job.params.max_tokens.or(Some(4096)),
         stream: false,
+        response_format: None,
     };
     
     // Call LLM

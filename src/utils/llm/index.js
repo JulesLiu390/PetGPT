@@ -104,6 +104,7 @@ const callLLMRust = async ({ messages, apiFormat, apiKey, model, baseUrl, option
       temperature: options.temperature,
       max_tokens: options.maxTokens,
       stream: false,
+      response_format: options.responseFormat || undefined,
     };
     
     const response = await llmCall(request);

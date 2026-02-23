@@ -100,6 +100,19 @@ impl LlmClient {
             temperature: request.temperature,
             max_tokens: request.max_tokens,
             stream: false,
+            response_format: {
+                // OpenAI strict mode: 自动注入 strict + additionalProperties
+                let mut rf = request.response_format.clone();
+                if let Some(ref mut val) = rf {
+                    if let Some(js) = val.get_mut("json_schema") {
+                        js["strict"] = serde_json::json!(true);
+                        if let Some(schema) = js.get_mut("schema") {
+                            Self::inject_additional_properties_false(schema);
+                        }
+                    }
+                }
+                rf
+            },
         };
 
         let response = self.http_client
@@ -170,13 +183,42 @@ impl LlmClient {
             })
             .collect();
 
-        let gemini_request = serde_json::json!({
-            "contents": contents,
-            "generationConfig": {
-                "temperature": request.temperature.unwrap_or(0.7),
-                "maxOutputTokens": request.max_tokens.unwrap_or(8192)
-            }
+        // 提取 system instruction（与 stream.rs 保持一致）
+        let system_instruction: Option<serde_json::Value> = request.messages.iter()
+            .find(|m| m.role == Role::System)
+            .map(|m| {
+                serde_json::json!({
+                    "parts": [{ "text": m.content.as_text() }]
+                })
+            });
+
+        let mut generation_config = serde_json::json!({
+            "temperature": request.temperature.unwrap_or(0.7),
+            "maxOutputTokens": request.max_tokens.unwrap_or(8192)
         });
+
+        // 结构化输出: 将 OpenAI response_format 映射为 Gemini generationConfig 字段
+        if let Some(ref rf) = request.response_format {
+            // 从 OpenAI 格式 { type: "json_schema", json_schema: { schema: ... } } 提取 schema
+            if let Some(schema) = rf.get("json_schema").and_then(|js| js.get("schema")) {
+                generation_config["responseMimeType"] = serde_json::json!("application/json");
+                // Gemini responseSchema 使用 OpenAPI Schema（大写 type: OBJECT/STRING/BOOLEAN 等）
+                let mut converted = schema.clone();
+                Self::convert_json_schema_to_openapi(&mut converted);
+                generation_config["responseSchema"] = converted;
+            } else if rf.get("type").and_then(|t| t.as_str()) == Some("json_object") {
+                generation_config["responseMimeType"] = serde_json::json!("application/json");
+            }
+        }
+
+        let mut gemini_request = serde_json::json!({
+            "contents": contents,
+            "generationConfig": generation_config
+        });
+
+        if let Some(sys) = system_instruction {
+            gemini_request["systemInstruction"] = sys;
+        }
 
         let response = self.http_client
             .post(&endpoint)
@@ -212,6 +254,55 @@ impl LlmClient {
             error: None,
             tool_calls: None,
         })
+    }
+
+    /// 将标准 JSON Schema（小写 type）转换为 Gemini OpenAPI Schema（大写 type）
+    /// 同时剥离 Gemini 不支持的字段（additionalProperties, description 等）
+    fn convert_json_schema_to_openapi(value: &mut serde_json::Value) {
+        if let Some(obj) = value.as_object_mut() {
+            // type: "object" → "OBJECT", "string" → "STRING" 等
+            if let Some(t) = obj.get_mut("type") {
+                if let Some(s) = t.as_str() {
+                    *t = serde_json::json!(s.to_uppercase());
+                }
+            }
+            // 剥离 Gemini 不支持的字段
+            obj.remove("additionalProperties");
+            obj.remove("description");
+            obj.remove("$schema");
+            obj.remove("title");
+            // 递归处理所有子节点
+            let keys: Vec<String> = obj.keys().cloned().collect();
+            for key in keys {
+                if let Some(v) = obj.get_mut(&key) {
+                    Self::convert_json_schema_to_openapi(v);
+                }
+            }
+        } else if let Some(arr) = value.as_array_mut() {
+            for v in arr.iter_mut() {
+                Self::convert_json_schema_to_openapi(v);
+            }
+        }
+    }
+
+    /// 递归为所有 type=object 的 schema 节点注入 additionalProperties: false（OpenAI strict mode 要求）
+    fn inject_additional_properties_false(value: &mut serde_json::Value) {
+        if let Some(obj) = value.as_object_mut() {
+            if obj.get("type").and_then(|t| t.as_str()) == Some("object") {
+                obj.entry("additionalProperties").or_insert(serde_json::json!(false));
+            }
+            // 递归处理嵌套 schema（properties 的值、items 等）
+            if let Some(props) = obj.get_mut("properties") {
+                if let Some(props_obj) = props.as_object_mut() {
+                    for v in props_obj.values_mut() {
+                        Self::inject_additional_properties_false(v);
+                    }
+                }
+            }
+            if let Some(items) = obj.get_mut("items") {
+                Self::inject_additional_properties_false(items);
+            }
+        }
     }
 }
 
