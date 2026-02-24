@@ -1168,6 +1168,9 @@ export async function startSocialLoop(config, onStatusChange) {
   const dataBuffer = new Map(); // target → { messages: [], metadata: {}, compressedSummary, seenIds: Set }
   const BUFFER_HARD_CAP = 500; // 安全阀：单 target 最大缓存消息数
   const BUFFER_COMPRESS_THRESHOLD = 30; // 旧消息超过此数触发 compress
+  const fetcherFirstSeen = new Set(); // 已完成首次 fetch 的 target（用于跳过历史 @me）
+  // Intent ↔ Reply 互斥锁：同一 target 同时只能有一个在跑 LLM
+  const processorBusy = new Map(); // target → 'intent' | 'reply' | null
   // Fetcher 的定时器 ID
   let fetcherTimeoutId = null;
   // 用于区分新旧循环的 generation ID，stopSocialLoop 后立即 start 时防止旧闭包继续调度
@@ -1446,6 +1449,18 @@ export async function startSocialLoop(config, onStatusChange) {
 
         // ── 3 分钟无新消息 → 最终评估 → sleep（保留历史） ──
         if (now - state.lastActivityTime >= INTENT_IDLE_TIMEOUT_MS) {
+          // 互斥：等待 Reply 完成
+          if (processorBusy.get(target) === 'reply') {
+            if (!state._waitingForReply) {
+              state._waitingForReply = true;
+              addLog('intent', `🧠 [${tName()}] waiting for Reply to finish`, null, target);
+            }
+            await sleepInterruptible(state, 500);
+            continue;
+          }
+          state._waitingForReply = false;
+          processorBusy.set(target, 'intent');
+
           // 做最后一次 LLM 评估（带重试）
           const intentModel = config.intentModelName || llmConfig.modelName;
 
@@ -1545,6 +1560,7 @@ export async function startSocialLoop(config, onStatusChange) {
           }
 
           state.sleeping = true;
+          processorBusy.delete(target);
           continue;
         }
 
@@ -1569,7 +1585,7 @@ export async function startSocialLoop(config, onStatusChange) {
           const guaranteedInterval = sinceLastEval >= INTENT_EVAL_COOLDOWN_MS; // 60s 保底
 
           if (!hasNewMessages && !guaranteedInterval) {
-            await sleepInterruptible(state, 2000);
+            await sleepInterruptible(state, 500);
             continue;
           }
           // 首次运行只设水位线，不立即评估
@@ -1577,7 +1593,7 @@ export async function startSocialLoop(config, onStatusChange) {
             const buf = dataBuffer.get(target);
             const lastMsg = buf?.messages?.[buf.messages.length - 1];
             if (lastMsg?.message_id) intentWatermarks.set(target, lastMsg.message_id);
-            await sleepInterruptible(state, 2000);
+            await sleepInterruptible(state, 500);
             continue;
           }
         } else {
@@ -1588,6 +1604,18 @@ export async function startSocialLoop(config, onStatusChange) {
             continue;
           }
         }
+
+        // ── 互斥：等待 Reply 完成 ──
+        if (processorBusy.get(target) === 'reply') {
+          if (!state._waitingForReply) {
+            state._waitingForReply = true;
+            addLog('intent', `🧠 [${tName()}] waiting for Reply to finish`, null, target);
+          }
+          await sleepInterruptible(state, 500);
+          continue;
+        }
+        state._waitingForReply = false;
+        processorBusy.set(target, 'intent');
 
         // ── 常规意图评估（带重试） ──
         const intentModel = config.intentModelName || llmConfig.modelName;
@@ -1667,6 +1695,7 @@ export async function startSocialLoop(config, onStatusChange) {
         if (intentResult.error) {
           addLog('intent', `Intent LLM error [${tName()}]: ${intentResult.content}`, null, target);
           intentGate.delete(target); // 解锁门控（即使出错也要解锁，避免死锁）
+          processorBusy.delete(target);
           await sleepInterruptible(state, 30000);
           continue;
         }
@@ -1712,9 +1741,11 @@ export async function startSocialLoop(config, onStatusChange) {
         }
 
         // idle 不 sleep，保持 awake 继续监听新消息；只有 5min 无新消息的 idle timeout 才真正进入 sleep
-        await sleepInterruptible(state, 2000);
+        processorBusy.delete(target);
+        await sleepInterruptible(state, 500);
       } catch (e) {
         addLog('intent', `Intent loop error [${tName()}]`, e.message, target);
+        processorBusy.delete(target);
         await sleepInterruptible(state, 30000);
       }
     }
@@ -1778,13 +1809,29 @@ export async function startSocialLoop(config, onStatusChange) {
           iState.sleeping = false;
         }
 
-        // --- @me 检测：有新的未消费 @me → 标记紧急 + 强制唤醒 Intent ---
+        // --- @me 检测：有新的未消费 @me → 标记紧急 + 强制唤醒 Intent + 立即消费 ---
         const consumed = consumedAtMe.get(target) || new Set();
-        const hasNewAtMe = fetchedMessages.some(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
-        if (hasNewAtMe) {
-          iState.urgentAtMe = true;
-          forceWakeIntent(target);
-          addLog('info', `📩 Fetcher ${target}: @me detected, urgent-waking Intent`, null, target);
+        if (!fetcherFirstSeen.has(target)) {
+          // 首次 fetch：将初始批次中所有 @me 标记为已消费，不触发 urgentAtMe（历史数据忽略）
+          fetcherFirstSeen.add(target);
+          let seeded = 0;
+          for (const m of fetchedMessages) {
+            if (m.is_at_me && !m.is_self && m.message_id) { consumed.add(m.message_id); seeded++; }
+          }
+          if (seeded > 0) {
+            consumedAtMe.set(target, consumed);
+            addLog('info', `Fetcher ${target}: first fetch, seeded ${seeded} historical @me IDs (ignored)`, null, target);
+          }
+        } else {
+          const newAtMeMsgs = fetchedMessages.filter(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
+          if (newAtMeMsgs.length > 0) {
+            // 立即消费这些 @me ID，防止下次 poll 重复触发
+            for (const m of newAtMeMsgs) consumed.add(m.message_id);
+            consumedAtMe.set(target, consumed);
+            iState.urgentAtMe = true;
+            forceWakeIntent(target);
+            addLog('info', `📩 Fetcher ${target}: @me detected (${newAtMeMsgs.length}), urgent-waking Intent`, null, target);
+          }
         }
       }
       
@@ -1972,10 +2019,9 @@ export async function startSocialLoop(config, onStatusChange) {
     const label = `${targetType}:${target}`;
     await new Promise(r => setTimeout(r, Math.random() * 2000));
 
-    const MAX_PENDING_SLOTS = 2;   // 最多追 2 轮
-    let pendingSlots = 0;          // 当前待处理槽位 (0 = 空闲, 1-2 = 有待处理)
     let llmRunning = false;        // 本 target 的 LLM 是否正在执行
     let lastLoggedNewCount = 0;    // 上次日志记录的新消息条数（去重用）
+    let waitingForIntent = false;  // 日志去重：等待 Intent 完成
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
@@ -2003,7 +2049,7 @@ export async function startSocialLoop(config, onStatusChange) {
         
         // ── 检测日志：仅当新消息条数变化时记录 ──
         if (changed && newCount > 0 && newCount !== lastLoggedNewCount) {
-          addLog('info', `📨 Reply ${label}: +${newCount} new messages${hasAtMe ? ' (has @me)' : ''}${llmRunning ? ` [LLM busy, slot ${pendingSlots}/${MAX_PENDING_SLOTS}]` : ''}`, null, target);
+          addLog('info', `📨 Reply ${label}: +${newCount} new messages${hasAtMe ? ' (has @me)' : ''}${llmRunning ? ' [LLM busy]' : ''}`, null, target);
           lastLoggedNewCount = newCount;
         }
         
@@ -2013,11 +2059,14 @@ export async function startSocialLoop(config, onStatusChange) {
           const pendingAtMe = buf.messages.some(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
           
           if (pendingAtMe) {
-            // 有 @me → 唤醒 Intent 让它评估（不再直接 bypass）
+            // 有 @me → 消费 + 唤醒 Intent 让它评估
+            const pendingAtMeMsgs = buf.messages.filter(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
+            for (const m of pendingAtMeMsgs) consumed.add(m.message_id);
+            consumedAtMe.set(target, consumed);
             const iState = getIntentState(target);
             iState.urgentAtMe = true;
             forceWakeIntent(target);
-            addLog('info', `${label} reply first run, has pending @me — waking Intent`, null, target);
+            addLog('info', `${label} reply first run, has pending @me (${pendingAtMeMsgs.length}) — waking Intent`, null, target);
           }
           // 无论有无 @me，首次运行都设水位线，等 Intent 评估后通过 replyWakeFlag 触发
           const lastMsg = buf.messages[buf.messages.length - 1];
@@ -2041,11 +2090,22 @@ export async function startSocialLoop(config, onStatusChange) {
         replyWakeFlag.delete(target);
         addLog('info', `🔔 Reply ${label}: triggered by Intent (willingness ≥ 3)`, null, target);
         
-        // ── LLM 正在执行 → slot watcher 内部已在处理，外层只等待 ──
+        // ── LLM 正在执行 → 等待完成 ──
         if (llmRunning) {
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
+
+        // ── 互斥：等待 Intent 完成 ──
+        if (processorBusy.get(target) === 'intent') {
+          if (!waitingForIntent) {
+            waitingForIntent = true;
+            addLog('info', `⏳ Reply ${label}: waiting for Intent to finish`, null, target);
+          }
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        waitingForIntent = false;
         
         // ── 潜水模式决定是否跳过回复 ──
         const targetLurkMode = lurkModes.get(target) || 'normal';
@@ -2053,7 +2113,6 @@ export async function startSocialLoop(config, onStatusChange) {
           // full-lurk：Reply 不运行，只推进水位线到最新
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          pendingSlots = 0;
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
@@ -2061,7 +2120,6 @@ export async function startSocialLoop(config, onStatusChange) {
         if (targetLurkMode === 'semi-lurk' && !hasAtMe) {
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          pendingSlots = 0;
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
@@ -2095,117 +2153,60 @@ export async function startSocialLoop(config, onStatusChange) {
           consumedAtMe.set(target, consumed);
         }
         
-        // ── 启动 LLM（带 slot 追赶循环） ──
-        // 用 async fire-and-forget + 后台 slot 检测实现：
-        // 1. pollTarget 异步执行，期间后台 watcher 每秒检测新消息并标记 slot
-        // 2. pollTarget 完成后，如果有 pending slot，立即再跑一轮
-        // 3. 最多追 MAX_PENDING_SLOTS 轮
+        // ── 启动 LLM（单轮，不再自主 catchup，新消息交还 Intent 决策） ──
         llmRunning = true;
-        pendingSlots = 0;
         lastLoggedNewCount = 0;
+        processorBusy.set(target, 'reply');
 
-        const runLLMWithCatchup = async () => {
+        const runReplyLLM = async () => {
           try {
-            let round = 0;
-            do {
-              const allConsumed = consumedAtMe.get(target) || new Set();
-              const snapshotBuf = dataBuffer.get(target);
+            const allConsumed = consumedAtMe.get(target) || new Set();
+            const snapshotBuf = dataBuffer.get(target);
 
-              if (round > 0) {
-                addLog('info', `🔄 Reply ${label}: catchup round ${round}`, null, target);
-                pendingSlots = 0;
-              }
+            const result = await pollTarget({
+              target,
+              targetType,
+              mcpServerName: config.mcpServerName,
+              llmConfig,
+              petId: config.petId,
+              promptConfig,
+              watermarks: replyWatermarks,
+              sentCache: sentMessagesCache,
+              bufferMessages: snapshotBuf ? snapshotBuf.messages : buf.messages,
+              compressedSummary: snapshotBuf ? snapshotBuf.compressedSummary : buf.compressedSummary,
+              groupName: (snapshotBuf || buf).metadata?.group_name || (snapshotBuf || buf).metadata?.friend_name || target,
+              consumedAtMeIds: allConsumed,
+              lurkMode: 'normal',
+              role: 'reply',
+              intentHistory: getIntentState(target).history,
+              intentSleeping: getIntentState(target).sleeping,
+            });
 
-              // 在 pollTarget 运行期间，用 interval 检测 buffer 是否有新消息到达
-              // 记录 LLM 启动时的 buffer 最后 message_id，之后只看新增的外部消息
-              const snapshotLastId = snapshotBuf?.messages?.length > 0
-                ? snapshotBuf.messages[snapshotBuf.messages.length - 1]?.message_id
-                : null;
-              let slotAlreadyMarked = false; // 每轮只标记一次 slot（多条新消息合并为一个 slot）
-              const slotWatcher = setInterval(() => {
-                if (slotAlreadyMarked || pendingSlots >= MAX_PENDING_SLOTS) return;
-                const currentBuf = dataBuffer.get(target);
-                if (!currentBuf || currentBuf.messages.length === 0) return;
-                // 找到 snapshot 时的最后消息在当前 buffer 中的位置
-                let snapshotIdx = -1;
-                if (snapshotLastId) {
-                  for (let i = currentBuf.messages.length - 1; i >= 0; i--) {
-                    if (currentBuf.messages[i].message_id === snapshotLastId) { snapshotIdx = i; break; }
-                  }
-                }
-                // snapshot 之后有新的非自己消息 → 标记 slot
-                const newMsgs = snapshotIdx >= 0
-                  ? currentBuf.messages.slice(snapshotIdx + 1)
-                  : (snapshotLastId ? currentBuf.messages : []); // snapshotLastId 被 trim 掉了 → 视为全部新
-                const externalNew = newMsgs.filter(m => !m.is_self);
-                if (externalNew.length > 0) {
-                  pendingSlots++;
-                  slotAlreadyMarked = true;
-                  addLog('info', `📨 Reply ${label}: +${externalNew.length} new msgs during LLM [slot ${pendingSlots}/${MAX_PENDING_SLOTS}]`, null, target);
-                  // @me 消费
-                  const consumed = consumedAtMe.get(target) || new Set();
-                  for (const m of externalNew) {
-                    if (m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id)) {
-                      consumed.add(m.message_id);
-                    }
-                  }
-                  consumedAtMe.set(target, consumed);
-                }
-              }, 2000);
-
-              let result;
-              try {
-                result = await pollTarget({
-                  target,
-                  targetType,
-                  mcpServerName: config.mcpServerName,
-                  llmConfig,
-                  petId: config.petId,
-                  promptConfig,
-                  watermarks: replyWatermarks,
-                  sentCache: sentMessagesCache,
-                  bufferMessages: snapshotBuf ? snapshotBuf.messages : buf.messages,
-                  compressedSummary: snapshotBuf ? snapshotBuf.compressedSummary : buf.compressedSummary,
-                  groupName: (snapshotBuf || buf).metadata?.group_name || (snapshotBuf || buf).metadata?.friend_name || target,
-                  consumedAtMeIds: allConsumed,
-                  lurkMode: 'normal',
-                  role: 'reply',
-                  intentHistory: getIntentState(target).history,
-                  intentSleeping: getIntentState(target).sleeping,
-                });
-              } finally {
-                clearInterval(slotWatcher);
-              }
-
-              if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
-              if (result && result.action === 'replied') {
-                // 锁定门控 + 立即唤醒 Intent 重新评估
-                intentGate.set(target, Date.now());
-                addLog('info', `🔒 Reply ${label}: gate locked, waking Intent`, null, target);
-                forceWakeIntent(target);
-              }
-
-              round++;
-            } while (pendingSlots > 0 && round <= MAX_PENDING_SLOTS);
-
-            if (pendingSlots > 0) {
-              addLog('info', `⏸️ Reply ${label}: max catchup reached (${MAX_PENDING_SLOTS}), remaining new msgs deferred`, null, target);
+            if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
+            if (result && result.action === 'replied') {
+              // 锁定门控 + 立即唤醒 Intent 重新评估
+              intentGate.set(target, Date.now());
+              addLog('info', `🔒 Reply ${label}: gate locked, waking Intent`, null, target);
+              forceWakeIntent(target);
             }
           } catch (e) {
             addLog('error', `Reply ${label} LLM error`, e.message, target);
           } finally {
             llmRunning = false;
-            pendingSlots = 0;
             lastLoggedNewCount = 0;
+            processorBusy.delete(target);
           }
         };
 
         // 不 await — 异步执行，检测循环继续运行（但 llmRunning 会阻止重复启动）
-        runLLMWithCatchup();
+        runReplyLLM();
         
         await new Promise(r => setTimeout(r, 1000));
       } catch (e) {
         addLog('error', `Reply ${label} loop error`, e.message, target);
+        // 安全清理：防止崩溃后 processorBusy/llmRunning 卡死导致 Intent 死锁
+        llmRunning = false;
+        processorBusy.delete(target);
         await new Promise(r => setTimeout(r, 3000));
       }
     }
