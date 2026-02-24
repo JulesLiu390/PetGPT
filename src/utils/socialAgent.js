@@ -574,7 +574,7 @@ async function pollTarget({
       intentBlock += '（意图模块尚未产出评估，请根据聊天内容自行判断。）';
     }
     intentBlock += '\n---';
-    intentBlock += '\n⚠️ 回复前请回顾上方 assistant 消息（你之前说过的话）。如果你想表达的观点、信息或态度已经在之前的回复中出现过，请选择沉默，不要重复。';
+    intentBlock += '\n⚠️ 回复前请回顾上方 assistant 消息（你之前说过的话）。如果你想表达的观点已经出现过，且没有人针对你的发言追问或回应，请选择沉默。但如果有群友回应或追问了你刚才说的话，回答他们是对话的延续，不是重复——即使话题相同，你也应该回应。';
 
     // 找到最后一条 user turn 并追加
     for (let i = historyTurns.length - 1; i >= 0; i--) {
@@ -1188,17 +1188,35 @@ export async function startSocialLoop(config, onStatusChange) {
     { level: 5, key: '忍不住' },
   ];
   const WILLINGNESS_RE = /\[(不想理|无感|等回复|有点想说|想聊|忍不住)[：:][^\]]*\]/;
+  const WILLINGNESS_RE_LOOSE = /(不想理|无感|等回复|有点想说|想聊|忍不住)[：:]([^\n]*)/;
   const parseWillingness = (rawText) => {
+    // 严格匹配：[tag：reason]（带方括号）
     const m = rawText.match(WILLINGNESS_RE);
-    if (!m) return { level: 0, label: '', thought: rawText.trim() };
-    const key = m[1];
-    const tag = WILLINGNESS_TAGS.find(t => t.key === key);
-    const thought = rawText.replace(WILLINGNESS_RE, '').trim();
-    return { level: tag ? tag.level : 0, label: m[0], thought };
+    if (m) {
+      const key = m[1];
+      const tag = WILLINGNESS_TAGS.find(t => t.key === key);
+      const thought = rawText.replace(WILLINGNESS_RE, '').trim();
+      return { level: tag ? tag.level : 0, label: m[0], thought };
+    }
+    // 容错匹配：tag：reason（无方括号，LLM 偶尔会省略括号）
+    const mLoose = rawText.match(WILLINGNESS_RE_LOOSE);
+    if (mLoose) {
+      const key = mLoose[1];
+      const tag = WILLINGNESS_TAGS.find(t => t.key === key);
+      const reason = (mLoose[2] || '').trim();
+      const label = `[${key}：${reason}]`;
+      const thought = rawText.substring(0, mLoose.index).trim();
+      return { level: tag ? tag.level : 0, label, thought };
+    }
+    return { level: 0, label: '', thought: rawText.trim() };
   };
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // 非 normal 模式的评估冷却
-  const INTENT_IDLE_TIMEOUT_MS = 3 * 60 * 1000; // 3 分钟无新消息 → 最终评估 → sleep（保留历史）
+  const INTENT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟无新消息 → 最终评估 → sleep（保留历史）
+  const INTENT_LLM_MAX_RETRIES = 2;             // LLM 调用失败后最多重试 2 次（共 3 次尝试），每次间隔 30s
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
+  const intentGate = new Map();                  // target → lock timestamp（Reply 发完消息后锁住，等 Intent 重评后解锁）
+  const INTENT_GATE_TIMEOUT_MS = 30 * 1000;      // 门控安全超时：30s 后自动解锁
+  const replyWakeFlag = new Map();                // target → true（Intent 评出 ≥3 时置位，Reply 消费后清除）
 
   /** 获取/创建某群的 IntentState */
   const getIntentState = (target) => {
@@ -1209,9 +1227,28 @@ export async function startSocialLoop(config, onStatusChange) {
         lastActivityTime: 0, // 最近一条新消息（含 self）的时间
         lastEvalTime: 0,
         loopTimeoutId: null,
+        _wake: null,          // 可中断 sleep 的 resolve 回调
+        forceEval: false,     // Reply 发完消息后强制立即评估（跳过 detectChange）
+        urgentAtMe: false,    // Fetcher 检测到 @me 时置位，Intent 优先处理
       });
     }
     return intentMap.get(target);
+  };
+
+  /** 可中断的延迟（用于 intentLoop，支持 forceWakeIntent 立即唤醒） */
+  const sleepInterruptible = (state, ms) => new Promise(r => {
+    state._wake = r;
+    state.loopTimeoutId = setTimeout(r, ms);
+  });
+
+  /** 强制唤醒指定 target 的 intentLoop 并立即评估 */
+  const forceWakeIntent = (target) => {
+    const state = getIntentState(target);
+    state.sleeping = false;
+    state.forceEval = true;
+    state.lastActivityTime = Date.now();
+    clearTimeout(state.loopTimeoutId);
+    if (state._wake) { state._wake(); state._wake = null; }
   };
   
   /**
@@ -1401,7 +1438,7 @@ export async function startSocialLoop(config, onStatusChange) {
       try {
         // ── 睡眠中 → 每 5s 检查 ──
         if (state.sleeping) {
-          await new Promise(r => { state.loopTimeoutId = setTimeout(r, 5000); });
+          await sleepInterruptible(state, 5000);
           continue;
         }
 
@@ -1409,29 +1446,7 @@ export async function startSocialLoop(config, onStatusChange) {
 
         // ── 3 分钟无新消息 → 最终评估 → sleep（保留历史） ──
         if (now - state.lastActivityTime >= INTENT_IDLE_TIMEOUT_MS) {
-          // 做最后一次 LLM 评估
-          const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
-          const sinceMin = state.lastEvalTime > 0
-            ? Math.round((now - state.lastEvalTime) / 60000) : 0;
-          const targetLurkMode = lurkModes.get(target) || 'normal';
-          const intentPrompt = await buildIntentSystemPrompt({
-            petId: config.petId,
-            targetName: tName(),
-            targetId: target,
-            intentHistory: state.history,
-            sinceLastEvalMin: sinceMin,
-            socialPersonaPrompt: promptConfig.socialPersonaPrompt,
-            botQQ: promptConfig.botQQ,
-            ownerQQ: promptConfig.ownerQQ,
-            ownerName: promptConfig.ownerName,
-            ownerSecret: eph?.ownerSecret || '',
-            nameDelimiterL: eph?.nameL || '',
-            nameDelimiterR: eph?.nameR || '',
-            msgDelimiterL: eph?.msgL || '',
-            msgDelimiterR: eph?.msgR || '',
-            lurkMode: targetLurkMode,
-          });
-
+          // 做最后一次 LLM 评估（带重试）
           const intentModel = config.intentModelName || llmConfig.modelName;
 
           // 构建只读工具集（与 Reply 相同的 history + groupLog）
@@ -1444,29 +1459,60 @@ export async function startSocialLoop(config, onStatusChange) {
           }));
 
           let intentResult;
-          try {
-            const raw = await callLLMWithTools({
-              messages: [
-                { role: 'system', content: intentPrompt },
-                ...intentTurns,
-                { role: 'user', content: '请分析当前想法和行为倾向。' },
-              ],
-              apiFormat: llmConfig.apiFormat,
-              apiKey: llmConfig.apiKey,
-              model: intentModel,
-              baseUrl: llmConfig.baseUrl,
-              mcpTools: intentMcpTools,
-              options: {
-                temperature: 0.4,
-              },
-              builtinToolContext: { petId: config.petId, targetId: target, memoryEnabled: false },
-              onToolCall: (name, args) => {
-                addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
-              },
+          for (let attempt = 0; ; attempt++) {
+            // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
+            const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
+            const sinceMin = state.lastEvalTime > 0
+              ? Math.round((Date.now() - state.lastEvalTime) / 60000) : 0;
+            const targetLurkMode = lurkModes.get(target) || 'normal';
+            const intentPrompt = await buildIntentSystemPrompt({
+              petId: config.petId,
+              targetName: tName(),
+              targetId: target,
+              intentHistory: state.history,
+              sinceLastEvalMin: sinceMin,
+              socialPersonaPrompt: promptConfig.socialPersonaPrompt,
+              botQQ: promptConfig.botQQ,
+              ownerQQ: promptConfig.ownerQQ,
+              ownerName: promptConfig.ownerName,
+              ownerSecret: eph?.ownerSecret || '',
+              nameDelimiterL: eph?.nameL || '',
+              nameDelimiterR: eph?.nameR || '',
+              msgDelimiterL: eph?.msgL || '',
+              msgDelimiterR: eph?.msgR || '',
+              lurkMode: targetLurkMode,
             });
-            intentResult = { content: raw.content, error: null };
-          } catch (e) {
-            intentResult = { content: e.message, error: true };
+
+            try {
+              const raw = await callLLMWithTools({
+                messages: [
+                  { role: 'system', content: intentPrompt },
+                  ...intentTurns,
+                  { role: 'user', content: '请分析当前想法和行为倾向。' },
+                ],
+                apiFormat: llmConfig.apiFormat,
+                apiKey: llmConfig.apiKey,
+                model: intentModel,
+                baseUrl: llmConfig.baseUrl,
+                mcpTools: intentMcpTools,
+                options: {
+                  temperature: 0.4,
+                },
+                builtinToolContext: { petId: config.petId, targetId: target, memoryEnabled: false },
+                onToolCall: (name, args) => {
+                  addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
+                },
+              });
+              intentResult = { content: raw.content, error: null };
+              break;
+            } catch (e) {
+              if (attempt < INTENT_LLM_MAX_RETRIES) {
+                addLog('intent', `🧠 [${tName()}] idle-eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 30s): ${e.message}`, null, target);
+                await sleepInterruptible(state, 30000);
+                continue;
+              }
+              intentResult = { content: e.message, error: true };
+            }
           }
 
           // 解析纯文本结果并记入历史（不清空）
@@ -1488,6 +1534,9 @@ export async function startSocialLoop(config, onStatusChange) {
             addLog('intent', `🧠 [${tName()}] → sleeping (LLM error)`, null, target);
           }
 
+          // 解锁 Intent 门控
+          intentGate.delete(target);
+
           // 推进 intent 水位线到最新
           const bufBeforeSleep = dataBuffer.get(target);
           if (bufBeforeSleep && bufBeforeSleep.messages.length > 0) {
@@ -1501,53 +1550,46 @@ export async function startSocialLoop(config, onStatusChange) {
 
         // ── 模式感知的评估触发 ──
         const intentLurkMode = lurkModes.get(target) || 'normal';
-        if (intentLurkMode === 'normal') {
-          // normal 模式：有新消息才评估（和 Reply 一样逐条触发）
+        const wasForceEval = state.forceEval;
+        const wasUrgentAtMe = state.urgentAtMe;
+        if (state.urgentAtMe) {
+          // Fetcher 检测到 @me → 跳过一切冷却，立即评估
+          state.urgentAtMe = false;
+          state.forceEval = false;
+          addLog('intent', `🧠 [${tName()}] urgent-eval: @me detected`, null, target);
+        } else if (state.forceEval) {
+          // Reply 刚发完消息，跳过 detectChange 直接评估
+          state.forceEval = false;
+          addLog('intent', `🧠 [${tName()}] force-eval after Reply`, null, target);
+        } else if (intentLurkMode === 'normal') {
+          // normal 模式：有新消息才评估（和 Reply 一样逐条触发），但保底每 60s 评估一次
           const intentDetection = detectChange(target, intentWatermarks);
-          if (!intentDetection || !intentDetection.changed) {
-            await new Promise(r => { state.loopTimeoutId = setTimeout(r, 2000); });
+          const sinceLastEval = state.lastEvalTime > 0 ? now - state.lastEvalTime : Infinity;
+          const hasNewMessages = intentDetection && intentDetection.changed;
+          const guaranteedInterval = sinceLastEval >= INTENT_EVAL_COOLDOWN_MS; // 60s 保底
+
+          if (!hasNewMessages && !guaranteedInterval) {
+            await sleepInterruptible(state, 2000);
             continue;
           }
           // 首次运行只设水位线，不立即评估
-          if (intentDetection.isFirstRun) {
+          if (intentDetection && intentDetection.isFirstRun) {
             const buf = dataBuffer.get(target);
             const lastMsg = buf?.messages?.[buf.messages.length - 1];
             if (lastMsg?.message_id) intentWatermarks.set(target, lastMsg.message_id);
-            await new Promise(r => { state.loopTimeoutId = setTimeout(r, 2000); });
+            await sleepInterruptible(state, 2000);
             continue;
           }
         } else {
           // semi-lurk / full-lurk 模式：保持 1 分钟冷却
           if (state.lastEvalTime > 0 && now - state.lastEvalTime < INTENT_EVAL_COOLDOWN_MS) {
             const waitMs = INTENT_EVAL_COOLDOWN_MS - (now - state.lastEvalTime) + 1000;
-            await new Promise(r => { state.loopTimeoutId = setTimeout(r, Math.min(waitMs, 10000)); });
+            await sleepInterruptible(state, Math.min(waitMs, 10000));
             continue;
           }
         }
 
-        // ── 常规意图评估 ──
-        const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
-        const sinceMin = state.lastEvalTime > 0
-          ? Math.round((now - state.lastEvalTime) / 60000) : 0;
-        const targetLurkMode = lurkModes.get(target) || 'normal';
-        const intentPrompt = await buildIntentSystemPrompt({
-          petId: config.petId,
-          targetName: tName(),
-          targetId: target,
-          intentHistory: state.history,
-          sinceLastEvalMin: sinceMin,
-          socialPersonaPrompt: promptConfig.socialPersonaPrompt,
-          botQQ: promptConfig.botQQ,
-          ownerQQ: promptConfig.ownerQQ,
-          ownerName: promptConfig.ownerName,
-          ownerSecret: eph?.ownerSecret || '',
-          nameDelimiterL: eph?.nameL || '',
-          nameDelimiterR: eph?.nameR || '',
-          msgDelimiterL: eph?.msgL || '',
-          msgDelimiterR: eph?.msgR || '',
-          lurkMode: targetLurkMode,
-        });
-
+        // ── 常规意图评估（带重试） ──
         const intentModel = config.intentModelName || llmConfig.modelName;
 
         // 构建只读工具集（与 Reply 相同的 history + groupLog）
@@ -1559,35 +1601,73 @@ export async function startSocialLoop(config, onStatusChange) {
           serverName: null,
         }));
 
+        const intentEvalPrompt = wasUrgentAtMe
+          ? '有群友 @了你，请立即评估当前状态。注意：被 @ 通常意味着有人在跟你说话或提问，应优先考虑回复。同时仍需遵守「别三连」规则。'
+          : wasForceEval
+            ? '你的 Reply 模块刚刚发了消息（可能尚未出现在对话记录中）。请重新评估当前状态。你刚发了言，除非有人直接回应你（追问、反驳、@你），否则必须选 [等回复]。同时检查「别三连」规则：如果你已经连续发言 ≥ 2 次且没人回应你，无论如何不得选 ≥ 3 的意愿。'
+            : '请分析当前想法和行为倾向。';
+
         let intentResult;
-        try {
-          const raw = await callLLMWithTools({
-            messages: [
-              { role: 'system', content: intentPrompt },
-              ...intentTurns,
-              { role: 'user', content: '请分析当前想法和行为倾向。' },
-            ],
-            apiFormat: llmConfig.apiFormat,
-            apiKey: llmConfig.apiKey,
-            model: intentModel,
-            baseUrl: llmConfig.baseUrl,
-            mcpTools: intentMcpTools,
-            options: {
-              temperature: 0.4,
-            },
-            builtinToolContext: { petId: config.petId, targetId: target, memoryEnabled: false },
-            onToolCall: (name, args) => {
-              addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
-            },
+        for (let attempt = 0; ; attempt++) {
+          // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
+          const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
+          const sinceMin = state.lastEvalTime > 0
+            ? Math.round((Date.now() - state.lastEvalTime) / 60000) : 0;
+          const targetLurkMode = lurkModes.get(target) || 'normal';
+          const intentPrompt = await buildIntentSystemPrompt({
+            petId: config.petId,
+            targetName: tName(),
+            targetId: target,
+            intentHistory: state.history,
+            sinceLastEvalMin: sinceMin,
+            socialPersonaPrompt: promptConfig.socialPersonaPrompt,
+            botQQ: promptConfig.botQQ,
+            ownerQQ: promptConfig.ownerQQ,
+            ownerName: promptConfig.ownerName,
+            ownerSecret: eph?.ownerSecret || '',
+            nameDelimiterL: eph?.nameL || '',
+            nameDelimiterR: eph?.nameR || '',
+            msgDelimiterL: eph?.msgL || '',
+            msgDelimiterR: eph?.msgR || '',
+            lurkMode: targetLurkMode,
           });
-          intentResult = { content: raw.content, error: null };
-        } catch (e) {
-          intentResult = { content: e.message, error: true };
+
+          try {
+            const raw = await callLLMWithTools({
+              messages: [
+                { role: 'system', content: intentPrompt },
+                ...intentTurns,
+                { role: 'user', content: intentEvalPrompt },
+              ],
+              apiFormat: llmConfig.apiFormat,
+              apiKey: llmConfig.apiKey,
+              model: intentModel,
+              baseUrl: llmConfig.baseUrl,
+              mcpTools: intentMcpTools,
+              options: {
+                temperature: 0.4,
+              },
+              builtinToolContext: { petId: config.petId, targetId: target, memoryEnabled: false },
+              onToolCall: (name, args) => {
+                addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
+              },
+            });
+            intentResult = { content: raw.content, error: null };
+            break;
+          } catch (e) {
+            if (attempt < INTENT_LLM_MAX_RETRIES) {
+              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 30s): ${e.message}`, null, target);
+              await sleepInterruptible(state, 30000);
+              continue;
+            }
+            intentResult = { content: e.message, error: true };
+          }
         }
 
         if (intentResult.error) {
           addLog('intent', `Intent LLM error [${tName()}]: ${intentResult.content}`, null, target);
-          await new Promise(r => { state.loopTimeoutId = setTimeout(r, 30000); });
+          intentGate.delete(target); // 解锁门控（即使出错也要解锁，避免死锁）
+          await sleepInterruptible(state, 30000);
           continue;
         }
 
@@ -1607,6 +1687,12 @@ export async function startSocialLoop(config, onStatusChange) {
         if (state.history.length > INTENT_HISTORY_MAX) state.history.shift();
         state.lastEvalTime = Date.now();
 
+        // 解锁 Intent 门控（Reply 可以重新发言了）
+        if (intentGate.has(target)) {
+          intentGate.delete(target);
+          addLog('intent', `🔓 [${tName()}] intent gate unlocked`, null, target);
+        }
+
         // 更新 intent 水位线到 buffer 最新消息
         const bufAfterEval = dataBuffer.get(target);
         if (bufAfterEval && bufAfterEval.messages.length > 0) {
@@ -1614,17 +1700,22 @@ export async function startSocialLoop(config, onStatusChange) {
           if (lastMsgAfterEval?.message_id) intentWatermarks.set(target, lastMsgAfterEval.message_id);
         }
 
+        // Intent 评出 ≥ 3（有点想说/想聊/忍不住）时，通知 Reply 可以主动触发（即使没有新消息）
+        if (w.level >= 3 && !intentGate.has(target)) {
+          replyWakeFlag.set(target, true);
+        }
+
         if (isIdle) {
-          state.sleeping = true;
           addLog('intent', `🧠 [${tName()}] → idle ${w.label}`, entry.content, target);
         } else {
           addLog('intent', `🧠 [${tName()}] ${w.label}`, entry.content, target);
         }
 
-        await new Promise(r => { state.loopTimeoutId = setTimeout(r, 2000); });
+        // idle 不 sleep，保持 awake 继续监听新消息；只有 5min 无新消息的 idle timeout 才真正进入 sleep
+        await sleepInterruptible(state, 2000);
       } catch (e) {
         addLog('intent', `Intent loop error [${tName()}]`, e.message, target);
-        await new Promise(r => { state.loopTimeoutId = setTimeout(r, 30000); });
+        await sleepInterruptible(state, 30000);
       }
     }
   };
@@ -1685,6 +1776,15 @@ export async function startSocialLoop(config, onStatusChange) {
         iState.lastActivityTime = Date.now();
         if (iState.sleeping) {
           iState.sleeping = false;
+        }
+
+        // --- @me 检测：有新的未消费 @me → 标记紧急 + 强制唤醒 Intent ---
+        const consumed = consumedAtMe.get(target) || new Set();
+        const hasNewAtMe = fetchedMessages.some(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
+        if (hasNewAtMe) {
+          iState.urgentAtMe = true;
+          forceWakeIntent(target);
+          addLog('info', `📩 Fetcher ${target}: @me detected, urgent-waking Intent`, null, target);
         }
       }
       
@@ -1912,22 +2012,34 @@ export async function startSocialLoop(config, onStatusChange) {
           const consumed = consumedAtMe.get(target) || new Set();
           const pendingAtMe = buf.messages.some(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id));
           
-          if (!pendingAtMe) {
-            // 无 @me → 正常跳过，设水位线到末尾
-            const lastMsg = buf.messages[buf.messages.length - 1];
-            if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-            addLog('info', `${label} reply first run, watermark set`, null, target);
-            await new Promise(r => setTimeout(r, 1000));
-            continue;
+          if (pendingAtMe) {
+            // 有 @me → 唤醒 Intent 让它评估（不再直接 bypass）
+            const iState = getIntentState(target);
+            iState.urgentAtMe = true;
+            forceWakeIntent(target);
+            addLog('info', `${label} reply first run, has pending @me — waking Intent`, null, target);
           }
-          // 有 @me → 不设水位线，让代码继续走到 pollTarget 正常处理
-          addLog('info', `${label} reply first run, has pending @me — processing`, null, target);
-        }
-        
-        if (!changed) {
+          // 无论有无 @me，首次运行都设水位线，等 Intent 评估后通过 replyWakeFlag 触发
+          const lastMsg = buf.messages[buf.messages.length - 1];
+          if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
+          addLog('info', `${label} reply first run, watermark set`, null, target);
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
+        
+        // ── Intent 唯一触发：Reply 只在 Intent 信号或 @me 时运行，不再因“有新消息”就跑 ──
+        const intentWoke = replyWakeFlag.get(target);
+        if (!intentWoke) {
+          // 无 Intent 信号 → 推进水位线但不触发 Reply
+          if (changed) {
+            const lastMsg = buf.messages[buf.messages.length - 1];
+            if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
+          }
+          await new Promise(r => setTimeout(r, 1000));
+          continue;
+        }
+        replyWakeFlag.delete(target);
+        addLog('info', `🔔 Reply ${label}: triggered by Intent (willingness ≥ 3)`, null, target);
         
         // ── LLM 正在执行 → slot watcher 内部已在处理，外层只等待 ──
         if (llmRunning) {
@@ -1954,6 +2066,18 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
+        // ── Intent 门控：Reply 发完消息后等 Intent 重新评估才能再次发言 ──
+        const gateLockTime = intentGate.get(target);
+        if (gateLockTime) {
+          if (Date.now() - gateLockTime < INTENT_GATE_TIMEOUT_MS) {
+            await new Promise(r => setTimeout(r, 1000));
+            continue;
+          }
+          // 安全超时 — 自动解锁
+          intentGate.delete(target);
+          addLog('warn', `🔓 Reply ${label}: intent gate timeout-unlocked (${INTENT_GATE_TIMEOUT_MS / 1000}s)`, null, target);
+        }
+
         // Reply 冷却（replyIntervalMs，默认 0 = 无冷却）
         if (replyIntervalMs > 0) {
           const now = Date.now();
@@ -2055,9 +2179,10 @@ export async function startSocialLoop(config, onStatusChange) {
 
               if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
               if (result && result.action === 'replied') {
-                const iState = getIntentState(target);
-                iState.lastActivityTime = Date.now();
-                if (iState.sleeping) iState.sleeping = false;
+                // 锁定门控 + 立即唤醒 Intent 重新评估
+                intentGate.set(target, Date.now());
+                addLog('info', `🔒 Reply ${label}: gate locked, waking Intent`, null, target);
+                forceWakeIntent(target);
               }
 
               round++;
