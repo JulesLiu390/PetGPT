@@ -1314,6 +1314,12 @@ export async function startSocialLoop(config, onStatusChange) {
       }
     }
     
+    // seenIds 安全阀：防止无限增长（只保留当前 messages 中存在的 ID）
+    if (buf.seenIds.size > BUFFER_HARD_CAP * 3) {
+      const activeIds = new Set(buf.messages.map(m => m.message_id).filter(Boolean));
+      buf.seenIds = activeIds;
+    }
+    
     return added;
   };
 
@@ -1786,6 +1792,7 @@ export async function startSocialLoop(config, onStatusChange) {
     
     // 逐 target 去重累积到 dataBuffer + append compressed_summary
     for (const targetData of targetResults) {
+      try {
       const target = targetData.target;
       
       // 缓存 target 名称（群名/好友名）
@@ -1865,6 +1872,9 @@ export async function startSocialLoop(config, onStatusChange) {
             addLog('warn', `Failed to append group buffer for ${target}`, e.message, target);
           }
         }
+      }
+      } catch (e) {
+        addLog('error', `Fetcher: error processing target ${targetData?.target}`, e.message, targetData?.target);
       }
     }
     
