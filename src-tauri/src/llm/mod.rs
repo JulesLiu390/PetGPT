@@ -7,7 +7,9 @@
 pub mod client;
 pub mod types;
 pub mod stream;
+pub mod proxy;
 
 pub use client::LlmClient;
 pub use types::*;
 pub use stream::{stream_chat, LlmStreamCancellation};
+pub use proxy::LlmProxy;

@@ -8,7 +8,7 @@ import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
-import { downloadUrlAsBase64 } from '../tauri';
+import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
 import { isSocialBuiltinTool, executeSocialBuiltinTool, isGroupRuleBuiltinTool, executeGroupRuleBuiltinTool, isReplyStrategyBuiltinTool, executeReplyStrategyBuiltinTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool } from '../workspace/socialToolExecutor.js';
 
@@ -323,6 +323,17 @@ const toGeminiInlineData = async (data, mimeType) => {
  * @param {Array<{data: string, mimeType: string}>} images
  * @returns {Promise<Array<{data: string, mimeType: string}>>}
  */
+/**
+ * 验证 base64 数据是否为有效图片（magic bytes + 大小检查）
+ * 防止 QQ CDN 返回 HTML 错误页被当作图片发给 LLM
+ */
+const isValidImageBase64 = (b64) => {
+  if (!b64 || typeof b64 !== 'string') return false;
+  if (b64.length > 20 * 1024 * 1024) return false; // > ~15MB raw 太大
+  const magics = ['/9j/', 'iVBOR', 'R0lGOD', 'UklGR', 'Qk0']; // JPEG, PNG, GIF, WebP, BMP
+  return magics.some(m => b64.startsWith(m));
+};
+
 export const resolveImageUrls = async (images) => {
   if (!images || images.length === 0) return images;
   
@@ -331,12 +342,17 @@ export const resolveImageUrls = async (images) => {
     if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
       try {
         const result = await downloadUrlAsBase64(img.data);
+        // Plan A: 验证下载内容是否为真正的图片
+        if (!isValidImageBase64(result.data)) {
+          console.warn('[MCP] Downloaded data is not a valid image (bad magic bytes or too large), skipping:', img.data.substring(0, 80));
+          continue; // 丢弃无效图片
+        }
         resolved.push({ data: result.data, mimeType: result.mime_type || img.mimeType });
         console.log('[MCP] Downloaded image via backend:', img.data.substring(0, 80) + '...');
       } catch (e) {
         console.warn('[MCP] Failed to download image via backend:', img.data.substring(0, 80), e);
-        // Keep original URL as fallback
-        resolved.push(img);
+        // 下载失败 → 丢弃（Gemini 不能用外部 URL，OpenAI 可能可以但不稳定）
+        continue;
       }
     } else {
       resolved.push(img);
@@ -466,27 +482,28 @@ export const callLLMWithTools = async ({
       }
     });
     
-    // 发送请求
-    const response = await fetch(req.endpoint, {
-      method: 'POST',
-      headers: req.headers,
-      body: JSON.stringify(req.body)
-    });
-    
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      let errorMessage = `API Error ${response.status}`;
+    // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
+    let data;
+    try {
+      data = await llmProxyCall(req.endpoint, req.headers, req.body);
+    } catch (proxyErr) {
+      // Tauri invoke 抛的是 string，无法挂属性 → 包装成 Error 对象
+      const err = typeof proxyErr === 'string' ? new Error(proxyErr) : (proxyErr instanceof Error ? proxyErr : new Error(String(proxyErr)));
       try {
-        const errorData = JSON.parse(errorText);
-        errorMessage = errorData.error?.message || errorData.message || errorText || errorMessage;
-      } catch {
-        errorMessage = errorText || errorMessage;
-      }
-      console.error('[MCP] API Error:', response.status, errorMessage);
-      throw new Error(errorMessage);
+        const bodyStr = JSON.stringify(req.body);
+        // 从错误信息中提取 column 号，截取报错位置前后 200 字符
+        const colMatch = (err.message || '').match(/column\s+(\d+)/);
+        if (colMatch) {
+          const col = parseInt(colMatch[1], 10);
+          const start = Math.max(0, col - 200);
+          const end = Math.min(bodyStr.length, col + 200);
+          err._debugBody = `…col ${col}, context [${start}..${end}]:\n${bodyStr.substring(start, end)}`;
+        } else {
+          err._debugBody = bodyStr.substring(0, 2000) + (bodyStr.length > 2000 ? '…' : '');
+        }
+      } catch (_) { /* ignore */ }
+      throw err;
     }
-    
-    const data = await response.json();
     const result = adapter.parseResponse(data);
     
     // Emit LLM text for every iteration (including empty — caller decides what to show)
@@ -750,13 +767,28 @@ export const callLLMStreamWithTools = async ({
       }
     });
     
-    // 发送请求
+    // 发送请求（流式：带超时保护）
+    const timeoutMs = 90000;
+    let timeoutId;
+    let internalAbort;
+    if (!abortSignal) {
+      internalAbort = new AbortController();
+      timeoutId = setTimeout(() => internalAbort.abort(), timeoutMs);
+    }
+    const effectiveSignal = abortSignal || internalAbort?.signal;
     const response = await fetch(req.endpoint, {
       method: 'POST',
       headers: req.headers,
       body: JSON.stringify(req.body),
-      signal: abortSignal
+      signal: effectiveSignal,
+    }).catch(e => {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (e.name === 'AbortError' && !abortSignal) {
+        throw new Error(`LLM stream request timed out after ${timeoutMs / 1000}s`);
+      }
+      throw e;
     });
+    if (timeoutId) clearTimeout(timeoutId);
     
     if (!response.ok) {
       const errorText = await response.text().catch(() => '');

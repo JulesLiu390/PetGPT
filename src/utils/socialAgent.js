@@ -663,9 +663,11 @@ async function pollTarget({
   let sendMessageSuccess = false;
   let sendCount = 0;
   let pendingSendContent = null; // 暂存 send_message 的 content 参数
+  let _messagesForLLM = messages;
+  for (let _imgRetry = 0; _imgRetry < 2; _imgRetry++) {
   try {
     const result = await callLLMWithTools({
-      messages,
+      messages: _messagesForLLM,
       apiFormat: llmConfig.apiFormat,
       apiKey: llmConfig.apiKey,
       model: llmConfig.modelName,
@@ -681,7 +683,9 @@ async function pollTarget({
           for (const sec of Object.values(ephemeral)) {
             content = content.replaceAll(sec, '');
           }
-          return { ...args, content, target, target_type: targetType };
+          // num_chunks 防护：LLM 忘传时默认 1（不拆分）
+          const num_chunks = args?.num_chunks ?? 1;
+          return { ...args, content, num_chunks, target, target_type: targetType };
         }
         return args;
       },
@@ -802,7 +806,7 @@ async function pollTarget({
         }
         try {
           const sendToolName = `${mcpServerName}__send_message`;
-          await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType }, { timeout: 10000 });
+          await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType, num_chunks: 1 }, { timeout: 10000 });
           sendMessageSuccess = true;
           if (newWatermarkId) watermarks.set(target, newWatermarkId);
           // 缓存发送记录
@@ -822,10 +826,22 @@ async function pollTarget({
       return { action: 'silent', detail: result.content };
     }
   } catch (e) {
+    // Plan B: 带图片的 LLM 调用失败 → 剥离图片后重试一次
+    if (_imgRetry === 0 && totalImageCount > 0) {
+      addLog('warn', `LLM failed with ${totalImageCount} image(s), retrying without images for ${target}`, e.message || e, target);
+      _messagesForLLM = messages.map(msg => {
+        if (typeof msg.content === 'string' || !Array.isArray(msg.content)) return msg;
+        if (!msg.content.some(p => p.type === 'image_url')) return msg;
+        const texts = msg.content.filter(p => p.type === 'text' && !p.text.includes('梗图/表情包'));
+        return { ...msg, content: (texts.map(p => p.text).join('\n') + '\n[图片]').trim() };
+      });
+      continue;
+    }
     emitPollLog('error');
-    addLog('error', `LLM call failed for ${target}`, e.message, target);
-    return { action: 'error', detail: e.message };
+    addLog('error', `LLM call failed for ${target}`, e._debugBody || (e.message || e), target);
+    return { action: 'error', detail: e.message || e };
   }
+  } // end for _imgRetry
 }
 
 // ============ 社交记忆辅助 ============
@@ -1408,7 +1424,8 @@ export async function startSocialLoop(config, onStatusChange) {
     const MAX_MSGS = 30;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
-    const recent = buf.messages.slice(-MAX_MSGS);
+    // Intent 不需要图片（只评估意愿），剥离图片避免因图片导致 LLM 500 错误
+    const recent = buf.messages.slice(-MAX_MSGS).map(m => ({ ...m, _images: [] }));
     // 生成本轮临时安全令牌（每次评估都不同）
     const _rnd = () => crypto.randomUUID().slice(0, 6);
     const eph = {
@@ -1469,6 +1486,7 @@ export async function startSocialLoop(config, onStatusChange) {
 
           // 做最后一次 LLM 评估（带重试）
           const intentModel = config.intentModelName || llmConfig.modelName;
+          addLog('intent', `🧠 [${tName()}] idle-eval starting (model=${intentModel})`, null, target);
 
           // 构建只读工具集（与 Reply 相同的 history + groupLog）
           const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
@@ -1528,11 +1546,11 @@ export async function startSocialLoop(config, onStatusChange) {
               break;
             } catch (e) {
               if (attempt < INTENT_LLM_MAX_RETRIES) {
-                addLog('intent', `🧠 [${tName()}] idle-eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 30s): ${e.message}`, null, target);
-                await sleepInterruptible(state, 30000);
+                addLog('intent', `🧠 [${tName()}] idle-eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 2s): ${e.message || e}`, e._debugBody || null, target);
+                await sleepInterruptible(state, 2000);
                 continue;
               }
-              intentResult = { content: e.message, error: true };
+              intentResult = { content: e.message || e, error: true };
             }
           }
 
@@ -1625,6 +1643,8 @@ export async function startSocialLoop(config, onStatusChange) {
 
         // ── 常规意图评估（带重试） ──
         const intentModel = config.intentModelName || llmConfig.modelName;
+        addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
+        state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
 
         // 构建只读工具集（与 Reply 相同的 history + groupLog）
         const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
@@ -1690,11 +1710,11 @@ export async function startSocialLoop(config, onStatusChange) {
             break;
           } catch (e) {
             if (attempt < INTENT_LLM_MAX_RETRIES) {
-              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 30s): ${e.message}`, null, target);
-              await sleepInterruptible(state, 30000);
+              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 2s): ${e.message || e}`, e._debugBody || null, target);
+              await sleepInterruptible(state, 2000);
               continue;
             }
-            intentResult = { content: e.message, error: true };
+            intentResult = { content: e.message || e, error: true };
           }
         }
 
@@ -1702,7 +1722,7 @@ export async function startSocialLoop(config, onStatusChange) {
           addLog('intent', `Intent LLM error [${tName()}]: ${intentResult.content}`, null, target);
           intentGate.delete(target); // 解锁门控（即使出错也要解锁，避免死锁）
           processorBusy.delete(target);
-          await sleepInterruptible(state, 30000);
+          await sleepInterruptible(state, 2000);
           continue;
         }
 
@@ -1720,7 +1740,6 @@ export async function startSocialLoop(config, onStatusChange) {
 
         state.history.push(entry);
         if (state.history.length > INTENT_HISTORY_MAX) state.history.shift();
-        state.lastEvalTime = Date.now();
 
         // 解锁 Intent 门控（Reply 可以重新发言了）
         if (intentGate.has(target)) {
@@ -1750,9 +1769,9 @@ export async function startSocialLoop(config, onStatusChange) {
         processorBusy.delete(target);
         await sleepInterruptible(state, 500);
       } catch (e) {
-        addLog('intent', `Intent loop error [${tName()}]`, e.message, target);
+        addLog('intent', `Intent loop error [${tName()}]`, e.message || e, target);
         processorBusy.delete(target);
-        await sleepInterruptible(state, 30000);
+        await sleepInterruptible(state, 2000);
       }
     }
   };
@@ -1874,7 +1893,7 @@ export async function startSocialLoop(config, onStatusChange) {
         }
       }
       } catch (e) {
-        addLog('error', `Fetcher: error processing target ${targetData?.target}`, e.message, targetData?.target);
+        addLog('error', `Fetcher: error processing target ${targetData?.target}`, e.message || e, targetData?.target);
       }
     }
     
@@ -1904,6 +1923,7 @@ export async function startSocialLoop(config, onStatusChange) {
     await new Promise(r => setTimeout(r, Math.random() * 3000 + 1000));
 
     let llmRunning = false;   // 本 target observer 的 LLM 是否正在执行
+    let consecutiveErrors = 0;  // 连续错误计数（用于退避）
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
@@ -1949,10 +1969,12 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
-        // Observer 冷却
+        // Observer 冷却（连续错误时指数退避：180s, 360s, 720s... 上限 300s 额外）
         const now = Date.now();
+        const errorBackoff = consecutiveErrors > 0 ? Math.min(consecutiveErrors * observerIntervalMs, 300000) : 0;
+        const effectiveCooldown = observerIntervalMs + errorBackoff;
         const sinceLastObserve = now - (lastObserveTime.get(target) || 0);
-        if (sinceLastObserve < observerIntervalMs) {
+        if (sinceLastObserve < effectiveCooldown) {
           await new Promise(r => setTimeout(r, 2000));
           continue;
         }
@@ -1979,8 +2001,13 @@ export async function startSocialLoop(config, onStatusChange) {
           intentHistory: getIntentState(target).history,
           intentSleeping: getIntentState(target).sleeping,
         }).then(result => {
-          if (result.action !== 'error') {
-            lastObserveTime.set(target, Date.now());
+          // 无论成功失败都更新冷却时间，防止错误时 2s 重试风暴
+          lastObserveTime.set(target, Date.now());
+          if (result.action === 'error') {
+            consecutiveErrors++;
+            addLog('warn', `Observer ${label} LLM error (consecutive: ${consecutiveErrors}, next cooldown: ${Math.round((observerIntervalMs + Math.min(consecutiveErrors * observerIntervalMs, 300000)) / 1000)}s)`, result.detail, target);
+          } else {
+            consecutiveErrors = 0; // 成功后重置
             // Observer 处理完后触发 compress（如果旧消息超过阈值）
             const currentBuf = dataBuffer.get(target);
             if (currentBuf) {
@@ -2003,14 +2030,16 @@ export async function startSocialLoop(config, onStatusChange) {
             }
           }
         }).catch(e => {
-          addLog('error', `Observer ${label} error`, e.message, target);
+          lastObserveTime.set(target, Date.now());
+          consecutiveErrors++;
+          addLog('error', `Observer ${label} error (consecutive: ${consecutiveErrors})`, e.message || e, target);
         }).finally(() => {
           llmRunning = false;
         });
         
         await new Promise(r => setTimeout(r, 2000));
       } catch (e) {
-        addLog('error', `Observer ${label} loop error`, e.message, target);
+        addLog('error', `Observer ${label} loop error`, e.message || e, target);
         await new Promise(r => setTimeout(r, 5000));
       }
     }
@@ -2200,7 +2229,7 @@ export async function startSocialLoop(config, onStatusChange) {
               forceWakeIntent(target);
             }
           } catch (e) {
-            addLog('error', `Reply ${label} LLM error`, e.message, target);
+            addLog('error', `Reply ${label} LLM error`, e.message || e, target);
           } finally {
             llmRunning = false;
             lastLoggedNewCount = 0;
@@ -2213,7 +2242,7 @@ export async function startSocialLoop(config, onStatusChange) {
         
         await new Promise(r => setTimeout(r, 1000));
       } catch (e) {
-        addLog('error', `Reply ${label} loop error`, e.message, target);
+        addLog('error', `Reply ${label} loop error`, e.message || e, target);
         // 安全清理：防止崩溃后 processorBusy/llmRunning 卡死导致 Intent 死锁
         llmRunning = false;
         processorBusy.delete(target);

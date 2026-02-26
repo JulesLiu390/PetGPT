@@ -339,6 +339,28 @@ export const subscribeTabState = async (conversationId, callback) => {
 export const llmCall = (request) => invoke('llm_call', { request });
 
 /**
+ * LLM HTTP 代理调用（social agent 专用）
+ * 通过 Rust 侧 reqwest 发送，自带 90s 超时 + 并发控制（最多 2 个同时请求）
+ * @param {string} endpoint - 完整 API URL
+ * @param {Object} headers - HTTP 请求头
+ * @param {Object} body - JSON 请求体（已由 JS adapter 构建好）
+ * @returns {Promise<Object>} 原始 API JSON 响应
+ */
+export const llmProxyCall = (endpoint, headers, body) => {
+  // JSON.stringify (ES2019) 会把孤立 surrogate 转义为字面文本 \ud83e，
+  // serde_json 遇到 \uD800-\uDBFF 后找不到配对的 \uDC00-\uDFFF 就报
+  // "unexpected end of hex escape" → 在 JSON 文本层面替换为 \ufffd
+  const jsonStr = JSON.stringify(body)
+    .replace(/\\ud[89ab][0-9a-f]{2}(?!\\ud[cdef][0-9a-f]{2})/gi, '\\ufffd')
+    .replace(/(?<!\\ud[89ab][0-9a-f]{2})\\ud[cdef][0-9a-f]{2}/gi, '\\ufffd');
+  const bytes = new TextEncoder().encode(jsonStr);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const bodyB64 = btoa(binary);
+  return invoke('llm_proxy_call', { endpoint, headers, bodyB64 });
+};
+
+/**
  * 流式 LLM 调用 - 通过事件推送响应块
  * @param {Object} request - LLM 请求配置 (同 llmCall)
  * @returns {Promise<Object>} 完整响应

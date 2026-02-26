@@ -13,7 +13,7 @@ use database::{Database, pets, conversations, messages, settings, mcp_servers, a
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent, SamplingLlmConfig};
 use message_cache::TabMessageCache;
 use tab_state::TabState;
-use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation};
+use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation, LlmProxy};
 use workspace::WorkspaceEngine;
 use platform::{Platform, PlatformProvider, WindowEffect};
 use window_layout::{WindowState, screen_info_from_tauri_monitor};
@@ -33,6 +33,9 @@ type LlmState = Arc<LlmClient>;
 
 // Type alias for LLM stream cancellation state
 type LlmCancelState = Arc<LlmStreamCancellation>;
+
+// Type alias for LLM proxy state (social agent 用)
+type LlmProxyState = Arc<LlmProxy>;
 
 // Type alias for MCP manager state
 type McpState = Arc<tokio::sync::RwLock<McpManager>>;
@@ -2143,6 +2146,10 @@ pub fn run() {
             let llm_client: LlmState = Arc::new(LlmClient::new());
             app.manage(llm_client);
 
+            // Initialize LLM proxy (social agent 用：带超时 + 并发控制)
+            let llm_proxy: LlmProxyState = Arc::new(LlmProxy::new());
+            app.manage(llm_proxy);
+
             // Initialize LLM stream cancellation manager
             let llm_cancellation: LlmCancelState = Arc::new(LlmStreamCancellation::new());
             app.manage(llm_cancellation);
@@ -2579,6 +2586,7 @@ pub fn run() {
             llm_cancel_stream,
             llm_cancel_all_streams,
             llm_reset_cancellation,
+            llm::proxy::llm_proxy_call,
             // Workspace commands
             workspace::workspace_read,
             workspace::workspace_write,
