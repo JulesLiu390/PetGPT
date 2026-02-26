@@ -563,6 +563,10 @@ async function pollTarget({
     if (latestIntent) {
       const wTag = latestIntent.willingnessLabel ? ` ${latestIntent.willingnessLabel}` : '';
       intentBlock += `${latestIntent.content}${wTag}\n`;
+      // 结构化回复参数
+      if (latestIntent.numChunks != null) intentBlock += `numChunks=${latestIntent.numChunks}`;
+      if (latestIntent.atTarget) intentBlock += ` at=${latestIntent.atTarget}`;
+      intentBlock += '\n';
       if (pollIntentSleeping) {
         intentBlock += '（群里已经安静了一段时间，以上是你之前的想法，可能需要更新）';
       } else if (latestIntent.idle) {
@@ -683,8 +687,10 @@ async function pollTarget({
           for (const sec of Object.values(ephemeral)) {
             content = content.replaceAll(sec, '');
           }
-          // num_chunks 防护：LLM 忘传时默认 1（不拆分）
-          const num_chunks = args?.num_chunks ?? 1;
+          // num_chunks：优先用 LLM 传的，其次用 Intent 建议的，最后默认 1
+          const intentEntry = (pollIntentHistory || []).filter(e => !e.idle).slice(-1)[0];
+          const intentChunks = intentEntry?.numChunks ?? 1;
+          const num_chunks = args?.num_chunks ?? intentChunks;
           return { ...args, content, num_chunks, target, target_type: targetType };
         }
         return args;
@@ -1208,26 +1214,35 @@ export async function startSocialLoop(config, onStatusChange) {
   ];
   const WILLINGNESS_RE = /\[(不想理|无感|等回复|有点想说|想聊|忍不住)[：:][^\]]*\]/;
   const WILLINGNESS_RE_LOOSE = /(不想理|无感|等回复|有点想说|想聊|忍不住)[：:]([^\n]*)/;
+  const FORMAT_RE = /numChunks\s*=\s*(\d+)\s+at\s*=\s*(\S+)/i;
   const parseWillingness = (rawText) => {
+    // 解析回复格式行：numChunks=N at=无/某人
+    const fmtMatch = rawText.match(FORMAT_RE);
+    const numChunks = fmtMatch ? parseInt(fmtMatch[1], 10) : 1;
+    const atRaw = fmtMatch ? fmtMatch[2] : '无';
+    const atTarget = (atRaw === '无' || atRaw === '无') ? null : atRaw;
+    // 去掉格式行后再解析标签
+    const cleanText = fmtMatch ? rawText.replace(FORMAT_RE, '').trim() : rawText;
+
     // 严格匹配：[tag：reason]（带方括号）
-    const m = rawText.match(WILLINGNESS_RE);
+    const m = cleanText.match(WILLINGNESS_RE);
     if (m) {
       const key = m[1];
       const tag = WILLINGNESS_TAGS.find(t => t.key === key);
-      const thought = rawText.replace(WILLINGNESS_RE, '').trim();
-      return { level: tag ? tag.level : 0, label: m[0], thought };
+      const thought = cleanText.replace(WILLINGNESS_RE, '').trim();
+      return { level: tag ? tag.level : 0, label: m[0], thought, numChunks, atTarget };
     }
     // 容错匹配：tag：reason（无方括号，LLM 偶尔会省略括号）
-    const mLoose = rawText.match(WILLINGNESS_RE_LOOSE);
+    const mLoose = cleanText.match(WILLINGNESS_RE_LOOSE);
     if (mLoose) {
       const key = mLoose[1];
       const tag = WILLINGNESS_TAGS.find(t => t.key === key);
       const reason = (mLoose[2] || '').trim();
       const label = `[${key}：${reason}]`;
-      const thought = rawText.substring(0, mLoose.index).trim();
-      return { level: tag ? tag.level : 0, label, thought };
+      const thought = cleanText.substring(0, mLoose.index).trim();
+      return { level: tag ? tag.level : 0, label, thought, numChunks, atTarget };
     }
-    return { level: 0, label: '', thought: rawText.trim() };
+    return { level: 0, label: '', thought: cleanText.trim(), numChunks, atTarget };
   };
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // 非 normal 模式的评估冷却
   const INTENT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟无新消息 → 最终评估 → sleep（保留历史）
@@ -1565,6 +1580,8 @@ export async function startSocialLoop(config, onStatusChange) {
               willingness: w.level,
               willingnessLabel: w.label,
               content: w.thought || (isIdle ? '(无内容)' : ''),
+              numChunks: w.numChunks,
+              atTarget: w.atTarget,
             };
             state.history.push(entry);
             if (state.history.length > INTENT_HISTORY_MAX) state.history.shift();
@@ -1736,6 +1753,8 @@ export async function startSocialLoop(config, onStatusChange) {
           willingness: w.level,
           willingnessLabel: w.label,
           content: w.thought || (isIdle ? '(无内容)' : ''),
+          numChunks: w.numChunks,
+          atTarget: w.atTarget,
         };
 
         state.history.push(entry);

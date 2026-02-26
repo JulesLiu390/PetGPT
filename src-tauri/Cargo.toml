@@ -1,6 +1,6 @@
 [package]
 name = "petgpt"
-version = "0.4.1"
+version = "0.4.2"
 description = "PetGPT - AI Desktop Pet Assistant"
 authors = ["JulesLiu390"]
 license = "MIT"
