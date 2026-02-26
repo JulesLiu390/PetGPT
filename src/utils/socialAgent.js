@@ -565,6 +565,7 @@ async function pollTarget({
       intentBlock += `${latestIntent.content}${wTag}\n`;
       // 结构化回复参数
       if (latestIntent.numChunks != null) intentBlock += `numChunks=${latestIntent.numChunks}`;
+      if (latestIntent.replyLen != null) intentBlock += ` replyLen=${latestIntent.replyLen}`;
       if (latestIntent.atTarget) intentBlock += ` at=${latestIntent.atTarget}`;
       intentBlock += '\n';
       if (pollIntentSleeping) {
@@ -1214,15 +1215,30 @@ export async function startSocialLoop(config, onStatusChange) {
   ];
   const WILLINGNESS_RE = /\[(不想理|无感|等回复|有点想说|想聊|忍不住)[：:][^\]]*\]/;
   const WILLINGNESS_RE_LOOSE = /(不想理|无感|等回复|有点想说|想聊|忍不住)[：:]([^\n]*)/;
-  const FORMAT_RE = /numChunks\s*=\s*(\d+)\s+at\s*=\s*(\S+)/i;
+  const FORMAT_RE = /numChunks\s*=\s*(\d+)\s+replyLen\s*=\s*(\d+)\s+at\s*=\s*(\S+)/i;
+  const FORMAT_RE_NOLEN = /numChunks\s*=\s*(\d+)\s+at\s*=\s*(\S+)/i;
   const parseWillingness = (rawText) => {
-    // 解析回复格式行：numChunks=N at=无/某人
-    const fmtMatch = rawText.match(FORMAT_RE);
-    const numChunks = fmtMatch ? parseInt(fmtMatch[1], 10) : 1;
-    const atRaw = fmtMatch ? fmtMatch[2] : '无';
+    // 解析回复格式行：numChunks=N replyLen=N at=无/某人
+    let fmtMatch = rawText.match(FORMAT_RE);
+    let numChunks = 1, replyLen = null, atRaw = '无';
+    let fmtStr = '';
+    if (fmtMatch) {
+      numChunks = parseInt(fmtMatch[1], 10);
+      replyLen = parseInt(fmtMatch[2], 10);
+      atRaw = fmtMatch[3];
+      fmtStr = fmtMatch[0];
+    } else {
+      // 兼容旧格式（无 replyLen）
+      const fmtMatch2 = rawText.match(FORMAT_RE_NOLEN);
+      if (fmtMatch2) {
+        numChunks = parseInt(fmtMatch2[1], 10);
+        atRaw = fmtMatch2[2];
+        fmtStr = fmtMatch2[0];
+      }
+    }
     const atTarget = (atRaw === '无' || atRaw === '无') ? null : atRaw;
     // 去掉格式行后再解析标签
-    const cleanText = fmtMatch ? rawText.replace(FORMAT_RE, '').trim() : rawText;
+    const cleanText = fmtStr ? rawText.replace(fmtStr, '').trim() : rawText;
 
     // 严格匹配：[tag：reason]（带方括号）
     const m = cleanText.match(WILLINGNESS_RE);
@@ -1230,7 +1246,7 @@ export async function startSocialLoop(config, onStatusChange) {
       const key = m[1];
       const tag = WILLINGNESS_TAGS.find(t => t.key === key);
       const thought = cleanText.replace(WILLINGNESS_RE, '').trim();
-      return { level: tag ? tag.level : 0, label: m[0], thought, numChunks, atTarget };
+      return { level: tag ? tag.level : 0, label: m[0], thought, numChunks, replyLen, atTarget };
     }
     // 容错匹配：tag：reason（无方括号，LLM 偶尔会省略括号）
     const mLoose = cleanText.match(WILLINGNESS_RE_LOOSE);
@@ -1240,9 +1256,9 @@ export async function startSocialLoop(config, onStatusChange) {
       const reason = (mLoose[2] || '').trim();
       const label = `[${key}：${reason}]`;
       const thought = cleanText.substring(0, mLoose.index).trim();
-      return { level: tag ? tag.level : 0, label, thought, numChunks, atTarget };
+      return { level: tag ? tag.level : 0, label, thought, numChunks, replyLen, atTarget };
     }
-    return { level: 0, label: '', thought: cleanText.trim(), numChunks, atTarget };
+    return { level: 0, label: '', thought: cleanText.trim(), numChunks, replyLen, atTarget };
   };
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // 非 normal 模式的评估冷却
   const INTENT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟无新消息 → 最终评估 → sleep（保留历史）
@@ -1581,11 +1597,13 @@ export async function startSocialLoop(config, onStatusChange) {
               willingnessLabel: w.label,
               content: w.thought || (isIdle ? '(无内容)' : ''),
               numChunks: w.numChunks,
+              replyLen: w.replyLen,
               atTarget: w.atTarget,
             };
             state.history.push(entry);
             if (state.history.length > INTENT_HISTORY_MAX) state.history.shift();
-            addLog('intent', `🧠 [${tName()}] → sleeping ${w.label}`, entry.content, target);
+            const fmtTagIdle = w.level >= 3 ? ` numChunks=${w.numChunks} replyLen=${w.replyLen ?? '?'}${w.atTarget ? ` at=${w.atTarget}` : ' at=无'}` : '';
+            addLog('intent', `🧠 [${tName()}] → sleeping ${w.label}`, entry.content + fmtTagIdle, target);
           } else {
             addLog('intent', `🧠 [${tName()}] → sleeping (LLM error)`, null, target);
           }
@@ -1754,6 +1772,7 @@ export async function startSocialLoop(config, onStatusChange) {
           willingnessLabel: w.label,
           content: w.thought || (isIdle ? '(无内容)' : ''),
           numChunks: w.numChunks,
+          replyLen: w.replyLen,
           atTarget: w.atTarget,
         };
 
@@ -1781,7 +1800,8 @@ export async function startSocialLoop(config, onStatusChange) {
         if (isIdle) {
           addLog('intent', `🧠 [${tName()}] → idle ${w.label}`, entry.content, target);
         } else {
-          addLog('intent', `🧠 [${tName()}] ${w.label}`, entry.content, target);
+          const fmtTag = `numChunks=${w.numChunks} replyLen=${w.replyLen ?? '?'}${w.atTarget ? ` at=${w.atTarget}` : ' at=无'}`;
+          addLog('intent', `🧠 [${tName()}] ${w.label}`, `${entry.content}\n${fmtTag}`, target);
         }
 
         // idle 不 sleep，保持 awake 继续监听新消息；只有 5min 无新消息的 idle timeout 才真正进入 sleep
