@@ -563,11 +563,16 @@ async function pollTarget({
     if (latestIntent) {
       const wTag = latestIntent.willingnessLabel ? ` ${latestIntent.willingnessLabel}` : '';
       intentBlock += `${latestIntent.content}${wTag}\n`;
-      // 结构化回复参数
-      if (latestIntent.numChunks != null) intentBlock += `numChunks=${latestIntent.numChunks}`;
-      if (latestIntent.replyLen != null) intentBlock += ` replyLen=${latestIntent.replyLen}`;
-      if (latestIntent.atTarget) intentBlock += ` at=${latestIntent.atTarget}`;
-      intentBlock += '\n';
+      // 回复参数（中文指令）
+      {
+        const chunks = latestIntent.numChunks ?? 1;
+        const len = latestIntent.replyLen;
+        const at = latestIntent.atTarget;
+        let paramLine = `分${chunks}条发送（num_chunks=${chunks}）`;
+        if (len != null) paramLine += `，【字数严格控制在${len}字左右，这很重要（replyLen=${len}）】`;
+        paramLine += at && at !== '无' ? `，需要@${at}` : '，不需要@';
+        intentBlock += paramLine + '\n';
+      }
       if (pollIntentSleeping) {
         intentBlock += '（群里已经安静了一段时间，以上是你之前的想法，可能需要更新）';
       } else if (latestIntent.idle) {
@@ -1602,7 +1607,7 @@ export async function startSocialLoop(config, onStatusChange) {
             };
             state.history.push(entry);
             if (state.history.length > INTENT_HISTORY_MAX) state.history.shift();
-            const fmtTagIdle = w.level >= 3 ? ` numChunks=${w.numChunks} replyLen=${w.replyLen ?? '?'}${w.atTarget ? ` at=${w.atTarget}` : ' at=无'}` : '';
+            const fmtTagIdle = w.level >= 3 ? ` 分${w.numChunks}条 ${w.replyLen ?? '?'}字${w.atTarget && w.atTarget !== '无' ? ` @${w.atTarget}` : ''}` : '';
             addLog('intent', `🧠 [${tName()}] → sleeping ${w.label}`, entry.content + fmtTagIdle, target);
           } else {
             addLog('intent', `🧠 [${tName()}] → sleeping (LLM error)`, null, target);
@@ -1800,7 +1805,7 @@ export async function startSocialLoop(config, onStatusChange) {
         if (isIdle) {
           addLog('intent', `🧠 [${tName()}] → idle ${w.label}`, entry.content, target);
         } else {
-          const fmtTag = `numChunks=${w.numChunks} replyLen=${w.replyLen ?? '?'}${w.atTarget ? ` at=${w.atTarget}` : ' at=无'}`;
+          const fmtTag = `分${w.numChunks}条 ${w.replyLen ?? '?'}字${w.atTarget && w.atTarget !== '无' ? ` @${w.atTarget}` : ''}`;
           addLog('intent', `🧠 [${tName()}] ${w.label}`, `${entry.content}\n${fmtTag}`, target);
         }
 
