@@ -258,7 +258,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     
     const provider = providerList.find(p => p.id === providerId);
     if (provider) {
-      const models = provider.cachedModels || [];
+      const models = [...(provider.cachedModels || [])].sort((a, b) => a.localeCompare(b));
       setAvailableModels(models);
       
       const firstModel = models.length > 0 ? models[0] : "";
@@ -2002,7 +2002,7 @@ const ModelsPanel = () => {
 
           {/* Table Body - Grouped by Provider */}
           {providers.map(provider => {
-            const models = provider.cachedModels || [];
+            const models = [...(provider.cachedModels || [])].sort((a, b) => a.localeCompare(b));
             const hiddenModels = provider.hiddenModels || [];
             const isExpanded = expandedProviders.has(provider._id);
 
@@ -2043,7 +2043,7 @@ const ModelsPanel = () => {
                             index !== models.length - 1 ? 'border-b border-gray-100' : ''
                           }`}
                         >
-                          <div className="col-span-6 text-sm text-gray-800 font-mono truncate">
+                          <div className="col-span-6 text-sm text-gray-800 font-mono truncate" title={modelName}>
                             {modelName}
                           </div>
                           <div className="col-span-3 text-sm text-gray-500">
@@ -2900,6 +2900,10 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
         const hiddenModels = selectedProvider.hiddenModels || [];
         const modelName = typeof model === 'string' ? model : model.name;
         return !hiddenModels.includes(modelName);
+      }).sort((a, b) => {
+        const na = typeof a === 'string' ? a : a.name;
+        const nb = typeof b === 'string' ? b : b.name;
+        return na.localeCompare(nb);
       })
     : [];
   
@@ -3638,7 +3642,11 @@ const SocialPanel = ({ assistants, apiProviders }) => {
 
   // Resolve available models for selected provider
   const selectedProvider = apiProviders.find(p => (p._id || p.id) === config.apiProviderId);
-  const providerModels = selectedProvider?.cachedModels || [];
+  const providerModels = [...(selectedProvider?.cachedModels || [])].sort((a, b) => {
+    const na = typeof a === 'string' ? a : a.id;
+    const nb = typeof b === 'string' ? b : b.id;
+    return na.localeCompare(nb);
+  });
 
   return (
     <>

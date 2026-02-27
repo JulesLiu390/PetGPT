@@ -30,6 +30,7 @@ export default function SocialPage() {
     replyStrategyPrompt: '',
     agentCanEditStrategy: false,
     atMustReply: true,
+    enableImages: true,
     botQQ: '',
     intentModelName: '',
   });
@@ -299,7 +300,11 @@ export default function SocialPage() {
 
   // ── Derived state ──
   const selectedProvider = apiProviders.find(p => (p._id || p.id) === config.apiProviderId);
-  const providerModels = selectedProvider?.cachedModels || [];
+  const providerModels = [...(selectedProvider?.cachedModels || [])].sort((a, b) => {
+    const na = typeof a === 'string' ? a : a.id;
+    const nb = typeof b === 'string' ? b : b.id;
+    return na.localeCompare(nb);
+  });
 
   // Build log filter tabs from config
   const watchedTargets = [
@@ -635,6 +640,12 @@ export default function SocialPage() {
                     hint="Always reply when someone @mentions the bot"
                     checked={config.atMustReply !== false}
                     onChange={(v) => handleConfigChange('atMustReply', v)}
+                  />
+                  <ToggleRow
+                    label="Enable Images"
+                    hint="Send images to LLM for understanding; disable if provider doesn't support vision"
+                    checked={config.enableImages !== false}
+                    onChange={(v) => handleConfigChange('enableImages', v)}
                   />
                 </div>
               </Card>

@@ -611,6 +611,10 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       const visibleModels = models.filter(model => {
         const modelName = typeof model === 'string' ? model : model.name;
         return !hiddenModels.includes(modelName);
+      }).sort((a, b) => {
+        const na = typeof a === 'string' ? a : a.name;
+        const nb = typeof b === 'string' ? b : b.name;
+        return na.localeCompare(nb);
       });
       return {
         ...provider,

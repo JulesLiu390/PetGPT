@@ -161,6 +161,38 @@ async function saveLurkModes(petId, modes) {
   }
 }
 
+/**
+ * 加载持久化的 paused targets
+ * @param {string} petId
+ * @returns {Promise<Object|null>} { [target]: true } 或 null（首次启动）
+ */
+async function loadPausedTargets(petId) {
+  try {
+    const allSettings = await tauri.getSettings();
+    const raw = allSettings[`social_paused_targets_${petId}`];
+    if (!raw) return null;
+    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+  } catch (e) {
+    console.warn('[Social] Failed to load paused targets for', petId, e);
+    return null;
+  }
+}
+
+/**
+ * 持久化 paused targets
+ * @param {string} petId
+ * @param {Object} paused - { [target]: true }
+ */
+async function savePausedTargets(petId, paused) {
+  try {
+    await tauri.updateSettings({
+      [`social_paused_targets_${petId}`]: JSON.stringify(paused)
+    });
+  } catch (e) {
+    console.warn('[Social] Failed to save paused targets', e);
+  }
+}
+
 // ============ API Provider 解析 ============
 
 /**
@@ -335,6 +367,7 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
  * @param {'observer'|'reply'} [params.role='reply'] - 角色
  * @param {Array} [params.intentHistory=[]] - 该群意图滚动窗口
  * @param {boolean} [params.intentSleeping=false] - 该群 intent 是否处于休眠状态
+ * @param {boolean} [params.enableImages=true] - 是否向 LLM 发送图片
  * @returns {Promise<{action: 'skipped'|'silent'|'replied'|'error', detail?: string}>}
  */
 async function pollTarget({
@@ -354,6 +387,7 @@ async function pollTarget({
   role = 'reply',
   intentHistory: pollIntentHistory = [],
   intentSleeping: pollIntentSleeping = false,
+  enableImages = true,
 }) {
   const groupName = gName || target;
   const compressedSummary = compSummary;
@@ -385,18 +419,25 @@ async function pollTarget({
   }
   // _isOld 标记已移除：LLM 看到统一的对话历史，不区分新旧
   
-  // ── 3. 解析图片 URL 为 base64 ──
+  // ── 3. 解析图片 URL 为 base64（enableImages=false 时跳过） ──
   let totalImageCount = 0;
-  for (const msg of individualMessages) {
-    if (msg._images && msg._images.length > 0) {
-      msg._images = await resolveImageUrls(msg._images);
-      totalImageCount += msg._images.length;
-    } else {
+  if (enableImages) {
+    for (const msg of individualMessages) {
+      if (msg._images && msg._images.length > 0) {
+        msg._images = await resolveImageUrls(msg._images);
+        totalImageCount += msg._images.length;
+      } else {
+        msg._images = [];
+      }
+    }
+    if (totalImageCount > 0) {
+      addLog('info', `Resolved ${totalImageCount} image(s) across ${individualMessages.filter(m => m._images.length > 0).length} message(s)`, null, target);
+    }
+  } else {
+    // 图片关闭：清空所有 _images
+    for (const msg of individualMessages) {
       msg._images = [];
     }
-  }
-  if (totalImageCount > 0) {
-    addLog('info', `Resolved ${totalImageCount} image(s) across ${individualMessages.filter(m => m._images.length > 0).length} message(s)`, null, target);
   }
   
   // ── 4. 注入本地发送缓存中的 bot 消息 ──
@@ -850,8 +891,10 @@ async function pollTarget({
       continue;
     }
     emitPollLog('error');
-    addLog('error', `LLM call failed for ${target}`, e._debugBody || (e.message || e), target);
-    return { action: 'error', detail: e.message || e };
+    const errMsg = e.message || String(e);
+    const detail = e._debugBody ? `${errMsg}\n\n--- request body ---\n${e._debugBody}` : errMsg;
+    addLog('error', `LLM call failed for ${target}`, detail, target);
+    return { action: 'error', detail: errMsg };
   }
   } // end for _imgRetry
 }
@@ -1077,6 +1120,40 @@ export async function startSocialLoop(config, onStatusChange) {
     }
   } catch (e) {
     addLog('warn', 'Failed to restore lurk modes', e.message);
+  }
+
+  // 恢复持久化的 paused targets（首次启动时全部暂停）
+  const allTargetIds = [
+    ...(config.watchedGroups || []).map(g => g.trim()).filter(Boolean),
+    ...(config.watchedFriends || []).map(f => f.trim()).filter(Boolean),
+  ];
+  try {
+    const savedPaused = await loadPausedTargets(config.petId);
+    if (savedPaused && typeof savedPaused === 'object') {
+      // 有保存的状态 → 恢复
+      for (const [target, isPaused] of Object.entries(savedPaused)) {
+        if (isPaused) pausedTargets.set(target, true);
+      }
+      // 首次出现的新 target 也默认暂停
+      for (const t of allTargetIds) {
+        if (!(t in savedPaused)) {
+          pausedTargets.set(t, true);
+        }
+      }
+      addLog('info', `Restored paused state: ${pausedTargets.size} target(s) paused`);
+    } else {
+      // 首次启动 → 全部暂停
+      for (const t of allTargetIds) {
+        pausedTargets.set(t, true);
+      }
+      addLog('info', `First launch: all ${allTargetIds.length} target(s) paused by default`);
+    }
+  } catch (e) {
+    addLog('warn', 'Failed to restore paused targets', e.message);
+    // 出错也全部暂停，安全第一
+    for (const t of allTargetIds) {
+      pausedTargets.set(t, true);
+    }
   }
   
   // 确保 MCP 服务器已启动
@@ -1498,6 +1575,12 @@ export async function startSocialLoop(config, onStatusChange) {
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
+        // ── 暂停检查 ──
+        if (pausedTargets.get(target)) {
+          await sleepInterruptible(state, 2000);
+          continue;
+        }
+
         // ── 睡眠中 → 每 5s 检查 ──
         if (state.sleeping) {
           await sleepInterruptible(state, 5000);
@@ -2044,6 +2127,7 @@ export async function startSocialLoop(config, onStatusChange) {
           role: 'observer',
           intentHistory: getIntentState(target).history,
           intentSleeping: getIntentState(target).sleeping,
+          enableImages: config.enableImages !== false,
         }).then(result => {
           // 无论成功失败都更新冷却时间，防止错误时 2s 重试风暴
           lastObserveTime.set(target, Date.now());
@@ -2263,6 +2347,7 @@ export async function startSocialLoop(config, onStatusChange) {
               role: 'reply',
               intentHistory: getIntentState(target).history,
               intentSleeping: getIntentState(target).sleeping,
+              enableImages: config.enableImages !== false,
             });
 
             if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
@@ -2405,6 +2490,8 @@ export function stopSocialLoop() {
     if (lurkModes.size > 0) {
       saveLurkModes(activeLoop.petId, Object.fromEntries(lurkModes));
     }
+    // 持久化 paused targets 在清空之前
+    savePausedTargets(activeLoop.petId, Object.fromEntries(pausedTargets));
     activeLoop._scheduleCleanup?.();
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
@@ -2469,6 +2556,10 @@ export function setTargetPaused(target, paused) {
   }
   if (prev !== !!paused) {
     addLog('info', `Target [${target}] ${paused ? '⏸️ paused' : '▶️ resumed'}`, null, target);
+    // 持久化变更
+    if (activeLoop?.petId) {
+      savePausedTargets(activeLoop.petId, Object.fromEntries(pausedTargets));
+    }
   }
 }
 

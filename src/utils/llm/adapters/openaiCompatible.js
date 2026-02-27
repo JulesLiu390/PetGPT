@@ -59,8 +59,32 @@ export const convertMessages = async (messages) => {
   const expanded = await expandDocumentPartsToText(messages);
   const normalizedMessages = normalizeMessages(expanded);
   const result = [];
-  
-  for (const msg of normalizedMessages) {
+
+  // 记录 tool 相关字段，normalizeMessages 只保留 role+content 会丢掉它们
+  const toolMetaByIndex = new Map();
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role === 'assistant' && m.tool_calls) {
+      toolMetaByIndex.set(i, { tool_calls: m.tool_calls, content: m.content ?? null });
+    } else if (m.role === 'tool' && m.tool_call_id) {
+      toolMetaByIndex.set(i, { tool_call_id: m.tool_call_id });
+    }
+  }
+
+  for (let i = 0; i < normalizedMessages.length; i++) {
+    const msg = normalizedMessages[i];
+    const toolMeta = toolMetaByIndex.get(i);
+
+    // assistant 带 tool_calls → 直接透传，不走 content 转换
+    if (toolMeta?.tool_calls) {
+      result.push({
+        role: 'assistant',
+        content: toolMeta.content,
+        tool_calls: toolMeta.tool_calls,
+      });
+      continue;
+    }
+
     const convertedContent = [];
     
     for (const part of msg.content) {
@@ -109,10 +133,12 @@ export const convertMessages = async (messages) => {
       finalContent = convertedContent;
     }
     
-    result.push({
-      role: msg.role,
-      content: finalContent
-    });
+    const outputMsg = { role: msg.role, content: finalContent };
+    // tool 消息需要保留 tool_call_id
+    if (toolMeta?.tool_call_id) {
+      outputMsg.tool_call_id = toolMeta.tool_call_id;
+    }
+    result.push(outputMsg);
   }
   
   return result;
