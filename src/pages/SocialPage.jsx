@@ -4,7 +4,7 @@ import { MdCancel } from "react-icons/md";
 import TitleBar from "../components/UI/TitleBar";
 import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/UI/ui";
 import * as tauri from "../utils/tauri";
-import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
+import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { listen, emit } from "@tauri-apps/api/event";
 
@@ -250,6 +250,16 @@ export default function SocialPage() {
         setGroupsText('');
         setFriendsText('');
       }
+      // 预加载群名缓存（即使 agent 未启动）
+      const savedNames = await loadSavedTargetNames(selectedPetId);
+      if (savedNames && Object.keys(savedNames).length > 0) {
+        setTargetNames(prev => ({ ...prev, ...savedNames }));
+      }
+      // 预加载 paused 状态（即使 agent 未启动）
+      const savedPaused = await loadSavedPausedTargets(selectedPetId);
+      if (savedPaused && typeof savedPaused === 'object') {
+        setPausedTargets(savedPaused);
+      }
       emit('social-query-status');
     };
     load();
@@ -373,7 +383,15 @@ export default function SocialPage() {
   };
   const toggleTargetPaused = (target) => {
     const isPaused = pausedTargets[target] || false;
-    emit('social-set-target-paused', { target, paused: !isPaused });
+    const newPaused = !isPaused;
+    if (socialActive) {
+      // agent 运行时：通过事件通知 agent（agent 会同时持久化）
+      emit('social-set-target-paused', { target, paused: newPaused });
+    } else {
+      // agent 未启动：直接更新 UI 状态 + 持久化到 DB
+      setPausedTargets(prev => ({ ...prev, [target]: newPaused }));
+      if (selectedPetId) saveTargetPausedDirect(selectedPetId, target, newPaused);
+    }
   };
   // Which target is selected in the log filter (not 'all'/'system')
   const selectedTarget = logFilter !== 'all' && logFilter !== 'system' ? logFilter : null;
@@ -775,8 +793,8 @@ export default function SocialPage() {
                       const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
                       setTargetLurkMode(t.id, next);
                     } : null}
-                    paused={socialActive ? isPaused : false}
-                    onPauseClick={socialActive ? () => toggleTargetPaused(t.id) : null}
+                    paused={isPaused}
+                    onPauseClick={() => toggleTargetPaused(t.id)}
                   />
                 );
               })}
@@ -804,7 +822,7 @@ export default function SocialPage() {
               <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
               <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
               {/* Lurk mode buttons for selected target */}
-              {socialActive && selectedTarget && (() => {
+              {selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
                 const isPaused = pausedTargets[selectedTarget] || false;
                 return (
@@ -820,22 +838,24 @@ export default function SocialPage() {
                     >
                       {isPaused ? '⏸️ Paused' : '▶️ Running'}
                     </button>
-                    <div className="w-px h-4 bg-slate-200 mx-0.5" />
-                    {LURK_OPTIONS.map(opt => {
-                      const isActive = currentMode === opt.mode;
-                      return (
-                        <button
-                          key={opt.mode}
-                          onClick={() => setTargetLurkMode(selectedTarget, opt.mode)}
-                          className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
-                            isActive ? opt.activeCls : `${opt.cls} hover:opacity-80`
-                          }`}
-                          title={opt.label}
-                        >
-                          {opt.icon}
-                        </button>
-                      );
-                    })}
+                    {socialActive && <>
+                      <div className="w-px h-4 bg-slate-200 mx-0.5" />
+                      {LURK_OPTIONS.map(opt => {
+                        const isActive = currentMode === opt.mode;
+                        return (
+                          <button
+                            key={opt.mode}
+                            onClick={() => setTargetLurkMode(selectedTarget, opt.mode)}
+                            className={`px-2 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                              isActive ? opt.activeCls : `${opt.cls} hover:opacity-80`
+                            }`}
+                            title={opt.label}
+                          >
+                            {opt.icon}
+                          </button>
+                        );
+                      })}
+                    </>}
                   </div>
                 );
               })()}

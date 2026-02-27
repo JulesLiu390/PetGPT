@@ -23,6 +23,9 @@ const lurkModes = new Map();
 /** 每个 target 的暂停状态 Map<target, boolean> —— 暂停后 Observer 和 Reply 均跳过 */
 const pausedTargets = new Map();
 
+/** 已知的所有 target Set<string> —— 用于持久化时保存 enabled 状态（false）而不只是 paused（true） */
+const knownTargets = new Set();
+
 /** target 名称缓存 Map<target, string> —— 从 MCP 批量拉取中自动填充 */
 const targetNamesCache = new Map();
 
@@ -31,6 +34,35 @@ const imageDescCache = new Map();
 
 /** 图片描述进行中 Map<cacheKey, Promise<string>> —— Observer/Reply 并发去重 */
 const imageDescInflight = new Map();
+
+/** LLM 调用指数重试 delays: 5s → 25s → 125s */
+const LLM_RETRY_DELAYS = [5000, 25000, 125000];
+
+/**
+ * 带指数重试的 LLM 调用包装器
+ * @param {Function} fn - 返回 Promise 的 LLM 调用函数
+ * @param {Object} [opts] - 选项
+ * @param {string} [opts.label='LLM'] - 日志标签
+ * @param {string} [opts.target] - 日志 target
+ * @param {number[]} [opts.delays] - 重试延迟数组（默认 5s/25s/125s）
+ * @returns {Promise<*>} LLM 调用结果
+ */
+async function retryLLM(fn, { label = 'LLM', target = undefined, delays = LLM_RETRY_DELAYS } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (attempt < delays.length) {
+        const delay = delays[attempt];
+        addLog('warn', `${label} retry ${attempt + 1}/${delays.length} in ${delay / 1000}s`, e.message || String(e), target);
+        await new Promise(r => setTimeout(r, delay));
+      }
+    }
+  }
+  throw lastErr;
+}
 
 /** 系统日志（无 target，最多 200 条） */
 const systemLogs = [];
@@ -562,7 +594,7 @@ async function pollTarget({
             cachedCount++;
             continue;
           }
-          // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用）
+          // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用，失败指数重试 5→25→125s）
           try {
             let desc;
             if (imageDescInflight.has(cacheKey)) {
@@ -572,11 +604,14 @@ async function pollTarget({
             } else {
               const imgData = msg._images[j].data || '';
               const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${msg._images[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
-              // 创建 Promise 并存入 inflight
-              const descPromise = describeImage(msg._images[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig);
-              imageDescInflight.set(cacheKey, descPromise);
+              // 用 retryLLM 包装，inflight 跟踪确保并发去重
+              const wrappedDescribe = () => {
+                const p = describeImage(msg._images[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig);
+                imageDescInflight.set(cacheKey, p);
+                return p;
+              };
               try {
-                desc = await descPromise;
+                desc = await retryLLM(wrappedDescribe, { label: `Vision [${sender}] img${j}`, target });
               } finally {
                 imageDescInflight.delete(cacheKey);
               }
@@ -894,7 +929,7 @@ async function pollTarget({
   let _messagesForLLM = messages;
   for (let _imgRetry = 0; _imgRetry < 2; _imgRetry++) {
   try {
-    const result = await callLLMWithTools({
+    const result = await retryLLM(() => callLLMWithTools({
       messages: _messagesForLLM,
       apiFormat: llmConfig.apiFormat,
       apiKey: llmConfig.apiKey,
@@ -981,7 +1016,7 @@ async function pollTarget({
           }
         }
       },
-    });
+    }), { label: `${role === 'observer' ? 'Observer' : 'Reply'} ${target}`, target });
     
     // 只有 LLM 调用成功完成后才推进水位线
     // 使用开头快照的 snapshotWatermarkId，而非 bufferMessages 当前末尾
@@ -1213,7 +1248,7 @@ async function runDailyCompress(petId, llmConfig, targetSet) {
 
 ${combined}`;
       
-      const result = await callLLMWithTools({
+      const result = await retryLLM(() => callLLMWithTools({
         messages: [
           { role: 'system', content: '你是一个精简信息的助手。' },
           { role: 'user', content: compressPrompt },
@@ -1224,7 +1259,7 @@ ${combined}`;
         baseUrl: llmConfig.baseUrl,
         mcpTools: [],
         options: { temperature: 0.3 },
-      });
+      }), { label: 'DailyCompress' });
       
       const dailyContent = `# ${dateStr} 社交日报\n\n${result.content || '（压缩失败）'}\n`;
       const dailyPath = `social/DAILY_${dateStr}.md`;
@@ -1299,25 +1334,29 @@ export async function startSocialLoop(config, onStatusChange) {
     addLog('warn', 'Failed to restore lurk modes', e.message);
   }
 
-  // 恢复持久化的 paused targets（首次启动时全部暂停）
+  // 注册所有已知 target（用于持久化 enabled 状态）
   const allTargetIds = [
     ...(config.watchedGroups || []).map(g => g.trim()).filter(Boolean),
     ...(config.watchedFriends || []).map(f => f.trim()).filter(Boolean),
   ];
+  for (const t of allTargetIds) knownTargets.add(t);
+
+  // 恢复持久化的 paused targets（首次启动时全部暂停）
   try {
     const savedPaused = await loadPausedTargets(config.petId);
     if (savedPaused && typeof savedPaused === 'object') {
-      // 有保存的状态 → 恢复
-      for (const [target, isPaused] of Object.entries(savedPaused)) {
-        if (isPaused) pausedTargets.set(target, true);
-      }
-      // 首次出现的新 target 也默认暂停
+      // 有保存的状态 → 恢复（已知 target 使用保存的值；全新 target 默认暂停）
       for (const t of allTargetIds) {
-        if (!(t in savedPaused)) {
+        if (t in savedPaused) {
+          // 曾经保存过此 target 的状态，直接使用
+          if (savedPaused[t]) pausedTargets.set(t, true);
+          // savedPaused[t] === false → 已开启，不加入 pausedTargets
+        } else {
+          // 全新 target（从未出现在已保存数据中）→ 默认暂停
           pausedTargets.set(t, true);
         }
       }
-      addLog('info', `Restored paused state: ${pausedTargets.size} target(s) paused`);
+      addLog('info', `Restored paused state: ${pausedTargets.size} target(s) paused, ${allTargetIds.length - pausedTargets.size} enabled`);
     } else {
       // 首次启动 → 全部暂停
       for (const t of allTargetIds) {
@@ -1458,8 +1497,6 @@ export async function startSocialLoop(config, onStatusChange) {
   // watermark = lastSeenMessageId，标记上次处理到哪条消息
   const observerWatermarks = new Map(); // target → lastSeenMessageId
   const replyWatermarks = new Map();    // target → lastSeenMessageId
-  // 已知 target 列表（用于每日压缩时遍历群缓冲文件）
-  const knownTargets = new Set();
   // 上次 append 到群缓冲的 compressed_summary（用于去重，避免累积摘要重复写入）
   const lastAppendedSummary = new Map();
   // 已消费的 @me message_id：每条 @me 只触发一次瞬回，防止旧 @me 反复绕过冷却
@@ -1540,7 +1577,8 @@ export async function startSocialLoop(config, onStatusChange) {
   };
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // 非 normal 模式的评估冷却
   const INTENT_IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 分钟无新消息 → 最终评估 → sleep（保留历史）
-  const INTENT_LLM_MAX_RETRIES = 2;             // LLM 调用失败后最多重试 2 次（共 3 次尝试），每次间隔 30s
+  const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次，指数退避 5s/25s/125s
+  const INTENT_RETRY_DELAYS = [5000, 25000, 125000];
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
   const intentGate = new Map();                  // target → lock timestamp（Reply 发完消息后锁住，等 Intent 重评后解锁）
   const INTENT_GATE_TIMEOUT_MS = 30 * 1000;      // 门控安全超时：30s 后自动解锁
@@ -1864,8 +1902,9 @@ export async function startSocialLoop(config, onStatusChange) {
               break;
             } catch (e) {
               if (attempt < INTENT_LLM_MAX_RETRIES) {
-                addLog('intent', `🧠 [${tName()}] idle-eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 2s): ${e.message || e}`, e._debugBody || null, target);
-                await sleepInterruptible(state, 2000);
+                const retryDelay = INTENT_RETRY_DELAYS[attempt] || 5000;
+                addLog('intent', `🧠 [${tName()}] idle-eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in ${retryDelay / 1000}s): ${e.message || e}`, e._debugBody || null, target);
+                await sleepInterruptible(state, retryDelay);
                 continue;
               }
               intentResult = { content: e.message || e, error: true };
@@ -2032,8 +2071,9 @@ export async function startSocialLoop(config, onStatusChange) {
             break;
           } catch (e) {
             if (attempt < INTENT_LLM_MAX_RETRIES) {
-              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in 2s): ${e.message || e}`, e._debugBody || null, target);
-              await sleepInterruptible(state, 2000);
+              const retryDelay = INTENT_RETRY_DELAYS[attempt] || 5000;
+              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in ${retryDelay / 1000}s): ${e.message || e}`, e._debugBody || null, target);
+              await sleepInterruptible(state, retryDelay);
               continue;
             }
             intentResult = { content: e.message || e, error: true };
@@ -2695,8 +2735,10 @@ export function stopSocialLoop() {
     if (lurkModes.size > 0) {
       saveLurkModes(activeLoop.petId, Object.fromEntries(lurkModes));
     }
-    // 持久化 paused targets 在清空之前
-    savePausedTargets(activeLoop.petId, Object.fromEntries(pausedTargets));
+    // 持久化 paused targets 在清空之前（包含所有 knownTargets 的 true/false 状态）
+    const pausedSnapshot = {};
+    for (const t of knownTargets) pausedSnapshot[t] = pausedTargets.get(t) || false;
+    savePausedTargets(activeLoop.petId, pausedSnapshot);
     activeLoop._scheduleCleanup?.();
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
@@ -2705,6 +2747,7 @@ export function stopSocialLoop() {
     imageDescInflight.clear();
     lurkModes.clear();
     pausedTargets.clear();
+    knownTargets.clear();
     targetNamesCache.clear();
   }
 }
@@ -2756,6 +2799,7 @@ export function getLurkModes() {
 export function setTargetPaused(target, paused) {
   if (!target) return;
   const prev = pausedTargets.get(target) || false;
+  knownTargets.add(target); // 确保 target 已被记录
   if (paused) {
     pausedTargets.set(target, true);
   } else {
@@ -2763,9 +2807,11 @@ export function setTargetPaused(target, paused) {
   }
   if (prev !== !!paused) {
     addLog('info', `Target [${target}] ${paused ? '⏸️ paused' : '▶️ resumed'}`, null, target);
-    // 持久化变更
+    // 持久化变更（显式保存所有 knownTargets 的状态，包括 enabled=false）
     if (activeLoop?.petId) {
-      savePausedTargets(activeLoop.petId, Object.fromEntries(pausedTargets));
+      const pausedSnapshot = {};
+      for (const t of knownTargets) pausedSnapshot[t] = pausedTargets.get(t) || false;
+      savePausedTargets(activeLoop.petId, pausedSnapshot);
     }
   }
 }
@@ -2808,6 +2854,52 @@ export function isSocialActiveForPet(petId) {
   return activeLoop?.petId === petId;
 }
 
+/**
+ * 在 social loop 未启动时从 workspace 文件读取群名缓存（不修改全局 Map）
+ * @param {string} petId
+ * @returns {Promise<Object>} { [targetId]: name }
+ */
+export async function loadSavedTargetNames(petId) {
+  try {
+    const raw = await tauri.workspaceRead(petId, KNOWN_TARGETS_PATH);
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return {};
+    const names = {};
+    for (const item of arr) {
+      if (item && item.id && item.name) names[item.id] = item.name;
+    }
+    return names;
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * 在 social loop 未启动时读取持久化的 paused targets
+ * @param {string} petId
+ * @returns {Promise<Object>} { [target]: boolean }，首次返回 null
+ */
+export async function loadSavedPausedTargets(petId) {
+  return loadPausedTargets(petId);
+}
+
+/**
+ * 在 social loop 未启动时直接保存单个 target 的 paused 状态
+ * （loop 运行时改用 setTargetPaused）
+ * @param {string} petId
+ * @param {string} target
+ * @param {boolean} paused
+ */
+export async function saveTargetPausedDirect(petId, target, paused) {
+  try {
+    const current = (await loadPausedTargets(petId)) || {};
+    current[target] = paused;
+    await tauri.updateSettings({ [`social_paused_targets_${petId}`]: JSON.stringify(current) });
+  } catch (e) {
+    console.warn('[Social] Failed to save target paused direct', e);
+  }
+}
+
 export default {
   loadSocialConfig,
   saveSocialConfig,
@@ -2823,4 +2915,7 @@ export default {
   setTargetPaused,
   getPausedTargets,
   getTargetNames,
+  loadSavedTargetNames,
+  loadSavedPausedTargets,
+  saveTargetPausedDirect,
 };
