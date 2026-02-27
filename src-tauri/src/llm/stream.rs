@@ -281,7 +281,7 @@ async fn stream_openai(
 }
 
 /// 将 ContentPart 转换为 Gemini API 的 part 格式
-fn content_part_to_gemini_part(part: &ContentPart) -> serde_json::Value {
+pub fn content_part_to_gemini_part(part: &ContentPart) -> serde_json::Value {
     match part {
         ContentPart::Text { text } => {
             serde_json::json!({ "text": text })

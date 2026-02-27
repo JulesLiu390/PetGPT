@@ -31,6 +31,9 @@ export default function SocialPage() {
     agentCanEditStrategy: false,
     atMustReply: true,
     enableImages: true,
+    imageDescMode: 'off',
+    imageDescProviderId: '',
+    imageDescModelName: '',
     botQQ: '',
     intentModelName: '',
   });
@@ -306,6 +309,13 @@ export default function SocialPage() {
     return na.localeCompare(nb);
   });
 
+  const visionProvider = apiProviders.find(p => (p._id || p.id) === config.imageDescProviderId);
+  const visionProviderModels = [...(visionProvider?.cachedModels || [])].sort((a, b) => {
+    const na = typeof a === 'string' ? a : a.id;
+    const nb = typeof b === 'string' ? b : b.id;
+    return na.localeCompare(nb);
+  });
+
   // Build log filter tabs from config
   const watchedTargets = [
     ...(config.watchedGroups || []).map(g => {
@@ -489,6 +499,66 @@ export default function SocialPage() {
                     />
                   )}
                 </FormGroup>
+              </Card>
+
+              {/* Vision Model (Image Pre-Description) */}
+              <Card title="Vision Model" description="Use a vision LLM to describe images before sending to main model">
+                <div className="space-y-3">
+                  <FormGroup label="Image Pre-Description">
+                    <Select
+                      value={config.imageDescMode || 'off'}
+                      onChange={(e) => {
+                        handleConfigChange('imageDescMode', e.target.value);
+                        if (e.target.value !== 'other') {
+                          handleConfigChange('imageDescProviderId', '');
+                          handleConfigChange('imageDescModelName', '');
+                        }
+                      }}
+                    >
+                      <option value="off">关闭</option>
+                      <option value="self">自己（使用主模型）</option>
+                      <option value="other">其他（使用独立模型）</option>
+                    </Select>
+                  </FormGroup>
+                  {config.imageDescMode === 'other' && (
+                    <>
+                      <FormGroup label="API Provider">
+                        <Select
+                          value={config.imageDescProviderId}
+                          onChange={(e) => {
+                            handleConfigChange('imageDescProviderId', e.target.value);
+                            handleConfigChange('imageDescModelName', '');
+                          }}
+                        >
+                          <option value="">Select provider...</option>
+                          {apiProviders.map(p => (
+                            <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                          ))}
+                        </Select>
+                      </FormGroup>
+                      <FormGroup label="Model">
+                        {visionProviderModels.length > 0 ? (
+                          <Select
+                            value={config.imageDescModelName}
+                            onChange={(e) => handleConfigChange('imageDescModelName', e.target.value)}
+                          >
+                            <option value="">Select model...</option>
+                            {visionProviderModels.map(m => {
+                              const modelId = typeof m === 'string' ? m : m.id;
+                              return <option key={modelId} value={modelId}>{modelId}</option>;
+                            })}
+                          </Select>
+                        ) : (
+                          <Input
+                            value={config.imageDescModelName}
+                            onChange={(e) => handleConfigChange('imageDescModelName', e.target.value)}
+                            placeholder="e.g. gemini-2.0-flash"
+                          />
+                        )}
+                      </FormGroup>
+                    </>
+                  )}
+                </div>
               </Card>
 
               {/* MCP Server */}
@@ -781,12 +851,15 @@ export default function SocialPage() {
                     <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
                   ) : log.level === 'intent' ? (
                     <IntentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'llm' ? (
+                    <LlmLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
                       log.level === 'warn' ? 'text-amber-600' :
                       log.level === 'memory' ? 'text-purple-600' :
                       log.level === 'intent' ? 'text-purple-500' :
+                      log.level === 'llm' ? 'text-blue-500' :
                       'text-slate-600'
                     }`}>
                       <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
@@ -835,6 +908,36 @@ function IntentLogEntry({ log, logFilter }) {
       )}
       {hasDetails && expanded && (
         <div className="mt-0.5 ml-4 pl-2 border-l-2 border-purple-300/40 text-purple-400 whitespace-pre-wrap break-words">
+          {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LlmLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const hasDetails = !!log.details;
+  return (
+    <div className="py-0.5 text-blue-500">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold">[{log.level}]</span>
+      {log.target && logFilter === 'all' && (
+        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+      )}
+      {' '}
+      {log.message}
+      {hasDetails && (
+        <button
+          onClick={() => setExpanded(v => !v)}
+          className="ml-1.5 text-blue-400 hover:text-blue-300 transition-colors"
+        >
+          {expanded ? '▾' : '▸'}
+        </button>
+      )}
+      {hasDetails && expanded && (
+        <div className="mt-0.5 ml-4 pl-2 border-l-2 border-blue-300/40 text-blue-400 whitespace-pre-wrap break-words">
           {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
         </div>
       )}

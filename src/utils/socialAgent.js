@@ -9,6 +9,7 @@ import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilde
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
 import { getSocialBuiltinToolDefinitions, getGroupRuleToolDefinitions, getReplyStrategyToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions } from './workspace/socialToolExecutor';
+import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
 // ============ 状态 ============
@@ -24,6 +25,12 @@ const pausedTargets = new Map();
 
 /** target 名称缓存 Map<target, string> —— 从 MCP 批量拉取中自动填充 */
 const targetNamesCache = new Map();
+
+/** 图片描述缓存 Map<messageId_imageIndex, string> —— 避免重复调用 vision LLM */
+const imageDescCache = new Map();
+
+/** 图片描述进行中 Map<cacheKey, Promise<string>> —— Observer/Reply 并发去重 */
+const imageDescInflight = new Map();
 
 /** 系统日志（无 target，最多 200 条） */
 const systemLogs = [];
@@ -221,6 +228,67 @@ async function resolveApiProvider(apiProviderId, modelName) {
   }
 }
 
+// ============ 图片预描述 ============
+
+/**
+ * 调用 vision LLM 描述一张图片，结合聊天上下文分析内容和发送者意图。
+ *
+ * @param {Object} resolvedImage - { data: string (base64/url), mimeType: string }
+ * @param {string} contextBefore - 图片前的聊天文本
+ * @param {string} contextAfter - 图片后的聊天文本
+ * @param {string} senderName - 发送者名称
+ * @param {string} botName - bot 在群里的名称
+ * @param {Object} visionLLMConfig - { apiKey, baseUrl, apiFormat, modelName }
+ * @returns {Promise<string>} 图片描述文本
+ */
+async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig) {
+  let imageUrl;
+  if (resolvedImage.data.startsWith('http://') || resolvedImage.data.startsWith('https://')) {
+    imageUrl = resolvedImage.data;
+  } else if (resolvedImage.data.startsWith('data:')) {
+    imageUrl = resolvedImage.data;
+  } else {
+    imageUrl = `data:${resolvedImage.mimeType};base64,${resolvedImage.data}`;
+  }
+
+  const systemPrompt = `你是图片描述助手。先判断图片类型，再详细描述内容。输出为一段连续的文字，不要换行。
+
+格式：[类型] 描述内容
+
+类型判断：
+- [表情包]：表情包、梗图、emoji、动图、搞笑图。描述画面内容（角色、表情、动作、背景），提取图上所有文字
+- [截图]：聊天记录、网页、文章、代码、通知、应用界面等屏幕截图。描述截图类型和界面布局，然后完整逐字提取截图中所有可见文字，不要省略不要概括
+- [照片]：实拍照片、实物、风景、人物照、自拍等。详细描述拍摄的内容、环境、光线、构图等
+- 以上都不是：直接描述图片中看到的所有内容`;
+
+  const messages = [
+    { role: 'system', content: systemPrompt },
+    {
+      role: 'user',
+      content: [
+        { type: 'text', text: '请分析这张图片。' },
+        { type: 'image_url', image_url: { url: imageUrl, mime_type: resolvedImage.mimeType || 'image/jpeg' } },
+      ],
+    },
+  ];
+
+  const result = await callLLM({
+    messages,
+    apiFormat: visionLLMConfig.apiFormat,
+    apiKey: visionLLMConfig.apiKey,
+    model: visionLLMConfig.modelName,
+    baseUrl: visionLLMConfig.baseUrl,
+    options: { temperature: 0.2 },
+    conversationId: `vision-desc-${Date.now()}`,
+  });
+
+  if (result.error) {
+    throw new Error(result.content || 'Vision LLM call failed');
+  }
+
+  return (result.content || '').trim();
+}
+
 // ============ 核心轮询逻辑 ============
 
 /**
@@ -280,10 +348,37 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
       text = text.replaceAll('@me', '@[已读]');
     }
 
-    // 构建 content：有图片时用多模态数组，否则用纯字符串
+    // 构建 content：有预描述时用文本占位，有原始图片时用多模态数组，否则用纯字符串
+    const hasImageDescs = !msg.is_self && msg._imageDescs && msg._imageDescs.length > 0;
     const hasImages = !msg.is_self && msg._images && msg._images.length > 0;
     let content;
-    if (hasImages) {
+
+    if (hasImageDescs && !hasImages) {
+      // 全部图片已描述成功 → 纯文本（描述占位）
+      const descText = msg._imageDescs.map(d => `[图片: ${d}]`).join('\n');
+      content = text + '\n' + descText;
+    } else if (hasImageDescs && hasImages) {
+      // 部分描述成功 + 部分保留原图 → 混合：描述文本 + 原图多模态
+      const descText = msg._imageDescs.map(d => `[图片: ${d}]`).join('\n');
+      content = [
+        { type: 'text', text: text + '\n' + descText },
+        ...msg._images.flatMap(img => {
+          let url;
+          if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
+            url = img.data;
+          } else if (img.data.startsWith('data:')) {
+            url = img.data;
+          } else {
+            url = `data:${img.mimeType};base64,${img.data}`;
+          }
+          return [
+            { type: 'text', text: '（如果是梗图/表情包，理解情绪即可，不需要刻意回应每张图）' },
+            { type: 'image_url', image_url: { url, mime_type: img.mimeType || 'image/jpeg' } },
+          ];
+        }),
+      ];
+    } else if (hasImages) {
+      // 无描述，原始图片 → 多模态数组
       content = [
         { type: 'text', text },
         ...msg._images.flatMap(img => {
@@ -368,6 +463,9 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
  * @param {Array} [params.intentHistory=[]] - 该群意图滚动窗口
  * @param {boolean} [params.intentSleeping=false] - 该群 intent 是否处于休眠状态
  * @param {boolean} [params.enableImages=true] - 是否向 LLM 发送图片
+ * @param {'off'|'self'|'other'} [params.imageDescMode='off'] - 图片预描述模式：off=关闭, self=用主模型, other=用独立模型
+ * @param {Object|null} [params.visionLLMConfig=null] - vision LLM 配置 { apiKey, baseUrl, apiFormat, modelName }
+ * @param {string} [params.botName=''] - bot 在群里的名称
  * @returns {Promise<{action: 'skipped'|'silent'|'replied'|'error', detail?: string}>}
  */
 async function pollTarget({
@@ -388,6 +486,9 @@ async function pollTarget({
   intentHistory: pollIntentHistory = [],
   intentSleeping: pollIntentSleeping = false,
   enableImages = true,
+  imageDescMode = 'off',
+  visionLLMConfig = null,
+  botName = '',
 }) {
   const groupName = gName || target;
   const compressedSummary = compSummary;
@@ -432,6 +533,73 @@ async function pollTarget({
     }
     if (totalImageCount > 0) {
       addLog('info', `Resolved ${totalImageCount} image(s) across ${individualMessages.filter(m => m._images.length > 0).length} message(s)`, null, target);
+    }
+
+    // ── 3b. 图片预描述（vision LLM） ──
+    if (imageDescMode !== 'off' && visionLLMConfig && totalImageCount > 0) {
+      let describedCount = 0;
+      let cachedCount = 0;
+      for (let i = 0; i < individualMessages.length; i++) {
+        const msg = individualMessages[i];
+        if (!msg._images || msg._images.length === 0 || msg.is_self) continue;
+
+        // 构建上下文：前5条消息文本 + 后所有消息文本
+        const ctxBefore = individualMessages.slice(Math.max(0, i - 5), i)
+          .map(m => `${m.sender_name || m.sender_id}: ${m.content || ''}`.trim())
+          .join('\n');
+        const ctxAfter = individualMessages.slice(i + 1)
+          .map(m => `${m.sender_name || m.sender_id}: ${m.content || ''}`.trim())
+          .join('\n');
+        const sender = msg.sender_name || msg.sender_id || 'unknown';
+
+        const descs = [];
+        const remainingImages = [];
+        for (let j = 0; j < msg._images.length; j++) {
+          const cacheKey = `${msg.message_id}_${j}`;
+          // 检查缓存
+          if (msg.message_id && imageDescCache.has(cacheKey)) {
+            descs.push(imageDescCache.get(cacheKey));
+            cachedCount++;
+            continue;
+          }
+          // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用）
+          try {
+            let desc;
+            if (imageDescInflight.has(cacheKey)) {
+              // 另一个循环（Observer/Reply）正在描述同一张图，等待它完成
+              desc = await imageDescInflight.get(cacheKey);
+              cachedCount++;
+            } else {
+              const imgData = msg._images[j].data || '';
+              const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${msg._images[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
+              // 创建 Promise 并存入 inflight
+              const descPromise = describeImage(msg._images[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig);
+              imageDescInflight.set(cacheKey, descPromise);
+              try {
+                desc = await descPromise;
+              } finally {
+                imageDescInflight.delete(cacheKey);
+              }
+              addLog('llm', `🖼️ Vision [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
+              describedCount++;
+            }
+            descs.push(desc);
+            if (msg.message_id) imageDescCache.set(cacheKey, desc);
+          } catch (e) {
+            addLog('warn', `Vision desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
+            // 失败：保留原始 resolved 图片用于 fallback
+            remainingImages.push(msg._images[j]);
+          }
+        }
+        // 写回消息
+        if (descs.length > 0) {
+          msg._imageDescs = descs;
+        }
+        msg._images = remainingImages; // 只保留未描述成功的图片
+      }
+      if (describedCount > 0 || cachedCount > 0) {
+        addLog('info', `🖼️ Vision desc: ${describedCount} described, ${cachedCount} cached for ${target}`, null, target);
+      }
     }
   } else {
     // 图片关闭：清空所有 _images
@@ -689,11 +857,20 @@ async function pollTarget({
   }
   
   // -- Poll data collection for aggregated log entry --
-  const pollChatMessages = otherMessages.map(m => ({
-    sender: m.sender_name,
-    content: (m.content || '').substring(0, 200),
-    isAtMe: m.is_at_me,
-  }));
+  const pollChatMessages = otherMessages.map(m => {
+    let content = (m.content || '').substring(0, 200);
+    if (m._imageDescs && m._imageDescs.length > 0) {
+      const descSuffix = m._imageDescs.map(d => `[图片: ${d}]`).join(' ');
+      content = (content + ' ' + descSuffix).substring(0, 400);
+    } else if (m._images && m._images.length > 0) {
+      content = content + ` [图片x${m._images.length}]`;
+    }
+    return {
+      sender: m.sender_name,
+      content,
+      isAtMe: m.is_at_me,
+    };
+  });
   const pollToolCalls = [];
   const pollLlmIters = [];  // every LLM iteration: { content, reasoning, iteration, toolNames }
   const pollSentMessages = []; // content of successful send_message calls
@@ -1184,6 +1361,25 @@ export async function startSocialLoop(config, onStatusChange) {
     return false;
   }
 
+  // 解析 Vision API provider（图片预描述用）
+  let visionLLMConfig = null;
+  if (config.imageDescMode && config.imageDescMode !== 'off') {
+    const visionProviderId = config.imageDescMode === 'self'
+      ? config.apiProviderId
+      : (config.imageDescProviderId || config.apiProviderId);
+    const visionModelName = config.imageDescMode === 'self'
+      ? config.modelName
+      : (config.imageDescModelName || '');
+    if (visionProviderId) {
+      visionLLMConfig = await resolveApiProvider(visionProviderId, visionModelName);
+      if (visionLLMConfig) {
+        addLog('info', `Vision LLM resolved: ${visionLLMConfig.modelName} (${visionLLMConfig.apiFormat})`);
+      } else {
+        addLog('warn', 'Vision API provider not resolved, image pre-description disabled');
+      }
+    }
+  }
+
   // 为 MCP 服务器设置 Sampling LLM 配置
   // 这样当 QQ MCP 的 compress_context 需要 Sampling 时，Tauri 能代理调用 LLM
   try {
@@ -1537,8 +1733,11 @@ export async function startSocialLoop(config, onStatusChange) {
     const MAX_MSGS = 30;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
-    // Intent 不需要图片（只评估意愿），剥离图片避免因图片导致 LLM 500 错误
-    const recent = buf.messages.slice(-MAX_MSGS).map(m => ({ ...m, _images: [] }));
+    // enableImages=false 时剥离图片；否则保留（让 Intent 也能理解图片语境）
+    const shouldStripImages = config.enableImages === false;
+    const recent = buf.messages.slice(-MAX_MSGS).map(m =>
+      shouldStripImages ? { ...m, _images: [] } : m
+    );
     // 生成本轮临时安全令牌（每次评估都不同）
     const _rnd = () => crypto.randomUUID().slice(0, 6);
     const eph = {
@@ -2128,6 +2327,9 @@ export async function startSocialLoop(config, onStatusChange) {
           intentHistory: getIntentState(target).history,
           intentSleeping: getIntentState(target).sleeping,
           enableImages: config.enableImages !== false,
+          imageDescMode: config.imageDescMode || 'off',
+          visionLLMConfig,
+          botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
         }).then(result => {
           // 无论成功失败都更新冷却时间，防止错误时 2s 重试风暴
           lastObserveTime.set(target, Date.now());
@@ -2348,6 +2550,9 @@ export async function startSocialLoop(config, onStatusChange) {
               intentHistory: getIntentState(target).history,
               intentSleeping: getIntentState(target).sleeping,
               enableImages: config.enableImages !== false,
+              imageDescMode: config.imageDescMode || 'off',
+              visionLLMConfig,
+              botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
             });
 
             if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
@@ -2496,6 +2701,8 @@ export function stopSocialLoop() {
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
     sentMessagesCache.clear();
+    imageDescCache.clear();
+    imageDescInflight.clear();
     lurkModes.clear();
     pausedTargets.clear();
     targetNamesCache.clear();

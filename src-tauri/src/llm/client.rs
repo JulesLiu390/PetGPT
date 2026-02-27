@@ -2,6 +2,7 @@
 
 use reqwest::Client;
 use crate::llm::types::*;
+use crate::llm::stream::content_part_to_gemini_part;
 
 /// LLM 客户端
 pub struct LlmClient {
@@ -176,9 +177,15 @@ impl LlmClient {
                     Role::Assistant => "model",
                     _ => "user",
                 };
+                let parts = match &msg.content {
+                    MessageContent::Text(s) => vec![serde_json::json!({ "text": s })],
+                    MessageContent::Parts(parts) => parts.iter()
+                        .map(content_part_to_gemini_part)
+                        .collect(),
+                };
                 serde_json::json!({
                     "role": role,
-                    "parts": [{ "text": msg.content.as_text() }]
+                    "parts": parts
                 })
             })
             .collect();
