@@ -699,9 +699,23 @@ const guessProviderName = (baseUrl) => {
 };
 
 /**
- * 根据 API Key 格式检测可能的服务商
+ * 从多行 API Key 字符串中解析出 Key 数组（每行一个，忽略空行）
  */
-const detectProviderFromKey = (apiKey) => {
+const parseApiKeys = (raw) => {
+  if (!raw) return [];
+  return raw.split('\n').map(k => k.trim()).filter(Boolean);
+};
+
+/**
+ * 获取多行 API Key 的第一个 Key
+ */
+const firstApiKey = (raw) => parseApiKeys(raw)[0] || '';
+
+/**
+ * 根据 API Key 格式检测可能的服务商（用第一个 Key 判断）
+ */
+const detectProviderFromKey = (apiKeysRaw) => {
+  const apiKey = firstApiKey(apiKeysRaw);
   if (!apiKey) return null;
   // Anthropic 使用 OpenAI 兼容格式（通过其兼容端点）
   if (apiKey.startsWith("sk-ant-")) return { format: "openai_compatible", name: "Anthropic", baseUrl: "https://api.anthropic.com/v1" };
@@ -714,11 +728,15 @@ const detectProviderFromKey = (apiKey) => {
 };
 
 /**
- * 脱敏显示 API Key
+ * 脱敏显示 API Key（支持多 Key：显示第一个 + 数量）
  */
 const maskApiKey = (key) => {
   if (!key || key.length < 10) return "****";
-  return key.substring(0, 7) + "..." + key.substring(key.length - 4);
+  const keys = parseApiKeys(key);
+  const first = keys[0] || '';
+  const masked = first.length < 10 ? '****' : first.substring(0, 7) + "..." + first.substring(first.length - 4);
+  if (keys.length > 1) return `${masked} (+${keys.length - 1} more)`;
+  return masked;
 };
 
 /**
@@ -765,9 +783,10 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     setTestSuccess(false);
   };
   
-  // Fetch models list
+  // Fetch models list (uses first key only — model list is the same for all keys)
   const handleFetchModels = async () => {
-    if (!formData.baseUrl || !formData.apiKey) {
+    const key = firstApiKey(formData.apiKey);
+    if (!formData.baseUrl || !key) {
       setTestResult("Please provide Base URL and API Key first");
       return;
     }
@@ -776,7 +795,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     setTestResult(null);
     
     try {
-      const models = await fetchModels(formData.baseUrl, formData.apiKey, formData.apiFormat);
+      const models = await fetchModels(formData.baseUrl, key, formData.apiFormat);
       
       if (models && models.length > 0) {
         const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
@@ -796,9 +815,10 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     }
   };
   
-  // Test connection
+  // Test connection — test each key separately
   const handleTestConnection = async () => {
-    if (!formData.baseUrl || !formData.apiKey) {
+    const keys = parseApiKeys(formData.apiKey);
+    if (!formData.baseUrl || keys.length === 0) {
       setTestResult("Please provide Base URL and API Key");
       return;
     }
@@ -808,30 +828,52 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     setTestSuccess(false);
     
     try {
-      // Try to fetch models as a test
-      const models = await fetchModels(formData.baseUrl, formData.apiKey, formData.apiFormat);
+      const results = [];
+      let anySuccess = false;
+      let modelsFetched = false;
       
-      if (models && models.length > 0) {
-        const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
-        setFetchedModels(modelIds);
-        setTestResult(`✓ Connection successful! Found ${models.length} models`);
-        setTestSuccess(true);
-      } else {
-        // Models not supported, try a simple completion
-        const response = await callOpenAILib({
-          apiKey: formData.apiKey,
-          baseUrl: formData.baseUrl,
-          apiFormat: formData.apiFormat,
-          model: "gpt-3.5-turbo",
-          messages: [{ role: "user", content: "Hi" }],
-          maxTokens: 5,
-        });
-        
-        if (response) {
-          setTestResult("✓ Connection successful!");
-          setTestSuccess(true);
+      for (let i = 0; i < keys.length; i++) {
+        const key = keys[i];
+        const label = key.length >= 10 ? key.substring(0, 7) + '...' + key.substring(key.length - 4) : '****';
+        try {
+          const models = await fetchModels(formData.baseUrl, key, formData.apiFormat);
+          if (models && models.length > 0) {
+            if (!modelsFetched) {
+              const modelIds = models.map(m => typeof m === 'object' ? m.id : m);
+              setFetchedModels(modelIds);
+              modelsFetched = true;
+            }
+            results.push(`Key ${i + 1} (${label}): ✓`);
+            anySuccess = true;
+          } else {
+            const response = await callOpenAILib({
+              apiKey: key,
+              baseUrl: formData.baseUrl,
+              apiFormat: formData.apiFormat,
+              model: "gpt-3.5-turbo",
+              messages: [{ role: "user", content: "Hi" }],
+              maxTokens: 5,
+            });
+            if (response) {
+              results.push(`Key ${i + 1} (${label}): ✓`);
+              anySuccess = true;
+            } else {
+              results.push(`Key ${i + 1} (${label}): ✗ No response`);
+            }
+          }
+        } catch (e) {
+          results.push(`Key ${i + 1} (${label}): ✗ ${(e.message || String(e)).substring(0, 60)}`);
         }
       }
+      
+      if (keys.length === 1) {
+        setTestResult(anySuccess ? `✓ Connection successful!` : results[0]);
+      } else {
+        const okCount = results.filter(r => r.includes('✓')).length;
+        const summary = `Tested ${keys.length} keys: ${okCount} OK, ${keys.length - okCount} failed`;
+        setTestResult(summary + '\n' + results.join('\n'));
+      }
+      setTestSuccess(anySuccess);
     } catch (error) {
       console.error("Test connection error:", error);
       setTestResult(`✗ Connection failed: ${error.message || error}`);
@@ -841,9 +883,10 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     }
   };
   
-  // Auto-detect endpoint by trying known provider URLs
+  // Auto-detect endpoint by trying known provider URLs (uses first key)
   const handleAutoDetect = async () => {
-    if (!formData.apiKey) {
+    const key = firstApiKey(formData.apiKey);
+    if (!key) {
       setTestResult("Please enter your API Key first");
       return;
     }
@@ -857,7 +900,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     const candidates = getDetectionCandidates(true);
     
     // Also try Gemini format for Google keys
-    const isGoogleKey = formData.apiKey.startsWith("AIza");
+    const isGoogleKey = key.startsWith("AIza");
     
     if (isGoogleKey) {
       // For Google keys, directly use Gemini endpoint
@@ -865,7 +908,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
       try {
         const models = await fetchModels(
           "https://generativelanguage.googleapis.com",
-          formData.apiKey,
+          key,
           "gemini_official"
         );
         if (models && models.length > 0) {
@@ -893,7 +936,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
       setAutoDetectProgress(`Testing ${candidate.label}...`);
       
       try {
-        const models = await fetchModels(candidate.baseUrl, formData.apiKey, "openai_compatible");
+        const models = await fetchModels(candidate.baseUrl, key, "openai_compatible");
         
         if (models && models.length > 0) {
           setFormData(prev => ({
@@ -926,7 +969,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const handleSubmit = async (e) => {
     e.preventDefault();
     
-    if (!formData.name || !formData.baseUrl || !formData.apiKey) {
+    if (!formData.name || !formData.baseUrl || !firstApiKey(formData.apiKey)) {
       setTestResult("Please fill in all required fields");
       return;
     }
@@ -971,34 +1014,39 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
-      {/* API Key with auto-detect hint */}
+      {/* API Key(s) with auto-detect hint */}
       <FormGroup>
-        <Label required>API Key</Label>
+        <Label required>API Key(s)</Label>
+        <p className="text-xs text-slate-500 mb-1">One key per line. Multiple keys enable load-balancing.</p>
         <div className="relative">
-          <Input
-            type={showApiKey ? "text" : "password"}
+          <Textarea
             name="apiKey"
             value={formData.apiKey}
             onChange={handleChange}
-            placeholder="sk-... or AIza..."
-            className="pr-10"
+            placeholder={"sk-... or AIza...\n(one per line for load balancing)"}
+            rows={parseApiKeys(formData.apiKey).length <= 1 ? 2 : Math.min(parseApiKeys(formData.apiKey).length + 1, 6)}
+            className="pr-10 font-mono text-xs"
+            style={{ WebkitTextSecurity: showApiKey ? 'none' : 'disc' }}
           />
           <button
             type="button"
             onClick={() => setShowApiKey(!showApiKey)}
-            className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 transition-colors"
+            className="absolute right-2 top-3 p-1 text-slate-400 hover:text-slate-600 transition-colors"
             tabIndex={-1}
           >
             {showApiKey ? <FaEyeSlash className="w-4 h-4" /> : <FaEye className="w-4 h-4" />}
           </button>
         </div>
+        {parseApiKeys(formData.apiKey).length > 1 && (
+          <span className="text-xs text-blue-600">{parseApiKeys(formData.apiKey).length} keys configured</span>
+        )}
         <div className="mt-2 flex items-center gap-2">
           <Button
             type="button"
             variant="secondary"
             size="sm"
             onClick={handleAutoDetect}
-            disabled={isAutoDetecting || !formData.apiKey}
+            disabled={isAutoDetecting || !firstApiKey(formData.apiKey)}
           >
             {isAutoDetecting ? <FaSpinner className="w-3 h-3 animate-spin" /> : <FaServer className="w-3 h-3" />}
             Auto-Detect Endpoint
@@ -1070,7 +1118,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
       {/* Test result */}
       {testResult && (
         <Alert variant={testSuccess ? "success" : "error"}>
-          {testResult}
+          <span className="whitespace-pre-line">{testResult}</span>
         </Alert>
       )}
       
@@ -1097,7 +1145,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
           type="button"
           variant="secondary"
           onClick={handleTestConnection}
-          disabled={testing || !formData.baseUrl || !formData.apiKey}
+          disabled={testing || !formData.baseUrl || !firstApiKey(formData.apiKey)}
         >
           {testing ? <FaSpinner className="w-4 h-4 animate-spin" /> : <FaCheck className="w-4 h-4" />}
           Test
@@ -1106,7 +1154,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
           type="button"
           variant="secondary"
           onClick={handleFetchModels}
-          disabled={isFetchingModels || !formData.baseUrl || !formData.apiKey}
+          disabled={isFetchingModels || !formData.baseUrl || !firstApiKey(formData.apiKey)}
         >
           {isFetchingModels ? <FaSpinner className="w-4 h-4 animate-spin" /> : <FaList className="w-4 h-4" />}
           Fetch Models

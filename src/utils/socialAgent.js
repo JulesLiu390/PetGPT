@@ -56,7 +56,8 @@ async function retryLLM(fn, { label = 'LLM', target = undefined, delays = LLM_RE
       lastErr = e;
       if (attempt < delays.length) {
         const delay = delays[attempt];
-        addLog('warn', `${label} retry ${attempt + 1}/${delays.length} in ${delay / 1000}s`, e.message || String(e), target);
+        const reason = (e.message || String(e)).substring(0, 120);
+        addLog('warn', `${label} retry ${attempt + 1}/${delays.length} in ${delay / 1000}s: ${reason}`, e.message || String(e), target);
         await new Promise(r => setTimeout(r, delay));
       }
     }
@@ -235,10 +236,25 @@ async function savePausedTargets(petId, paused) {
 // ============ API Provider 解析 ============
 
 /**
+ * API Key 轮询计数器（每个 Provider 独立）
+ * key: providerId, value: 上次使用的 key 索引
+ */
+const apiKeyRoundRobin = new Map();
+
+/**
+ * 从多 Key 字符串中解析 Key 数组（换行分隔，忽略空行）
+ */
+function parseApiKeys(raw) {
+  if (!raw) return [];
+  return raw.split('\n').map(k => k.trim()).filter(Boolean);
+}
+
+/**
  * 从 apiProviderId 解析出 LLM 调用所需的参数
+ * 支持多 Key 负载均衡：apiKey 字段可包含多行，每次调用轮询选取不同的 Key
  * @param {string} apiProviderId
  * @param {string} modelName
- * @returns {Promise<{apiKey: string, baseUrl: string, apiFormat: string}|null>}
+ * @returns {Promise<{apiKey: string, baseUrl: string, apiFormat: string, modelName: string}|null>}
  */
 async function resolveApiProvider(apiProviderId, modelName) {
   try {
@@ -248,8 +264,24 @@ async function resolveApiProvider(apiProviderId, modelName) {
       addLog('error', `API provider not found: ${apiProviderId}`);
       return null;
     }
+
+    // 多 Key 轮询
+    const keys = parseApiKeys(provider.apiKey);
+    let selectedKey;
+    if (keys.length === 0) {
+      addLog('error', `API provider "${provider.name}" has no valid API keys`);
+      return null;
+    } else if (keys.length === 1) {
+      selectedKey = keys[0];
+    } else {
+      const idx = (apiKeyRoundRobin.get(apiProviderId) ?? -1) + 1;
+      const nextIdx = idx % keys.length;
+      apiKeyRoundRobin.set(apiProviderId, nextIdx);
+      selectedKey = keys[nextIdx];
+    }
+
     return {
-      apiKey: provider.apiKey,
+      apiKey: selectedKey,
       baseUrl: provider.baseUrl,
       apiFormat: provider.apiFormat || 'openai_compatible',
       modelName: modelName || provider.defaultModel || '',
@@ -273,7 +305,44 @@ async function resolveApiProvider(apiProviderId, modelName) {
  * @param {Object} visionLLMConfig - { apiKey, baseUrl, apiFormat, modelName }
  * @returns {Promise<string>} 图片描述文本
  */
+/**
+ * 将 GIF 图片转换为 PNG（取第一帧），因为 Gemini 不支持 image/gif。
+ * 通过 OffscreenCanvas / Canvas 解码后重新编码为 PNG base64。
+ * @param {string} base64Data - 纯 base64 字符串（不带 data: 前缀）
+ * @returns {Promise<{data: string, mimeType: string}>} PNG base64 数据
+ */
+async function convertGifToPng(base64Data) {
+  const blob = await (await fetch(`data:image/gif;base64,${base64Data}`)).blob();
+  const bitmap = await createImageBitmap(blob);
+  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(bitmap, 0, 0);
+  bitmap.close();
+  const pngBlob = await canvas.convertToBlob({ type: 'image/png' });
+  const buf = await pngBlob.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return { data: btoa(binary), mimeType: 'image/png' };
+}
+
 async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig) {
+  // GIF → PNG 转码（Gemini 不支持 image/gif）
+  if (resolvedImage.mimeType === 'image/gif' || resolvedImage.data?.includes('data:image/gif')) {
+    try {
+      let rawBase64 = resolvedImage.data;
+      if (rawBase64.startsWith('data:')) {
+        rawBase64 = rawBase64.split(',')[1];
+      }
+      const converted = await convertGifToPng(rawBase64);
+      resolvedImage = { ...resolvedImage, data: converted.data, mimeType: 'image/png' };
+      console.log('[Vision] Converted GIF to PNG for Vision API');
+    } catch (e) {
+      console.warn('[Vision] GIF→PNG conversion failed, skipping image:', e.message || e);
+      return '[GIF 动图，无法识别内容]';
+    }
+  }
+
   let imageUrl;
   if (resolvedImage.data.startsWith('http://') || resolvedImage.data.startsWith('https://')) {
     imageUrl = resolvedImage.data;
@@ -382,6 +451,10 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
 
     // 构建 content：有预描述时用文本占位，有原始图片时用多模态数组，否则用纯字符串
     const hasImageDescs = !msg.is_self && msg._imageDescs && msg._imageDescs.length > 0;
+    // 过滤掉 Gemini 不支持的 image/gif（GIF 应在 Vision-pre 阶段已转码描述）
+    if (!msg.is_self && msg._images) {
+      msg._images = msg._images.filter(img => img.mimeType !== 'image/gif');
+    }
     const hasImages = !msg.is_self && msg._images && msg._images.length > 0;
     let content;
 
@@ -1393,11 +1466,47 @@ export async function startSocialLoop(config, onStatusChange) {
     return false;
   }
   
-  // 解析 API provider
-  const llmConfig = await resolveApiProvider(config.apiProviderId, config.modelName);
-  if (!llmConfig) {
+  // 解析 API provider — Reply (主模型)
+  const replyLLMConfig = await resolveApiProvider(config.apiProviderId, config.modelName);
+  if (!replyLLMConfig) {
     addLog('error', 'Cannot start: API provider not resolved');
     return false;
+  }
+
+  // 解析 Observer API provider（独立时用独立配置，否则用 Reply）
+  let observerLLMConfig = replyLLMConfig;
+  if (config.observerApiProviderId) {
+    const resolved = await resolveApiProvider(config.observerApiProviderId, config.observerModelName || '');
+    if (resolved) {
+      observerLLMConfig = resolved;
+      addLog('info', `Observer LLM resolved: ${resolved.modelName} (${resolved.apiFormat})`);
+    } else {
+      addLog('warn', 'Observer API provider not resolved, falling back to Reply LLM');
+    }
+  }
+
+  // 解析 Intent API provider（独立时用独立配置，否则用 Reply + 可选模型名覆盖）
+  let intentLLMConfig = replyLLMConfig;
+  if (config.intentApiProviderId) {
+    const resolved = await resolveApiProvider(config.intentApiProviderId, config.intentModelName || '');
+    if (resolved) {
+      intentLLMConfig = resolved;
+      addLog('info', `Intent LLM resolved: ${resolved.modelName} (${resolved.apiFormat})`);
+    } else {
+      addLog('warn', 'Intent API provider not resolved, falling back to Reply LLM');
+    }
+  }
+
+  // 解析 Compress API provider（独立时用独立配置，否则用 Reply）
+  let compressLLMConfig = replyLLMConfig;
+  if (config.compressApiProviderId) {
+    const resolved = await resolveApiProvider(config.compressApiProviderId, config.compressModelName || '');
+    if (resolved) {
+      compressLLMConfig = resolved;
+      addLog('info', `Compress LLM resolved: ${resolved.modelName} (${resolved.apiFormat})`);
+    } else {
+      addLog('warn', 'Compress API provider not resolved, falling back to Reply LLM');
+    }
   }
 
   // 解析 Vision API provider（图片预描述用）
@@ -1419,18 +1528,18 @@ export async function startSocialLoop(config, onStatusChange) {
     }
   }
 
-  // 为 MCP 服务器设置 Sampling LLM 配置
+  // 为 MCP 服务器设置 Sampling LLM 配置（使用 Compress 配置）
   // 这样当 QQ MCP 的 compress_context 需要 Sampling 时，Tauri 能代理调用 LLM
   try {
     const server = await tauri.mcp.getServerByName(config.mcpServerName);
     if (server?._id) {
       await tauri.mcp.setSamplingConfig(server._id, {
-        api_key: llmConfig.apiKey,
-        model: llmConfig.modelName,
-        base_url: llmConfig.baseUrl || null,
-        api_format: llmConfig.apiFormat || 'openai_compatible',
+        api_key: compressLLMConfig.apiKey,
+        model: compressLLMConfig.modelName,
+        base_url: compressLLMConfig.baseUrl || null,
+        api_format: compressLLMConfig.apiFormat || 'openai_compatible',
       });
-      addLog('info', `Sampling config set for MCP server "${config.mcpServerName}"`);
+      addLog('info', `Sampling config set for MCP server "${config.mcpServerName}" (using ${compressLLMConfig === replyLLMConfig ? 'Reply' : 'Compress'} LLM)`);
     }
   } catch (e) {
     addLog('warn', `Failed to set sampling config: ${e.message || e}`);
@@ -1799,6 +1908,88 @@ export async function startSocialLoop(config, onStatusChange) {
   };
 
   /**
+   * 在 Intent 评估前批量预处理 buffer 中未描述的图片
+   * 结果写入 buffer 消息的 _imageDescs + imageDescCache，
+   * 使后续 Observer/Reply 的 pollTarget 直接命中缓存。
+   */
+  const preprocessBufferImages = async (target) => {
+    if (config.enableImages === false) return;
+    if (!config.imageDescMode || config.imageDescMode === 'off' || !visionLLMConfig) return;
+    const buf = dataBuffer.get(target);
+    if (!buf || buf.messages.length === 0) return;
+
+    const botName = targetNamesCache.get(config.botQQ) || config.botQQ || 'bot';
+    let describedCount = 0;
+    let cachedCount = 0;
+
+    for (let i = 0; i < buf.messages.length; i++) {
+      const msg = buf.messages[i];
+      if (msg.is_self || msg._imageDescs) continue; // 已处理或自己的消息
+      if (!msg._images || msg._images.length === 0) continue;
+
+      // 上下文（用 buffer 内消息构建，不需要很精确）
+      const ctxBefore = buf.messages.slice(Math.max(0, i - 5), i)
+        .map(m => `${m.sender_name || m.sender_id}: ${m.content || ''}`.trim())
+        .join('\n');
+      const ctxAfter = buf.messages.slice(i + 1, i + 3)
+        .map(m => `${m.sender_name || m.sender_id}: ${m.content || ''}`.trim())
+        .join('\n');
+      const sender = msg.sender_name || msg.sender_id || 'unknown';
+
+      // 临时 resolve 图片 URL → base64（不修改 buffer 原始数据，避免内存膨胀）
+      const resolvedImages = await resolveImageUrls(msg._images.map(img => ({ ...img })));
+
+      const descs = [];
+      for (let j = 0; j < resolvedImages.length; j++) {
+        const cacheKey = `${msg.message_id}_${j}`;
+        if (msg.message_id && imageDescCache.has(cacheKey)) {
+          descs.push(imageDescCache.get(cacheKey));
+          cachedCount++;
+          continue;
+        }
+        try {
+          let desc;
+          if (imageDescInflight.has(cacheKey)) {
+            desc = await imageDescInflight.get(cacheKey);
+            cachedCount++;
+          } else {
+            const imgData = resolvedImages[j].data || '';
+            const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${resolvedImages[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
+            const wrappedDescribe = () => {
+              const p = describeImage(resolvedImages[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig);
+              imageDescInflight.set(cacheKey, p);
+              return p;
+            };
+            try {
+              desc = await retryLLM(wrappedDescribe, { label: `Vision-pre [${sender}] img${j}`, target });
+            } finally {
+              imageDescInflight.delete(cacheKey);
+            }
+            addLog('llm', `🖼️ Vision-pre [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
+            describedCount++;
+          }
+          descs.push(desc);
+          if (msg.message_id) imageDescCache.set(cacheKey, desc);
+        } catch (e) {
+          addLog('warn', `Vision-pre desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
+        }
+      }
+      if (descs.length > 0) {
+        msg._imageDescs = descs;
+        // 已描述的图片从 _images 中移除，避免 buildTurnsFromMessages 再把原图发给 LLM
+        if (descs.length >= msg._images.length) {
+          msg._images = []; // 全部描述成功
+        } else {
+          msg._images = msg._images.slice(descs.length); // 保留未描述的
+        }
+      }
+    }
+    if (describedCount > 0 || cachedCount > 0) {
+      addLog('info', `🖼️ Vision-pre: ${describedCount} described, ${cachedCount} cached for ${target}`, null, target);
+    }
+  };
+
+  /**
    * intentLoop: 每群独立的意图循环
    * 
    * 生命周期：
@@ -1841,8 +2032,11 @@ export async function startSocialLoop(config, onStatusChange) {
           processorBusy.set(target, 'intent');
 
           // 做最后一次 LLM 评估（带重试）
-          const intentModel = config.intentModelName || llmConfig.modelName;
+          const intentModel = intentLLMConfig.modelName;
           addLog('intent', `🧠 [${tName()}] idle-eval starting (model=${intentModel})`, null, target);
+
+          // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
+          await preprocessBufferImages(target);
 
           // 构建只读工具集（与 Reply 相同的 history + groupLog）
           const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
@@ -1885,10 +2079,10 @@ export async function startSocialLoop(config, onStatusChange) {
                   ...intentTurns,
                   { role: 'user', content: '请分析当前想法和行为倾向。' },
                 ],
-                apiFormat: llmConfig.apiFormat,
-                apiKey: llmConfig.apiKey,
+                apiFormat: intentLLMConfig.apiFormat,
+                apiKey: intentLLMConfig.apiKey,
                 model: intentModel,
-                baseUrl: llmConfig.baseUrl,
+                baseUrl: intentLLMConfig.baseUrl,
                 mcpTools: intentMcpTools,
                 options: {
                   temperature: 0.4,
@@ -2003,7 +2197,7 @@ export async function startSocialLoop(config, onStatusChange) {
         processorBusy.set(target, 'intent');
 
         // ── 常规意图评估（带重试） ──
-        const intentModel = config.intentModelName || llmConfig.modelName;
+        const intentModel = intentLLMConfig.modelName;
         addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
         state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
 
@@ -2021,6 +2215,9 @@ export async function startSocialLoop(config, onStatusChange) {
           : wasForceEval
             ? '你的 Reply 模块刚刚发了消息（可能尚未出现在对话记录中）。请重新评估当前状态。你刚发了言，除非有人直接回应你（追问、反驳、@你），否则必须选 [等回复]。同时检查「别三连」规则：如果你已经连续发言 ≥ 2 次且没人回应你，无论如何不得选 ≥ 3 的意愿。'
             : '请分析当前想法和行为倾向。';
+
+        // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
+        await preprocessBufferImages(target);
 
         let intentResult;
         for (let attempt = 0; ; attempt++) {
@@ -2054,10 +2251,10 @@ export async function startSocialLoop(config, onStatusChange) {
                 ...intentTurns,
                 { role: 'user', content: intentEvalPrompt },
               ],
-              apiFormat: llmConfig.apiFormat,
-              apiKey: llmConfig.apiKey,
+              apiFormat: intentLLMConfig.apiFormat,
+              apiKey: intentLLMConfig.apiKey,
               model: intentModel,
-              baseUrl: llmConfig.baseUrl,
+              baseUrl: intentLLMConfig.baseUrl,
               mcpTools: intentMcpTools,
               options: {
                 temperature: 0.4,
@@ -2353,7 +2550,7 @@ export async function startSocialLoop(config, onStatusChange) {
           target,
           targetType,
           mcpServerName: config.mcpServerName,
-          llmConfig,
+          llmConfig: observerLLMConfig,
           petId: config.petId,
           promptConfig,
           watermarks: observerWatermarks,
@@ -2576,7 +2773,7 @@ export async function startSocialLoop(config, onStatusChange) {
               target,
               targetType,
               mcpServerName: config.mcpServerName,
-              llmConfig,
+              llmConfig: replyLLMConfig,
               petId: config.petId,
               promptConfig,
               watermarks: replyWatermarks,
@@ -2659,7 +2856,7 @@ export async function startSocialLoop(config, onStatusChange) {
       
       // 检查是否有过去日期的群缓冲需要压缩
       if (knownTargets.size > 0) {
-        await runDailyCompress(config.petId, llmConfig, knownTargets);
+        await runDailyCompress(config.petId, compressLLMConfig, knownTargets);
       }
     } catch (e) {
       addLog('warn', 'Startup compression check failed', e.message);
@@ -2691,7 +2888,7 @@ export async function startSocialLoop(config, onStatusChange) {
       if (!activeLoop || activeLoop._generation !== loopGeneration) return;
       addLog('info', '⏰ 23:55 daily compression triggered');
       try {
-        await runDailyCompress(config.petId, llmConfig, knownTargets);
+        await runDailyCompress(config.petId, compressLLMConfig, knownTargets);
       } catch (e) {
         addLog('error', 'Daily compression timer failed', e.message);
       }

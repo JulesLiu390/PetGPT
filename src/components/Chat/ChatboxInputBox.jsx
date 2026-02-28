@@ -42,6 +42,19 @@ const getApiFormat = (model) => {
 };
 
 /**
+ * 从多 Key 字符串中轮询选取一个 Key（负载均衡）
+ * 如果只有一个 Key 则直接返回。
+ */
+let _chatKeyRRCounter = 0;
+const pickApiKey = (multiKeyStr) => {
+  if (!multiKeyStr) return '';
+  const keys = multiKeyStr.split('\n').map(k => k.trim()).filter(Boolean);
+  if (keys.length <= 1) return keys[0] || multiKeyStr;
+  const idx = (_chatKeyRRCounter++) % keys.length;
+  return keys[idx];
+};
+
+/**
  * 处理历史消息中的图片路径，将文件路径转换为 base64 数据
  * 用于发送给 LLM API 之前的预处理
  * @param {Array} messages - 历史消息数组
@@ -805,7 +818,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
         let suggestion = await promptSuggestion(
             {user:_userText, assistant:stateReply.content},
             getApiFormat(thisModel),
-            thisModel.modelApiKey,
+            pickApiKey(thisModel.modelApiKey),
             thisModel.modelName,
             thisModel.modelUrl
         )
@@ -1398,7 +1411,7 @@ When using tools, please follow these guidelines:
         const toolResult = await callLLMStreamWithTools({
           messages: fullMessages,
           apiFormat: getApiFormat(thisModel),
-          apiKey: thisModel.modelApiKey,
+          apiKey: pickApiKey(thisModel.modelApiKey),
           model: thisModel.modelName,
           baseUrl: thisModel.modelUrl,
           mcpTools: allToolsArray,
@@ -1473,7 +1486,7 @@ When using tools, please follow these guidelines:
       reply = await callOpenAILibStream(
         fullMessages,
         getApiFormat(thisModel),
-        thisModel.modelApiKey,
+        pickApiKey(thisModel.modelApiKey),
         thisModel.modelName,
         thisModel.modelUrl,
         (chunk) => {

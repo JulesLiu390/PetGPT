@@ -36,6 +36,12 @@ export default function SocialPage() {
     imageDescModelName: '',
     botQQ: '',
     intentModelName: '',
+    // 独立 API 配置
+    observerApiProviderId: '',
+    observerModelName: '',
+    intentApiProviderId: '',
+    compressApiProviderId: '',
+    compressModelName: '',
   });
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -246,6 +252,12 @@ export default function SocialPage() {
           ownerQQ: '',
           ownerName: '',
           enabledMcpServers: [],
+          observerApiProviderId: '',
+          observerModelName: '',
+          intentApiProviderId: '',
+          intentModelName: '',
+          compressApiProviderId: '',
+          compressModelName: '',
         }));
         setGroupsText('');
         setFriendsText('');
@@ -312,12 +324,23 @@ export default function SocialPage() {
   };
 
   // ── Derived state ──
-  const selectedProvider = apiProviders.find(p => (p._id || p.id) === config.apiProviderId);
-  const providerModels = [...(selectedProvider?.cachedModels || [])].sort((a, b) => {
+  const sortModels = (models) => [...(models || [])].sort((a, b) => {
     const na = typeof a === 'string' ? a : a.id;
     const nb = typeof b === 'string' ? b : b.id;
     return na.localeCompare(nb);
   });
+
+  const selectedProvider = apiProviders.find(p => (p._id || p.id) === config.apiProviderId);
+  const providerModels = sortModels(selectedProvider?.cachedModels);
+
+  const observerProvider = apiProviders.find(p => (p._id || p.id) === config.observerApiProviderId);
+  const observerProviderModels = sortModels(observerProvider?.cachedModels);
+
+  const intentProvider = apiProviders.find(p => (p._id || p.id) === config.intentApiProviderId);
+  const intentProviderModels = sortModels(intentProvider?.cachedModels);
+
+  const compressProvider = apiProviders.find(p => (p._id || p.id) === config.compressApiProviderId);
+  const compressProviderModels = sortModels(compressProvider?.cachedModels);
 
   const visionProvider = apiProviders.find(p => (p._id || p.id) === config.imageDescProviderId);
   const visionProviderModels = [...(visionProvider?.cachedModels || [])].sort((a, b) => {
@@ -455,8 +478,8 @@ export default function SocialPage() {
                 </FormGroup>
               </Card>
 
-              {/* LLM Configuration */}
-              <Card title="LLM" description="API provider and model for social decisions">
+              {/* LLM Configuration — Reply (main) */}
+              <Card title="Reply LLM" description="API provider and model for reply decisions (main model)">
                 <div className="space-y-3">
                   <FormGroup label="API Provider">
                     <Select
@@ -495,28 +518,205 @@ export default function SocialPage() {
                 </div>
               </Card>
 
-              {/* Intent Model */}
-              <Card title="Intent Model" description="Separate model for intent analysis (optional, defaults to main model)">
-                <FormGroup label="Model">
-                  {providerModels.length > 0 ? (
-                    <Select
-                      value={config.intentModelName}
-                      onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                    >
-                      <option value="">Same as main model</option>
-                      {providerModels.map(m => {
-                        const modelId = typeof m === 'string' ? m : m.id;
-                        return <option key={modelId} value={modelId}>{modelId}</option>;
-                      })}
-                    </Select>
-                  ) : (
-                    <Input
-                      value={config.intentModelName}
-                      onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                      placeholder="Leave empty to use main model"
+              {/* Observer LLM — independent toggle */}
+              <Card title="Observer LLM" description="Independent API for group observation and memory recording">
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!config.observerApiProviderId}
+                      onChange={(e) => {
+                        if (!e.target.checked) {
+                          handleConfigChange('observerApiProviderId', '');
+                          handleConfigChange('observerModelName', '');
+                        } else {
+                          handleConfigChange('observerApiProviderId', config.apiProviderId);
+                        }
+                      }}
+                      className="rounded border-slate-300"
                     />
+                    Use independent API (uncheck to use Reply LLM)
+                  </label>
+                  {config.observerApiProviderId && (
+                    <>
+                      <FormGroup label="API Provider">
+                        <Select
+                          value={config.observerApiProviderId}
+                          onChange={(e) => {
+                            handleConfigChange('observerApiProviderId', e.target.value);
+                            handleConfigChange('observerModelName', '');
+                          }}
+                        >
+                          <option value="">Select provider...</option>
+                          {apiProviders.map(p => (
+                            <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                          ))}
+                        </Select>
+                      </FormGroup>
+                      <FormGroup label="Model">
+                        {observerProviderModels.length > 0 ? (
+                          <Select
+                            value={config.observerModelName}
+                            onChange={(e) => handleConfigChange('observerModelName', e.target.value)}
+                          >
+                            <option value="">Select model...</option>
+                            {observerProviderModels.map(m => {
+                              const modelId = typeof m === 'string' ? m : m.id;
+                              return <option key={modelId} value={modelId}>{modelId}</option>;
+                            })}
+                          </Select>
+                        ) : (
+                          <Input
+                            value={config.observerModelName}
+                            onChange={(e) => handleConfigChange('observerModelName', e.target.value)}
+                            placeholder="e.g. gpt-4o-mini"
+                          />
+                        )}
+                      </FormGroup>
+                    </>
                   )}
-                </FormGroup>
+                </div>
+              </Card>
+
+              {/* Intent LLM — independent toggle */}
+              <Card title="Intent LLM" description="Independent API for willingness analysis">
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!config.intentApiProviderId}
+                      onChange={(e) => {
+                        if (!e.target.checked) {
+                          handleConfigChange('intentApiProviderId', '');
+                          handleConfigChange('intentModelName', '');
+                        } else {
+                          handleConfigChange('intentApiProviderId', config.apiProviderId);
+                        }
+                      }}
+                      className="rounded border-slate-300"
+                    />
+                    Use independent API (uncheck to use Reply LLM)
+                  </label>
+                  {config.intentApiProviderId ? (
+                    <>
+                      <FormGroup label="API Provider">
+                        <Select
+                          value={config.intentApiProviderId}
+                          onChange={(e) => {
+                            handleConfigChange('intentApiProviderId', e.target.value);
+                            handleConfigChange('intentModelName', '');
+                          }}
+                        >
+                          <option value="">Select provider...</option>
+                          {apiProviders.map(p => (
+                            <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                          ))}
+                        </Select>
+                      </FormGroup>
+                      <FormGroup label="Model">
+                        {intentProviderModels.length > 0 ? (
+                          <Select
+                            value={config.intentModelName}
+                            onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
+                          >
+                            <option value="">Select model...</option>
+                            {intentProviderModels.map(m => {
+                              const modelId = typeof m === 'string' ? m : m.id;
+                              return <option key={modelId} value={modelId}>{modelId}</option>;
+                            })}
+                          </Select>
+                        ) : (
+                          <Input
+                            value={config.intentModelName}
+                            onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
+                            placeholder="e.g. gpt-4o-mini"
+                          />
+                        )}
+                      </FormGroup>
+                    </>
+                  ) : (
+                    <FormGroup label="Model (optional, use different model from same provider)">
+                      {providerModels.length > 0 ? (
+                        <Select
+                          value={config.intentModelName}
+                          onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
+                        >
+                          <option value="">Same as Reply model</option>
+                          {providerModels.map(m => {
+                            const modelId = typeof m === 'string' ? m : m.id;
+                            return <option key={modelId} value={modelId}>{modelId}</option>;
+                          })}
+                        </Select>
+                      ) : (
+                        <Input
+                          value={config.intentModelName}
+                          onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
+                          placeholder="Leave empty to use Reply model"
+                        />
+                      )}
+                    </FormGroup>
+                  )}
+                </div>
+              </Card>
+
+              {/* Compress LLM — independent toggle */}
+              <Card title="Compress LLM" description="Independent API for daily compression and MCP sampling">
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={!!config.compressApiProviderId}
+                      onChange={(e) => {
+                        if (!e.target.checked) {
+                          handleConfigChange('compressApiProviderId', '');
+                          handleConfigChange('compressModelName', '');
+                        } else {
+                          handleConfigChange('compressApiProviderId', config.apiProviderId);
+                        }
+                      }}
+                      className="rounded border-slate-300"
+                    />
+                    Use independent API (uncheck to use Reply LLM)
+                  </label>
+                  {config.compressApiProviderId && (
+                    <>
+                      <FormGroup label="API Provider">
+                        <Select
+                          value={config.compressApiProviderId}
+                          onChange={(e) => {
+                            handleConfigChange('compressApiProviderId', e.target.value);
+                            handleConfigChange('compressModelName', '');
+                          }}
+                        >
+                          <option value="">Select provider...</option>
+                          {apiProviders.map(p => (
+                            <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                          ))}
+                        </Select>
+                      </FormGroup>
+                      <FormGroup label="Model">
+                        {compressProviderModels.length > 0 ? (
+                          <Select
+                            value={config.compressModelName}
+                            onChange={(e) => handleConfigChange('compressModelName', e.target.value)}
+                          >
+                            <option value="">Select model...</option>
+                            {compressProviderModels.map(m => {
+                              const modelId = typeof m === 'string' ? m : m.id;
+                              return <option key={modelId} value={modelId}>{modelId}</option>;
+                            })}
+                          </Select>
+                        ) : (
+                          <Input
+                            value={config.compressModelName}
+                            onChange={(e) => handleConfigChange('compressModelName', e.target.value)}
+                            placeholder="e.g. gpt-4o-mini"
+                          />
+                        )}
+                      </FormGroup>
+                    </>
+                  )}
+                </div>
               </Card>
 
               {/* Vision Model (Image Pre-Description) */}
@@ -533,9 +733,9 @@ export default function SocialPage() {
                         }
                       }}
                     >
-                      <option value="off">关闭</option>
-                      <option value="self">自己（使用主模型）</option>
-                      <option value="other">其他（使用独立模型）</option>
+                      <option value="off">Off</option>
+                      <option value="self">Self (use main model)</option>
+                      <option value="other">Other (use independent model)</option>
                     </Select>
                   </FormGroup>
                   {config.imageDescMode === 'other' && (
@@ -696,7 +896,7 @@ export default function SocialPage() {
                       rows={3}
                       value={config.socialPersonaPrompt}
                       onChange={(e) => handleConfigChange('socialPersonaPrompt', e.target.value)}
-                      placeholder="e.g. 你是群里的活跃成员，喜欢用emoji..."
+                      placeholder="e.g. You're an active group member who loves using emoji..."
                     />
                   </FormGroup>
                   <FormGroup label="Reply Strategy" hint="Rules for when to reply vs stay silent (stored in social/REPLY_STRATEGY.md)">
