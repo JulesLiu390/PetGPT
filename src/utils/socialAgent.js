@@ -307,23 +307,13 @@ async function resolveApiProvider(apiProviderId, modelName) {
  */
 /**
  * 将 GIF 图片转换为 PNG（取第一帧），因为 Gemini 不支持 image/gif。
- * 通过 OffscreenCanvas / Canvas 解码后重新编码为 PNG base64。
+ * 通过 Rust image crate 解码后重新编码为 PNG base64，跨平台兼容。
  * @param {string} base64Data - 纯 base64 字符串（不带 data: 前缀）
  * @returns {Promise<{data: string, mimeType: string}>} PNG base64 数据
  */
 async function convertGifToPng(base64Data) {
-  const blob = await (await fetch(`data:image/gif;base64,${base64Data}`)).blob();
-  const bitmap = await createImageBitmap(blob);
-  const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
-  const ctx = canvas.getContext('2d');
-  ctx.drawImage(bitmap, 0, 0);
-  bitmap.close();
-  const pngBlob = await canvas.convertToBlob({ type: 'image/png' });
-  const buf = await pngBlob.arrayBuffer();
-  const bytes = new Uint8Array(buf);
-  let binary = '';
-  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
-  return { data: btoa(binary), mimeType: 'image/png' };
+  const result = await tauri.convertGifToPng(base64Data);
+  return { data: result.data, mimeType: result.mime_type };
 }
 
 async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig) {
@@ -962,6 +952,27 @@ async function pollTarget({
       serverName: null,
     }));
     mcpTools = [...mcpTools, ...historyToolsAsMcp];
+  }
+
+  // ── 动态注入 Intent 建议到 send_message 工具的 num_chunks 参数描述 ──
+  if (role === 'reply') {
+    const hist = pollIntentHistory || [];
+    const latestActiveIntent = hist.filter(e => !e.idle).slice(-1)[0];
+    if (latestActiveIntent) {
+      const suggestedChunks = latestActiveIntent.numChunks ?? 1;
+      const suggestedLen = latestActiveIntent.replyLen;
+      const chunkDesc = suggestedLen != null
+        ? `Intent 建议本次分 ${suggestedChunks} 条发送（约 ${suggestedLen} 字），请按此设置。整数，表示消息拆分条数，系统会自动将你的 content 拆成这么多段逐条发送`
+        : `Intent 建议本次分 ${suggestedChunks} 条发送，请按此设置。整数，表示消息拆分条数，系统会自动将你的 content 拆成这么多段逐条发送`;
+      for (const tool of mcpTools) {
+        if (tool.name === 'send_message' || (tool.name && tool.name.endsWith('send_message'))) {
+          const props = tool.inputSchema?.properties;
+          if (props?.num_chunks) {
+            props.num_chunks = { ...props.num_chunks, description: chunkDesc };
+          }
+        }
+      }
+    }
   }
   
   // -- Poll data collection for aggregated log entry --
@@ -2038,14 +2049,25 @@ export async function startSocialLoop(config, onStatusChange) {
           // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
           await preprocessBufferImages(target);
 
-          // 构建只读工具集（与 Reply 相同的 history + groupLog）
+          // 构建只读工具集（与 Reply 相同的 history + groupLog + 外部 MCP 只读工具）
           const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
-          const intentMcpTools = intentToolDefs.map(t => ({
+          let intentMcpTools = intentToolDefs.map(t => ({
             name: t.function.name,
             description: t.function.description,
             inputSchema: t.function.parameters,
             serverName: null,
           }));
+          // 注入外部 MCP 工具（排除主 MCP 的 send_message 等，只保留额外服务器的只读工具）
+          try {
+            const allTools = await getMcpTools();
+            const extraServers = new Set(promptConfig.enabledMcpServers || []);
+            const externalTools = allTools.filter(t =>
+              extraServers.has(t.serverName) && t.serverName !== config.mcpServerName
+            );
+            if (externalTools.length > 0) {
+              intentMcpTools = [...intentMcpTools, ...externalTools];
+            }
+          } catch { /* 非致命：外部工具不可用不影响 Intent 评估 */ }
 
           let intentResult;
           for (let attempt = 0; ; attempt++) {
@@ -2201,14 +2223,25 @@ export async function startSocialLoop(config, onStatusChange) {
         addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
         state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
 
-        // 构建只读工具集（与 Reply 相同的 history + groupLog）
+        // 构建只读工具集（与 Reply 相同的 history + groupLog + 外部 MCP 只读工具）
         const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
-        const intentMcpTools = intentToolDefs.map(t => ({
+        let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
           inputSchema: t.function.parameters,
           serverName: null,
         }));
+        // 注入外部 MCP 工具（排除主 MCP 的 send_message 等，只保留额外服务器的只读工具）
+        try {
+          const allTools = await getMcpTools();
+          const extraServers = new Set(promptConfig.enabledMcpServers || []);
+          const externalTools = allTools.filter(t =>
+            extraServers.has(t.serverName) && t.serverName !== config.mcpServerName
+          );
+          if (externalTools.length > 0) {
+            intentMcpTools = [...intentMcpTools, ...externalTools];
+          }
+        } catch { /* 非致命：外部工具不可用不影响 Intent 评估 */ }
 
         const intentEvalPrompt = wasUrgentAtMe
           ? '有群友 @了你，请立即评估当前状态。注意：被 @ 通常意味着有人在跟你说话或提问，应优先考虑回复。同时仍需遵守「别三连」规则。'

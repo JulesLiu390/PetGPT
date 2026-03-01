@@ -17,10 +17,10 @@ pub enum WorkspaceError {
     ReadError(String),
     /// Failed to write file
     WriteError(String),
-    /// edit: oldText not found in file
-    EditNotFound(String),
-    /// edit: oldText matches multiple locations
-    EditMultipleMatches(String, usize),
+    /// edit: oldText not found in file (path, current_content)
+    EditNotFound(String, String),
+    /// edit: oldText matches multiple locations (path, count, current_content)
+    EditMultipleMatches(String, usize, String),
     /// edit: replacement produces no change
     EditNoChange(String),
     /// General IO error
@@ -42,18 +42,18 @@ impl std::fmt::Display for WorkspaceError {
             WorkspaceError::WriteError(msg) => {
                 write!(f, "写入文件失败: {}", msg)
             }
-            WorkspaceError::EditNotFound(path) => {
+            WorkspaceError::EditNotFound(path, current_content) => {
                 write!(
                     f,
-                    "无法在 {} 中找到指定文本。请确保文本精确匹配。",
-                    path
+                    "无法在 {} 中找到指定文本。请确保 oldText 与文件内容完全一致（包括标点、空格、换行）。建议先用 read 工具获取文件内容，直接从中复制要替换的部分。\n\n当前文件完整内容如下：\n{}",
+                    path, current_content
                 )
             }
-            WorkspaceError::EditMultipleMatches(path, n) => {
+            WorkspaceError::EditMultipleMatches(path, n, current_content) => {
                 write!(
                     f,
-                    "在 {} 中找到 {} 处匹配。请提供更多上下文使其唯一。",
-                    path, n
+                    "在 {} 中找到 {} 处匹配，oldText 不唯一。请增加上下文文本使其只匹配一处。\n\n当前文件完整内容如下：\n{}",
+                    path, n, current_content
                 )
             }
             WorkspaceError::EditNoChange(path) => {
@@ -184,9 +184,9 @@ impl WorkspaceEngine {
                     }
                     fs::write(&full_path, &new_content)
                         .map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
-                    return Ok(format!("成功替换了 {} 中的文本（模糊匹配）", path));
+                    return Ok(format!("成功替换了 {} 中的文本（模糊匹配）\n\n当前文件完整内容如下：\n{}", path, new_content));
                 }
-                None => return Err(WorkspaceError::EditNotFound(path.to_string())),
+                None => return Err(WorkspaceError::EditNotFound(path.to_string(), content)),
             }
         }
 
@@ -194,6 +194,7 @@ impl WorkspaceEngine {
             return Err(WorkspaceError::EditMultipleMatches(
                 path.to_string(),
                 match_count,
+                content,
             ));
         }
 
@@ -207,7 +208,7 @@ impl WorkspaceEngine {
         fs::write(&full_path, &new_content)
             .map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
 
-        Ok(format!("成功替换了 {} 中的文本", path))
+        Ok(format!("成功替换了 {} 中的文本\n\n当前文件完整内容如下：\n{}", path, new_content))
     }
 
     // ============ Fuzzy Matching ============

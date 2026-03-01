@@ -1410,6 +1410,27 @@ struct DownloadedImage {
     mime_type: String,
 }
 
+/// Convert a GIF image (base64) to PNG (base64) using the `image` crate.
+/// Works on all platforms without browser API dependencies (OffscreenCanvas etc.).
+#[tauri::command]
+fn convert_gif_to_png(base64_data: String) -> Result<DownloadedImage, String> {
+    let gif_bytes = BASE64.decode(&base64_data)
+        .map_err(|e| format!("Invalid base64: {}", e))?;
+
+    let img = image::load_from_memory_with_format(&gif_bytes, image::ImageFormat::Gif)
+        .map_err(|e| format!("Failed to decode GIF: {}", e))?;
+
+    let mut png_buf: Vec<u8> = Vec::new();
+    let mut cursor = std::io::Cursor::new(&mut png_buf);
+    img.write_to(&mut cursor, image::ImageFormat::Png)
+        .map_err(|e| format!("Failed to encode PNG: {}", e))?;
+
+    Ok(DownloadedImage {
+        data: BASE64.encode(&png_buf),
+        mime_type: "image/png".to_string(),
+    })
+}
+
 /// Download a URL and return base64 data + mime_type.
 /// Used by the frontend to fetch images from external servers (e.g. QQ)
 /// that block browser cross-origin requests.
@@ -2521,6 +2542,7 @@ pub fn run() {
             read_upload,
             get_uploads_path,
             download_url_as_base64,
+            convert_gif_to_png,
             // Screenshot commands
             take_screenshot,
             capture_region,

@@ -121,17 +121,17 @@ export function getSocialBuiltinToolDefinitions() {
       type: 'function',
       function: {
         name: 'social_edit',
-        description: '通过精确文本查找替换来编辑你的社交长期记忆文件。oldText 必须精确匹配文件中的内容。',
+        description: '通过精确文本查找替换来编辑你的社交长期记忆文件。使用前必须先调用 social_read 获取当前内容。每次只改一处，改完再 read 确认结果。如果需要大幅修改（超过一半内容），直接用 social_write 覆盖更可靠。',
         parameters: {
           type: 'object',
           properties: {
             oldText: {
               type: 'string',
-              description: '要查找并替换的精确文本（必须唯一匹配）',
+              description: '要替换的原文，必须从 social_read 返回的内容中精确复制（包括标点、空格、换行），不要凭记忆手打',
             },
             newText: {
               type: 'string',
-              description: '替换后的新文本',
+              description: '替换后的新文本，保留原文的 Markdown 格式（标题层级、列表符号等）',
             },
           },
           required: ['oldText', 'newText'],
@@ -248,17 +248,17 @@ export function getGroupRuleToolDefinitions() {
       type: 'function',
       function: {
         name: 'group_rule_edit',
-        description: '通过精确文本查找替换来编辑当前群的规则文件。oldText 必须精确匹配文件中的内容。',
+        description: '通过精确文本查找替换来编辑当前群的规则文件。使用前必须先调用 group_rule_read 获取当前内容。每次只改一处，改完再 read 确认结果。如果需要大幅修改（超过一半内容），直接用 group_rule_write 覆盖更可靠。',
         parameters: {
           type: 'object',
           properties: {
             oldText: {
               type: 'string',
-              description: '要查找并替换的精确文本（必须唯一匹配）',
+              description: '要替换的原文，必须从 group_rule_read 返回的内容中精确复制（包括标点、空格、换行），不要凭记忆手打',
             },
             newText: {
               type: 'string',
-              description: '替换后的新文本',
+              description: '替换后的新文本，保留原文的 Markdown 格式（标题层级、列表符号等）',
             },
           },
           required: ['oldText', 'newText'],

@@ -491,6 +491,13 @@ export const getUploadsPath = () => invoke('get_uploads_path');
  */
 export const downloadUrlAsBase64 = (url) => invoke('download_url_as_base64', { url });
 
+/**
+ * 通过 Rust image crate 将 GIF 转为 PNG（跨平台，无需 OffscreenCanvas）
+ * @param {string} base64Data - 纯 base64 字符串（不带 data: 前缀）
+ * @returns {Promise<{data: string, mime_type: string}>} PNG base64 数据
+ */
+export const convertGifToPng = (base64Data) => invoke('convert_gif_to_png', { base64Data });
+
 // ==================== Screenshot ====================
 
 /**
