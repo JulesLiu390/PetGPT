@@ -15,7 +15,7 @@ echo -e "${GREEN}🚀 Creating PetGPT DMG...${NC}"
 
 # Configuration
 APP_NAME="PetGPT"
-VERSION="0.4.3"
+VERSION="0.4.4"
 APP_PATH="src-tauri/target/release/bundle/macos/${APP_NAME}.app"
 DMG_NAME="${APP_NAME}_${VERSION}_aarch64.dmg"
 OUTPUT_PATH="src-tauri/target/release/bundle/dmg"

@@ -26,7 +26,7 @@ echo -e "${GREEN}🚀 Creating PetGPT .deb package...${NC}"
 # Configuration
 APP_NAME="petgpt"
 APP_DISPLAY_NAME="PetGPT"
-VERSION="0.4.3"
+VERSION="0.4.4"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
 DESCRIPTION="PetGPT - AI Desktop Pet Assistant"
 MAINTAINER="PetGPT Team"
