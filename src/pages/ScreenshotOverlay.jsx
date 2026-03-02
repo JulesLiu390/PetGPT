@@ -73,7 +73,7 @@ const ScreenshotOverlay = () => {
         console.log('[ScreenshotOverlay] Received screenshot:', data.logicalWidth, 'x', data.logicalHeight);
         // 通过 Tauri asset protocol 加载本地 PNG 文件（零 base64 开销）
         const { convertFileSrc } = await import('@tauri-apps/api/core');
-        const imageUrl = convertFileSrc(data.previewPath);
+        const imageUrl = convertFileSrc(data.previewPath) + '?t=' + Date.now();
         setScreenshotData({ ...data, imageUrl });
         setScaleFactor(data.scaleFactor || 2);
         setSelection(null);
