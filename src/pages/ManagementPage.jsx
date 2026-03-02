@@ -1298,7 +1298,12 @@ const ApiProvidersPanel = () => {
       }
       setIsCreating(false);
       setEditingProvider(null);
-      loadProviders();
+      await loadProviders();
+      // 通知其他窗口（SocialPage / AssistantForm）刷新 providers
+      try {
+        const updated = await tauri.getApiProviders();
+        if (updated) await tauri.sendApiProvidersUpdate(updated);
+      } catch { /* non-fatal */ }
     } catch (error) {
       console.error("Save failed:", error);
       alert("Failed to save: " + (error.message || error));
@@ -1316,7 +1321,12 @@ const ApiProvidersPanel = () => {
     
     try {
       await tauri.deleteApiProvider(id);
-      loadProviders();
+      await loadProviders();
+      // 通知其他窗口刷新 providers
+      try {
+        const updated = await tauri.getApiProviders();
+        if (updated) await tauri.sendApiProvidersUpdate(updated);
+      } catch { /* non-fatal */ }
     } catch (error) {
       console.error("Delete failed:", error);
       alert("Failed to delete: " + (error.message || error));

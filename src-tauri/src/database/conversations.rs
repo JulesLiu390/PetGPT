@@ -17,6 +17,20 @@ pub struct Conversation {
     pub message_count: i32,
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationWithPetName {
+    #[serde(rename = "_id")]
+    pub id: String,
+    pub pet_id: String,
+    pub title: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub message_count: i32,
+    pub pet_name: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct CreateConversationData {
     #[serde(alias = "petId")]
@@ -24,7 +38,47 @@ pub struct CreateConversationData {
     pub title: Option<String>,
 }
 
+/// Conversation + its messages in a single response
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationWithHistory {
+    #[serde(flatten)]
+    pub conversation: Conversation,
+    pub history: Vec<super::messages::Message>,
+}
+
 impl Database {
+    /// 一次性获取所有非删除 pet 的对话（含 pet_name），避免 N+1 查询
+    /// 只返回有消息的对话（HAVING message_count > 0）
+    pub fn get_all_conversations(&self) -> Result<Vec<ConversationWithPetName>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.pet_id, c.title, c.created_at, c.updated_at,
+                    (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count,
+                    p.name as pet_name
+             FROM conversations c
+             INNER JOIN pets p ON c.pet_id = p.id
+             WHERE (p.is_deleted = 0 OR p.is_deleted IS NULL)
+             GROUP BY c.id
+             HAVING message_count > 0
+             ORDER BY c.updated_at DESC"
+        )?;
+
+        let conversations = stmt.query_map([], |row| {
+            Ok(ConversationWithPetName {
+                id: row.get(0)?,
+                pet_id: row.get(1)?,
+                title: row.get(2)?,
+                created_at: row.get(3)?,
+                updated_at: row.get(4)?,
+                message_count: row.get(5)?,
+                pet_name: row.get(6)?,
+            })
+        })?.collect::<Result<Vec<_>>>()?;
+
+        Ok(conversations)
+    }
+
     pub fn get_conversations_by_pet(&self, pet_id: &str) -> Result<Vec<Conversation>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -73,6 +127,21 @@ impl Database {
         } else {
             println!("[Rust get_conversation_by_id] id={} NOT FOUND", id);
             Ok(None)
+        }
+    }
+
+    /// Get conversation + all its messages in a single call (avoids 2 IPC round-trips)
+    pub fn get_conversation_with_history(&self, id: &str) -> Result<Option<ConversationWithHistory>> {
+        let conv = self.get_conversation_by_id(id)?;
+        match conv {
+            Some(c) => {
+                let messages = self.get_messages_by_conversation(id)?;
+                Ok(Some(ConversationWithHistory {
+                    conversation: c,
+                    history: messages,
+                }))
+            }
+            None => Ok(None),
         }
     }
 
@@ -134,7 +203,7 @@ impl Database {
         Ok(rows)
     }
 
-    /// 获取孤儿对话（关联的 pet 已被删除）
+    /// 获取孤儿对话（关联的 pet 已被删除），只返回有消息的
     pub fn get_orphan_conversations(&self) -> Result<Vec<Conversation>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
@@ -143,6 +212,8 @@ impl Database {
              FROM conversations c
              LEFT JOIN pets p ON c.pet_id = p.id
              WHERE p.id IS NULL OR p.is_deleted = 1
+             GROUP BY c.id
+             HAVING message_count > 0
              ORDER BY c.updated_at DESC"
         )?;
         

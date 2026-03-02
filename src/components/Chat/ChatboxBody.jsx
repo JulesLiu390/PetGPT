@@ -41,6 +41,7 @@ export const Chatbox = () => {
   const [isTitleBarVisible, setIsTitleBarVisible] = useState(false); // 控制 opacity
   const [conversations, setConversations] = useState([]);
   const [orphanConversations, setOrphanConversations] = useState([]);
+  const [displayCount, setDisplayCount] = useState(50); // sidebar 分页：初始显示 50 条
   const [isThinking, setIsThinking] = useState(false);
   const [showTransferModal, setShowTransferModal] = useState(false);
   const [selectedOrphanConv, setSelectedOrphanConv] = useState(null);
@@ -94,23 +95,21 @@ export const Chatbox = () => {
     console.log('[ChatboxBody] fetchConversations called');
     try {
       const data = await tauri.getConversations();
-      console.log('[ChatboxBody] getConversations returned:', data);
+      console.log('[ChatboxBody] getConversations returned:', data?.length);
       if (Array.isArray(data)) {
-          // Filter out empty conversations (no messages)
-          const nonEmptyConversations = data.filter(conv => conv.messageCount > 0);
-          setConversations(nonEmptyConversations);
-          console.log('[ChatboxBody] setConversations with', nonEmptyConversations.length, 'non-empty items');
+          // SQL 已过滤空对话，直接使用
+          setConversations(data);
+          console.log('[ChatboxBody] setConversations with', data.length, 'items');
       } else {
           console.warn("getConversations returned non-array:", data);
           setConversations([]);
       }
       
-      // Also fetch orphan conversations
+      // Also fetch orphan conversations (SQL 已过滤空对话)
       const orphans = await tauri.getOrphanConversations();
       if (Array.isArray(orphans)) {
-          const nonEmptyOrphans = orphans.filter(conv => conv.messageCount > 0);
-          setOrphanConversations(nonEmptyOrphans);
-          console.log('[ChatboxBody] setOrphanConversations with', nonEmptyOrphans.length, 'items');
+          setOrphanConversations(orphans);
+          console.log('[ChatboxBody] setOrphanConversations with', orphans.length, 'items');
       }
     } catch (error) {
       console.error("Error fetching conversations:", error);
@@ -208,6 +207,26 @@ export const Chatbox = () => {
       setAllAssistants(assistants || []);
     }).catch(console.error);
   }, [fetchConversations]);
+
+  // 修复：当 conversations 列表从 DB 刷新后，同步仍为 "New Chat" 的 tab 标签
+  // 防止 updatedConversation 被后续 dispatch 覆盖导致标题丢失
+  useEffect(() => {
+    if (conversations.length === 0) return;
+    setTabs(prevTabs => {
+      let changed = false;
+      const newTabs = prevTabs.map(tab => {
+        if (tab.label === 'New Chat') {
+          const conv = conversations.find(c => c._id === tab.id);
+          if (conv && conv.title && conv.title !== 'New Chat') {
+            changed = true;
+            return { ...tab, label: conv.title };
+          }
+        }
+        return tab;
+      });
+      return changed ? newTabs : prevTabs;
+    });
+  }, [conversations]);
 
   // 监听 Rust 端发送的鼠标悬停事件
   useEffect(() => {
@@ -386,7 +405,7 @@ export const Chatbox = () => {
           return;
         }
 
-        tauri.sendConversationId?.(newConversation._id);
+        // sendConversationId 由 handleTabClick 统一发送，这里不再重复
 
         const newTab = {
             id: newConversation._id,
@@ -424,9 +443,9 @@ export const Chatbox = () => {
             return [...prev.map(t => ({...t, isActive: false})), newTab];
         });
 
-        handleTabClick(newConversation._id);
+        handleTabClick(newConversation._id, { skipFetch: true });
 
-        // 刷新对话列表以显示新创建的对话
+        // 刷新对话列表以显示新创建的对话（fire-and-forget，不阻塞 UI）
         fetchConversations();
       } finally {
         // 处理完成后移除标志
@@ -516,7 +535,7 @@ export const Chatbox = () => {
     }
   };
 
-  const handleTabClick = async (clickedId) => {
+  const handleTabClick = async (clickedId, { skipFetch = false } = {}) => {
     // Even if clicking active tab, we might want to ensure sync? 
     // But for performance, skip if same.
     if (activeTabId === clickedId) return;
@@ -526,20 +545,23 @@ export const Chatbox = () => {
     
     setTabs(prev => prev.map(t => ({...t, isActive: t.id === clickedId})));
 
-    // 新方案: 检查 Rust TabState 是否有消息
-    const tabState = await tauri.getTabState(clickedId);
-    let messages = tabState.messages || [];
+    // skipFetch=true 时跳过 DB 查询（新建的空对话已初始化过 TabState，无需再查）
+    if (!skipFetch) {
+      // 新方案: 检查 Rust TabState 是否有消息
+      const tabState = await tauri.getTabState(clickedId);
+      let messages = tabState.messages || [];
 
-    // If messages empty, fetch from backend and initialize Rust TabState
-    if (messages.length === 0) {
-         try {
-            const conversation = await fetchConversationById(clickedId);
-            messages = conversation.history || [];
-            // 新方案: 初始化 Rust TabState
-            await tauri.initTabMessages(clickedId, messages);
-         } catch (e) {
-             console.error(e);
-         }
+      // If messages empty, fetch from backend and initialize Rust TabState
+      if (messages.length === 0) {
+           try {
+              const conversation = await fetchConversationById(clickedId);
+              messages = conversation.history || [];
+              // 新方案: 初始化 Rust TabState
+              await tauri.initTabMessages(clickedId, messages);
+           } catch (e) {
+               console.error(e);
+           }
+      }
     }
 
     // Sync global - send the mood of the clicked tab to update character display
@@ -646,7 +668,7 @@ export const Chatbox = () => {
   useEffect(() => { handleItemClickRef.current = handleItemClick; });
 
   // 从某条消息处创建分支（复制该消息及之前的所有消息到新对话）
-  const handleBranchFromMessage = async (sourceConvId, messageIndex) => {
+  const handleBranchFromMessage = useCallback(async (sourceConvId, messageIndex) => {
     try {
       // 1. 获取源对话的 tab
       const sourceTab = tabs.find(t => t.id === sourceConvId);
@@ -703,14 +725,14 @@ export const Chatbox = () => {
 
       // 8. 添加 Tab 并切换
       setTabs(prev => [...prev.map(t => ({ ...t, isActive: false })), newTab]);
-      handleTabClick(newConversation._id);
+      handleTabClick(newConversation._id, { skipFetch: true });
       
-      // 9. 刷新对话列表
+      // 9. 刷新对话列表（fire-and-forget，不阻塞 UI）
       fetchConversations();
     } catch (error) {
       console.error('[Branch] Failed to create branch:', error);
     }
-  };
+  }, [tabs, handleTabClick, fetchConversations]);
 
   const handleNewChat = () => {
     const activeTab = tabs.find(tab => tab.id === activeTabId);
@@ -1089,7 +1111,7 @@ export const Chatbox = () => {
           <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
             Recent
           </div>
-          {conversations.map((conv) => (
+          {conversations.slice(0, displayCount).map((conv) => (
             <div
               key={conv._id}
               onClick={() => handleItemClick(conv)}
@@ -1102,6 +1124,14 @@ export const Chatbox = () => {
               />
             </div>
           ))}
+          {conversations.length > displayCount && (
+            <button
+              onClick={() => setDisplayCount(prev => prev + 50)}
+              className="w-full py-2 text-xs text-blue-500 hover:text-blue-700 hover:bg-blue-50 rounded-lg transition-colors"
+            >
+              Show more ({conversations.length - displayCount} remaining)
+            </button>
+          )}
           
           {/* Orphan Conversations */}
           {orphanConversations.length > 0 && (
@@ -1248,7 +1278,9 @@ export const Chatbox = () => {
                     </button>
                 </div>
              ) : (
-                tabs.map(tab => (
+                tabs.map(tab => {
+                    const streamContent = streamingReplies?.[tab.id] ?? null;
+                    return (
                     <div 
                         key={tab.id} 
                         style={{ display: tab.id === activeTabId ? 'flex' : 'none' }} 
@@ -1256,13 +1288,14 @@ export const Chatbox = () => {
                     >
                         <ChatboxMessageArea 
                             conversationId={tab.id}
-                            streamingContent={streamingReplies ? streamingReplies[tab.id] : null} 
+                            streamingContent={streamContent} 
                             isActive={tab.id === activeTabId}
                             showTitleBar={showTitleBar}
                             onBranchFromMessage={handleBranchFromMessage}
                         />
                     </div>
-                ))
+                    );
+                })
              )}
         </div>
         

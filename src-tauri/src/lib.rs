@@ -172,6 +172,11 @@ fn delete_pet(db: State<DbState>, id: String) -> Result<bool, String> {
 // ============ Conversation Commands ============
 
 #[tauri::command]
+fn get_all_conversations(db: State<DbState>) -> Result<Vec<conversations::ConversationWithPetName>, String> {
+    db.get_all_conversations().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 #[allow(non_snake_case)]
 fn get_conversations_by_pet(db: State<DbState>, petId: String) -> Result<Vec<conversations::Conversation>, String> {
     db.get_conversations_by_pet(&petId).map_err(|e| e.to_string())
@@ -180,6 +185,11 @@ fn get_conversations_by_pet(db: State<DbState>, petId: String) -> Result<Vec<con
 #[tauri::command]
 fn get_conversation(db: State<DbState>, id: String) -> Result<Option<conversations::Conversation>, String> {
     db.get_conversation_by_id(&id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_conversation_with_history(db: State<DbState>, id: String) -> Result<Option<conversations::ConversationWithHistory>, String> {
+    db.get_conversation_with_history(&id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -2477,8 +2487,10 @@ pub fn run() {
             update_pet,
             delete_pet,
             // Conversation commands
+            get_all_conversations,
             get_conversations_by_pet,
             get_conversation,
+            get_conversation_with_history,
             create_conversation,
             update_conversation_title,
             delete_conversation,

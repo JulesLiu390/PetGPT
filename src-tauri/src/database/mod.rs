@@ -160,6 +160,12 @@ impl Database {
 
         // Migration: add is_builtin and is_hidden columns if not exists
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_builtin INTEGER DEFAULT 0", []);
+
+        // Index: speed up COUNT(*) and message lookups by conversation_id
+        let _ = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_hidden INTEGER DEFAULT 0", []);
         // Migration: add moods column for dynamic mood/expression support
         // 固定表情系统: ["normal", "smile", "sad", "shocked", "thinking"]

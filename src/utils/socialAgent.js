@@ -2350,8 +2350,9 @@ export async function startSocialLoop(config, onStatusChange) {
         }
 
         // Intent 评出 ≥ 3（有点想说/想聊/忍不住）时，通知 Reply 可以主动触发（即使没有新消息）
+        // 携带 atMe 信息，让 Reply 在 semi-lurk 模式下知道本次唤醒是否因为 @me
         if (w.level >= 3 && !intentGate.has(target)) {
-          replyWakeFlag.set(target, true);
+          replyWakeFlag.set(target, { atMe: wasUrgentAtMe });
         }
 
         if (isIdle) {
@@ -2755,8 +2756,8 @@ export async function startSocialLoop(config, onStatusChange) {
           await new Promise(r => setTimeout(r, 1000));
           continue;
         }
-        // semi-lurk 且没有 @me → 跳过回复，推进水位线
-        if (targetLurkMode === 'semi-lurk' && !hasAtMe) {
+        // semi-lurk 且本次唤醒不是因为 @me → 跳过回复，推进水位线
+        if (targetLurkMode === 'semi-lurk' && !intentWoke?.atMe) {
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
           await new Promise(r => setTimeout(r, 1000));

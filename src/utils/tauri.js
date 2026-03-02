@@ -161,18 +161,8 @@ export const deleteAssistant = deletePet;
 // ==================== Conversations ====================
 
 export const getConversations = async () => {
-  const pets = await getPets();
-  const allConversations = [];
-  for (const pet of pets) {
-    const convs = await invoke('get_conversations_by_pet', { petId: pet._id });
-    allConversations.push(...convs.map(c => ({ ...c, petName: pet.name })));
-  }
-  // 全局按 updated_at 降序排列，确保最新对话始终在最前面
-  allConversations.sort((a, b) => {
-    const timeA = a.updatedAt || a.updated_at || '';
-    const timeB = b.updatedAt || b.updated_at || '';
-    return timeB.localeCompare(timeA);
-  });
+  // 单次 IPC 获取所有对话（含 petName），替代原来的 N+1 查询
+  const allConversations = await invoke('get_all_conversations');
   return allConversations;
 };
 
@@ -205,12 +195,11 @@ export const searchConversations = async (query) => {
  * @returns {Promise<Object>} 包含 history 字段的会话对象
  */
 export const getConversationWithHistory = async (id) => {
-  const conv = await invoke('get_conversation', { id });
-  if (!conv) return null;
+  const result = await invoke('get_conversation_with_history', { id });
+  if (!result) return null;
   
-  const messages = await invoke('get_messages', { conversationId: id });
   // 解析消息内容 (如果是 JSON 字符串)
-  const parsedMessages = (messages || []).map(msg => ({
+  const parsedMessages = (result.history || []).map(msg => ({
     ...msg,
     content: typeof msg.content === 'string' && msg.content.startsWith('[') 
       ? JSON.parse(msg.content) 
@@ -220,7 +209,7 @@ export const getConversationWithHistory = async (id) => {
       : undefined
   }));
   
-  return { ...conv, history: parsedMessages };
+  return { ...result, history: parsedMessages };
 };
 
 export const createConversation = async (data) => {
@@ -588,9 +577,13 @@ export const setVibrancyEnabled = (enabled) => invoke('set_vibrancy_enabled', { 
 
 export const onCharacterId = (callback) => {
   let unlisten = null;
+  let settled = false;
   const readyPromise = listen('character-id', (event) => callback(event.payload))
-    .then(fn => { unlisten = fn; });
-  const cleanup = () => { if (unlisten) unlisten(); };
+    .then(fn => { unlisten = fn; settled = true; });
+  const cleanup = async () => {
+    if (!settled) await readyPromise.catch(() => {});
+    if (unlisten) unlisten();
+  };
   cleanup.ready = readyPromise;
   return cleanup;
 };
@@ -600,9 +593,13 @@ export const sendConversationId = (id) =>
 
 export const onConversationId = (callback) => {
   let unlisten = null;
+  let settled = false;
   const readyPromise = listen('conversation-id', (event) => callback(event.payload))
-    .then(fn => { unlisten = fn; });
-  const cleanup = () => { if (unlisten) unlisten(); };
+    .then(fn => { unlisten = fn; settled = true; });
+  const cleanup = async () => {
+    if (!settled) await readyPromise.catch(() => {});
+    if (unlisten) unlisten();
+  };
   cleanup.ready = readyPromise;
   return cleanup;
 };

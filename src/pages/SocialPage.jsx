@@ -88,6 +88,11 @@ export default function SocialPage() {
       }
     };
     fetchData();
+
+    // 监听跨窗口 API providers 更新事件
+    let unlisten;
+    listen('api-providers-updated', () => { fetchData(); }).then(fn => { unlisten = fn; });
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   // ── Load MCP servers ──

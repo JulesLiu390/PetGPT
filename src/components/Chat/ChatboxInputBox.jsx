@@ -1544,8 +1544,8 @@ When using tools, please follow these guidelines:
         const currentState = await tauri.getTabState(sendingConversationId || 'temp');
         const currentMsgs = currentState.messages || [];
         console.log('[handleSend] ★★★ temp TabState messages:', currentMsgs.length);
-        // 如果用户通过快速切换按钮选择了不同的模型，使用 overrideModel._sourceId
-        const actualPetId = overrideModel ? overrideModel._sourceId : petInfo._id;
+        // 新对话始终归属当前 pet（overrideModel 只影响 LLM 调用，不影响对话归属）
+        const actualPetId = petInfo._id;
         const newConversation = await tauri.createConversation({
           petId: actualPetId,
           title: _userText,
@@ -1573,11 +1573,8 @@ When using tools, please follow these guidelines:
     console.log('[handleSend] ★★★ 保存判断: sendingConversationId=', sendingConversationId, 'type=', typeof sendingConversationId);
     if (sendingConversationId && sendingConversationId !== 'temp') {
         console.log('[handleSend] ★★★ 进入保存流程, convId=', sendingConversationId);
-        // 如果用户通过快速切换按钮选择了不同的模型，更新会话的 pet_id
-        if (overrideModel && overrideModel._sourceId !== petInfo._id) {
-            await tauri.transferConversation(sendingConversationId, overrideModel._sourceId);
-            console.log(`[handleSend] Transferred conversation ${sendingConversationId} to pet ${overrideModel._sourceId}`);
-        }
+        // overrideModel._sourceId 是 API provider ID（非 pet ID），不能用于 transferConversation
+        // 模型切换只影响 LLM 调用，对话归属不变
 
         // 新方案: 从 Rust TabState 获取最新完整历史
         const finalState = await tauri.getTabState(sendingConversationId);

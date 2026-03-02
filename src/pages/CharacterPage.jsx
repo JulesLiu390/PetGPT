@@ -556,38 +556,8 @@ export const Character = () => {
     };
   }, []);
 
-  useEffect(() => {
-    const fetchConv = async (conversationId) => {
-      try {
-        const conv = await tauri.getConversationById(conversationId);
-        // 优先尝试 getAssistant，失败则回退到 getPet
-        let pet = null;
-        try {
-          pet = await tauri.getAssistant(conv.petId);
-        } catch (e) {
-          // 忽略，尝试旧 API
-        }
-        if (!pet) {
-          pet = await tauri.getPet(conv.petId);
-        }
-        if (pet && pet.imageName) {
-          setImageName(pet.imageName);
-        }
-      } catch (error) {
-        console.error("Error fetching conversation:", error);
-        throw error;
-      }
-    };
-
-    const handleConversationId = async(id) => {
-      await fetchConv(id);
-    };
-
-    const cleanup = tauri.onConversationId(handleConversationId);
-    return () => {
-      if (cleanup) cleanup();
-    };
-  }, []);
+  // onConversationId 已移除：以前用来根据 conversationId 查 petId 再查 imageName，
+  // 但 onCharacterId 已经直接用 petId 做同样的事情，无需多一次 getConversationById IPC。
 
   // 根据 characterMood 动态加载对应图片
   useEffect(() => {

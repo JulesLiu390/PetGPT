@@ -1152,4 +1152,4 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
 };
 
 
-export default ChatboxMessageArea;
+export default React.memo(ChatboxMessageArea);
