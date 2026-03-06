@@ -2628,6 +2628,8 @@ pub fn run() {
             workspace::workspace_ensure_default_files,
             workspace::workspace_file_exists,
             workspace::workspace_get_path,
+            workspace::workspace_delete_folder,
+            workspace::workspace_open_folder,
             workspace::workspace_open_file,
         ])
         .run(tauri::generate_context!())

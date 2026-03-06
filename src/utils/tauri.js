@@ -722,6 +722,14 @@ export const workspaceGetPath = async (petId, path, ensureExists = false) => {
   return invoke('workspace_get_path', { petId, path, ensureExists });
 };
 
+export const workspaceDeleteFolder = async (petId) => {
+  return invoke('workspace_delete_folder', { petId });
+};
+
+export const workspaceOpenFolder = async (petId) => {
+  return invoke('workspace_open_folder', { petId });
+};
+
 export const workspaceOpenFile = async (petId, path, defaultContent = '') => {
   return invoke('workspace_open_file', { petId, path, defaultContent });
 };
@@ -1008,6 +1016,8 @@ const tauri = {
   workspaceEnsureDefaultFiles,
   workspaceFileExists,
   workspaceGetPath,
+  workspaceDeleteFolder,
+  workspaceOpenFolder,
   workspaceOpenFile,
   
   // Dragging

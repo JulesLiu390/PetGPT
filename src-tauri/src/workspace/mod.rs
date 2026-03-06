@@ -95,6 +95,46 @@ pub fn workspace_get_path(
         .ok_or_else(|| "Path contains invalid UTF-8".to_string())
 }
 
+/// Delete a pet's workspace folder (used for cleanup when cancelling new assistant creation)
+#[tauri::command]
+pub fn workspace_delete_folder(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+) -> Result<(), String> {
+    workspace.delete_workspace(&pet_id).map_err(|e| e.to_string())
+}
+
+/// Open the pet's workspace folder in the system file manager
+#[tauri::command]
+pub fn workspace_open_folder(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+) -> Result<(), String> {
+    // Ensure the workspace directory exists
+    let folder = workspace.get_full_path(&pet_id, ".").map_err(|e| e.to_string())?;
+    let _ = std::fs::create_dir_all(&folder);
+
+    #[cfg(target_os = "macos")]
+    StdCommand::new("open")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {}", e))?;
+
+    #[cfg(target_os = "linux")]
+    StdCommand::new("xdg-open")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    StdCommand::new("explorer")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {}", e))?;
+
+    Ok(())
+}
+
 /// Open a workspace file in the system default editor
 #[tauri::command]
 pub fn workspace_open_file(

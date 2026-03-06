@@ -289,6 +289,16 @@ impl WorkspaceEngine {
     pub fn get_full_path(&self, pet_id: &str, path: &str) -> Result<PathBuf, WorkspaceError> {
         self.resolve_safe_path(pet_id, path)
     }
+
+    /// Delete a pet's entire workspace directory
+    pub fn delete_workspace(&self, pet_id: &str) -> Result<(), WorkspaceError> {
+        let workspace = self.pet_workspace(pet_id);
+        if workspace.exists() {
+            fs::remove_dir_all(&workspace)
+                .map_err(|e| WorkspaceError::IoError(e.to_string()))?;
+        }
+        Ok(())
+    }
 }
 
 // ============ Utility Functions ============

@@ -20,7 +20,7 @@ pub struct LlmProxy {
 }
 
 /// 单次请求的超时秒数
-const REQUEST_TIMEOUT_SECS: u64 = 90;
+const REQUEST_TIMEOUT_SECS: u64 = 180;
 /// 最大并发 LLM 请求数（Observer + Intent + Compress 共享）
 const MAX_CONCURRENT_REQUESTS: usize = 2;
 

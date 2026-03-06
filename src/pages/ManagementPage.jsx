@@ -140,10 +140,14 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [customSkins, setCustomSkins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  
+
+  // For new assistants: generate a temp ID for workspace, track template choice and whether workspace was created
+  const [tempId] = useState(() => assistant?._id || crypto.randomUUID());
+  const [soulTemplate, setSoulTemplate] = useState("preset"); // "preset" | "blank"
+  const [workspaceCreated, setWorkspaceCreated] = useState(!!assistant?._id);
+
   const [formData, setFormData] = useState({
     name: assistant?.name || "",
-    systemInstruction: assistant?.systemInstruction || "You are a helpful assistant.",
     appearance: assistant?.appearance || "",
     imageName: assistant?.imageName || "default",
     hasMood: assistant?.hasMood !== false,
@@ -298,7 +302,12 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     try {
       // Explicitly clear modelConfigId to ensure the Assistant's local settings (Pro) take precedence
       // over any stale linked configuration (Flash)
-      await onSave({ ...formData, modelConfigId: "" });
+      // For new assistants, pass the tempId so the backend uses the same ID as the workspace
+      const saveData = { ...formData, modelConfigId: "" };
+      if (!assistant) {
+        saveData.id = tempId;
+      }
+      await onSave(saveData);
     } catch (error) {
       console.error("Save failed:", error);
       alert("Failed to save: " + (error.message || error));
@@ -391,13 +400,56 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
 
       <FormGroup>
         <Label>System Instruction</Label>
-        <Textarea
-          name="systemInstruction"
-          placeholder="Describe how the assistant should behave..."
-          value={formData.systemInstruction}
-          onChange={handleChange}
-          rows={3}
-        />
+        <p className="text-xs text-slate-500 mb-2">
+          Edit SOUL.md and other files in the workspace folder.
+        </p>
+        {!assistant && !workspaceCreated && (
+          <div className="flex items-center gap-4 mb-2">
+            <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+              <input
+                type="radio"
+                name="soulTemplate"
+                value="preset"
+                checked={soulTemplate === "preset"}
+                onChange={() => setSoulTemplate("preset")}
+              />
+              Use preset template
+            </label>
+            <label className="flex items-center gap-1.5 text-sm cursor-pointer">
+              <input
+                type="radio"
+                name="soulTemplate"
+                value="blank"
+                checked={soulTemplate === "blank"}
+                onChange={() => setSoulTemplate("blank")}
+              />
+              Blank
+            </label>
+          </div>
+        )}
+        <Button
+          type="button"
+          variant="ghost"
+          onClick={async () => {
+            try {
+              if (!workspaceCreated) {
+                if (soulTemplate === "preset") {
+                  await tauri.workspaceEnsureDefaultFiles(tempId, formData.name || "Assistant");
+                } else {
+                  // Create workspace with a blank SOUL.md
+                  await tauri.workspaceWrite(tempId, "SOUL.md", "");
+                }
+                setWorkspaceCreated(true);
+              }
+              await tauri.workspaceOpenFolder(tempId);
+            } catch (err) {
+              console.error("Failed to open workspace folder:", err);
+            }
+          }}
+        >
+          <FaFile className="w-3.5 h-3.5 mr-1.5" />
+          Open Workspace Folder
+        </Button>
       </FormGroup>
 
       <FormGroup>
@@ -449,11 +501,21 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
       {/* Actions */}
       <div className="flex items-center gap-2 pt-2">
         <div className="flex-1" />
-        <Button type="button" variant="secondary" onClick={onCancel}>
+        <Button type="button" variant="secondary" onClick={async () => {
+          // Clean up temp workspace if it was created for a new assistant
+          if (!assistant && workspaceCreated) {
+            try {
+              await tauri.workspaceDeleteFolder(tempId);
+            } catch (err) {
+              console.error("Failed to cleanup temp workspace:", err);
+            }
+          }
+          onCancel();
+        }}>
           Cancel
         </Button>
-        <Button 
-          type="submit" 
+        <Button
+          type="submit"
           variant="primary"
           disabled={saving || apiProviders.length === 0 || !formData.modelName}
         >
@@ -660,9 +722,9 @@ const AssistantsPanel = ({ onNavigate }) => {
                   </div>
                 </div>
 
-                {(assistant.systemInstruction || assistant.appearance) && (
+                {assistant.appearance && (
                   <div className="mt-2 space-y-1">
-                    <TruncatedText label="Instruction" text={assistant.systemInstruction} />
+                    <TruncatedText label="Appearance" text={assistant.appearance} />
                   </div>
                 )}
               </div>

@@ -31,6 +31,7 @@ pub struct Pet {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreatePetData {
+    pub id: Option<String>,
     pub name: String,
     #[serde(rename = "type")]
     pub pet_type: Option<String>,
@@ -139,7 +140,7 @@ impl Database {
 
     pub fn create_pet(&self, data: CreatePetData) -> Result<Pet> {
         let conn = self.conn.lock().unwrap();
-        let id = Uuid::new_v4().to_string();
+        let id = data.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = Utc::now().to_rfc3339();
         let has_mood = data.has_mood.unwrap_or(true);
         let pet_type = data.pet_type.clone().unwrap_or_else(|| "assistant".to_string());
