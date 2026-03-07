@@ -3653,7 +3653,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
     return () => { unlisten?.(); };
   }, [selectedPetId]);
 
-  // Listen for log responses from character window
+  // Listen for full log responses (initial load / clear)
   useEffect(() => {
     let unlisten;
     const setup = async () => {
@@ -3665,12 +3665,42 @@ const SocialPanel = ({ assistants, apiProviders }) => {
     return () => { unlisten?.(); };
   }, []);
 
-  // Refresh logs periodically when visible
+  // Incremental log listening — replaces 3s full polling
+  // Only active when log panel is visible; batches updates via RAF to avoid render storms
   useEffect(() => {
     if (!showLogs) return;
+    // One-time full load on open
     emit('social-query-logs');
-    const interval = setInterval(() => emit('social-query-logs'), 3000);
-    return () => clearInterval(interval);
+
+    let unlisten;
+    let pending = [];
+    let rafId = null;
+    const UI_MAX_LOGS = 500;
+
+    const flush = () => {
+      rafId = null;
+      if (pending.length === 0) return;
+      const batch = pending;
+      pending = [];
+      setLogs(prev => {
+        const next = [...prev, ...batch];
+        return next.length > UI_MAX_LOGS ? next.slice(next.length - UI_MAX_LOGS) : next;
+      });
+    };
+
+    const setup = async () => {
+      unlisten = await listen('social-log-entry', (event) => {
+        const entry = event.payload;
+        if (!entry) return;
+        pending.push(entry);
+        if (rafId == null) rafId = requestAnimationFrame(flush);
+      });
+    };
+    setup();
+    return () => {
+      unlisten?.();
+      if (rafId != null) cancelAnimationFrame(rafId);
+    };
   }, [showLogs]);
 
   // Load config when pet changes

@@ -69,6 +69,17 @@ fn emit_to_all(app: AppHandle, event: String, payload: JsonValue, win_state: Sta
     app.emit(&event, payload).map_err(|e| e.to_string())
 }
 
+/// 向指定窗口发送事件（不广播到所有窗口）
+#[tauri::command]
+fn emit_to_labels(app: AppHandle, labels: Vec<String>, event: String, payload: JsonValue) -> Result<(), String> {
+    for label in &labels {
+        if let Some(window) = app.get_webview_window(label) {
+            let _ = window.emit(&event, payload.clone());
+        }
+    }
+    Ok(())
+}
+
 /// 获取并清除待处理的 character-id
 #[tauri::command]
 fn get_pending_character_id(win_state: State<WinState>) -> Option<String> {
@@ -2595,6 +2606,7 @@ pub fn run() {
             update_shortcuts,
             // Event broadcasting
             emit_to_all,
+            emit_to_labels,
             get_pending_character_id,
             set_vibrancy_enabled,
             // Tab message cache commands (legacy)

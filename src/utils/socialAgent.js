@@ -104,8 +104,9 @@ function addLog(level, message, details = null, target = undefined) {
     systemLogs.push(entry);
     if (systemLogs.length > MAX_LOGS) systemLogs.splice(0, systemLogs.length - MAX_LOGS);
   }
-  // Incremental push to all windows (SocialPage lives in a different webview)
-  tauri.emitToAll('social-log-entry', entry);
+  // Incremental push only to windows that consume logs (social + management),
+  // NOT to character/chat windows — avoids event flooding on the main character webview.
+  tauri.emitToLabels(['social', 'management'], 'social-log-entry', entry);
 
   // Don't console.log poll entries (they are aggregated and verbose)
   if (level === 'poll') return;
@@ -1210,6 +1211,16 @@ async function persistKnownTargets(petId, targetSet) {
   } catch (e) {
     console.warn('[Social] Failed to persist known targets', e);
   }
+}
+
+/** Debounced persistKnownTargets — max once per 30s to avoid flooding IO from fetcher loop */
+let _persistDebounceTimer = null;
+function persistKnownTargetsDebounced(petId, targetSet) {
+  if (_persistDebounceTimer) return; // already scheduled
+  _persistDebounceTimer = setTimeout(() => {
+    _persistDebounceTimer = null;
+    persistKnownTargets(petId, targetSet);
+  }, 30000);
 }
 
 /**
@@ -2485,7 +2496,7 @@ export async function startSocialLoop(config, onStatusChange) {
             await tauri.workspaceWrite(config.petId, bufferPath, existing + entry);
             lastAppendedSummary.set(target, targetData.compressed_summary);
             knownTargets.add(target);
-            await persistKnownTargets(config.petId, knownTargets);
+            persistKnownTargetsDebounced(config.petId, knownTargets);
           } catch (e) {
             addLog('warn', `Failed to append group buffer for ${target}`, e.message, target);
           }
@@ -2973,6 +2984,12 @@ export function stopSocialLoop() {
     for (const t of knownTargets) pausedSnapshot[t] = pausedTargets.get(t) || false;
     savePausedTargets(activeLoop.petId, pausedSnapshot);
     activeLoop._scheduleCleanup?.();
+    // Flush debounced persistKnownTargets immediately before clearing state
+    if (_persistDebounceTimer) {
+      clearTimeout(_persistDebounceTimer);
+      _persistDebounceTimer = null;
+      persistKnownTargets(activeLoop.petId, knownTargets);
+    }
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
     sentMessagesCache.clear();

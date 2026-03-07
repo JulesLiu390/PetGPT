@@ -566,8 +566,17 @@ export const sendCharacterId = (id) =>
  * @param {string} event - 事件名称
  * @param {any} payload - 事件数据
  */
-export const emitToAll = (event, payload) => 
+export const emitToAll = (event, payload) =>
   invoke('emit_to_all', { event, payload });
+
+/**
+ * 向指定窗口发送事件（不广播到所有窗口）
+ * @param {string[]} labels - 目标窗口 label 列表
+ * @param {string} event - 事件名称
+ * @param {any} payload - 事件数据
+ */
+export const emitToLabels = (labels, event, payload) =>
+  invoke('emit_to_labels', { labels, event, payload });
 
 // 获取待处理的 character-id（用于 chat 窗口启动时检查）
 export const getPendingCharacterId = () => invoke('get_pending_character_id');
