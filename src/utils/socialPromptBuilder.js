@@ -8,16 +8,10 @@
 import { readSoulFile, readUserFile, readMemoryFile, truncateContent } from './promptBuilder';
 import { formatCurrentTime } from './timeInjection';
 import * as tauri from './tauri';
-import { SOCIAL_MEMORY_MAX_CHARS, GROUP_RULE_MAX_CHARS, REPLY_STRATEGY_MAX_CHARS } from './workspace/socialToolExecutor';
+import { SOCIAL_FILE_MAX_CHARS } from './workspace/socialToolExecutor';
 
-/** 社交记忆截断上限 */
-const SOCIAL_MEMORY_TRUNCATE = SOCIAL_MEMORY_MAX_CHARS;
-
-/** 群规则截断上限 */
-const GROUP_RULE_TRUNCATE = GROUP_RULE_MAX_CHARS;
-
-/** 回复策略截断上限 */
-const REPLY_STRATEGY_TRUNCATE = REPLY_STRATEGY_MAX_CHARS;
+/** 社交文件截断上限（统一） */
+const SOCIAL_FILE_TRUNCATE = SOCIAL_FILE_MAX_CHARS;
 
 /**
  * 安全读取社交记忆文件
@@ -37,7 +31,7 @@ export async function readSocialMemoryFile(petId) {
 export async function readGroupRuleFile(petId, targetId) {
   if (!targetId) return null;
   try {
-    const content = await tauri.workspaceRead(petId, `social/GROUP_RULE_${targetId}.md`);
+    const content = await tauri.workspaceRead(petId, `social/group/RULE_${targetId}.md`);
     return content || null;
   } catch {
     return null;
@@ -45,18 +39,43 @@ export async function readGroupRuleFile(petId, targetId) {
 }
 
 /**
+ * 安全读取联系人索引文件
+ */
+export async function readContactsFile(petId) {
+  try {
+    const content = await tauri.workspaceRead(petId, 'social/CONTACTS.md');
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 联系人索引引导指令（仅 Observer）
+ */
+function contactsGuidance(content) {
+  if (!content) {
+    return '⚠️ 你还没有联系人索引。遇到活跃或值得记住的人时，用 social_write 创建 social/CONTACTS.md，每人一行简要记录（QQ号、昵称、哪个群认识的、一句话印象）。详细档案写到 social/people/{QQ号}.md。';
+  }
+  if (content.length > SOCIAL_FILE_TRUNCATE * 0.8) {
+    return '⚠️ 联系人索引快满了。请精简不活跃的人员条目，保留常联系的人。';
+  }
+  return '遇到新的活跃成员或已有联系人信息变化时，更新联系人索引。';
+}
+
+/**
  * 社交记忆三档引导指令
  */
 function socialMemoryGuidance(content, targetName, targetId) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : targetId;
-  const isolationRule = `\n⚠️ 群隔离规则：你当前在${groupLabel}。社交记忆是跨群共享的，严禁写入任何群特定内容（群内梗、群话题、群氛围、群事件）。这些内容必须写到 group_rule 中。社交记忆只记录：跨群通用的人物信息（某人的性格、关系、偏好）、重要的跨群事件。`;
+  const isolationRule = `\n⚠️ 内容分区规则：你当前在${groupLabel}。SOCIAL_MEMORY.md 只记录跨群共享的社交态势（跨群事件、社交策略反思），不要在里面记人物信息。联系人索引写到 CONTACTS.md，人物详情写到 social/people/{QQ号}.md，群特定内容写到 social/group/RULE_${targetId}.md。其他自由笔记写到 social/notes/ 目录下。`;
   if (!content) {
-    return '你还没有社交长期记忆。当在群聊中遇到值得长期记住的信息时（群友关系、重要事件、习惯偏好等），使用 social_write 工具创建记忆。' + isolationRule;
+    return '你还没有社交记忆。用 social_write 创建 social/SOCIAL_MEMORY.md 来记录跨群社交态势。' + isolationRule;
   }
-  if (content.length > SOCIAL_MEMORY_TRUNCATE * 0.8) {
-    return '你的社交记忆快满了。请整理社交记忆，移除过时内容，合并重复信息。使用 social_edit 或 social_write 工具更新。' + isolationRule;
+  if (content.length > SOCIAL_FILE_TRUNCATE * 0.8) {
+    return '社交记忆快满了。请整理，移除过时内容，合并重复信息。' + isolationRule;
   }
-  return '遇到值得长期记住的社交信息时，使用 social_edit 工具更新社交记忆。定期整理，保持精炼。' + isolationRule;
+  return '遇到跨群社交态势变化时，更新社交记忆。' + isolationRule;
 }
 
 /**
@@ -76,13 +95,14 @@ export async function readReplyStrategyFile(petId) {
  */
 function groupRuleGuidance(content, targetName, targetId) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : targetId;
+  const rulePath = `social/group/RULE_${targetId}.md`;
   if (!content) {
-    return `⚠️ ${groupLabel}还没有专属规则。在回复完成后，请用 group_rule_write 工具记录你对这个群的第一印象：这个群是干什么的、聊天氛围如何、话题偏好、禁忌、需要注意的事项等。这是你理解每个群的基础，务必完成。`;
+    return `⚠️ ${groupLabel}还没有专属规则。请用 social_write(path="${rulePath}", ...) 记录你对这个群的第一印象：这个群是干什么的、聊天氛围如何、话题偏好、禁忌、需要注意的事项等。这是你理解每个群的基础，务必完成。`;
   }
-  if (content.length > GROUP_RULE_TRUNCATE * 0.8) {
-    return '⚠️ 当前群规则文件快满了。请用 group_rule_edit 或 group_rule_write 精简内容，保留最重要的观察。';
+  if (content.length > SOCIAL_FILE_TRUNCATE * 0.8) {
+    return `⚠️ 当前群规则文件快满了。请用 social_edit 或 social_write 精简 ${rulePath}，保留最重要的观察。`;
   }
-  return `留意${groupLabel}的群特征变化：新的话题趋势、群内梗/暗语、活跃成员变化、氛围转变、敏感话题等。发现任何与群规则不一致的新情况，就用 group_rule_edit 更新。如果需要回忆之前的群聊内容，可以用 history_read 或 daily_read 查询。`;
+  return `留意${groupLabel}的群特征变化：新的话题趋势、群内梗/暗语、活跃成员变化、氛围转变、敏感话题等。发现新情况就用 social_edit 更新 ${rulePath}。如果需要回忆之前的群聊内容，可以用 history_read 或 daily_read 查询。`;
 }
 
 /**
@@ -159,9 +179,9 @@ export async function buildSocialPrompt({
     sections.push(memoryTruncated);
   }
 
-  // === 当前群规则（social/GROUP_RULE_{群号}.md，群专属） ===
+  // === 当前群规则（social/group/RULE_{群号}.md，群专属） ===
   const groupRuleContent = await readGroupRuleFile(petId, targetId);
-  const groupRuleTruncated = truncateContent(groupRuleContent, GROUP_RULE_TRUNCATE);
+  const groupRuleTruncated = truncateContent(groupRuleContent, SOCIAL_FILE_TRUNCATE);
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : (targetId || '当前群');
   sections.push(`# ${groupLabel} 群规则`);
   if (groupRuleTruncated) {
@@ -169,16 +189,30 @@ export async function buildSocialPrompt({
   } else {
     sections.push('（空）');
   }
-  // Observer 显示写入引导，Reply 只显示只读提示
   if (role === 'observer') {
     sections.push(groupRuleGuidance(groupRuleContent, targetName, targetId));
   } else {
     sections.push('（以上群规则为只读参考，帮助你理解群氛围）');
   }
 
-  // === 社交长期记忆（social/SOCIAL_MEMORY.md，全局共享） ===
+  // === 联系人索引（social/CONTACTS.md，常联系人速查） ===
+  const contactsContent = await readContactsFile(petId);
+  const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
+  sections.push('# 联系人索引');
+  if (contactsTruncated) {
+    sections.push(contactsTruncated);
+  } else {
+    sections.push('（空）');
+  }
+  if (role === 'observer') {
+    sections.push(contactsGuidance(contactsContent));
+  } else {
+    sections.push('（以上联系人索引为只读参考）');
+  }
+
+  // === 社交记忆（social/SOCIAL_MEMORY.md，跨群共享社交态势） ===
   const socialMemoryContent = await readSocialMemoryFile(petId);
-  const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_MEMORY_TRUNCATE);
+  const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
   sections.push('# 社交记忆（全局）');
   if (socialMemoryTruncated) {
     sections.push(socialMemoryTruncated);
@@ -240,7 +274,7 @@ export async function buildSocialPrompt({
   // === 回复策略 / @必回 —— 仅 Reply 模式 ===
   if (role === 'reply') {
     const replyStrategyContent = await readReplyStrategyFile(petId);
-    const replyStrategyTruncated = truncateContent(replyStrategyContent, REPLY_STRATEGY_TRUNCATE);
+    const replyStrategyTruncated = truncateContent(replyStrategyContent, SOCIAL_FILE_TRUNCATE);
     sections.push('# 回复策略');
     if (replyStrategyTruncated) {
       sections.push(replyStrategyTruncated);
@@ -312,23 +346,28 @@ function buildSocialModeInstruction(targetName, targetId, botQQ) {
 function buildLurkObservationInstruction(targetName, targetId, botQQ) {
   const target = targetName && targetId ? `"${targetName}"（${targetId}）` : targetName ? `"${targetName}"` : '一个聊天';
   const qqInfo = botQQ ? `你的 QQ 号是 ${botQQ}。` : '';
-  
+
   return `你正处于**纯观察模式**，静默浏览${target}的消息。${qqInfo}
 
 ⚠️ 核心规则：你**不能发送任何消息**。你没有 send_message 工具，也不应尝试回复。
 
-你的首要任务是**维护群档案**。每次观察必须：
-1. **先读取** group_rule_read，了解当前已记录的群档案
-2. **对比新消息**，发现任何新信息就用 group_rule_edit 增补
-3. **记录重点**：成员特征（说话风格、常用梗、技术方向）、群内梗/黑话、热门话题、社交关系、有趣事件
-4. 跨群通用信息（人物关系、个人偏好）写入社交记忆
+你的首要任务是**维护群档案和人物档案**。每次观察必须：
+1. **先 social_tree** 查看当前工作区结构
+2. **读取群规则** social_read("social/group/RULE_${targetId}.md")，了解已记录的群档案
+3. **对比新消息**，发现新信息就用 social_edit 或 social_write 更新
+4. **记录分区**：
+   - 群特定内容（群内梗/黑话、话题偏好、群氛围）→ social/group/RULE_${targetId}.md
+   - 联系人索引（每人一行：QQ号、昵称、来源群、一句话印象）→ social/CONTACTS.md
+   - 人物详细档案（性格、兴趣、说话风格、跨群行为）→ social/people/{QQ号}.md（每人独立文件）
+   - 跨群社交态势（跨群事件、社交策略反思）→ social/SOCIAL_MEMORY.md（不记人物信息）
+   - 自由笔记（话题研究、灵感、计划、草稿等）→ social/notes/ 目录下自行创建文件
 5. 记录完毕后输出"[沉默]"
 
 ⚠️ 编辑工具使用规范（必须严格遵守）：
-1. oldText 必须从 read 返回的内容中**原样复制**，包括标点符号、空格和换行，绝不能凭记忆手打
+1. oldText 必须从 social_read 返回的内容中**原样复制**，包括标点符号、空格和换行，绝不能凭记忆手打
 2. 每次 edit 只改一处，改完再 read 确认结果后再改下一处
 3. 如果 edit 失败，重新 read 获取最新内容后再试
-4. 大幅修改（改动超过一半内容）时，直接用 write 覆盖比多次 edit 更可靠
+4. 大幅修改（改动超过一半内容）时，直接用 social_write 覆盖比多次 edit 更可靠
 
 ⚠️ 不要只写概括性描述。记录**具体的人名、具体的梗、具体的事件**。越具体越好。
 
@@ -339,7 +378,7 @@ function buildLurkObservationInstruction(targetName, targetId, botQQ) {
 
 ⚠️ 媒体说明：图片会以真实图片传递，你可以看到。但 [视频]、[语音]、[文件]、[请在最新版qq查看] 等方括号标记只是纯文本占位符，你看不到实际内容，直接忽略即可。
 
-你是一个安静但勤奋的观察者。把精力放在维护群档案和记忆上，而不是回复。`;
+你是一个安静但勤奋的观察者。把精力放在维护群档案、人物档案和社交记忆上，而不是回复。`;
 }
 
 /**
@@ -350,24 +389,37 @@ function buildLurkToolInstruction(targetName, targetId) {
   return `⚠️ 你处于纯观察模式，没有 send_message 工具。不要尝试发送消息。
 ⚠️ 你当前在：${groupLabel}
 
-⚠️ 每次观察**必须**先 group_rule_read，再决定是否有新内容需要补充。跳过记录步骤是不允许的。
+⚠️ 每次观察**必须**先 social_tree 查看工作区结构，再 social_read 读取群规则，然后决定是否有新内容需要补充。跳过记录步骤是不允许的。
 
-群规则工具（仅作用于${groupLabel}，你的**首要工具**）：
-- group_rule_read：读取当前群的档案（每次必须先调用）
-- group_rule_write(content)：覆盖写入当前群的档案（大幅修改时优先使用，比多次 edit 更可靠）
-- group_rule_edit(oldText, newText)：精确替换当前群档案中的文本。oldText 必须从 group_rule_read 的返回中原样复制，每次只改一处
-- 记录内容：群定位、成员档案（具体人名+特征）、群内梗/黑话、话题偏好与禁忌、近期事件、互动建议
+通用文件工具（你的核心工具）：
+- social_tree()：列出 social/ 目录结构（每次观察先调用，了解当前有哪些文件）
+- social_read(path)：读取文件内容
+- social_write(path, content)：创建或覆盖文件（自动创建子目录）
+- social_edit(path, oldText, newText)：精确替换文件中的文本
+- social_delete(path)：删除文件（删除前建议先 social_read 确认内容）
+- social_rename(from, to)：移动或重命名文件（自动创建目标路径的中间目录）
 
-社交记忆工具（跨群共享，⚠️ 严禁写入${groupLabel}特有的内容）：
-- social_read：读取你的长期记忆（无需参数）
-- social_write(content)：覆盖写入长期记忆（大幅修改时优先使用）
-- social_edit(oldText, newText)：精确替换记忆中的文本。oldText 必须从 social_read 的返回中原样复制，每次只改一处
-- 只记录跨群通用的信息：人物关系、个人偏好、重要跨群事件
-- 群话题、群内梗、群氛围等必须写 group_rule，不要写进社交记忆
+工作区目录约定：
+social/
+├── people/{QQ号}.md         — 人物详细档案（每人独立文件：性格、兴趣、说话风格、跨群行为模式）
+├── group/RULE_${targetId}.md — ${groupLabel}的群规则（群定位、群内梗/黑话、话题偏好与禁忌、近期事件）
+├── group/LOG_*.md           — 压缩历史（系统自动写入，只读）
+├── notes/                    — 自由笔记区（你可以随意创建、修改、删除文件）
+├── CONTACTS.md               — 联系人索引（每人一行：QQ号、昵称、来源群、一句话印象）
+├── SOCIAL_MEMORY.md          — 跨群社交态势（跨群事件、社交策略反思，不记人物信息）
+├── REPLY_STRATEGY.md         — 回复策略
+└── daily/*.md                — 日报（系统自动生成，只读）
+
+⚠️ 内容分区规则：
+- 群内梗、群话题、群氛围 → social/group/RULE_${targetId}.md
+- 联系人速查（常联系的人的简要列表）→ social/CONTACTS.md
+- 人物详细档案 → social/people/{QQ号}.md
+- 跨群社交态势（不记人物信息）→ social/SOCIAL_MEMORY.md
+- 其他自由内容（话题研究、灵感、计划、草稿等）→ social/notes/ 下自行组织
 
 历史查询工具（只读）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文
-- daily_read(date?)：读取跨所有群的每日社交摘要（默认昨天）。注意：日报包含所有群的信息，只关注与${groupLabel}相关的部分
+- daily_read(date?)：读取跨所有群的每日社交摘要（默认昨天）
 - daily_list()：列出有哪些日期的日报可读
 
 观察完毕后，输出"[沉默]"。不要输出任何其他纯文本。`;
@@ -438,7 +490,7 @@ function buildReplyToolInstruction(targetName, targetId) {
 - group_log_list()：列出所有有日志记录的群（群号+群名）
 - group_log_read(targets, query?, start_time?, end_time?)：搜索指定群的原始日志。targets 为群号数组，query 可选（不传则返回最新内容）
 
-⚠️ 你没有群规则和社交记忆的写入工具。群档案的维护由独立的观察者负责，你只需专注于回复决策。
+⚠️ 你没有社交文件写入工具。群档案、人物档案和社交记忆的维护由独立的观察者负责，你只需专注于回复决策。
 
 ⚠️ 【再次提醒】想说话 → 必须调用 send_message 工具。直接输出纯文本群友看不到。发送前先回顾上方 assistant 消息，确认没有重复。如果已经说过类似的话，输出"[沉默]：<理由>"。`;
 }
@@ -510,9 +562,9 @@ export async function buildIntentSystemPrompt({
     sections.push(memoryTruncated);
   }
 
-  // === 当前群规则（GROUP_RULE_{群号}.md，只读） ===
+  // === 当前群规则（social/group/RULE_{群号}.md，只读） ===
   const groupRuleContent = await readGroupRuleFile(petId, targetId);
-  const groupRuleTruncated = truncateContent(groupRuleContent, GROUP_RULE_TRUNCATE);
+  const groupRuleTruncated = truncateContent(groupRuleContent, SOCIAL_FILE_TRUNCATE);
   sections.push(`# ${groupLabel} 群规则`);
   if (groupRuleTruncated) {
     sections.push(groupRuleTruncated);
@@ -521,9 +573,20 @@ export async function buildIntentSystemPrompt({
   }
   sections.push('（以上群规则为只读参考，帮助你理解群氛围）');
 
-  // === 社交长期记忆（SOCIAL_MEMORY.md，只读） ===
+  // === 联系人索引（social/CONTACTS.md，只读） ===
+  const contactsContent = await readContactsFile(petId);
+  const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
+  sections.push('# 联系人索引');
+  if (contactsTruncated) {
+    sections.push(contactsTruncated);
+  } else {
+    sections.push('（空）');
+  }
+  sections.push('（以上联系人索引为只读参考）');
+
+  // === 社交记忆（social/SOCIAL_MEMORY.md，只读） ===
   const socialMemoryContent = await readSocialMemoryFile(petId);
-  const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_MEMORY_TRUNCATE);
+  const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
   sections.push('# 社交记忆（全局）');
   if (socialMemoryTruncated) {
     sections.push(socialMemoryTruncated);

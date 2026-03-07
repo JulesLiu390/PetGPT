@@ -1,102 +1,76 @@
 /**
  * socialToolExecutor.js — 社交代理专用内置工具执行器
- * 
- * 社交记忆工具：操作 social/SOCIAL_MEMORY.md（全局共享），路径硬编码。
- * 群规则工具：操作 social/GROUP_RULE_{群号}.md（群专属），群号从上下文自动获取。
- * 工具名使用 social_ / group_rule_ 前缀，与主聊天的 read / write / edit 工具隔离。
+ *
+ * 通用文件工具：social_tree / social_read / social_write / social_edit / social_delete / social_rename
+ *   操作 social/ 子目录下的任意文件，LLM 自主决定文件组织方式。
+ *
+ * 查询工具（保留专用逻辑）：
+ *   history_read / daily_read / daily_list — 历史聊天搜索
+ *   group_log_list / group_log_read — 跨群日志搜索
  */
 
 import * as tauri from '../tauri';
 
 // ============ 常量 ============
 
-const SOCIAL_MEMORY_PATH = 'social/SOCIAL_MEMORY.md';
-const SOCIAL_TOOL_NAMES = new Set(['social_read', 'social_write', 'social_edit']);
+/** social 子目录前缀（所有社交文件必须在此目录下） */
+const SOCIAL_DIR = 'social';
 
-const GROUP_RULE_PATH_PREFIX = 'social/GROUP_RULE_';
-const GROUP_RULE_TOOL_NAMES = new Set(['group_rule_read', 'group_rule_write', 'group_rule_edit']);
+/** 群压缩历史日志路径前缀 */
+const GROUP_LOG_PATH_PREFIX = 'social/group/LOG_';
 
-const REPLY_STRATEGY_PATH = 'social/REPLY_STRATEGY.md';
-const REPLY_STRATEGY_TOOL_NAMES = new Set(['reply_strategy_read', 'reply_strategy_edit']);
+/** 每日摘要路径前缀 */
+const DAILY_PATH_PREFIX = 'social/daily/';
 
-const GROUP_BUFFER_PATH_PREFIX = 'social/GROUP_';
-const DAILY_PATH_PREFIX = 'social/DAILY_';
-const HISTORY_TOOL_NAMES = new Set(['history_read', 'daily_read', 'daily_list']);
-
+/** 已知 target 列表 */
 const KNOWN_TARGETS_PATH = 'social/targets.json';
-const GROUP_LOG_TOOL_NAMES = new Set(['group_log_list', 'group_log_read']);
 
 /** 历史查询返回最大字符数 */
 export const HISTORY_READ_MAX_CHARS = 8000;
 
-/** 社交记忆文件最大字符数 */
-export const SOCIAL_MEMORY_MAX_CHARS = 20000;
+/** 单个社交文件最大字符数（写入时校验） */
+export const SOCIAL_FILE_MAX_CHARS = 20000;
 
-/** 群规则文件最大字符数 */
-export const GROUP_RULE_MAX_CHARS = 10000;
+// ============ 通用文件工具 ============
 
-/** 回复策略文件最大字符数 */
-export const REPLY_STRATEGY_MAX_CHARS = 5000;
+const SOCIAL_FILE_TOOL_NAMES = new Set(['social_tree', 'social_read', 'social_write', 'social_edit', 'social_delete', 'social_rename']);
 
-// ============ 工具检测 ============
-
-/**
- * 检查工具名是否为社交内置工具（社交记忆）
- */
-export function isSocialBuiltinTool(toolName) {
-  return SOCIAL_TOOL_NAMES.has(toolName);
+/** 检查工具名是否为社交通用文件工具 */
+export function isSocialFileTool(toolName) {
+  return SOCIAL_FILE_TOOL_NAMES.has(toolName);
 }
 
 /**
- * 检查工具名是否为群规则内置工具
+ * 获取社交通用文件工具的 function calling 定义
  */
-export function isGroupRuleBuiltinTool(toolName) {
-  return GROUP_RULE_TOOL_NAMES.has(toolName);
-}
-
-/**
- * 检查工具名是否为回复策略内置工具
- */
-export function isReplyStrategyBuiltinTool(toolName) {
-  return REPLY_STRATEGY_TOOL_NAMES.has(toolName);
-}
-
-/**
- * 检查工具名是否为历史查询内置工具
- */
-export function isHistoryBuiltinTool(toolName) {
-  return HISTORY_TOOL_NAMES.has(toolName);
-}
-
-/**
- * 检查工具名是否为跨群日志内置工具
- */
-export function isGroupLogBuiltinTool(toolName) {
-  return GROUP_LOG_TOOL_NAMES.has(toolName);
-}
-
-/** 获取群规则文件路径 */
-function groupRulePath(targetId) {
-  return `${GROUP_RULE_PATH_PREFIX}${targetId}.md`;
-}
-
-// ============ 工具定义 ============
-
-/**
- * 获取社交专用内置工具的 function calling 定义
- * 路径固定为 social/SOCIAL_MEMORY.md，不需要 path 参数
- */
-export function getSocialBuiltinToolDefinitions() {
+export function getSocialFileToolDefinitions() {
   return [
     {
       type: 'function',
       function: {
-        name: 'social_read',
-        description: '读取你的社交长期记忆文件内容。',
+        name: 'social_tree',
+        description: '列出社交工作区 social/ 的目录结构（含所有子目录和文件）。用于了解当前有哪些文件、确认路径。',
         parameters: {
           type: 'object',
           properties: {},
           required: [],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'social_read',
+        description: '读取社交工作区中的一个文件。路径相对于工作区根目录，例如 "social/people/123456.md"、"social/group/RULE_789.md"、"social/SOCIAL_MEMORY.md"。',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: '文件路径（必须以 social/ 开头）',
+            },
+          },
+          required: ['path'],
         },
       },
     },
@@ -104,16 +78,20 @@ export function getSocialBuiltinToolDefinitions() {
       type: 'function',
       function: {
         name: 'social_write',
-        description: '创建或覆盖你的社交长期记忆文件。用于记录社交中值得长期记住的信息（群友关系、重要事件、习惯偏好等）。',
+        description: '创建或覆盖社交工作区中的一个文件。会自动创建中间目录。路径必须以 social/ 开头。',
         parameters: {
           type: 'object',
           properties: {
+            path: {
+              type: 'string',
+              description: '文件路径（必须以 social/ 开头）',
+            },
             content: {
               type: 'string',
               description: '要写入的完整内容',
             },
           },
-          required: ['content'],
+          required: ['path', 'content'],
         },
       },
     },
@@ -121,174 +99,169 @@ export function getSocialBuiltinToolDefinitions() {
       type: 'function',
       function: {
         name: 'social_edit',
-        description: '通过精确文本查找替换来编辑你的社交长期记忆文件。使用前必须先调用 social_read 获取当前内容。每次只改一处，改完再 read 确认结果。如果需要大幅修改（超过一半内容），直接用 social_write 覆盖更可靠。',
+        description: '通过精确文本查找替换来编辑社交工作区中的一个文件。使用前必须先调用 social_read 获取当前内容。每次只改一处，改完再 read 确认结果。如果需要大幅修改（超过一半内容），直接用 social_write 覆盖更可靠。',
         parameters: {
           type: 'object',
           properties: {
+            path: {
+              type: 'string',
+              description: '文件路径（必须以 social/ 开头）',
+            },
             oldText: {
               type: 'string',
               description: '要替换的原文，必须从 social_read 返回的内容中精确复制（包括标点、空格、换行），不要凭记忆手打',
             },
             newText: {
               type: 'string',
-              description: '替换后的新文本，保留原文的 Markdown 格式（标题层级、列表符号等）',
+              description: '替换后的新文本',
             },
           },
-          required: ['oldText', 'newText'],
+          required: ['path', 'oldText', 'newText'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'social_delete',
+        description: '删除社交工作区中的一个文件。删除前建议先 social_read 确认内容，避免误删。',
+        parameters: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: '文件路径（必须以 social/ 开头）',
+            },
+          },
+          required: ['path'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'social_rename',
+        description: '移动或重命名社交工作区中的一个文件。会自动创建目标路径的中间目录。',
+        parameters: {
+          type: 'object',
+          properties: {
+            from: {
+              type: 'string',
+              description: '源文件路径（必须以 social/ 开头）',
+            },
+            to: {
+              type: 'string',
+              description: '目标文件路径（必须以 social/ 开头）',
+            },
+          },
+          required: ['from', 'to'],
         },
       },
     },
   ];
 }
 
-// ============ 工具执行 ============
-
-async function executeRead(petId) {
-  try {
-    const content = await tauri.workspaceRead(petId, SOCIAL_MEMORY_PATH);
-    return { content: [{ type: 'text', text: content || '（空）' }] };
-  } catch {
-    return { content: [{ type: 'text', text: '（社交记忆文件尚未创建）' }] };
-  }
-}
-
-async function executeWrite(petId, args) {
-  const { content } = args;
-  if (content === undefined || content === null) {
-    return { error: '缺少 content 参数' };
-  }
-  try {
-    const result = await tauri.workspaceWrite(petId, SOCIAL_MEMORY_PATH, content);
-    return { content: [{ type: 'text', text: result }] };
-  } catch (err) {
-    return { error: err.toString() };
-  }
-}
-
-async function executeEdit(petId, args) {
-  const { oldText, newText } = args;
-  if (!oldText) return { error: '缺少 oldText 参数' };
-  if (newText === undefined || newText === null) return { error: '缺少 newText 参数' };
-  try {
-    const result = await tauri.workspaceEdit(petId, SOCIAL_MEMORY_PATH, oldText, newText);
-    return { content: [{ type: 'text', text: result }] };
-  } catch (err) {
-    return { error: err.toString() };
-  }
-}
-
-// ============ 统一入口 ============
+// ============ 路径安全 ============
 
 /**
- * 执行社交内置工具
- * 
- * @param {string} toolName - 'social_read' | 'social_write' | 'social_edit'
- * @param {Object} args - 工具参数
- * @param {Object} context - { petId }
- * @returns {Promise<Object>} MCP 标准响应格式
+ * 校验路径是否在 social/ 目录下
+ * @param {string} path
+ * @returns {boolean}
  */
-export async function executeSocialBuiltinTool(toolName, args, context) {
-  const { petId } = context;
-  if (!petId) {
-    return { error: '缺少 petId，无法执行社交记忆操作。' };
-  }
-
-  console.log(`[SocialBuiltin] Executing ${toolName}`, { petId });
-
-  switch (toolName) {
-    case 'social_read':
-      return executeRead(petId);
-    case 'social_write':
-      return executeWrite(petId, args);
-    case 'social_edit':
-      return executeEdit(petId, args);
-    default:
-      return { error: `未知的社交工具: ${toolName}` };
-  }
+function isSocialPath(path) {
+  if (!path) return false;
+  const normalized = path.replace(/\\/g, '/');
+  return normalized.startsWith('social/') && !normalized.includes('..');
 }
-
-// ============ 群规则工具定义 ============
 
 /**
- * 获取群规则内置工具的 function calling 定义
- * 路径自动绑定当前群号，AI 不需要也不能指定群号
+ * 只读路径（系统自动写入，LLM 不允许覆盖）
  */
-export function getGroupRuleToolDefinitions() {
-  return [
-    {
-      type: 'function',
-      function: {
-        name: 'group_rule_read',
-        description: '读取当前群的专属规则和观察记录。',
-        parameters: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'group_rule_write',
-        description: '创建或覆盖当前群的规则文件。用于记录：这个群是干什么的、群内特殊规则、话题偏好、禁忌等。',
-        parameters: {
-          type: 'object',
-          properties: {
-            content: {
-              type: 'string',
-              description: '要写入的完整内容',
-            },
-          },
-          required: ['content'],
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'group_rule_edit',
-        description: '通过精确文本查找替换来编辑当前群的规则文件。使用前必须先调用 group_rule_read 获取当前内容。每次只改一处，改完再 read 确认结果。如果需要大幅修改（超过一半内容），直接用 group_rule_write 覆盖更可靠。',
-        parameters: {
-          type: 'object',
-          properties: {
-            oldText: {
-              type: 'string',
-              description: '要替换的原文，必须从 group_rule_read 返回的内容中精确复制（包括标点、空格、换行），不要凭记忆手打',
-            },
-            newText: {
-              type: 'string',
-              description: '替换后的新文本，保留原文的 Markdown 格式（标题层级、列表符号等）',
-            },
-          },
-          required: ['oldText', 'newText'],
-        },
-      },
-    },
-  ];
+const READ_ONLY_PREFIXES = [
+  'social/group/LOG_',  // 压缩历史（Fetcher 自动写入）
+  'social/daily/',      // 日报（系统自动生成）
+  'social/targets.json', // 已知 target 列表
+];
+
+function isReadOnlyPath(path) {
+  const normalized = path.replace(/\\/g, '/');
+  return READ_ONLY_PREFIXES.some(p => normalized.startsWith(p) || normalized === p);
 }
 
-// ============ 群规则工具执行 ============
+// ============ 通用文件工具执行 ============
 
-async function executeGroupRuleRead(petId, targetId) {
-  const path = groupRulePath(targetId);
+async function executeSocialTree(petId) {
+  try {
+    const entries = await tauri.workspaceListDir(petId, SOCIAL_DIR);
+    if (!entries || entries.length === 0) {
+      return { content: [{ type: 'text', text: 'social/ 目录为空。你可以用 social_write 创建文件。' }] };
+    }
+    // 构建树形显示
+    const tree = buildTreeString(entries);
+    return { content: [{ type: 'text', text: `social/\n${tree}` }] };
+  } catch (e) {
+    // 目录不存在时返回空提示
+    if (e?.toString?.()?.includes('不存在') || e?.toString?.()?.includes('FileNotFound')) {
+      return { content: [{ type: 'text', text: 'social/ 目录尚未创建。用 social_write 写入第一个文件时会自动创建。' }] };
+    }
+    return { error: e.toString() };
+  }
+}
+
+/**
+ * 将扁平的路径列表转换为缩进的树形字符串
+ */
+function buildTreeString(entries) {
+  // entries 已按字母排序，格式如 "social/group/RULE_123.md", "social/people/"
+  // 去掉 "social/" 前缀后按层级缩进
+  const lines = [];
+  for (const entry of entries) {
+    let rel = entry;
+    if (rel.startsWith('social/')) rel = rel.slice('social/'.length);
+    if (!rel) continue;
+    const depth = (rel.match(/\//g) || []).length;
+    const isDir = rel.endsWith('/');
+    const name = isDir ? rel.split('/').filter(Boolean).pop() + '/' : rel.split('/').pop();
+    // 只显示叶子节点的名字，目录前缀通过缩进表达
+    const indent = '  '.repeat(depth);
+    // 避免目录行和其子文件重复：只有目录条目才加目录行
+    if (isDir) {
+      lines.push(`${indent}${name}`);
+    } else {
+      // 文件条目，用最后一级的缩进
+      const fileDepth = rel.split('/').length - 1;
+      lines.push(`${'  '.repeat(fileDepth)}${name}`);
+    }
+  }
+  return lines.join('\n');
+}
+
+async function executeSocialRead(petId, args) {
+  const { path } = args;
+  if (!path) return { error: '缺少 path 参数' };
+  if (!isSocialPath(path)) return { error: '路径必须以 social/ 开头' };
+
   try {
     const content = await tauri.workspaceRead(petId, path);
-    return { content: [{ type: 'text', text: content || '（空）' }] };
-  } catch {
-    return { content: [{ type: 'text', text: '（当前群还没有规则文件）' }] };
+    return { content: [{ type: 'text', text: content || '（空文件）' }] };
+  } catch (e) {
+    if (e?.toString?.()?.includes('不存在') || e?.toString?.()?.includes('FileNotFound')) {
+      return { content: [{ type: 'text', text: `（文件不存在: ${path}）` }] };
+    }
+    return { error: e.toString() };
   }
 }
 
-async function executeGroupRuleWrite(petId, targetId, args) {
-  const { content } = args;
-  if (content === undefined || content === null) {
-    return { error: '缺少 content 参数' };
+async function executeSocialWrite(petId, args) {
+  const { path, content } = args;
+  if (!path) return { error: '缺少 path 参数' };
+  if (content === undefined || content === null) return { error: '缺少 content 参数' };
+  if (!isSocialPath(path)) return { error: '路径必须以 social/ 开头' };
+  if (isReadOnlyPath(path)) return { error: `${path} 是系统自动维护的只读文件，不允许手动写入。` };
+  if (content.length > SOCIAL_FILE_MAX_CHARS) {
+    return { error: `内容超出单文件上限（${SOCIAL_FILE_MAX_CHARS} 字符），请精简后重试。` };
   }
-  if (content.length > GROUP_RULE_MAX_CHARS) {
-    return { error: `内容超出群规则文件上限（${GROUP_RULE_MAX_CHARS} 字符），请精简后重试。` };
-  }
-  const path = groupRulePath(targetId);
+
   try {
     const result = await tauri.workspaceWrite(petId, path, content);
     return { content: [{ type: 'text', text: result }] };
@@ -297,11 +270,14 @@ async function executeGroupRuleWrite(petId, targetId, args) {
   }
 }
 
-async function executeGroupRuleEdit(petId, targetId, args) {
-  const { oldText, newText } = args;
+async function executeSocialEdit(petId, args) {
+  const { path, oldText, newText } = args;
+  if (!path) return { error: '缺少 path 参数' };
   if (!oldText) return { error: '缺少 oldText 参数' };
   if (newText === undefined || newText === null) return { error: '缺少 newText 参数' };
-  const path = groupRulePath(targetId);
+  if (!isSocialPath(path)) return { error: '路径必须以 social/ 开头' };
+  if (isReadOnlyPath(path)) return { error: `${path} 是系统自动维护的只读文件，不允许手动编辑。` };
+
   try {
     const result = await tauri.workspaceEdit(petId, path, oldText, newText);
     return { content: [{ type: 'text', text: result }] };
@@ -310,105 +286,31 @@ async function executeGroupRuleEdit(petId, targetId, args) {
   }
 }
 
-/**
- * 执行群规则内置工具
- * 
- * @param {string} toolName - 'group_rule_read' | 'group_rule_write' | 'group_rule_edit'
- * @param {Object} args - 工具参数
- * @param {Object} context - { petId, targetId }
- * @returns {Promise<Object>} MCP 标准响应格式
- */
-export async function executeGroupRuleBuiltinTool(toolName, args, context) {
-  const { petId, targetId } = context;
-  if (!petId) {
-    return { error: '缺少 petId，无法执行群规则操作。' };
-  }
-  if (!targetId) {
-    return { error: '缺少 targetId（群号），无法执行群规则操作。' };
-  }
+async function executeSocialDelete(petId, args) {
+  const { path } = args;
+  if (!path) return { error: '缺少 path 参数' };
+  if (!isSocialPath(path)) return { error: '路径必须以 social/ 开头' };
+  if (isReadOnlyPath(path)) return { error: `${path} 是系统自动维护的只读文件，不允许删除。` };
 
-  console.log(`[GroupRule] Executing ${toolName}`, { petId, targetId });
-
-  switch (toolName) {
-    case 'group_rule_read':
-      return executeGroupRuleRead(petId, targetId);
-    case 'group_rule_write':
-      return executeGroupRuleWrite(petId, targetId, args);
-    case 'group_rule_edit':
-      return executeGroupRuleEdit(petId, targetId, args);
-    default:
-      return { error: `未知的群规则工具: ${toolName}` };
-  }
-}
-
-// ============ 回复策略工具定义 ============
-
-/**
- * 获取回复策略内置工具的 function calling 定义
- * 仅在 agentCanEditStrategy 开启时注入
- */
-export function getReplyStrategyToolDefinitions() {
-  return [
-    {
-      type: 'function',
-      function: {
-        name: 'reply_strategy_read',
-        description: '读取你当前的回复策略文件。',
-        parameters: {
-          type: 'object',
-          properties: {},
-          required: [],
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'reply_strategy_edit',
-        description: '通过精确文本查找替换来修改你的回复策略。用于根据经验调整何时回复、回复频率、语气等规则。oldText 必须精确匹配文件中的内容。',
-        parameters: {
-          type: 'object',
-          properties: {
-            oldText: {
-              type: 'string',
-              description: '要查找并替换的精确文本（必须唯一匹配）',
-            },
-            newText: {
-              type: 'string',
-              description: '替换后的新文本',
-            },
-          },
-          required: ['oldText', 'newText'],
-        },
-      },
-    },
-  ];
-}
-
-// ============ 回复策略工具执行 ============
-
-async function executeReplyStrategyRead(petId) {
   try {
-    const content = await tauri.workspaceRead(petId, REPLY_STRATEGY_PATH);
-    return { content: [{ type: 'text', text: content || '（空）' }] };
-  } catch {
-    return { content: [{ type: 'text', text: '（回复策略文件尚未创建，使用默认策略）' }] };
+    const result = await tauri.workspaceDeleteFile(petId, path);
+    return { content: [{ type: 'text', text: result }] };
+  } catch (err) {
+    return { error: err.toString() };
   }
 }
 
-async function executeReplyStrategyEdit(petId, args) {
-  const { oldText, newText } = args;
-  if (!oldText) return { error: '缺少 oldText 参数' };
-  if (newText === undefined || newText === null) return { error: '缺少 newText 参数' };
+async function executeSocialRename(petId, args) {
+  const { from, to } = args;
+  if (!from) return { error: '缺少 from 参数' };
+  if (!to) return { error: '缺少 to 参数' };
+  if (!isSocialPath(from)) return { error: 'from 路径必须以 social/ 开头' };
+  if (!isSocialPath(to)) return { error: 'to 路径必须以 social/ 开头' };
+  if (isReadOnlyPath(from)) return { error: `${from} 是系统自动维护的只读文件，不允许移动。` };
+  if (isReadOnlyPath(to)) return { error: `${to} 是系统自动维护的只读路径，不允许写入。` };
+
   try {
-    // 如果文件不存在，先用默认内容创建
-    const exists = await tauri.workspaceFileExists(petId, REPLY_STRATEGY_PATH).catch(() => false);
-    if (!exists) {
-      // 动态导入默认策略以避免循环依赖
-      const { DEFAULT_REPLY_STRATEGY } = await import('../socialPromptBuilder');
-      await tauri.workspaceWrite(petId, REPLY_STRATEGY_PATH, DEFAULT_REPLY_STRATEGY);
-    }
-    const result = await tauri.workspaceEdit(petId, REPLY_STRATEGY_PATH, oldText, newText);
+    const result = await tauri.workspaceRenameFile(petId, from, to);
     return { content: [{ type: 'text', text: result }] };
   } catch (err) {
     return { error: err.toString() };
@@ -416,46 +318,54 @@ async function executeReplyStrategyEdit(petId, args) {
 }
 
 /**
- * 执行回复策略内置工具
+ * 执行社交通用文件工具
  *
- * @param {string} toolName - 'reply_strategy_read' | 'reply_strategy_edit'
+ * @param {string} toolName - 'social_tree' | 'social_read' | 'social_write' | 'social_edit' | 'social_delete' | 'social_rename'
  * @param {Object} args - 工具参数
  * @param {Object} context - { petId }
  * @returns {Promise<Object>} MCP 标准响应格式
  */
-export async function executeReplyStrategyBuiltinTool(toolName, args, context) {
+export async function executeSocialFileTool(toolName, args, context) {
   const { petId } = context;
   if (!petId) {
-    return { error: '缺少 petId，无法执行回复策略操作。' };
+    return { error: '缺少 petId，无法执行社交文件操作。' };
   }
 
-  console.log(`[ReplyStrategy] Executing ${toolName}`, { petId });
+  console.log(`[SocialFile] Executing ${toolName}`, { petId, path: args?.path });
 
   switch (toolName) {
-    case 'reply_strategy_read':
-      return executeReplyStrategyRead(petId);
-    case 'reply_strategy_edit':
-      return executeReplyStrategyEdit(petId, args);
+    case 'social_tree':
+      return executeSocialTree(petId);
+    case 'social_read':
+      return executeSocialRead(petId, args);
+    case 'social_write':
+      return executeSocialWrite(petId, args);
+    case 'social_edit':
+      return executeSocialEdit(petId, args);
+    case 'social_delete':
+      return executeSocialDelete(petId, args);
+    case 'social_rename':
+      return executeSocialRename(petId, args);
     default:
-      return { error: `未知的回复策略工具: ${toolName}` };
+      return { error: `未知的社交文件工具: ${toolName}` };
   }
 }
 
-// ============ 历史查询工具定义 ============
+// ============ 历史查询工具（保留，有复杂查询逻辑） ============
 
-/**
- * 获取历史查询内置工具的 function calling 定义
- * history_read: 按关键词 + 时间范围搜索当前群的聊天记录
- * daily_read: 读取某天的日报摘要
- * daily_list: 列出可用的日报日期
- */
+const HISTORY_TOOL_NAMES = new Set(['history_read', 'daily_read', 'daily_list']);
+
+export function isHistoryBuiltinTool(toolName) {
+  return HISTORY_TOOL_NAMES.has(toolName);
+}
+
 export function getHistoryToolDefinitions() {
   return [
     {
       type: 'function',
       function: {
         name: 'history_read',
-        description: '搜索当前群的历史聊天记录。按关键词过滤，可指定时间范围。返回匹配的消息片段（最新的在最后）。',
+        description: '搜索指定群的历史聊天记录。按关键词过滤，可指定时间范围。返回匹配的消息片段（最新的在最后）。',
         parameters: {
           type: 'object',
           properties: {
@@ -516,7 +426,6 @@ export function getHistoryToolDefinitions() {
  */
 function parseGroupBuffer(content) {
   const sections = [];
-  // Split by ## header lines (ISO timestamp)
   const regex = /^## (\d{4}-\d{2}-\d{2}T[\d:.]+Z?)$/gm;
   let lastIndex = 0;
   let lastTimestamp = null;
@@ -532,7 +441,6 @@ function parseGroupBuffer(content) {
     lastTimestamp = new Date(match[1]);
     lastIndex = match.index;
   }
-  // Push the last section
   if (lastTimestamp !== null) {
     sections.push({
       timestamp: lastTimestamp,
@@ -553,7 +461,7 @@ async function executeHistoryRead(petId, targetId, args) {
   if (isNaN(startDate.getTime())) return { error: 'start_time 格式无效' };
   if (isNaN(endDate.getTime())) return { error: 'end_time 格式无效' };
 
-  const bufferPath = `${GROUP_BUFFER_PATH_PREFIX}${targetId}.md`;
+  const bufferPath = `${GROUP_LOG_PATH_PREFIX}${targetId}.md`;
   let content;
   try {
     content = await tauri.workspaceRead(petId, bufferPath);
@@ -568,7 +476,6 @@ async function executeHistoryRead(petId, targetId, args) {
   const sections = parseGroupBuffer(content);
   const queryLower = query.toLowerCase();
 
-  // Filter by time range + query match
   const matched = sections.filter(s => {
     if (s.timestamp < startDate || s.timestamp > endDate) return false;
     return s.text.toLowerCase().includes(queryLower);
@@ -578,7 +485,6 @@ async function executeHistoryRead(petId, targetId, args) {
     return { content: [{ type: 'text', text: `在 ${start_time} ~ ${end_time || '现在'} 范围内未找到包含"${query}"的记录。` }] };
   }
 
-  // Build result, truncate from the tail (keep most recent)
   let result = '';
   for (let i = matched.length - 1; i >= 0; i--) {
     const entry = matched[i].text + '\n\n';
@@ -592,13 +498,11 @@ async function executeHistoryRead(petId, targetId, args) {
 async function executeDailyRead(petId, args) {
   let dateStr = args?.date;
   if (!dateStr) {
-    // Default to yesterday
     const yesterday = new Date();
     yesterday.setDate(yesterday.getDate() - 1);
     dateStr = yesterday.toISOString().split('T')[0];
   }
 
-  // Validate format
   if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
     return { error: 'date 格式无效，应为 YYYY-MM-DD' };
   }
@@ -616,7 +520,6 @@ async function executeDailyList(petId) {
   const dates = [];
   const today = new Date();
 
-  // Check last 30 days
   for (let i = 0; i < 30; i++) {
     const d = new Date(today);
     d.setDate(d.getDate() - i);
@@ -639,11 +542,6 @@ async function executeDailyList(petId) {
 
 /**
  * 执行历史查询内置工具
- *
- * @param {string} toolName - 'history_read' | 'daily_read' | 'daily_list'
- * @param {Object} args - 工具参数
- * @param {Object} context - { petId, targetId }
- * @returns {Promise<Object>} MCP 标准响应格式
  */
 export async function executeHistoryBuiltinTool(toolName, args, context) {
   const { petId, targetId } = context;
@@ -666,11 +564,14 @@ export async function executeHistoryBuiltinTool(toolName, args, context) {
   }
 }
 
-// ============ 跨群日志工具 ============
+// ============ 跨群日志工具（保留，有跨群搜索逻辑） ============
 
-/**
- * 获取跨群日志工具的 function calling 定义
- */
+const GROUP_LOG_TOOL_NAMES = new Set(['group_log_list', 'group_log_read']);
+
+export function isGroupLogBuiltinTool(toolName) {
+  return GROUP_LOG_TOOL_NAMES.has(toolName);
+}
+
 export function getGroupLogToolDefinitions() {
   return [
     {
@@ -718,9 +619,6 @@ export function getGroupLogToolDefinitions() {
   ];
 }
 
-/**
- * 执行 group_log_list：列出所有有记录的群
- */
 async function executeGroupLogList(petId) {
   try {
     const raw = await tauri.workspaceRead(petId, KNOWN_TARGETS_PATH);
@@ -738,9 +636,6 @@ async function executeGroupLogList(petId) {
   }
 }
 
-/**
- * 执行 group_log_read：搜索指定群的日志
- */
 async function executeGroupLogRead(petId, args) {
   const { targets, query, start_time, end_time } = args;
   if (!targets || !Array.isArray(targets) || targets.length === 0) {
@@ -757,7 +652,7 @@ async function executeGroupLogRead(petId, args) {
   const results = [];
 
   for (const target of targets) {
-    const bufferPath = `${GROUP_BUFFER_PATH_PREFIX}${target}.md`;
+    const bufferPath = `${GROUP_LOG_PATH_PREFIX}${target}.md`;
     let content;
     try {
       content = await tauri.workspaceRead(petId, bufferPath);
@@ -766,7 +661,6 @@ async function executeGroupLogRead(petId, args) {
 
     const sections = parseGroupBuffer(content);
 
-    // Filter by time range + optional query
     let matched = sections;
     if (startDate || endDate) {
       matched = matched.filter(s => {
@@ -781,7 +675,6 @@ async function executeGroupLogRead(petId, args) {
 
     if (matched.length === 0) continue;
 
-    // 取最新的部分（从尾部截取），受总字符数限制
     let groupResult = '';
     for (let i = matched.length - 1; i >= 0; i--) {
       const entry = matched[i].text + '\n\n';

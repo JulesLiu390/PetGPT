@@ -290,6 +290,130 @@ impl WorkspaceEngine {
         self.resolve_safe_path(pet_id, path)
     }
 
+    /// List files under a directory in the pet's workspace (recursive tree).
+    /// Returns relative paths (relative to the pet's workspace root).
+    /// Directories are suffixed with '/'.
+    pub fn list_dir(
+        &self,
+        pet_id: &str,
+        path: &str,
+    ) -> Result<Vec<String>, WorkspaceError> {
+        let full_path = self.resolve_safe_path(pet_id, path)?;
+        let workspace = self.pet_workspace(pet_id);
+
+        if !full_path.exists() {
+            return Err(WorkspaceError::FileNotFound(path.to_string()));
+        }
+        if !full_path.is_dir() {
+            return Err(WorkspaceError::IoError(format!(
+                "{} is not a directory",
+                path
+            )));
+        }
+
+        let mut entries = Vec::new();
+        self.collect_entries(&full_path, &workspace, &mut entries)?;
+        entries.sort();
+        Ok(entries)
+    }
+
+    /// Recursively collect file/dir entries relative to workspace root
+    fn collect_entries(
+        &self,
+        dir: &Path,
+        workspace_root: &Path,
+        out: &mut Vec<String>,
+    ) -> Result<(), WorkspaceError> {
+        let read_dir =
+            fs::read_dir(dir).map_err(|e| WorkspaceError::IoError(e.to_string()))?;
+
+        for entry in read_dir {
+            let entry = entry.map_err(|e| WorkspaceError::IoError(e.to_string()))?;
+            let entry_path = entry.path();
+
+            // Skip hidden files/dirs (e.g. .DS_Store)
+            if let Some(name) = entry_path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with('.') {
+                    continue;
+                }
+            }
+
+            let relative = entry_path
+                .strip_prefix(workspace_root)
+                .map_err(|e| WorkspaceError::IoError(e.to_string()))?;
+            let rel_str = relative.to_string_lossy().to_string();
+
+            if entry_path.is_dir() {
+                out.push(format!("{}/", rel_str));
+                self.collect_entries(&entry_path, workspace_root, out)?;
+            } else {
+                out.push(rel_str);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Delete a single file in the pet's workspace.
+    pub fn delete_file(
+        &self,
+        pet_id: &str,
+        path: &str,
+    ) -> Result<String, WorkspaceError> {
+        let full_path = self.resolve_safe_path(pet_id, path)?;
+
+        if !full_path.exists() {
+            return Err(WorkspaceError::FileNotFound(path.to_string()));
+        }
+        if full_path.is_dir() {
+            return Err(WorkspaceError::IoError(format!(
+                "{} is a directory, not a file",
+                path
+            )));
+        }
+
+        fs::remove_file(&full_path).map_err(|e| WorkspaceError::IoError(e.to_string()))?;
+
+        Ok(format!("已删除 {}", path))
+    }
+
+    /// Rename (move) a file within the pet's workspace.
+    /// Automatically creates parent directories for the destination.
+    pub fn rename_file(
+        &self,
+        pet_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<String, WorkspaceError> {
+        let from_path = self.resolve_safe_path(pet_id, from)?;
+        let to_path = self.resolve_safe_path(pet_id, to)?;
+
+        if !from_path.exists() {
+            return Err(WorkspaceError::FileNotFound(from.to_string()));
+        }
+        if from_path.is_dir() {
+            return Err(WorkspaceError::IoError(format!(
+                "{} is a directory, not a file",
+                from
+            )));
+        }
+        if to_path.exists() {
+            return Err(WorkspaceError::IoError(format!(
+                "目标文件 {} 已存在",
+                to
+            )));
+        }
+
+        // Create parent directories for destination if needed
+        if let Some(parent) = to_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
+        }
+
+        fs::rename(&from_path, &to_path).map_err(|e| WorkspaceError::IoError(e.to_string()))?;
+
+        Ok(format!("已将 {} 移动到 {}", from, to))
+    }
+
     /// Delete a pet's entire workspace directory
     pub fn delete_workspace(&self, pet_id: &str) -> Result<(), WorkspaceError> {
         let workspace = self.pet_workspace(pet_id);

@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialBuiltinToolDefinitions, getGroupRuleToolDefinitions, getReplyStrategyToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions } from './workspace/socialToolExecutor';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -916,7 +916,7 @@ async function pollTarget({
   let mcpTools = [];
 
   if (role === 'observer') {
-    // ── Observer: 只有 builtin 工具（group_rule RW, social RW, reply_strategy RW, history），无 send_message，无外部 MCP ──
+    // ── Observer: 通用文件工具（social_tree/read/write/edit）+ history，无 send_message，无外部 MCP ──
     const toMcp = (defs) => defs.map(t => ({
       name: t.function.name,
       description: t.function.description,
@@ -924,14 +924,9 @@ async function pollTarget({
       serverName: null,
     }));
     mcpTools = [
-      ...toMcp(getSocialBuiltinToolDefinitions()),
-      ...toMcp(getGroupRuleToolDefinitions()),
+      ...toMcp(getSocialFileToolDefinitions()),
       ...toMcp(getHistoryToolDefinitions()),
     ];
-    // Observer 也可以管理回复策略（如果开启）
-    if (promptConfig.agentCanEditStrategy) {
-      mcpTools = [...mcpTools, ...toMcp(getReplyStrategyToolDefinitions())];
-    }
   } else {
     // ── Reply: send_message + 外部 MCP + history 工具，无 builtin 读写 ──
     try {
@@ -1045,13 +1040,9 @@ async function pollTarget({
       },
       onToolCall: (name, args) => {
         pollToolCalls.push({ name, args: JSON.stringify(args).substring(0, 300) });
-        // 社交记忆写入用特殊 level 标记
-        if (name === 'social_write' || name === 'social_edit') {
-          addLog('memory', `🧠 社交记忆更新: ${name}`, JSON.stringify(args).substring(0, 300), target);
-        } else if (name === 'group_rule_write' || name === 'group_rule_edit') {
-          addLog('memory', `📋 群规则更新: ${name}`, JSON.stringify(args).substring(0, 300), target);
-        } else if (name === 'reply_strategy_edit') {
-          addLog('memory', `📐 回复策略更新: ${name}`, JSON.stringify(args).substring(0, 300), target);
+        // 社交文件写入用特殊 level 标记
+        if ((name === 'social_write' || name === 'social_edit') && args?.path) {
+          addLog('memory', `📝 社交文件更新: ${name} → ${args.path}`, JSON.stringify(args).substring(0, 300), target);
         } else {
           addLog('info', `LLM called tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
         }
@@ -1068,7 +1059,7 @@ async function pollTarget({
           pollToolCalls[pollToolCalls.length - 1].isError = isError;
         }
         if ((name === 'social_write' || name === 'social_edit') && !isError) {
-          addLog('memory', `✅ 社交记忆已保存`, preview, target);
+          addLog('memory', `✅ 社交文件已保存`, preview, target);
         } else {
           addLog(isError ? 'error' : 'info', `Tool result: ${name}`, preview, target);
         }
@@ -1306,7 +1297,7 @@ async function runDailyCompress(petId, llmConfig, targetSet) {
   const dayGroups = new Map();
   
   for (const target of targetSet) {
-    const bufferPath = `social/GROUP_${target}.md`;
+    const bufferPath = `social/group/LOG_${target}.md`;
     let content;
     try {
       content = await tauri.workspaceRead(petId, bufferPath);
@@ -1357,7 +1348,7 @@ ${combined}`;
       }), { label: 'DailyCompress' });
       
       const dailyContent = `# ${dateStr} 社交日报\n\n${result.content || '（压缩失败）'}\n`;
-      const dailyPath = `social/DAILY_${dateStr}.md`;
+      const dailyPath = `social/daily/${dateStr}.md`;
       await tauri.workspaceWrite(petId, dailyPath, dailyContent);
       addLog('info', `📝 Compressed daily log: ${dailyPath}`);
     } catch (e) {
@@ -1367,7 +1358,7 @@ ${combined}`;
     
     // 从各群缓冲中删除已压缩日期的条目（保留今天的）
     for (const { target } of targetEntries) {
-      const bufferPath = `social/GROUP_${target}.md`;
+      const bufferPath = `social/group/LOG_${target}.md`;
       try {
         const content = await tauri.workspaceRead(petId, bufferPath);
         const dateMap = parseBufferByDate(content);
@@ -2487,7 +2478,7 @@ export async function startSocialLoop(config, onStatusChange) {
           delta = targetData.compressed_summary.slice(prevSummary.length).replace(/^\n+/, '');
         }
         if (delta) {
-          const bufferPath = `social/GROUP_${target}.md`;
+          const bufferPath = `social/group/LOG_${target}.md`;
           const timestamp = new Date().toISOString();
           const entry = `\n## ${timestamp}\n${delta}\n`;
           try {

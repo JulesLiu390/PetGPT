@@ -65,6 +65,43 @@ pub fn workspace_ensure_default_files(
         .map_err(|e| e.to_string())
 }
 
+/// List files in a directory of the pet's workspace (recursive tree)
+#[tauri::command]
+pub fn workspace_list_dir(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+) -> Result<Vec<String>, String> {
+    workspace
+        .list_dir(&pet_id, &path)
+        .map_err(|e| e.to_string())
+}
+
+/// Delete a single file in the pet's workspace
+#[tauri::command]
+pub fn workspace_delete_file(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+) -> Result<String, String> {
+    workspace
+        .delete_file(&pet_id, &path)
+        .map_err(|e| e.to_string())
+}
+
+/// Rename (move) a file within the pet's workspace
+#[tauri::command]
+pub fn workspace_rename_file(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    from: String,
+    to: String,
+) -> Result<String, String> {
+    workspace
+        .rename_file(&pet_id, &from, &to)
+        .map_err(|e| e.to_string())
+}
+
 /// Check if a file exists in the pet's workspace
 #[tauri::command]
 pub fn workspace_file_exists(

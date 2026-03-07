@@ -723,6 +723,18 @@ export const workspaceEnsureDefaultFiles = async (petId, petName) => {
   return invoke('workspace_ensure_default_files', { petId, petName });
 };
 
+export const workspaceListDir = async (petId, path) => {
+  return invoke('workspace_list_dir', { petId, path });
+};
+
+export const workspaceDeleteFile = async (petId, path) => {
+  return invoke('workspace_delete_file', { petId, path });
+};
+
+export const workspaceRenameFile = async (petId, from, to) => {
+  return invoke('workspace_rename_file', { petId, from, to });
+};
+
 export const workspaceFileExists = async (petId, path) => {
   return invoke('workspace_file_exists', { petId, path });
 };
@@ -1023,6 +1035,9 @@ const tauri = {
   workspaceWrite,
   workspaceEdit,
   workspaceEnsureDefaultFiles,
+  workspaceListDir,
+  workspaceDeleteFile,
+  workspaceRenameFile,
   workspaceFileExists,
   workspaceGetPath,
   workspaceDeleteFolder,

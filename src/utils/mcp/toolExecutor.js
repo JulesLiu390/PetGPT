@@ -10,7 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialBuiltinTool, executeSocialBuiltinTool, isGroupRuleBuiltinTool, executeGroupRuleBuiltinTool, isReplyStrategyBuiltinTool, executeReplyStrategyBuiltinTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool } from '../workspace/socialToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -584,24 +584,19 @@ export const callLLMWithTools = async ({
           // Validate tool name against declared tools to prevent LLM hallucinating undeclared tool calls
           const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
           const isBuiltin = isBuiltinTool(call.name);
-          const isSocialBuiltin = isSocialBuiltinTool(call.name);
-          const isGroupRuleBuiltin = isGroupRuleBuiltinTool(call.name);
-          const isReplyStrategyBuiltin = isReplyStrategyBuiltinTool(call.name);
+          const isSocialFile = isSocialFileTool(call.name);
           const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialBuiltin=${isSocialBuiltin} isGroupRule=${isGroupRuleBuiltin} isReplyStrategy=${isReplyStrategyBuiltin} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin}`);
-          if (!isBuiltin && !isSocialBuiltin && !isGroupRuleBuiltin && !isReplyStrategyBuiltin && !isHistoryBuiltin && !isGroupLogBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin;
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin}`);
+          if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
             toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
           } else if (isBuiltin && builtinToolContext) {
             toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isSocialBuiltin && builtinToolContext) {
-            toolResult = await executeSocialBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isGroupRuleBuiltin && builtinToolContext) {
-            toolResult = await executeGroupRuleBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isReplyStrategyBuiltin && builtinToolContext) {
-            toolResult = await executeReplyStrategyBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSocialFile && builtinToolContext) {
+            toolResult = await executeSocialFileTool(call.name, call.arguments, builtinToolContext);
           } else if (isHistoryBuiltin && builtinToolContext) {
             toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isGroupLogBuiltin && builtinToolContext) {
