@@ -1104,6 +1104,17 @@ async function executeStickerSend(petId, args, context) {
     // 记录本次发送，防止连发
     lastStickerSent.set(targetId, { id: numId, time: Date.now() });
 
+    // 缓存发送记录（带含义），让 prompt 上下文知道自己发了什么表情包
+    if (context.sentCache) {
+      const arr = context.sentCache.get(targetId) || [];
+      arr.push({
+        content: `[发送了表情包#${numId}：${entry.meaning}]`,
+        timestamp: new Date().toISOString(),
+        _isStickerSend: true,
+      });
+      context.sentCache.set(targetId, arr);
+    }
+
     // 更新使用计数（不影响发送结果）
     try {
       entry.used = (entry.used || 0) + 1;

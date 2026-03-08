@@ -426,7 +426,12 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
     let text;
     if (msg.is_self) {
       // assistant turn：只放内容，不加名字前缀
-      text = msg.content || '';
+      // 如果是 bot 自己发的纯图片（表情包），用文字占位（正常情况下 sentMessagesCache 会覆盖）
+      if (!(msg.content || '').trim() && msg._images && msg._images.length > 0) {
+        text = '[发送了表情包]';
+      } else {
+        text = msg.content || '';
+      }
     } else {
       // user turn：用安全分隔符包裹名字和消息
       let name = stripSecrets(String(msg.sender_name || msg.sender_id));
@@ -1050,7 +1055,7 @@ async function pollTarget({
       baseUrl: llmConfig.baseUrl,
       mcpTools,
       options: { temperature: 0.7 },
-      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap },
+      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache },
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -2213,7 +2218,7 @@ export async function startSocialLoop(config, onStatusChange) {
                 options: {
                   temperature: 0.4,
                 },
-                builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false },
+                builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache },
                 onToolCall: (name, args) => {
                   if (name === 'sticker_send') idleStickerSent = true;
                   addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
@@ -2444,7 +2449,7 @@ export async function startSocialLoop(config, onStatusChange) {
               options: {
                 temperature: 0.4,
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache },
               onToolCall: (name, args) => {
                 if (name === 'sticker_send') intentStickerSent = true;
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
@@ -2582,10 +2587,20 @@ export async function startSocialLoop(config, onStatusChange) {
         ...msg,
         _images: (msg.image_urls || []).map(url => ({ data: url, mimeType: 'image/jpeg' })),
       }));
+      // 在 appendToBuffer 前记录哪些 bot 自发纯图片消息（表情包）是新的
+      const bufRef = getBuffer(target);
+      let newSelfImageCount = 0;
+      for (const m of fetchedMessages) {
+        if (m.is_self && m.message_id && (m.image_urls?.length > 0) && !(m.content || '').trim()) {
+          if (!bufRef.seenIds.has(m.message_id)) newSelfImageCount++;
+        }
+      }
       const added = appendToBuffer(target, fetchedMessages, targetData);
+      // 排除 bot 自发表情包图片，不算作"新活动"
+      const effectiveAdded = added - Math.min(newSelfImageCount, added);
 
-      // --- 有新消息 → 清除表情包冷却 + 唤醒 Intent ---
-      if (added > 0) {
+      // --- 有新消息（排除自己发的表情包图片）→ 清除表情包冷却 + 唤醒 Intent ---
+      if (effectiveAdded > 0) {
         resetStickerCooldown(target);
         const iState = getIntentState(target);
         iState.lastActivityTime = Date.now();
