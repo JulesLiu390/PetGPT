@@ -765,6 +765,15 @@ const STICKER_MAX_COUNT = 30;
 
 const STICKER_TOOL_NAMES = new Set(['sticker_save', 'sticker_list', 'sticker_send']);
 
+/** 每个 target 上次发送的 sticker 记录 { id, time }，带冷却 */
+const lastStickerSent = new Map();
+const STICKER_COOLDOWN_MS = 60 * 1000; // 1 分钟冷却
+
+/** 清除指定 target 的表情包冷却（有新消息时调用） */
+export function resetStickerCooldown(targetId) {
+  lastStickerSent.delete(targetId);
+}
+
 export function isStickerBuiltinTool(toolName) {
   return STICKER_TOOL_NAMES.has(toolName);
 }
@@ -1045,6 +1054,13 @@ async function executeStickerSend(petId, args, context) {
   if (!targetId) return { error: '缺少 targetId，无法发送表情包。' };
   if (!mcpServerName) return { error: '缺少 mcpServerName，无法发送表情包。' };
 
+  // 防止短时间内连发同一张表情包（1分钟冷却，有新消息时自动清除）
+  const numId = Number(sticker_id);
+  const last = lastStickerSent.get(targetId);
+  if (last && last.id === numId && (Date.now() - last.time) < STICKER_COOLDOWN_MS) {
+    return { error: `表情包 #${sticker_id} 刚刚已经发过了，换一个吧。` };
+  }
+
   // 1. 读取索引找到对应表情包
   let entries = [];
   try {
@@ -1084,6 +1100,9 @@ async function executeStickerSend(petId, args, context) {
     const fullToolName = `${mcpServerName}__send_image`;
     const result = await tauri.mcp.callToolByName(fullToolName, sendArgs);
     console.log('[Sticker] send_image result:', result);
+
+    // 记录本次发送，防止连发
+    lastStickerSent.set(targetId, { id: numId, time: Date.now() });
 
     // 更新使用计数（不影响发送结果）
     try {

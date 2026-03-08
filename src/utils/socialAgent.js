@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, resetStickerCooldown } from './workspace/socialToolExecutor';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -2361,13 +2361,41 @@ export async function startSocialLoop(config, onStatusChange) {
           }
         } catch { /* 非致命：外部工具不可用不影响 Intent 评估 */ }
 
+        // 构建上次评估锚定（仅对常规评估生效，不影响 @me/forceEval/首次）
+        let lastEvalAnchor = '';
+        if (!wasUrgentAtMe && !wasForceEval && state.history.length > 0) {
+          const lastEntry = state.history[state.history.length - 1];
+          if (lastEntry && lastEntry.willingness < 3) {
+            // 计算水位线之后的新消息数（非 self）
+            const wm = intentWatermarks.get(target);
+            const buf = dataBuffer.get(target);
+            let newMsgCount = 0;
+            if (buf && wm) {
+              let afterWm = false;
+              for (const m of buf.messages) {
+                if (m.message_id === wm) { afterWm = true; continue; }
+                if (afterWm && !m.is_self) newMsgCount++;
+              }
+            }
+            const label = lastEntry.willingnessLabel || `level ${lastEntry.willingness}`;
+            const reason = lastEntry.content ? `："${lastEntry.content.split('\n')[0].slice(0, 60)}"` : '';
+            if (newMsgCount === 0) {
+              lastEvalAnchor = `\n\n# 上次评估\n你上一次选了 [${label}]${reason}。\n此后没有任何新消息。没有新信息改变你的判断，保持原来的选择。`;
+            } else if (newMsgCount <= 5) {
+              lastEvalAnchor = `\n\n# 上次评估\n你上一次选了 [${label}]${reason}。\n此后有 ${newMsgCount} 条新消息，但消息不多。在以下情况可以改变选择：\n- 有人直接和你互动（@你、回复你、点名你）\n- 出现了一个全新的、你真正有话想说的话题（不是同一个话题的延续）\n否则保持原来的选择。注意：对同一段对话"重新想了想"不是改变选择的理由。`;
+            } else {
+              lastEvalAnchor = `\n\n# 上次评估\n你上一次选了 [${label}]${reason}。\n此后有 ${newMsgCount} 条新消息，话题可能有新进展，重新评估。`;
+            }
+          }
+        }
+
         const intentEvalPrompt = wasUrgentAtMe
           ? '有群友 @了你，请立即评估当前状态。注意：被 @ 通常意味着有人在跟你说话或提问，应优先考虑回复。同时仍需遵守「别三连」规则。'
           : wasForceEval
             ? '你的 Reply 模块刚刚发了消息（可能尚未出现在对话记录中）。请重新评估当前状态。你刚发了言，除非有人直接回应你（追问、反驳、@你），否则必须选 [等回复]。同时检查「别三连」规则：如果你已经连续发言 ≥ 2 次且没人回应你，无论如何不得选 ≥ 3 的意愿。'
             : state.history.length === 0
               ? '你的系统刚刚启动（可能是重启）。这是你的首次评估。请先仔细观察当前对话记录：如果其中包含你自己之前发送的消息（is_self），说明你在重启前曾参与过对话。此时应当先安静观察当前气氛和上下文，不要急于发言，除非有人正在等待你的回复或 @了你。'
-              : '请分析当前想法和行为倾向。';
+              : '请分析当前想法和行为倾向。' + lastEvalAnchor;
 
         // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
         await preprocessBufferImages(target);
@@ -2554,8 +2582,9 @@ export async function startSocialLoop(config, onStatusChange) {
       }));
       const added = appendToBuffer(target, fetchedMessages, targetData);
 
-      // --- Intent Loop 唤醒：有新消息（含 self）→ 唤醒该群 ---
+      // --- 有新消息 → 清除表情包冷却 + 唤醒 Intent ---
       if (added > 0) {
+        resetStickerCooldown(target);
         const iState = getIntentState(target);
         iState.lastActivityTime = Date.now();
         if (iState.sleeping) {
