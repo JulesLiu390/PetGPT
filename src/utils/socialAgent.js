@@ -2233,9 +2233,11 @@ export async function startSocialLoop(config, onStatusChange) {
           }
 
           // 解析纯文本结果并记入历史（不清空）
+          let idleWillingness = null;
           if (!intentResult.error) {
             const rawText = (intentResult.content || '').trim();
             const w = parseWillingness(rawText);
+            idleWillingness = w;
             const isIdle = !rawText || w.level <= 2;
             const entry = {
               timestamp: new Date().toISOString(),
@@ -2266,7 +2268,7 @@ export async function startSocialLoop(config, onStatusChange) {
           intentGate.delete(target);
 
           // idle-eval 也可能评出 ≥ 3，需要唤醒 Reply
-          if (w && w.level >= 3 && !intentGate.has(target)) {
+          if (idleWillingness && idleWillingness.level >= 3) {
             replyWakeFlag.set(target, { atMe: false });
           }
 
