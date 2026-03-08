@@ -10,6 +10,7 @@
  */
 
 import * as tauri from '../tauri';
+import { downloadUrlAsBase64 } from '../tauri';
 
 // ============ 常量 ============
 
@@ -181,6 +182,7 @@ const READ_ONLY_PREFIXES = [
   'social/group/LOG_',  // 压缩历史（Fetcher 自动写入）
   'social/daily/',      // 日报（系统自动生成）
   'social/targets.json', // 已知 target 列表
+  'social/stickers/index.yaml', // 表情包索引（由 sticker_save 自动维护）
 ];
 
 function isReadOnlyPath(path) {
@@ -390,13 +392,17 @@ export function getHistoryToolDefinitions() {
       type: 'function',
       function: {
         name: 'daily_read',
-        description: '读取指定日期的每日社交摘要。摘要包含当天的聊天总结、关键事件等。',
+        description: '读取每日社交摘要。不传 target 读全局跨群日报；传 target 读该群/好友的详细日报。',
         parameters: {
           type: 'object',
           properties: {
             date: {
               type: 'string',
               description: '日期，格式 YYYY-MM-DD。不传则默认为昨天',
+            },
+            target: {
+              type: 'string',
+              description: '群号或好友 ID。不传则读全局日报，传了则读该群/好友的单独日报',
             },
           },
           required: [],
@@ -407,7 +413,7 @@ export function getHistoryToolDefinitions() {
       type: 'function',
       function: {
         name: 'daily_list',
-        description: '列出所有可用的每日社交摘要日期。',
+        description: '列出可用的每日社交摘要。返回日期列表及每天有哪些群的独立日报。',
         parameters: {
           type: 'object',
           properties: {},
@@ -507,6 +513,20 @@ async function executeDailyRead(petId, args) {
     return { error: 'date 格式无效，应为 YYYY-MM-DD' };
   }
 
+  const target = args?.target;
+
+  if (target) {
+    // 读取特定群/好友的日报
+    const perGroupPath = `${DAILY_PATH_PREFIX}${dateStr}/${target}.md`;
+    try {
+      const content = await tauri.workspaceRead(petId, perGroupPath);
+      return { content: [{ type: 'text', text: content || '（该日期该群的摘要为空）' }] };
+    } catch {
+      return { content: [{ type: 'text', text: `（${dateStr} 没有 ${target} 的独立日报）` }] };
+    }
+  }
+
+  // 读取全局日报
   const dailyPath = `${DAILY_PATH_PREFIX}${dateStr}.md`;
   try {
     const content = await tauri.workspaceRead(petId, dailyPath);
@@ -517,7 +537,7 @@ async function executeDailyRead(petId, args) {
 }
 
 async function executeDailyList(petId) {
-  const dates = [];
+  const entries = [];
   const today = new Date();
 
   for (let i = 0; i < 30; i++) {
@@ -525,19 +545,37 @@ async function executeDailyList(petId) {
     d.setDate(d.getDate() - i);
     const dateStr = d.toISOString().split('T')[0];
     const dailyPath = `${DAILY_PATH_PREFIX}${dateStr}.md`;
+    let hasGlobal = false;
     try {
-      const exists = await tauri.workspaceFileExists(petId, dailyPath);
-      if (exists) dates.push(dateStr);
-    } catch {
-      // ignore
+      hasGlobal = await tauri.workspaceFileExists(petId, dailyPath);
+    } catch { /* ignore */ }
+
+    // 检查该日期是否有每群日报文件夹
+    let groupFiles = [];
+    try {
+      const dirPath = `${DAILY_PATH_PREFIX}${dateStr}`;
+      const tree = await tauri.workspaceListDir(petId, dirPath);
+      if (tree && Array.isArray(tree)) {
+        groupFiles = tree
+          .filter(f => f.name && f.name.endsWith('.md'))
+          .map(f => f.name.replace('.md', ''));
+      }
+    } catch { /* folder doesn't exist */ }
+
+    if (hasGlobal || groupFiles.length > 0) {
+      let line = dateStr;
+      if (groupFiles.length > 0) {
+        line += `  (${groupFiles.length} 个群独立日报: ${groupFiles.join(', ')})`;
+      }
+      entries.push(line);
     }
   }
 
-  if (dates.length === 0) {
+  if (entries.length === 0) {
     return { content: [{ type: 'text', text: '（暂无日报摘要文件）' }] };
   }
 
-  return { content: [{ type: 'text', text: `可用日报日期（最近30天）：\n${dates.join('\n')}` }] };
+  return { content: [{ type: 'text', text: `可用日报日期（最近30天）：\n${entries.join('\n')}` }] };
 }
 
 /**
@@ -716,5 +754,371 @@ export async function executeGroupLogBuiltinTool(toolName, args, context) {
       return executeGroupLogRead(petId, args);
     default:
       return { error: `未知的跨群日志工具: ${toolName}` };
+  }
+}
+
+// ============ 表情包收藏工具 ============
+
+const STICKER_DIR = 'social/stickers';
+const STICKER_INDEX_PATH = `${STICKER_DIR}/index.yaml`;
+const STICKER_MAX_COUNT = 30;
+
+const STICKER_TOOL_NAMES = new Set(['sticker_save', 'sticker_list', 'sticker_send']);
+
+export function isStickerBuiltinTool(toolName) {
+  return STICKER_TOOL_NAMES.has(toolName);
+}
+
+export function getStickerToolDefinitions() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'sticker_save',
+        description: '收藏一个表情包/贴纸。通过聊天消息中的图片序号（[图片#N] 中的 N）下载并保存。',
+        parameters: {
+          type: 'object',
+          properties: {
+            image_id: {
+              type: 'number',
+              description: '图片序号，即消息中 [图片#N: ...] 的 N',
+            },
+            meaning: {
+              type: 'string',
+              description: '这个表情包的含义/用途描述（如"开心大笑"、"无语"、"赞同"）',
+            },
+          },
+          required: ['image_id', 'meaning'],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'sticker_list',
+        description: '查看已收藏的所有表情包列表（序号 + 含义）。',
+        parameters: {
+          type: 'object',
+          properties: {},
+          required: [],
+        },
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'sticker_send',
+        description: '发送一个已收藏的表情包到当前群聊。先用 sticker_list 查看有哪些表情包，再用序号发送。',
+        parameters: {
+          type: 'object',
+          properties: {
+            sticker_id: {
+              type: 'number',
+              description: '要发送的表情包序号（从 sticker_list 获取）',
+            },
+            reply_to: {
+              type: 'string',
+              description: '（可选）要回复的消息 ID',
+            },
+          },
+          required: ['sticker_id'],
+        },
+      },
+    },
+  ];
+}
+
+/**
+ * 从 URL 推断文件扩展名
+ */
+function inferImageExt(url, mimeType) {
+  // 先尝试从 MIME 类型推断
+  if (mimeType) {
+    const mimeMap = {
+      'image/png': 'png',
+      'image/jpeg': 'jpg',
+      'image/gif': 'gif',
+      'image/webp': 'webp',
+      'image/bmp': 'bmp',
+    };
+    const ext = mimeMap[mimeType.toLowerCase()];
+    if (ext) return ext;
+  }
+  // 从 URL 路径推断
+  try {
+    const pathname = new URL(url).pathname;
+    const match = pathname.match(/\.(png|jpg|jpeg|gif|webp|bmp)$/i);
+    if (match) return match[1].toLowerCase() === 'jpeg' ? 'jpg' : match[1].toLowerCase();
+  } catch { /* ignore */ }
+  return 'png'; // 默认
+}
+
+/**
+ * 解析 index.yaml（简单 YAML：每条记录为 "- id: N\n  meaning: ...\n  file: ..."）
+ */
+function parseStickerIndex(content) {
+  if (!content || !content.trim()) return [];
+  const entries = [];
+  const blocks = content.split(/^- /m).filter(Boolean);
+  for (const block of blocks) {
+    const entry = {};
+    const lines = block.split('\n');
+    for (const line of lines) {
+      const m = line.match(/^\s*(\w+):\s*(.+)$/);
+      if (m) entry[m[1]] = m[2].trim();
+    }
+    if (entry.id) {
+      entry.id = parseInt(entry.id, 10);
+      if (entry.used != null) entry.used = parseInt(entry.used, 10) || 0;
+      entries.push(entry);
+    }
+  }
+  return entries;
+}
+
+/**
+ * 序列化 sticker entries 为简单 YAML
+ */
+function serializeStickerIndex(entries) {
+  return entries.map(e => {
+    let lines = `- id: ${e.id}\n  meaning: ${e.meaning}\n  file: ${e.file}`;
+    if (e.url) lines += `\n  url: ${e.url}`;
+    if (e.used != null) lines += `\n  used: ${e.used}`;
+    if (e.last_used) lines += `\n  last_used: ${e.last_used}`;
+    return lines;
+  }).join('\n');
+}
+
+/**
+ * 清除字符串中的安全令牌/分隔符（如 ‹/74a2c1›）
+ */
+function stripSecurityTokens(text) {
+  if (!text) return text;
+  // 匹配 ‹...› 或 ‹/...› 格式的安全分隔符
+  return text.replace(/[‹<]\/?\w+[›>]/g, '').trim();
+}
+
+async function executeStickerSave(petId, args, imageUrlMap) {
+  const { image_id } = args;
+  let { meaning } = args;
+  if (!image_id) return { error: '缺少 image_id 参数' };
+  if (!meaning) return { error: '缺少 meaning 参数' };
+
+  // 清除 meaning 中可能泄漏的安全令牌
+  meaning = stripSecurityTokens(meaning);
+
+  // 1. 从 imageUrlMap 查找真实 URL
+  const url = imageUrlMap?.get(Number(image_id));
+  if (!url) {
+    return { error: `找不到图片 #${image_id}，请确认序号正确（来自 [图片#N: ...] 中的 N）` };
+  }
+
+  // 2. 读取现有索引（提前读取，用于 URL 去重）
+  let entries = [];
+  try {
+    const existing = await tauri.workspaceRead(petId, STICKER_INDEX_PATH);
+    entries = parseStickerIndex(existing);
+  } catch { /* index doesn't exist yet */ }
+
+  // 3. URL 去重：检查是否已保存过相同 URL 的表情包
+  const existingWithUrl = entries.find(e => e.url === url);
+  if (existingWithUrl) {
+    return { content: [{ type: 'text', text: `该表情包已收藏过（#${existingWithUrl.id}：${existingWithUrl.meaning}），无需重复保存。` }] };
+  }
+
+  // 4. 下载图片
+  let base64Data, mimeType;
+  try {
+    const result = await downloadUrlAsBase64(url);
+    base64Data = result.data;
+    mimeType = result.mime_type;
+  } catch (e) {
+    return { error: `下载图片失败: ${e}` };
+  }
+
+  if (!base64Data) {
+    return { error: '下载图片返回空数据' };
+  }
+
+  // 5. 确定新 ID 和文件名
+  const newId = entries.length > 0 ? Math.max(...entries.map(e => e.id)) + 1 : 1;
+  const ext = inferImageExt(url, mimeType);
+  const fileName = `stk_${String(newId).padStart(3, '0')}.${ext}`;
+  const filePath = `${STICKER_DIR}/${fileName}`;
+
+  // 6. 写入二进制图片
+  try {
+    await tauri.workspaceWriteBinary(petId, filePath, base64Data);
+  } catch (e) {
+    return { error: `保存图片文件失败: ${e}` };
+  }
+
+  // 7. 更新索引（含 url 用于去重）
+  entries.push({ id: newId, meaning, file: fileName, url });
+  try {
+    await tauri.workspaceWrite(petId, STICKER_INDEX_PATH, serializeStickerIndex(entries));
+  } catch (e) {
+    return { error: `更新索引失败: ${e}` };
+  }
+
+  // 8. 自动清理：超过上限时删除使用频率最低的表情包
+  let cleanupMsg = '';
+  if (entries.length > STICKER_MAX_COUNT) {
+    cleanupMsg = await autoCleanupStickers(petId, entries, newId);
+  }
+
+  return { content: [{ type: 'text', text: `已收藏表情包 #${newId}（${meaning}）→ ${fileName}${cleanupMsg}` }] };
+}
+
+/**
+ * 自动清理表情包：删除使用频率最低的，直到总数 ≤ STICKER_MAX_COUNT
+ * @param {string} petId
+ * @param {Array} entries - 当前全部条目（会被 mutate）
+ * @param {number} excludeId - 刚保存的条目 ID，不参与清理
+ * @returns {string} 清理结果描述
+ */
+async function autoCleanupStickers(petId, entries, excludeId) {
+  const toRemoveCount = entries.length - STICKER_MAX_COUNT;
+  if (toRemoveCount <= 0) return '';
+
+  // 按 used 升序（未使用的排前面），相同 used 按 last_used 升序（最久没用的排前面）
+  const candidates = entries
+    .filter(e => e.id !== excludeId)
+    .sort((a, b) => {
+      const usedA = a.used || 0;
+      const usedB = b.used || 0;
+      if (usedA !== usedB) return usedA - usedB;
+      const timeA = a.last_used ? new Date(a.last_used).getTime() : 0;
+      const timeB = b.last_used ? new Date(b.last_used).getTime() : 0;
+      return timeA - timeB;
+    });
+
+  const toRemove = candidates.slice(0, toRemoveCount);
+  const removedIds = [];
+
+  for (const entry of toRemove) {
+    // 删除图片文件
+    try {
+      await tauri.workspaceDeleteFile(petId, `${STICKER_DIR}/${entry.file}`);
+    } catch { /* file may not exist */ }
+    removedIds.push(entry.id);
+  }
+
+  // 从 entries 中移除（原地修改）
+  const removeSet = new Set(removedIds);
+  for (let i = entries.length - 1; i >= 0; i--) {
+    if (removeSet.has(entries[i].id)) {
+      entries.splice(i, 1);
+    }
+  }
+
+  // 更新索引
+  try {
+    await tauri.workspaceWrite(petId, STICKER_INDEX_PATH, serializeStickerIndex(entries));
+  } catch { /* ignore */ }
+
+  return `（已自动清理 ${removedIds.length} 个低频表情包：#${removedIds.join(', #')}）`;
+}
+
+async function executeStickerList(petId) {
+  let entries = [];
+  try {
+    const content = await tauri.workspaceRead(petId, STICKER_INDEX_PATH);
+    entries = parseStickerIndex(content);
+  } catch {
+    return { content: [{ type: 'text', text: '（还没有收藏任何表情包）' }] };
+  }
+
+  if (entries.length === 0) {
+    return { content: [{ type: 'text', text: '（还没有收藏任何表情包）' }] };
+  }
+
+  const lines = entries.map(e => `#${e.id} ${e.meaning} (${e.file})`);
+  return { content: [{ type: 'text', text: `已收藏 ${entries.length} 个表情包：\n${lines.join('\n')}` }] };
+}
+
+async function executeStickerSend(petId, args, context) {
+  const { sticker_id, reply_to } = args;
+  if (!sticker_id) return { error: '缺少 sticker_id 参数' };
+
+  const { targetId, targetType, mcpServerName } = context;
+  if (!targetId) return { error: '缺少 targetId，无法发送表情包。' };
+  if (!mcpServerName) return { error: '缺少 mcpServerName，无法发送表情包。' };
+
+  // 1. 读取索引找到对应表情包
+  let entries = [];
+  try {
+    const content = await tauri.workspaceRead(petId, STICKER_INDEX_PATH);
+    entries = parseStickerIndex(content);
+  } catch {
+    return { error: '还没有收藏任何表情包，请先用 sticker_save 收藏。' };
+  }
+
+  const entry = entries.find(e => e.id === Number(sticker_id));
+  if (!entry) {
+    return { error: `找不到表情包 #${sticker_id}，请用 sticker_list 查看可用的表情包。` };
+  }
+
+  // 2. 读取表情包文件为 base64
+  const filePath = `${STICKER_DIR}/${entry.file}`;
+  let base64Data;
+  try {
+    base64Data = await tauri.workspaceReadBinary(petId, filePath);
+  } catch (e) {
+    return { error: `读取表情包文件失败: ${e}` };
+  }
+
+  if (!base64Data) {
+    return { error: '表情包文件为空' };
+  }
+
+  // 3. 通过 MCP send_image 发送
+  const sendArgs = {
+    target: targetId,
+    target_type: targetType || 'group',
+    image: base64Data, // base64 without prefix
+  };
+  if (reply_to) sendArgs.reply_to = reply_to;
+
+  try {
+    const fullToolName = `${mcpServerName}__send_image`;
+    const result = await tauri.mcp.callToolByName(fullToolName, sendArgs);
+    console.log('[Sticker] send_image result:', result);
+
+    // 更新使用计数（不影响发送结果）
+    try {
+      entry.used = (entry.used || 0) + 1;
+      entry.last_used = new Date().toISOString();
+      await tauri.workspaceWrite(petId, STICKER_INDEX_PATH, serializeStickerIndex(entries));
+    } catch (e) {
+      console.warn('[Sticker] Failed to update usage count:', e);
+    }
+
+    return { content: [{ type: 'text', text: `已发送表情包 #${sticker_id}（${entry.meaning}）` }] };
+  } catch (e) {
+    return { error: `发送表情包失败: ${e}` };
+  }
+}
+
+/**
+ * 执行表情包内置工具
+ */
+export async function executeStickerBuiltinTool(toolName, args, context) {
+  const { petId, imageUrlMap } = context;
+  if (!petId) {
+    return { error: '缺少 petId，无法执行表情包操作。' };
+  }
+
+  console.log(`[Sticker] Executing ${toolName}`, { petId });
+
+  switch (toolName) {
+    case 'sticker_save':
+      return executeStickerSave(petId, args, imageUrlMap);
+    case 'sticker_list':
+      return executeStickerList(petId);
+    case 'sticker_send':
+      return executeStickerSend(petId, args, context);
+    default:
+      return { error: `未知的表情包工具: ${toolName}` };
   }
 }

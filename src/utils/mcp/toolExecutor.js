@@ -10,7 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool } from '../workspace/socialToolExecutor.js';
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -334,6 +334,18 @@ const isValidImageBase64 = (b64) => {
   return magics.some(m => b64.startsWith(m));
 };
 
+/**
+ * 从 base64 前缀推断图片 MIME type（用于修正 octet-stream）
+ */
+const detectMimeFromBase64Prefix = (b64) => {
+  if (!b64) return null;
+  if (b64.startsWith('/9j/')) return 'image/jpeg';
+  if (b64.startsWith('iVBOR')) return 'image/png';
+  if (b64.startsWith('R0lGOD')) return 'image/gif';
+  if (b64.startsWith('UklGR')) return 'image/webp';
+  return null;
+};
+
 export const resolveImageUrls = async (images) => {
   if (!images || images.length === 0) return images;
   
@@ -347,7 +359,8 @@ export const resolveImageUrls = async (images) => {
           console.warn('[MCP] Downloaded data is not a valid image (bad magic bytes or too large), skipping:', img.data.substring(0, 80));
           continue; // 丢弃无效图片
         }
-        resolved.push({ data: result.data, mimeType: result.mime_type || img.mimeType });
+        const mime = result.mime_type || img.mimeType;
+        resolved.push({ data: result.data, mimeType: (mime === 'application/octet-stream' ? detectMimeFromBase64Prefix(result.data) : mime) || mime });
         console.log('[MCP] Downloaded image via backend:', img.data.substring(0, 80) + '...');
       } catch (e) {
         console.warn('[MCP] Failed to download image via backend:', img.data.substring(0, 80), e);
@@ -587,8 +600,9 @@ export const callLLMWithTools = async ({
           const isSocialFile = isSocialFileTool(call.name);
           const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin;
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin}`);
+          const isStickerTool = isStickerBuiltinTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool;
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool}`);
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
@@ -601,6 +615,8 @@ export const callLLMWithTools = async ({
             toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isGroupLogBuiltin && builtinToolContext) {
             toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isStickerTool && builtinToolContext) {
+            toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }
@@ -1008,12 +1024,25 @@ export const callLLMStreamWithTools = async ({
           // Validate tool name against declared tools
           const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
           const isBuiltin = isBuiltinTool(call.name);
-          if (!isBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+          const isSocialFile = isSocialFileTool(call.name);
+          const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
+          const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
+          const isStickerTool = isStickerBuiltinTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool;
+          if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
             isError = true;
             toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
           } else if (isBuiltin && builtinToolContext) {
             toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSocialFile && builtinToolContext) {
+            toolResult = await executeSocialFileTool(call.name, call.arguments, builtinToolContext);
+          } else if (isHistoryBuiltin && builtinToolContext) {
+            toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isGroupLogBuiltin && builtinToolContext) {
+            toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isStickerTool && builtinToolContext) {
+            toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }

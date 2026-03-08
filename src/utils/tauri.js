@@ -735,6 +735,14 @@ export const workspaceRenameFile = async (petId, from, to) => {
   return invoke('workspace_rename_file', { petId, from, to });
 };
 
+export const workspaceWriteBinary = async (petId, path, base64Data) => {
+  return invoke('workspace_write_binary', { petId, path, base64Data });
+};
+
+export const workspaceReadBinary = async (petId, path) => {
+  return invoke('workspace_read_binary', { petId, path });
+};
+
 export const workspaceFileExists = async (petId, path) => {
   return invoke('workspace_file_exists', { petId, path });
 };
@@ -1038,6 +1046,7 @@ const tauri = {
   workspaceListDir,
   workspaceDeleteFile,
   workspaceRenameFile,
+  workspaceWriteBinary,
   workspaceFileExists,
   workspaceGetPath,
   workspaceDeleteFolder,

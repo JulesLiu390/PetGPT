@@ -51,6 +51,39 @@ export const getMimeTypeFromPath = (filePath) => {
 };
 
 /**
+ * 从 base64 数据的 magic bytes 检测 MIME 类型
+ * @param {string} b64 - 纯 base64 字符串（不带 data: 前缀）
+ * @returns {string|null} 检测到的 MIME 类型，或 null
+ */
+export const detectMimeFromBase64 = (b64) => {
+  if (!b64 || b64.length < 8) return null;
+  const hex = atob(b64.slice(0, 16)).split('').map(c => c.charCodeAt(0).toString(16).padStart(2, '0')).join('');
+  if (hex.startsWith('ffd8ff')) return 'image/jpeg';
+  if (hex.startsWith('89504e47')) return 'image/png';
+  if (hex.startsWith('47494638')) return 'image/gif';
+  if (hex.startsWith('52494646') && hex.slice(16, 24) === '57454250') return 'image/webp';
+  if (hex.startsWith('25504446')) return 'application/pdf';
+  return null;
+};
+
+/**
+ * 修正 octet-stream MIME：尝试从 data URI 的 base64 magic bytes 检测真实类型
+ */
+export const fixOctetStream = (url, mime) => {
+  if (mime && mime !== 'application/octet-stream') return mime;
+  if (!url) return mime;
+  // data URI: 提取 base64 部分检测
+  if (url.startsWith('data:')) {
+    const commaIdx = url.indexOf(',');
+    if (commaIdx > 0) {
+      const detected = detectMimeFromBase64(url.slice(commaIdx + 1));
+      if (detected) return detected;
+    }
+  }
+  return mime;
+};
+
+/**
  * 将外部消息格式（带 image_url / file_url）标准化为内部格式
  * 
  * 外部格式 (现有 UI 使用的):
@@ -81,13 +114,13 @@ export const normalizeMessageContent = (content) => {
     
     if (part.type === 'image_url') {
       const url = part.image_url?.url || '';
-      const mimeType = part.image_url?.mime_type || part.mime_type || getMimeTypeFromPath(url);
+      const mimeType = fixOctetStream(url, part.image_url?.mime_type || part.mime_type || getMimeTypeFromPath(url));
       return { type: 'image', url, mime_type: mimeType };
     }
-    
+
     if (part.type === 'file_url') {
       const url = part.file_url?.url || '';
-      const mimeType = part.file_url?.mime_type || getMimeTypeFromPath(url);
+      const mimeType = fixOctetStream(url, part.file_url?.mime_type || getMimeTypeFromPath(url));
       const name = part.file_url?.name || url.split('/').pop() || 'file';
       const category = getMediaCategory(mimeType);
       

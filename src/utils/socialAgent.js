@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions } from './workspace/socialToolExecutor';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -252,7 +252,7 @@ function parseApiKeys(raw) {
 
 /**
  * 从 apiProviderId 解析出 LLM 调用所需的参数
- * 支持多 Key 负载均衡：apiKey 字段可包含多行，每次调用轮询选取不同的 Key
+ * 支持多 Key 负载均衡：apiKey 是 getter，每次读取自动轮询到下一个 Key
  * @param {string} apiProviderId
  * @param {string} modelName
  * @returns {Promise<{apiKey: string, baseUrl: string, apiFormat: string, modelName: string}|null>}
@@ -266,27 +266,35 @@ async function resolveApiProvider(apiProviderId, modelName) {
       return null;
     }
 
-    // 多 Key 轮询
     const keys = parseApiKeys(provider.apiKey);
-    let selectedKey;
     if (keys.length === 0) {
       addLog('error', `API provider "${provider.name}" has no valid API keys`);
       return null;
-    } else if (keys.length === 1) {
-      selectedKey = keys[0];
-    } else {
-      const idx = (apiKeyRoundRobin.get(apiProviderId) ?? -1) + 1;
-      const nextIdx = idx % keys.length;
-      apiKeyRoundRobin.set(apiProviderId, nextIdx);
-      selectedKey = keys[nextIdx];
     }
 
-    return {
-      apiKey: selectedKey,
+    const config = {
       baseUrl: provider.baseUrl,
       apiFormat: provider.apiFormat || 'openai_compatible',
       modelName: modelName || provider.defaultModel || '',
     };
+
+    if (keys.length === 1) {
+      config.apiKey = keys[0];
+    } else {
+      // 多 Key 轮询：每次读取 apiKey 自动切换到下一个
+      Object.defineProperty(config, 'apiKey', {
+        enumerable: true,
+        get() {
+          const idx = (apiKeyRoundRobin.get(apiProviderId) ?? -1) + 1;
+          const nextIdx = idx % keys.length;
+          apiKeyRoundRobin.set(apiProviderId, nextIdx);
+          return keys[nextIdx];
+        }
+      });
+      addLog('info', `API provider "${provider.name}": ${keys.length} keys, round-robin enabled`);
+    }
+
+    return config;
   } catch (e) {
     addLog('error', 'Failed to resolve API provider', e.message);
     return null;
@@ -397,7 +405,7 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
  * @param {boolean} options.sanitizeAtMe - 是否把 @me 替换为 @[已读]（用于历史消息）
  * @returns {Array<{role: string, content: string}>}
  */
-function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', ownerName = '', ownerSecret = '', nameL = '', nameR = '', msgL = '', msgR = '' } = {}) {
+function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', ownerName = '', ownerSecret = '', nameL = '', nameR = '', msgL = '', msgR = '', imageUrlMap = null } = {}) {
   if (!messages || messages.length === 0) return [];
 
   // 用于从文本中剥离所有安全分隔符和令牌的辅助函数
@@ -406,6 +414,9 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
     for (const sec of allSecrets) s = s.replaceAll(sec, '');
     return s;
   };
+
+  // 图片序号计数器（跨消息递增），用于 sticker_save 的 image_id 引用
+  let imageIdCounter = 0;
 
   const turns = [];
 
@@ -442,6 +453,11 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
 
     // 构建 content：有预描述时用文本占位，有原始图片时用多模态数组，否则用纯字符串
     const hasImageDescs = !msg.is_self && msg._imageDescs && msg._imageDescs.length > 0;
+
+    // 用原始 image_urls（resolve 前的 HTTP URL）注册到 imageUrlMap
+    // msg._images.data 在 resolveImageUrls 后已变成 base64，无法用于下载
+    const originalUrls = (!msg.is_self && msg.image_urls) ? msg.image_urls : [];
+
     // 过滤掉 Gemini 不支持的 image/gif（GIF 应在 Vision-pre 阶段已转码描述）
     if (!msg.is_self && msg._images) {
       msg._images = msg._images.filter(img => img.mimeType !== 'image/gif');
@@ -449,13 +465,25 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
     const hasImages = !msg.is_self && msg._images && msg._images.length > 0;
     let content;
 
+    // 为本条消息的所有图片分配序号并注册原始 URL 到 imageUrlMap
+    // 图片数量以 imageDescs 或 originalUrls 中较大者为准
+    const imageCount = Math.max(originalUrls.length, (hasImageDescs ? msg._imageDescs.length : 0));
+    const msgImageBaseId = imageIdCounter;
+    for (let i = 0; i < imageCount; i++) {
+      imageIdCounter++;
+      const url = originalUrls[i];
+      if (imageUrlMap && url && (url.startsWith('http://') || url.startsWith('https://'))) {
+        imageUrlMap.set(imageIdCounter, url);
+      }
+    }
+
     if (hasImageDescs && !hasImages) {
       // 全部图片已描述成功 → 纯文本（描述占位）
-      const descText = msg._imageDescs.map(d => `[图片: ${d}]`).join('\n');
+      const descText = msg._imageDescs.map((d, i) => `[图片#${msgImageBaseId + i + 1}: ${d}]`).join('\n');
       content = text + '\n' + descText;
     } else if (hasImageDescs && hasImages) {
       // 部分描述成功 + 部分保留原图 → 混合：描述文本 + 原图多模态
-      const descText = msg._imageDescs.map(d => `[图片: ${d}]`).join('\n');
+      const descText = msg._imageDescs.map((d, i) => `[图片#${msgImageBaseId + i + 1}: ${d}]`).join('\n');
       content = [
         { type: 'text', text: text + '\n' + descText },
         ...msg._images.flatMap(img => {
@@ -796,6 +824,9 @@ async function pollTarget({
     }
   }
 
+  // 图片序号 → 原始 URL 映射（用于 sticker_save 按序号引用图片）
+  const imageUrlMap = new Map();
+
   // 从逐条消息构建 user/assistant 轮次
   const historyTurns = buildTurnsFromMessages(individualMessages, {
     sanitizeAtMe: false,
@@ -806,6 +837,7 @@ async function pollTarget({
     nameR: ephemeral.nameR,
     msgL: ephemeral.msgL,
     msgR: ephemeral.msgR,
+    imageUrlMap,
   });
   
   // 如果有 compressed_summary，作为最前面的 user turn 提供上下文
@@ -926,6 +958,7 @@ async function pollTarget({
     mcpTools = [
       ...toMcp(getSocialFileToolDefinitions()),
       ...toMcp(getHistoryToolDefinitions()),
+      ...toMcp(getStickerToolDefinitions()),
     ];
   } else {
     // ── Reply: send_message + 外部 MCP + history 工具，无 builtin 读写 ──
@@ -939,15 +972,15 @@ async function pollTarget({
     } catch (e) {
       addLog('warn', 'Failed to get MCP tools, proceeding without tools', e.message, target);
     }
-    // Reply 有 history 只读工具 + 跨群日志工具
-    const historyDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
-    const historyToolsAsMcp = historyDefs.map(t => ({
+    // Reply 有 history 只读工具 + 跨群日志工具（表情包已移至 Intent 端处理）
+    const builtinDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
+    const builtinToolsAsMcp = builtinDefs.map(t => ({
       name: t.function.name,
       description: t.function.description,
       inputSchema: t.function.parameters,
       serverName: null,
     }));
-    mcpTools = [...mcpTools, ...historyToolsAsMcp];
+    mcpTools = [...mcpTools, ...builtinToolsAsMcp];
   }
 
   // ── 动态注入 Intent 建议到 send_message 工具的 num_chunks 参数描述 ──
@@ -1017,7 +1050,7 @@ async function pollTarget({
       baseUrl: llmConfig.baseUrl,
       mcpTools,
       options: { temperature: 0.7 },
-      builtinToolContext: { petId, targetId: target, memoryEnabled: true },
+      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap },
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -1291,11 +1324,11 @@ function parseBufferByDate(content) {
 async function runDailyCompress(petId, llmConfig, targetSet) {
   addLog('info', '📦 Starting daily compression...');
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
-  
+
   // 收集所有群的所有非今天的数据，按天分组
   // key: dateStr, value: Array<{ target, entries[] }>
   const dayGroups = new Map();
-  
+
   for (const target of targetSet) {
     const bufferPath = `social/group/LOG_${target}.md`;
     let content;
@@ -1303,7 +1336,7 @@ async function runDailyCompress(petId, llmConfig, targetSet) {
       content = await tauri.workspaceRead(petId, bufferPath);
     } catch { continue; } // 文件不存在
     if (!content || !content.trim()) continue;
-    
+
     const dateMap = parseBufferByDate(content);
     for (const [dateStr, entries] of dateMap) {
       if (dateStr === today) continue; // 今天的不压缩
@@ -1311,33 +1344,80 @@ async function runDailyCompress(petId, llmConfig, targetSet) {
       dayGroups.get(dateStr).push({ target, entries });
     }
   }
-  
+
   if (dayGroups.size === 0) {
     addLog('info', 'No past-day data to compress');
     return;
   }
-  
+
   // 逐天压缩
   for (const [dateStr, targetEntries] of [...dayGroups.entries()].sort()) {
-    // 拼接当天所有群的所有摘要
-    let combined = `# ${dateStr} 社交记录\n\n`;
+    let anyGroupCompressed = false;
+    const groupSummaries = []; // 收集每群摘要，用于生成全局日报
+
+    // ── 第一步：逐群压缩，写入 social/daily/{date}/{target}.md ──
     for (const { target, entries } of targetEntries) {
-      combined += `## 群/好友 ${target}\n`;
-      combined += entries.join('\n') + '\n\n';
-    }
-    
-    // LLM 压缩
-    try {
-      const compressPrompt = `你是一个信息压缩助手。请将以下一天的社交聊天记录摘要压缩成精炼的每日总结。
-保留关键事件、重要对话、群友动态，去除重复和琐碎内容。
+      const groupName = targetNamesCache.get(target) || target;
+      const groupContent = entries.join('\n');
+
+      try {
+        const perGroupPrompt = `你是一个信息压缩助手。请将以下聊天记录摘要压缩成该群/好友当天的详细总结。
+保留关键事件、重要对话、群友动态、话题走向、氛围变化，去除重复和琐碎内容。
 输出纯文本，不需要 markdown 格式标题。控制在 500 字以内。
 
-${combined}`;
-      
-      const result = await retryLLM(() => callLLMWithTools({
+群/好友：${groupName}（${target}）
+日期：${dateStr}
+
+${groupContent}`;
+
+        const result = await retryLLM(() => callLLMWithTools({
+          messages: [
+            { role: 'system', content: '你是一个精简信息的助手。' },
+            { role: 'user', content: perGroupPrompt },
+          ],
+          apiFormat: llmConfig.apiFormat,
+          apiKey: llmConfig.apiKey,
+          model: llmConfig.modelName,
+          baseUrl: llmConfig.baseUrl,
+          mcpTools: [],
+          options: { temperature: 0.3 },
+        }), { label: `DailyCompress:${target}` });
+
+        const summary = result.content || '（压缩失败）';
+        const perGroupContent = `# ${dateStr} ${groupName}\n\n${summary}\n`;
+        const perGroupPath = `social/daily/${dateStr}/${target}.md`;
+        await tauri.workspaceWrite(petId, perGroupPath, perGroupContent);
+        addLog('info', `📝 Per-group daily: ${perGroupPath}`, null, target);
+
+        groupSummaries.push({ target, groupName, summary });
+        anyGroupCompressed = true;
+      } catch (e) {
+        addLog('error', `Failed to compress daily log for ${target} on ${dateStr}`, e.message, target);
+      }
+    }
+
+    if (!anyGroupCompressed) continue; // 所有群都压缩失败，不清空 buffer
+
+    // ── 第二步：全局日报（跨群总结） ──
+    try {
+      const globalInput = groupSummaries.map(({ groupName, target, summary }) =>
+        `## ${groupName}（${target}）\n${summary}`
+      ).join('\n\n');
+
+      const globalPrompt = `你是一个信息压缩助手。以下是各群/好友今天的独立摘要，请写一篇跨群全局日报。
+重点关注：跨群事件关联、整体社交动态、值得注意的趋势。
+不要逐群复述，而是提炼跨群视角的洞察。
+输出纯文本，不需要 markdown 格式标题。控制在 800 字以内。
+
+日期：${dateStr}
+涉及 ${groupSummaries.length} 个群/好友
+
+${globalInput}`;
+
+      const globalResult = await retryLLM(() => callLLMWithTools({
         messages: [
           { role: 'system', content: '你是一个精简信息的助手。' },
-          { role: 'user', content: compressPrompt },
+          { role: 'user', content: globalPrompt },
         ],
         apiFormat: llmConfig.apiFormat,
         apiKey: llmConfig.apiKey,
@@ -1345,18 +1425,17 @@ ${combined}`;
         baseUrl: llmConfig.baseUrl,
         mcpTools: [],
         options: { temperature: 0.3 },
-      }), { label: 'DailyCompress' });
-      
-      const dailyContent = `# ${dateStr} 社交日报\n\n${result.content || '（压缩失败）'}\n`;
+      }), { label: 'DailyCompressGlobal' });
+
+      const dailyContent = `# ${dateStr} 社交日报\n\n${globalResult.content || '（压缩失败）'}\n`;
       const dailyPath = `social/daily/${dateStr}.md`;
       await tauri.workspaceWrite(petId, dailyPath, dailyContent);
-      addLog('info', `📝 Compressed daily log: ${dailyPath}`);
+      addLog('info', `📝 Global daily: ${dailyPath}`);
     } catch (e) {
-      addLog('error', `Failed to compress daily log for ${dateStr}`, e.message);
-      continue; // 压缩失败不清空，下次重试
+      addLog('error', `Failed to compress global daily log for ${dateStr}`, e.message);
     }
-    
-    // 从各群缓冲中删除已压缩日期的条目（保留今天的）
+
+    // ── 第三步：从各群缓冲中删除已压缩日期的条目 ──
     for (const { target } of targetEntries) {
       const bufferPath = `social/group/LOG_${target}.md`;
       try {
@@ -1371,7 +1450,7 @@ ${combined}`;
       }
     }
   }
-  
+
   // 更新压缩元数据
   await saveCompressMeta(petId, { lastCompressTime: new Date().toISOString() });
   addLog('info', '📦 Daily compression completed');
@@ -1652,28 +1731,37 @@ export async function startSocialLoop(config, onStatusChange) {
   ];
   const WILLINGNESS_RE = /\[(不想理|无感|等回复|有点想说|想聊|忍不住)[：:][^\]]*\]/;
   const WILLINGNESS_RE_LOOSE = /(不想理|无感|等回复|有点想说|想聊|忍不住)[：:]([^\n]*)/;
-  const FORMAT_RE = /numChunks\s*=\s*(\d+)\s+replyLen\s*=\s*(\d+)\s+at\s*=\s*(\S+)/i;
-  const FORMAT_RE_NOLEN = /numChunks\s*=\s*(\d+)\s+at\s*=\s*(\S+)/i;
+  // 格式行各字段独立提取（只出现需要的字段）
+  const FMT_NUMCHUNKS_RE = /numChunks\s*=\s*(\d+)/i;
+  const FMT_REPLYLEN_RE = /replyLen\s*=\s*(\d+)/i;
+  const FMT_AT_RE = /at\s*=\s*(\S+)/i;
+  // 匹配整行格式行（包含至少一个 key=value 的行）
+  const FMT_LINE_RE = /^(?:(?:numChunks|replyLen|at)\s*=\s*\S+[\s]*)+$/im;
   const parseWillingness = (rawText) => {
-    // 解析回复格式行：numChunks=N replyLen=N at=无/某人
-    let fmtMatch = rawText.match(FORMAT_RE);
-    let numChunks = 1, replyLen = null, atRaw = '无';
+    // 解析回复格式行：按 key=value 逐个提取，缺失的字段为 null/默认值
+    let numChunks = 1, replyLen = null, atRaw = null;
     let fmtStr = '';
-    if (fmtMatch) {
-      numChunks = parseInt(fmtMatch[1], 10);
-      replyLen = parseInt(fmtMatch[2], 10);
-      atRaw = fmtMatch[3];
-      fmtStr = fmtMatch[0];
+
+    const fmtLineMatch = rawText.match(FMT_LINE_RE);
+    if (fmtLineMatch) {
+      fmtStr = fmtLineMatch[0];
+      const nc = fmtStr.match(FMT_NUMCHUNKS_RE);
+      if (nc) numChunks = parseInt(nc[1], 10);
+      const rl = fmtStr.match(FMT_REPLYLEN_RE);
+      if (rl) replyLen = parseInt(rl[1], 10);
+      const at = fmtStr.match(FMT_AT_RE);
+      if (at) atRaw = at[1];
     } else {
-      // 兼容旧格式（无 replyLen）
-      const fmtMatch2 = rawText.match(FORMAT_RE_NOLEN);
-      if (fmtMatch2) {
-        numChunks = parseInt(fmtMatch2[1], 10);
-        atRaw = fmtMatch2[2];
-        fmtStr = fmtMatch2[0];
-      }
+      // 兼容：即使没匹配到整行，也尝试逐个提取
+      const nc = rawText.match(FMT_NUMCHUNKS_RE);
+      if (nc) { numChunks = parseInt(nc[1], 10); fmtStr = nc[0]; }
+      const rl = rawText.match(FMT_REPLYLEN_RE);
+      if (rl) { replyLen = parseInt(rl[1], 10); fmtStr += ' ' + rl[0]; }
+      const at = rawText.match(FMT_AT_RE);
+      if (at) { atRaw = at[1]; fmtStr += ' ' + at[0]; }
+      fmtStr = fmtStr.trim();
     }
-    const atTarget = (atRaw === '无' || atRaw === '无') ? null : atRaw;
+    const atTarget = (!atRaw || atRaw === '无') ? null : atRaw;
     // 去掉格式行后再解析标签
     const cleanText = fmtStr ? rawText.replace(fmtStr, '').trim() : rawText;
 
@@ -1893,11 +1981,15 @@ export async function startSocialLoop(config, onStatusChange) {
     const MAX_MSGS = 30;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
-    // enableImages=false 时剥离图片；否则保留（让 Intent 也能理解图片语境）
-    const shouldStripImages = config.enableImages === false;
-    const recent = buf.messages.slice(-MAX_MSGS).map(m =>
-      shouldStripImages ? { ...m, _images: [] } : m
-    );
+    // Intent 只用文本描述（_imageDescs），剥离未 resolve 的原始图片 URL
+    // 避免把未知 MIME 的原始 URL 传给 Gemini（会因 GIF 等不支持格式报错）
+    const recent = buf.messages.slice(-MAX_MSGS).map(m => {
+      if (config.enableImages === false) return { ...m, _images: [] };
+      // 保留 _imageDescs（文字描述），剥离未经 resolve 的原始 _images
+      // 只保留已 resolve 为 base64 的图片（data 不以 http 开头的）
+      const safeImages = (m._images || []).filter(img => img.data && !img.data.startsWith('http'));
+      return { ...m, _images: safeImages };
+    });
     // 生成本轮临时安全令牌（每次评估都不同）
     const _rnd = () => crypto.randomUUID().slice(0, 6);
     const eph = {
@@ -1949,8 +2041,15 @@ export async function startSocialLoop(config, onStatusChange) {
         .join('\n');
       const sender = msg.sender_name || msg.sender_id || 'unknown';
 
-      // 临时 resolve 图片 URL → base64（不修改 buffer 原始数据，避免内存膨胀）
+      // 临时 resolve 图片 URL → base64（不保留 base64 数据到 buffer，避免内存膨胀）
       const resolvedImages = await resolveImageUrls(msg._images.map(img => ({ ...img })));
+
+      // 将 resolve 检测到的真实 mimeType 写回 buffer（修正 fetcher 硬编码的 image/jpeg）
+      for (let j = 0; j < resolvedImages.length && j < msg._images.length; j++) {
+        if (resolvedImages[j].mimeType && resolvedImages[j].mimeType !== msg._images[j].mimeType) {
+          msg._images[j].mimeType = resolvedImages[j].mimeType;
+        }
+      }
 
       const descs = [];
       for (let j = 0; j < resolvedImages.length; j++) {
@@ -2010,7 +2109,7 @@ export async function startSocialLoop(config, onStatusChange) {
    *
    * @param {string} target - 群号/好友号
    */
-  const intentLoop = async (target) => {
+  const intentLoop = async (target, targetType) => {
     const state = getIntentState(target);
     const tName = () => targetNamesCache.get(target) || target;
 
@@ -2051,8 +2150,9 @@ export async function startSocialLoop(config, onStatusChange) {
           // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
           await preprocessBufferImages(target);
 
-          // 构建只读工具集（与 Reply 相同的 history + groupLog + 外部 MCP 只读工具）
-          const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
+          // 构建工具集（history + groupLog + sticker_send/list + 外部 MCP 只读工具）
+          const intentStickerDefs = getStickerToolDefinitions().filter(t => t.function.name !== 'sticker_save');
+          const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions(), ...intentStickerDefs];
           let intentMcpTools = intentToolDefs.map(t => ({
             name: t.function.name,
             description: t.function.description,
@@ -2072,6 +2172,7 @@ export async function startSocialLoop(config, onStatusChange) {
           } catch { /* 非致命：外部工具不可用不影响 Intent 评估 */ }
 
           let intentResult;
+          let idleStickerSent = false;
           for (let attempt = 0; ; attempt++) {
             // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
             const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
@@ -2096,6 +2197,7 @@ export async function startSocialLoop(config, onStatusChange) {
               lurkMode: targetLurkMode,
             });
 
+            idleStickerSent = false;
             try {
               const raw = await callLLMWithTools({
                 messages: [
@@ -2111,8 +2213,9 @@ export async function startSocialLoop(config, onStatusChange) {
                 options: {
                   temperature: 0.4,
                 },
-                builtinToolContext: { petId: config.petId, targetId: target, memoryEnabled: false },
+                builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false },
                 onToolCall: (name, args) => {
+                  if (name === 'sticker_send') idleStickerSent = true;
                   addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
                 },
               });
@@ -2143,10 +2246,17 @@ export async function startSocialLoop(config, onStatusChange) {
               numChunks: w.numChunks,
               replyLen: w.replyLen,
               atTarget: w.atTarget,
+              stickerSent: idleStickerSent,
             };
             state.history.push(entry);
             if (state.history.length > INTENT_HISTORY_MAX) state.history.shift();
-            const fmtTagIdle = w.level >= 3 ? ` 分${w.numChunks}条 ${w.replyLen ?? '?'}字${w.atTarget && w.atTarget !== '无' ? ` @${w.atTarget}` : ''}` : '';
+            const fmtParts = [];
+            if (w.level >= 3) {
+              fmtParts.push(`分${w.numChunks}条 ${w.replyLen ?? '?'}字`);
+              if (w.atTarget && w.atTarget !== '无') fmtParts.push(`@${w.atTarget}`);
+            }
+            if (idleStickerSent) fmtParts.push('📎sticker已发');
+            const fmtTagIdle = fmtParts.length > 0 ? ` ${fmtParts.join(' ')}` : '';
             addLog('intent', `🧠 [${tName()}] → sleeping ${w.label}`, entry.content + fmtTagIdle, target);
           } else {
             addLog('intent', `🧠 [${tName()}] → sleeping (LLM error)`, null, target);
@@ -2154,6 +2264,11 @@ export async function startSocialLoop(config, onStatusChange) {
 
           // 解锁 Intent 门控
           intentGate.delete(target);
+
+          // idle-eval 也可能评出 ≥ 3，需要唤醒 Reply
+          if (w && w.level >= 3 && !intentGate.has(target)) {
+            replyWakeFlag.set(target, { atMe: false });
+          }
 
           // 推进 intent 水位线到最新
           const bufBeforeSleep = dataBuffer.get(target);
@@ -2225,8 +2340,9 @@ export async function startSocialLoop(config, onStatusChange) {
         addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
         state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
 
-        // 构建只读工具集（与 Reply 相同的 history + groupLog + 外部 MCP 只读工具）
-        const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
+        // 构建工具集（history + groupLog + sticker_send/list + 外部 MCP 只读工具）
+        const intentStickerDefs = getStickerToolDefinitions().filter(t => t.function.name !== 'sticker_save');
+        const intentToolDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions(), ...intentStickerDefs];
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
@@ -2257,6 +2373,7 @@ export async function startSocialLoop(config, onStatusChange) {
         await preprocessBufferImages(target);
 
         let intentResult;
+        let intentStickerSent = false; // 追踪 Intent 是否通过工具调用发送了表情包
         for (let attempt = 0; ; attempt++) {
           // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
           const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
@@ -2281,6 +2398,7 @@ export async function startSocialLoop(config, onStatusChange) {
             lurkMode: targetLurkMode,
           });
 
+          intentStickerSent = false; // 每次重试重置
           try {
             const raw = await callLLMWithTools({
               messages: [
@@ -2296,8 +2414,9 @@ export async function startSocialLoop(config, onStatusChange) {
               options: {
                 temperature: 0.4,
               },
-              builtinToolContext: { petId: config.petId, targetId: target, memoryEnabled: false },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false },
               onToolCall: (name, args) => {
+                if (name === 'sticker_send') intentStickerSent = true;
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
               },
             });
@@ -2325,7 +2444,9 @@ export async function startSocialLoop(config, onStatusChange) {
         // ── 解析纯文本输出（五档回复意愿） ──
         const rawText = (intentResult.content || '').trim();
         const w = parseWillingness(rawText);
-        const isIdle = !rawText || w.level <= 2;
+        // sticker-only 场景：Intent 通过工具调用已发送表情包，且不需要发文字 → 不触发 Reply
+        const isStickerOnly = intentStickerSent && w.level < 3;
+        const isIdle = !rawText || (w.level <= 2 && !isStickerOnly);
         const entry = {
           timestamp: new Date().toISOString(),
           idle: isIdle,
@@ -2335,6 +2456,7 @@ export async function startSocialLoop(config, onStatusChange) {
           numChunks: w.numChunks,
           replyLen: w.replyLen,
           atTarget: w.atTarget,
+          stickerSent: intentStickerSent,
         };
 
         state.history.push(entry);
@@ -2359,10 +2481,14 @@ export async function startSocialLoop(config, onStatusChange) {
           replyWakeFlag.set(target, { atMe: wasUrgentAtMe });
         }
 
-        if (isIdle) {
+        if (isIdle && !isStickerOnly) {
           addLog('intent', `🧠 [${tName()}] → idle ${w.label}`, entry.content, target);
         } else {
-          const fmtTag = `分${w.numChunks}条 ${w.replyLen ?? '?'}字${w.atTarget && w.atTarget !== '无' ? ` @${w.atTarget}` : ''}`;
+          const fmtParts = [];
+          if (w.replyLen != null) fmtParts.push(`分${w.numChunks}条 ${w.replyLen}字`);
+          if (w.atTarget && w.atTarget !== '无') fmtParts.push(`@${w.atTarget}`);
+          if (intentStickerSent) fmtParts.push('📎sticker已发');
+          const fmtTag = fmtParts.join(' ');
           addLog('intent', `🧠 [${tName()}] ${w.label}`, `${entry.content}\n${fmtTag}`, target);
         }
 
@@ -2953,7 +3079,7 @@ export async function startSocialLoop(config, onStatusChange) {
   // 启动层 4: 每个 target 独立的 Intent Loop（意图分析）
   for (const t of targets) {
     getIntentState(t.target); // 预注册
-    intentLoop(t.target); // fire-and-forget
+    intentLoop(t.target, t.targetType); // fire-and-forget
   }
   
   onStatusChange?.(true);

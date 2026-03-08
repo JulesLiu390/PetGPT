@@ -10,6 +10,9 @@ import { formatCurrentTime } from './timeInjection';
 import * as tauri from './tauri';
 import { SOCIAL_FILE_MAX_CHARS } from './workspace/socialToolExecutor';
 
+/** 表情包索引路径 */
+const STICKER_INDEX_PATH = 'social/stickers/index.yaml';
+
 /** 社交文件截断上限（统一） */
 const SOCIAL_FILE_TRUNCATE = SOCIAL_FILE_MAX_CHARS;
 
@@ -76,6 +79,29 @@ function socialMemoryGuidance(content, targetName, targetId) {
     return '社交记忆快满了。请整理，移除过时内容，合并重复信息。' + isolationRule;
   }
   return '遇到跨群社交态势变化时，更新社交记忆。' + isolationRule;
+}
+
+/**
+ * 安全读取表情包索引（返回简洁的 "#id 含义" 列表文本，供 Intent prompt 注入）
+ */
+export async function readStickerIndexForPrompt(petId) {
+  try {
+    const content = await tauri.workspaceRead(petId, STICKER_INDEX_PATH);
+    if (!content) return null;
+    // 解析 YAML 格式的 index.yaml → 提取 id + meaning
+    const lines = [];
+    const entries = content.split(/^- /m).filter(Boolean);
+    for (const entry of entries) {
+      const idMatch = entry.match(/id:\s*(\d+)/);
+      const meaningMatch = entry.match(/meaning:\s*(.+)/);
+      if (idMatch && meaningMatch) {
+        lines.push(`#${idMatch[1]} ${meaningMatch[1].trim()}`);
+      }
+    }
+    return lines.length > 0 ? lines.join('\n') : null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -408,7 +434,12 @@ social/
 ├── CONTACTS.md               — 联系人索引（每人一行：QQ号、昵称、来源群、一句话印象）
 ├── SOCIAL_MEMORY.md          — 跨群社交态势（跨群事件、社交策略反思，不记人物信息）
 ├── REPLY_STRATEGY.md         — 回复策略
-└── daily/*.md                — 日报（系统自动生成，只读）
+├── stickers/                  — 表情包收藏夹
+│   ├── index.yaml             — 表情包索引（序号 + 含义，系统维护，只读）
+│   └── stk_NNN.{ext}         — 表情包图片文件
+└── daily/                     — 日报（系统自动生成，只读）
+    ├── {date}.md              — 全局跨群日报
+    └── {date}/{target}.md     — 每群独立日报
 
 ⚠️ 内容分区规则：
 - 群内梗、群话题、群氛围 → social/group/RULE_${targetId}.md
@@ -419,8 +450,19 @@ social/
 
 历史查询工具（只读）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文
-- daily_read(date?)：读取跨所有群的每日社交摘要（默认昨天）
-- daily_list()：列出有哪些日期的日报可读
+- daily_read(date?, target?)：读取每日摘要。不传 target 读全局跨群日报；传 target 读该群的详细日报
+- daily_list()：列出有哪些日期的日报可读（含每群独立日报信息）
+
+表情包收藏工具：
+- sticker_save(image_id, meaning)：收藏一个表情包。image_id 是消息中 [图片#N: ...] 的序号 N，meaning 是你对这个表情包含义的描述
+- sticker_list()：查看已收藏的所有表情包列表
+
+🎯 表情包收藏指南：
+- 聊天消息中的图片会标注为 [图片#N: 描述...]，N 就是 image_id
+- 看到有趣、实用、表现力强的表情包/贴纸时，用 sticker_save(image_id=N, meaning="...") 收藏
+- meaning 要简洁生动，描述表情包传达的情绪或用途（如"无语翻白眼"、"疯狂点赞"、"社死现场"）
+- 不要收藏普通照片或截图，只收藏表情包/贴纸/梗图
+- 可以先 sticker_list 看看已有哪些，避免重复收藏相似表情
 
 观察完毕后，输出"[沉默]"。不要输出任何其他纯文本。`;
 }
@@ -482,9 +524,9 @@ function buildReplyToolInstruction(targetName, targetId) {
 
 历史查询工具（只读）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
-- daily_read(date?)：读取跨所有群的每日社交摘要（默认昨天）。注意：日报包含所有群的信息，只关注与${groupLabel}相关的部分
-- daily_list()：列出有哪些日期的日报可读
-- 有人提到"之前的事"但你没印象时，用 history_read 搜当前群记录；想了解跨群全局动态，用 daily_read 看日报
+- daily_read(date?, target?)：读取每日摘要。传 target 读该群详细日报（推荐），不传读全局跨群日报
+- daily_list()：列出有哪些日期的日报可读（含每群独立日报信息）
+- 有人提到"之前的事"但你没印象时，用 history_read 搜当前群记录；想回忆昨天发生了什么，用 daily_read 读当群日报
 
 跨群日志工具（只读，查看其他群的 Observer 日志）：
 - group_log_list()：列出所有有日志记录的群（群号+群名）
@@ -645,23 +687,43 @@ export async function buildIntentSystemPrompt({
     sections.push(`# 时间提示\n距离上次评估已经过去了约 ${sinceLastEvalMin} 分钟。`);
   }
 
-  // === 工具说明（只读） ===
-  sections.push(`# 可用工具（只读）
-你有以下只读工具可以在需要时调用。大部分情况下你不需要用工具——只在你对聊天中提到的某件事缺乏背景信息、或需要核实事实时才使用。
+  // === 表情包收藏（注入索引供 Intent 直接发送） ===
+  if (lurkMode !== 'full-lurk') {
+    const stickerIndex = await readStickerIndexForPrompt(petId);
+    if (stickerIndex) {
+      sections.push(`# 表情包收藏
+${stickerIndex}
 
-历史查询工具：
+想发表情包时，直接调用 sticker_send 工具（sticker_id=序号）。这是发送表情包的唯一方式——写在文本里不会发送。
+- 当表情包比文字更能表达你的情绪时（好笑、无语、赞同等纯情绪回应），直接调用 sticker_send 就够了，不需要再发文字
+- 发表情包不受回复意愿限制——即使意愿 < 3，你也可以调用 sticker_send 来回应
+- 想发文字 + 表情包时：先调用 sticker_send，再在意愿标签后写格式行（numChunks + replyLen）
+`);
+    }
+  }
+
+  // === 工具说明 ===
+  sections.push(`# 可用工具
+你有以下工具可以在需要时调用。大部分情况下你不需要用工具——只在你对聊天中提到的某件事缺乏背景信息、或需要核实事实时才使用。
+
+历史查询工具（只读）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
-- daily_read(date?)：读取跨所有群的每日社交摘要（默认昨天）
+- daily_read(date?, target?)：读取每日摘要。传 target 读该群详细日报，不传读全局跨群日报
 - daily_list()：列出有哪些日期的日报可读
 
-跨群日志工具：
+跨群日志工具（只读）：
 - group_log_list()：列出所有有日志记录的群
 - group_log_read(targets, query?, start_time?, end_time?)：搜索指定群的 Observer 日志
+
+表情包工具：
+- sticker_send(sticker_id)：发送一个已收藏的表情包到当前群聊（序号见上方表情包收藏列表）
+- sticker_list()：查看已收藏的表情包列表
 
 外部搜索工具（如果已配置）：
 - 你可能还有 tavily_search、fetch 等外部搜索工具可用。当群友在辩论中引用了事实、数据或信息源，而你不确定真假时，用这些工具核实后再下判断
 
-⚠️ 不要每次评估都调工具。只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。`);
+⚠️ 不要每次评估都调查询/搜索工具。只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。
+💡 sticker_send 不受此限制——觉得合适就发。`);
 
   // === 评估要求 ===
   sections.push(`# 评估要求
@@ -713,17 +775,23 @@ export async function buildIntentSystemPrompt({
 
 第 5 行（最后一行）—— 回复格式（仅当意愿 ≥ 3 时才需要）：
 ⚠️ 这一行必须是你输出的最后一行，后面不能再有任何文字。
-⚠️ 意愿 ≤ 2（不想理/无感/等回复）时，不需要这一行，第 4 行的标签就是最后一行。
-格式为：numChunks=X replyLen=N at=无
-- numChunks = 消息拆分条数（整数）。真人聊天很少一次发一大段话，而是分几条打字发出来。拆分规则：
+⚠️ 意愿 ≤ 2 时，不需要这一行，第 4 行的标签就是最后一行。
+⚠️ 表情包通过调用 sticker_send 工具发送，不要写在格式行里。
+格式为（只写需要的字段，不需要的不写）：
+- numChunks=X —— 消息拆分条数（整数）。拆分规则：
   · 纯吐槽/接梗（≤10字）→ numChunks=1（太短不需要拆）
   · 正常回复（10-30字）→ numChunks=2（拆成两条短消息，更像真人节奏）
   · 稍长回复（大于30字）→ numChunks=1（按语义自然断句拆分）
   · 核心原则：想象你在手机上打字——你会把这段话分几次按发送键？那就是 numChunks 的值
-- replyLen = 建议回复字数（整数）。接梗/吐槽/附和通常 5-15 字；回答问题/表达观点通常 15-40 字；需要展开论述通常 40 字以上。除非必须长篇大论，否则一般 5-20 字就够（这次没说完下次继续说）
-- at = 要@的人的名字或QQ号，不需要@时写「无」
-- 90% 的情况下 at=无——群聊上下文已经足够清楚你在回复谁。只有这些情况才考虑@：你要同时回复多人、很多人同时在聊不@会搞不清你在回谁、隔了非常多条消息对方大概率没注意到你在说话
+- replyLen=N —— 建议回复字数（整数）。接梗/吐槽/附和通常 5-15 字；回答问题/表达观点通常 15-40 字；需要展开论述通常 40 字以上。除非必须长篇大论，否则一般 5-20 字就够（这次没说完下次继续说）
+- at=某人 —— 要@的人的名字或QQ号，不需要@时不写这个字段
+  90% 的情况下不需要@。只有这些情况才考虑@：你要同时回复多人、很多人同时在聊不@会搞不清你在回谁、隔了非常多条消息对方大概率没注意到你在说话
 - 不要用 JSON、不要用 Markdown、不要加任何格式标记（不要用代码围栏、不要用引号包裹）
+
+⚠️ 表情包和文字是独立的：
+- 只发表情包 → 调用 sticker_send 工具，不需要格式行，意愿可以 < 3
+- 只发文字 → 意愿 ≥ 3，写格式行（numChunks + replyLen）
+- 文字 + 表情包 → 先调用 sticker_send 工具，再写格式行
 
 ❗ 回复意愿和回复字数是完全独立的两个维度：
 - 意愿 = 你想不想说话（主观冲动）
@@ -731,14 +799,14 @@ export async function buildIntentSystemPrompt({
 - [忍不住] 可以只需要5字——非说不可，但一句吐槽就够了
 - [有点想说] 可以需要50字——兴趣一般，但要说的事情恰巧比较复杂
 
-示例输出（注意每个示例：回顾、氛围、想法、标签行，意愿≥3时再加格式行）：
+示例输出（注意每个示例：回顾、氛围、想法、标签行，需要回复时再加格式行）：
 
-示例 1（想聊）：
+示例 1（想聊，发文字）：
 回顾：我还没有在这个群说过话。
 氛围：张三在分享一个技术观点，李四在附和，讨论节奏中等，没有人在跟我说话。
 想法：张三说的技术观点有漏洞，想反驳但论据还没想好。
 [想聊：有话要说但还在组织语言]
-numChunks=2 replyLen=35 at=无
+numChunks=2 replyLen=35
 
 示例 2（无感）：
 回顾：我还没有在这个群说过话。
@@ -746,18 +814,18 @@ numChunks=2 replyLen=35 at=无
 想法：群里在讨论跟我无关的话题，看看就好。
 [无感：跟我没什么关系]
 
-示例 3（忍不住）：
+示例 3（忍不住，发文字）：
 回顾：我之前夸了张三的项目，张三说了谢谢。
 氛围：张三刚夸了我，气氛友好，对话球在我这边。
 想法：被群友夸了挺开心的，想继续聊。
 [忍不住：不回不礼貌而且我也想接话]
-numChunks=2 replyLen=15 at=无
+numChunks=2 replyLen=15
 
-示例 4（无感）：
+示例 4（无感，发表情包 → 调用 sticker_send 工具）：
 回顾：我还没有在这个群说过话。
-氛围：群里在发表情包和日常问候，节奏很慢，纯水聊。
-想法：就是一些日常水聊，没什么特别的。
-[无感：平平淡淡的日常]
+氛围：张三说了件搞笑的事，大家在哈哈哈，气氛欢乐。
+想法：确实好笑，发个表情包乐一下就行。（调用 sticker_send 发送 #3）
+[无感：不需要说话但想表达一下]
 
 示例 5（不想理）：
 回顾：我还没有在这个群说过话。
@@ -765,12 +833,12 @@ numChunks=2 replyLen=15 at=无
 想法：他们在聊政治我不想掺和。
 [不想理：这种话题碰都不想碰]
 
-示例 6（有点想说）：
+示例 6（有点想说，发文字）：
 回顾：我刚说了一个梗，没人接。
 氛围：有人抛了一个新梗，几个人在猜答案，气氛活跃，没人针对我的话回应。
 想法：这个新梗我也知道但说不说都行。
 [有点想说：知道答案但不说也没损失]
-numChunks=1 replyLen=8 at=无
+numChunks=1 replyLen=8
 
 示例 7（等回复）：
 回顾：我刚回答了张三的问题，还没人回应。
@@ -789,14 +857,14 @@ numChunks=1 replyLen=8 at=无
 氛围：有人问了一个简单的问题，其他人还没回，气氛平淡。
 想法：这个事情一句话就能回。
 [忍不住：必须开口]
-numChunks=1 replyLen=5 at=无
+numChunks=1 replyLen=5
 
-示例 10（忍不住，长回复）：
+示例 10（忍不住，文字+表情包 → 先调用 sticker_send 工具，再写格式行）：
 回顾：我之前回了一条闲聊，没人理。
-氛围：姐姐抛了一个深度问题，群里安静等回答，这是个全新话题跟之前的无关。
-想法：姐姐问的问题很深，想认真回答。
+氛围：姐姐分享了一个超离谱的经历，群里都在起哄。
+想法：太离谱了，想吐槽一句再配个无语表情包。（调用 sticker_send 发送 #1）
 [忍不住：不说会难受]
-numChunks=3 replyLen=60 at=无
+numChunks=1 replyLen=12
 
 示例 11（想聊 + @）：
 回顾：我还没有在这个群说过话。
@@ -814,7 +882,7 @@ numChunks=2 replyLen=20 at=张三
 - 大多数日常水聊应该是 [无感] 或 [不想理]，不要对什么都想参与
 - 回复前先想：你要说的话是否已经有群友表达过类似观点？如果是，选 [无感]，不要+1
 - 如果你只是想"刷存在感"但没有实质内容要说，选 [无感] 或 [不想理]。有价值的内容才值得开口
-- 如果你的回复只会是"哈哈"、"确实"、"是的"、"草"之类的废话，选 [无感]——这些不是有意义的发言
+- 如果你的回复只会是"哈哈"、"确实"、"是的"、"草"之类的废话，选 [无感]——这些不是有意义的发言。但这恰恰是发表情包的好时机，直接调用 sticker_send
 - 严禁自恋：如果话题不是在讨论你，不要强行把话题引向自己，不要复读自己的设定或往自己身上扯。讨论话题本身即可
 - 被群友批评话太多、频率过高时，立即大幅降低意愿——连续多轮选 [无感] 或 [不想理]，学习"潜水"，至少等其他人聊了 5-10 条消息后再考虑参与
 🚫 别三连铁律：检查对话记录中**最近 3 条消息**（不是全部历史），如果其中 ≥ 2 条是你（assistant）的发言，说明你正在刷屏，强制选 [等回复] 或更低。但如果你的上一条消息之后已经有 ≥ 5 条其他人的消息，"三连"计数器重置——此时你的旧发言已经被冲走，不算连续发言

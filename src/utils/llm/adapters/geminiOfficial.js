@@ -11,7 +11,7 @@
  * - Office 文档 (docx/xlsx/pptx): 不支持 (降级为文本引用)
  */
 
-import { normalizeMessages, expandDocumentPartsToText } from '../normalize.js';
+import { normalizeMessages, expandDocumentPartsToText, detectMimeFromBase64 } from '../normalize.js';
 import { readFileAsBase64, parseDataUri, isGeminiSupportedMime, getFileFallbackText, isFileTooLarge } from '../media.js';
 
 const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta';
@@ -184,9 +184,25 @@ export const convertMessages = async (messages) => {
       }
       
       // 媒体类型 (image, video, audio, file)
-      const mimeType = part.mime_type;
+      // 先读取文件（如果需要），再修正 octet-stream，最后判断是否支持
+      let dataUri = part.url;
+      if (!dataUri?.startsWith('data:') && !dataUri?.startsWith('http')) {
+        console.log('[Gemini] URL is not data URI, attempting to read file:', part.url?.substring(0, 100));
+        dataUri = await readFileAsBase64(part.url);
+        console.log('[Gemini] readFileAsBase64 result:', dataUri ? 'success (length: ' + dataUri.length + ')' : 'null/failed');
+      }
+
+      // 修正 octet-stream：从 base64 magic bytes 检测真实 MIME
+      let mimeType = part.mime_type;
+      if (mimeType === 'application/octet-stream' && dataUri?.startsWith('data:')) {
+        const commaIdx = dataUri.indexOf(',');
+        if (commaIdx > 0) {
+          mimeType = detectMimeFromBase64(dataUri.slice(commaIdx + 1)) || mimeType;
+        }
+      }
+
       const isSupported = isGeminiSupportedMime(mimeType);
-      
+
       // 调试日志
       console.log('[Gemini] Processing media part:', {
         type: part.type,
@@ -195,19 +211,11 @@ export const convertMessages = async (messages) => {
         urlPrefix: part.url?.substring(0, 50),
         hasDataPrefix: part.url?.startsWith('data:')
       });
-      
+
       if (!isSupported) {
         // 不支持的类型，降级为文本
         parts.push({ text: getFileFallbackText(part) });
         continue;
-      }
-      
-      // 尝试读取文件
-      let dataUri = part.url;
-      if (!dataUri?.startsWith('data:') && !dataUri?.startsWith('http')) {
-        console.log('[Gemini] URL is not data URI, attempting to read file:', part.url?.substring(0, 100));
-        dataUri = await readFileAsBase64(part.url);
-        console.log('[Gemini] readFileAsBase64 result:', dataUri ? 'success (length: ' + dataUri.length + ')' : 'null/failed');
       }
       
       if (!dataUri) {
@@ -229,9 +237,14 @@ export const convertMessages = async (messages) => {
         continue;
       }
       
+      // 修正 octet-stream：从 base64 magic bytes 检测真实 MIME
+      const finalMime = (parsed.mimeType === 'application/octet-stream')
+        ? (detectMimeFromBase64(parsed.data) || part.mime_type || parsed.mimeType)
+        : parsed.mimeType;
+
       parts.push({
         inline_data: {
-          mime_type: parsed.mimeType,
+          mime_type: finalMime,
           data: parsed.data
         }
       });

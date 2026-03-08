@@ -77,6 +77,31 @@ pub fn workspace_list_dir(
         .map_err(|e| e.to_string())
 }
 
+/// Write binary data (base64-encoded) to a file in the pet's workspace
+#[tauri::command]
+pub fn workspace_write_binary(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+    base64_data: String,
+) -> Result<String, String> {
+    workspace
+        .write_binary(&pet_id, &path, &base64_data)
+        .map_err(|e| e.to_string())
+}
+
+/// Read a file as base64-encoded string (for binary files like images)
+#[tauri::command]
+pub fn workspace_read_binary(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+) -> Result<String, String> {
+    workspace
+        .read_binary(&pet_id, &path)
+        .map_err(|e| e.to_string())
+}
+
 /// Delete a single file in the pet's workspace
 #[tauri::command]
 pub fn workspace_delete_file(

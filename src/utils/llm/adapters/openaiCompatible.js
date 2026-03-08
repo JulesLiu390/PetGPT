@@ -9,7 +9,7 @@
  * - 文档: 不支持 (降级为文本引用)
  */
 
-import { normalizeMessages, extractTextFromContent, expandDocumentPartsToText } from '../normalize.js';
+import { normalizeMessages, extractTextFromContent, expandDocumentPartsToText, detectMimeFromBase64 } from '../normalize.js';
 import { readFileAsBase64, parseDataUri, isOpenAISupportedMime, getFileFallbackText } from '../media.js';
 
 // Provider 默认 URL 映射
@@ -109,6 +109,15 @@ export const convertMessages = async (messages) => {
           }
         }
         
+        // 修正 data URI 中的 octet-stream MIME
+        if (imageUrl.startsWith('data:application/octet-stream')) {
+          const parsed = parseDataUri(imageUrl);
+          if (parsed) {
+            const realMime = detectMimeFromBase64(parsed.data) || 'image/jpeg';
+            imageUrl = `data:${realMime};base64,${parsed.data}`;
+          }
+        }
+
         convertedContent.push({
           type: 'image_url',
           image_url: { url: imageUrl }

@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 // ============ Error Types ============
 
@@ -150,6 +151,43 @@ impl WorkspaceEngine {
         fs::write(&full_path, content).map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
 
         Ok(format!("成功写入 {} 字节到 {}", bytes, path))
+    }
+
+    /// Write binary data (base64-encoded) to a file in the workspace.
+    pub fn write_binary(
+        &self,
+        pet_id: &str,
+        path: &str,
+        base64_data: &str,
+    ) -> Result<String, WorkspaceError> {
+        let full_path = self.resolve_safe_path(pet_id, path)?;
+
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
+        }
+
+        let bytes = BASE64.decode(base64_data.as_bytes())
+            .map_err(|e| WorkspaceError::WriteError(format!("base64 decode failed: {}", e)))?;
+        let len = bytes.len();
+        fs::write(&full_path, &bytes).map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
+
+        Ok(format!("成功写入 {} 字节到 {}", len, path))
+    }
+
+    /// Read a file as base64-encoded string (for binary files like images).
+    pub fn read_binary(
+        &self,
+        pet_id: &str,
+        path: &str,
+    ) -> Result<String, WorkspaceError> {
+        let full_path = self.resolve_safe_path(pet_id, path)?;
+
+        if !full_path.exists() {
+            return Err(WorkspaceError::FileNotFound(path.to_string()));
+        }
+
+        let bytes = fs::read(&full_path).map_err(|e| WorkspaceError::ReadError(e.to_string()))?;
+        Ok(BASE64.encode(&bytes))
     }
 
     /// Edit a file by exact text find-and-replace.

@@ -3710,8 +3710,14 @@ const SocialPanel = ({ assistants, apiProviders }) => {
       const saved = await loadSocialConfig(selectedPetId);
       if (saved) {
         setConfig({ ...saved, petId: selectedPetId });
-        setGroupsText((saved.watchedGroups || []).join(', '));
-        setFriendsText((saved.watchedFriends || []).join(', '));
+        const serverTargets = saved.targetsByServer?.[saved.mcpServerName];
+        if (serverTargets) {
+          setGroupsText((serverTargets.groups || []).join(', '));
+          setFriendsText((serverTargets.friends || []).join(', '));
+        } else {
+          setGroupsText((saved.watchedGroups || []).join(', '));
+          setFriendsText((saved.watchedFriends || []).join(', '));
+        }
       } else {
         setConfig(prev => ({
           ...prev,
@@ -3747,18 +3753,43 @@ const SocialPanel = ({ assistants, apiProviders }) => {
   }, [assistants, selectedPetId]);
 
   const handleConfigChange = (field, value) => {
-    setConfig(prev => ({ ...prev, [field]: value }));
+    if (field === 'mcpServerName') {
+      const oldServer = config.mcpServerName;
+      const currentGroups = groupsText.split(',').map(s => s.trim()).filter(Boolean);
+      const currentFriends = friendsText.split(',').map(s => s.trim()).filter(Boolean);
+      const updatedTargets = { ...(config.targetsByServer || {}) };
+      if (oldServer) {
+        updatedTargets[oldServer] = { groups: currentGroups, friends: currentFriends };
+      }
+      const newTargets = updatedTargets[value] || { groups: [], friends: [] };
+      setGroupsText((newTargets.groups || []).join(', '));
+      setFriendsText((newTargets.friends || []).join(', '));
+      setConfig(prev => ({ ...prev, mcpServerName: value, targetsByServer: updatedTargets }));
+    } else {
+      setConfig(prev => ({ ...prev, [field]: value }));
+    }
+  };
+
+  const buildConfigToSave = () => {
+    const groups = groupsText.split(',').map(s => s.trim()).filter(Boolean);
+    const friends = friendsText.split(',').map(s => s.trim()).filter(Boolean);
+    const updatedTargets = { ...(config.targetsByServer || {}) };
+    if (config.mcpServerName) {
+      updatedTargets[config.mcpServerName] = { groups, friends };
+    }
+    return {
+      ...config,
+      petId: selectedPetId,
+      watchedGroups: groups,
+      watchedFriends: friends,
+      targetsByServer: updatedTargets,
+    };
   };
 
   const handleSave = async () => {
     setSaving(true);
     try {
-      const configToSave = {
-        ...config,
-        petId: selectedPetId,
-        watchedGroups: groupsText.split(',').map(s => s.trim()).filter(Boolean),
-        watchedFriends: friendsText.split(',').map(s => s.trim()).filter(Boolean),
-      };
+      const configToSave = buildConfigToSave();
       await saveSocialConfig(selectedPetId, configToSave);
       setConfig(configToSave);
       // 如果循环正在运行，通知 character 窗口用新配置重启
@@ -3774,16 +3805,9 @@ const SocialPanel = ({ assistants, apiProviders }) => {
 
   const handleToggle = async () => {
     if (socialActive) {
-      // Send stop event to character window
       emit('social-stop');
     } else {
-      const configToStart = {
-        ...config,
-        petId: selectedPetId,
-        watchedGroups: groupsText.split(',').map(s => s.trim()).filter(Boolean),
-        watchedFriends: friendsText.split(',').map(s => s.trim()).filter(Boolean),
-      };
-      // Save config first, then send start event to character window
+      const configToStart = buildConfigToSave();
       await saveSocialConfig(selectedPetId, configToStart);
       setConfig(configToStart);
       emit('social-start', configToStart);
@@ -3920,7 +3944,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
           </Card>
 
           {/* MCP Server */}
-          <Card title="MCP Server" description="The QQ MCP server to use for messaging">
+          <Card title="MCP Server" description="The messaging MCP server (QQ, Telegram, etc.)">
             <FormGroup label="Server">
               <Select
                 value={config.mcpServerName}
@@ -3985,16 +4009,16 @@ const SocialPanel = ({ assistants, apiProviders }) => {
           )}
 
           {/* Targets */}
-          <Card title="Watch Targets" description="QQ groups and friends to monitor">
+          <Card title="Watch Targets" description="Groups and private chats to monitor on the selected MCP server">
             <div className="space-y-3">
-              <FormGroup label="Groups" hint="Comma-separated group numbers">
+              <FormGroup label="Groups" hint="Comma-separated group/chat IDs">
                 <Input
                   value={groupsText}
                   onChange={(e) => setGroupsText(e.target.value)}
-                  placeholder="e.g. 1059558644, 123456789"
+                  placeholder="e.g. 1059558644, -100123456"
                 />
               </FormGroup>
-              <FormGroup label="Friends" hint="Comma-separated QQ numbers">
+              <FormGroup label="Private Chats" hint="Comma-separated user IDs">
                 <Input
                   value={friendsText}
                   onChange={(e) => setFriendsText(e.target.value)}

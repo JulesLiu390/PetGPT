@@ -2641,6 +2641,8 @@ pub fn run() {
             workspace::workspace_list_dir,
             workspace::workspace_delete_file,
             workspace::workspace_rename_file,
+            workspace::workspace_write_binary,
+            workspace::workspace_read_binary,
             workspace::workspace_file_exists,
             workspace::workspace_get_path,
             workspace::workspace_delete_folder,
