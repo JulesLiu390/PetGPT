@@ -1,8 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion } from 'framer-motion';
 import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
-import { FaPlug } from "react-icons/fa6";
-import { GiPenguin } from "react-icons/gi";
+import { FaPlug, FaUserGroup } from "react-icons/fa6";
 import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
@@ -32,47 +31,13 @@ const IDLE_TIMEOUT_MS = 30000;      // 30秒无操作进入待机
 const IDLE_ANIMATION_INTERVAL_MS = 5000; // 待机动画切换间隔 5秒
 
 /**
- * 表情/状态名称到图片文件名的映射
- * 用于处理新表情系统中某些表情暂时没有对应图片的情况
- * 
- * 注意：自定义皮肤如果有对应的 idle 图片，会直接使用
- * 内置皮肤暂时还没有 idle 图片，会回退到 normal/smile
- */
-const MOOD_TO_IMAGE_MAP = {
-  // 情绪表情
-  'normal': 'normal',
-  'smile': 'smile',
-  'sad': 'angry',       // sad 暂时用 angry 图片
-  'shocked': 'smile',   // shocked 暂时用 smile 图片
-  // 系统状态
-  'thinking': 'thinking',
-  // idle 状态 - 自定义皮肤应该有这些图片
-  'idle-1': 'idle-1',
-  'idle-2': 'idle-2',
-  'idle-3': 'idle-3',
-};
-
-/**
- * 内置皮肤的 idle 回退映射（因为内置皮肤没有 idle 图片）
- */
-const BUILTIN_IDLE_FALLBACK = {
-  'idle-1': 'normal',
-  'idle-2': 'smile',
-  'idle-3': 'normal',
-};
-
-/**
  * 获取表情对应的图片文件名后缀
+ * 所有内置皮肤均支持完整 mood 集：normal, idle-1/2/3, smile, sad, shocked, thinking
  * @param {string} mood - 表情/状态名称
- * @param {boolean} isBuiltin - 是否为内置皮肤
- * @returns {string} 图片文件名后缀（不含连字符前缀）
+ * @returns {string} 图片文件名后缀
  */
-const getMoodImageName = (mood, isBuiltin = false) => {
-  // 内置皮肤的 idle 状态需要回退
-  if (isBuiltin && BUILTIN_IDLE_FALLBACK[mood]) {
-    return BUILTIN_IDLE_FALLBACK[mood];
-  }
-  return MOOD_TO_IMAGE_MAP[mood] || 'normal';
+const getMoodImageName = (mood) => {
+  return mood || 'normal';
 };
 
 
@@ -116,7 +81,7 @@ export const Character = () => {
   const [isManageVisible, setIsManageVisible] = useState(false);
   // 控制 Chat 窗口是否打开
   const [isChatVisible, setIsChatVisible] = useState(false);
-  const [imageName, setImageName] = useState("Jules");
+  const [imageName, setImageName] = useState("Glitch");
   const [currentPetId, setCurrentPetId] = useState(null);
   
   // 社交代理激活状态
@@ -453,12 +418,28 @@ export const Character = () => {
       const { listen } = await import('@tauri-apps/api/event');
       cleanup = await listen('mouse-over-character', (event) => {
         setIsMouseOver(event.payload);
+        if (event.payload) {
+          // 鼠标进入 → 启动 2 秒定时器
+          hoverIdleTimerRef.current = setTimeout(() => {
+            idleClickReadyRef.current = true;
+            setIdleClickReady(true);
+          }, HOVER_IDLE_DELAY);
+        } else {
+          // 鼠标离开 → 清除定时器并重置
+          if (hoverIdleTimerRef.current) {
+            clearTimeout(hoverIdleTimerRef.current);
+            hoverIdleTimerRef.current = null;
+          }
+          idleClickReadyRef.current = false;
+          setIdleClickReady(false);
+        }
       });
     };
     setupListener();
-    
+
     return () => {
       if (cleanup) cleanup();
+      if (hoverIdleTimerRef.current) clearTimeout(hoverIdleTimerRef.current);
     };
   }, []);
 
@@ -562,19 +543,13 @@ export const Character = () => {
   // 根据 characterMood 动态加载对应图片
   useEffect(() => {
     const loadImage = async () => {
-      // 判断是否为内置皮肤
-      const isBuiltinSkin = imageName === 'default' || imageName === 'Jules' || 
-                           imageName === 'Maodie' || imageName === 'LittlePony';
-      
-      // 使用映射表获取实际的图片文件名后缀
-      // 内置皮肤的 idle 会回退到 normal/smile
-      const imageNameSuffix = getMoodImageName(characterMood, isBuiltinSkin);
-      console.log(`[CharacterPage] Loading image for mood: ${characterMood} -> ${imageNameSuffix} (builtin: ${isBuiltinSkin})`);
-      
+      const imageNameSuffix = getMoodImageName(characterMood);
+      console.log(`[CharacterPage] Loading image for mood: ${characterMood} -> ${imageNameSuffix}`);
+
       try {
-        // 内置皮肤：Jules (default)、Maodie、LittlePony
-        if(imageName === 'default' || imageName === 'Jules') {
-          const module = await import(`../assets/Jules-${imageNameSuffix}.png`);
+        // 内置皮肤：Glitch (default)、Maodie、LittlePony
+        if(imageName === 'default' || imageName === 'Glitch') {
+          const module = await import(`../assets/Glitch-${imageNameSuffix}.png`);
           setImgSrc(module.default);
         } else if(imageName === "Maodie") {
           const module = await import(`../assets/Maodie-${imageNameSuffix}.png`);
@@ -583,22 +558,20 @@ export const Character = () => {
           const module = await import(`../assets/LittlePony-${imageNameSuffix}.png`);
           setImgSrc(module.default);
         } else if (imageName.startsWith("custom:")) {
-          // 自定义皮肤从文件系统加载 - 直接使用原始 mood 名称
           const skinId = imageName.split(":")[1];
           const base64Image = await tauri.readSkinImage(skinId, imageNameSuffix);
           setImgSrc(base64Image);
         } else {
-          // 其他皮肤尝试从文件系统加载
           const base64Image = await tauri.readPetImage(`${imageName}-${imageNameSuffix}.png`);
           setImgSrc(base64Image);
         }
-        
+
       } catch (err) {
         console.error(`Failed to load image for mood: ${characterMood} (${imageNameSuffix})`, err);
         // 如果失败，回退到 normal
         try {
-          if(imageName === 'default' || imageName === 'Jules') {
-            const module = await import(`../assets/Jules-normal.png`);
+          if(imageName === 'default' || imageName === 'Glitch') {
+            const module = await import(`../assets/Glitch-normal.png`);
             setImgSrc(module.default);
           } else if(imageName === "Maodie") {
             const module = await import(`../assets/Maodie-normal.png`);
@@ -616,9 +589,8 @@ export const Character = () => {
           }
         } catch (fallbackErr) {
           console.error('Failed to load fallback image:', fallbackErr);
-          // 最终回退到默认 Jules 皮肤
           try {
-            const module = await import(`../assets/Jules-normal.png`);
+            const module = await import(`../assets/Glitch-normal.png`);
             setImgSrc(module.default);
           } catch (_) {}
         }
@@ -753,14 +725,18 @@ export const Character = () => {
     isDragging: false,
   });
   
-  // 双击打扰相关状态
-  const lastClickTimeRef = useRef(0);
+  // 打扰相关状态（保留，待接入其他触发方式）
   const pokeCountRef = useRef(0);              // 打扰计数
   const pokeResetTimerRef = useRef(null);      // 打扰计数重置定时器
-  const DOUBLE_CLICK_THRESHOLD = 300;          // 双击判定时间（毫秒）
   const POKE_ANGRY_THRESHOLD = 5;              // 触发愤怒的打扰次数
   const POKE_RESET_DELAY = 10000;              // 打扰计数重置延迟（10秒）
   const POKE_REACTION_DURATION = 1500;         // 被戳反应持续时间（1.5秒）
+
+  // 悬浮 2 秒后切换光标，点击切换 idle
+  const HOVER_IDLE_DELAY = 2000;
+  const [idleClickReady, setIdleClickReady] = useState(false);
+  const idleClickReadyRef = useRef(false);
+  const hoverIdleTimerRef = useRef(null);
   
   /**
    * 处理被戳（双击）
@@ -806,6 +782,45 @@ export const Character = () => {
       }, POKE_REACTION_DURATION);
     }
   }, [resetIdleTimer]);
+
+  /**
+   * 切换 idle 状态（悬浮 2 秒后点击触发）
+   */
+  const toggleIdle = useCallback(() => {
+    setCharacterState(prev => {
+      if (prev === CHARACTER_STATE.IDLE) {
+        console.log('[Character] Toggle -> exit idle');
+        if (idleAnimationRef.current) {
+          clearInterval(idleAnimationRef.current);
+          idleAnimationRef.current = null;
+        }
+        setEmotionMood('normal');
+        if (idleTimeoutRef.current) clearTimeout(idleTimeoutRef.current);
+        idleTimeoutRef.current = setTimeout(() => {
+          setCharacterState(p => p !== CHARACTER_STATE.THINKING ? CHARACTER_STATE.IDLE : p);
+        }, IDLE_TIMEOUT_MS);
+        return CHARACTER_STATE.ACTIVE;
+      } else if (prev === CHARACTER_STATE.ACTIVE) {
+        console.log('[Character] Toggle -> enter idle');
+        if (idleTimeoutRef.current) {
+          clearTimeout(idleTimeoutRef.current);
+          idleTimeoutRef.current = null;
+        }
+        return CHARACTER_STATE.IDLE;
+      }
+      return prev;
+    });
+    // 重置悬浮状态，重新开始 2 秒计时
+    idleClickReadyRef.current = false;
+    setIdleClickReady(false);
+    if (hoverIdleTimerRef.current) {
+      clearTimeout(hoverIdleTimerRef.current);
+    }
+    hoverIdleTimerRef.current = setTimeout(() => {
+      idleClickReadyRef.current = true;
+      setIdleClickReady(true);
+    }, HOVER_IDLE_DELAY);
+  }, []);
 
   const handleCharacterMouseDown = useCallback((e) => {
     // 忽略右键和中键
@@ -858,24 +873,19 @@ export const Character = () => {
     
     // 如果是快速点击且移动距离小，视为点击
     if (elapsed < CLICK_TIME_THRESHOLD && distance < DRAG_THRESHOLD) {
-      const now = Date.now();
-      const timeSinceLastClick = now - lastClickTimeRef.current;
-      
-      if (timeSinceLastClick < DOUBLE_CLICK_THRESHOLD) {
-        // 这是双击 - 触发打扰反应
-        console.log('[Character] Double click detected!');
-        handlePoke();
-        lastClickTimeRef.current = 0; // 重置，避免三击也被当作双击
+      if (idleClickReadyRef.current) {
+        // 光标已切换为 grab → 切换 idle 状态
+        console.log('[Character] Idle toggle click!');
+        toggleIdle();
       } else {
-        // 这是单击 - 打开聊天窗口
-        lastClickTimeRef.current = now;
+        // 普通单击 → 打开聊天窗口
         handleClick();
       }
     }
     
     dragState.current.isMouseDown = false;
     dragState.current.isDragging = false;
-  }, [handlePoke]);
+  }, [toggleIdle]);
 
   // 清理函数
   useEffect(() => {
@@ -943,10 +953,10 @@ export const Character = () => {
               onClick={handleClickMcp}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
-            <GiPenguin
-              title="QQ Agent"
+            <FaUserGroup
+              title="Social"
               onClick={handleToggleSocial}
-              className={`${socialActive ? 'text-cyan-400' : 'text-gray-100'} hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer`}
+              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <IoIosSettings
               title="Settings"
@@ -958,8 +968,8 @@ export const Character = () => {
       </div>
 
       {/* 角色图片 - 可拖动区域 */}
-      <div 
-        className="flex-1 w-full flex items-center justify-center cursor-grab active:cursor-grabbing"
+      <div
+        className={`flex-1 w-full flex items-center justify-center ${idleClickReady ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
         onMouseDown={handleCharacterMouseDown}
       >
         {imgSrc && (

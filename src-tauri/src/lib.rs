@@ -763,28 +763,44 @@ struct BuiltinSkin {
 /// 初始化内置皮肤数据库记录（图片由前端处理，这里只创建数据库记录）
 fn initialize_builtin_skins(db: &Database) {
     let builtin_skins = vec![
-        BuiltinSkin { name: "Jules", author: "PetGPT Team" },
-        BuiltinSkin { name: "Maodie", author: "PetGPT Team" },
-        BuiltinSkin { name: "LittlePony", author: "JulesLiu390" },
+        BuiltinSkin { name: "Glitch", author: "Jules" },
+        BuiltinSkin { name: "Maodie", author: "Jules" },
+        BuiltinSkin { name: "LittlePony", author: "Jules" },
     ];
-    
+
+    let default_moods = vec![
+        "normal".to_string(), "idle-1".to_string(), "idle-2".to_string(), "idle-3".to_string(),
+        "smile".to_string(), "sad".to_string(), "shocked".to_string(), "thinking".to_string(),
+    ];
+
     // 获取数据库中所有皮肤（包括隐藏的）
     let existing_skins = db.get_all_skins_with_hidden().unwrap_or_default();
-    
+
+    // 删除旧的 Jules 内置皮肤（已被 Glitch 替换）
+    for skin in existing_skins.iter().filter(|s| s.name == "Jules" && s.is_builtin) {
+        let _ = db.delete_skin(&skin.id);
+        println!("[Skins] Removed old builtin skin: Jules (id: {})", skin.id);
+    }
+
     for builtin in &builtin_skins {
-        // 检查是否已存在同名的内置皮肤
-        let exists = existing_skins.iter().any(|s| s.name == builtin.name && s.is_builtin);
-        
-        if !exists {
-            // 创建内置皮肤记录（不需要图片文件，前端会从 assets 加载）
-            // 默认表情列表：normal, smile, angry, thinking
-            let default_moods = vec!["normal".to_string(), "smile".to_string(), "angry".to_string(), "thinking".to_string()];
+        let existing = existing_skins.iter().find(|s| s.name == builtin.name && s.is_builtin);
+
+        if let Some(skin) = existing {
+            // 更新现有内置皮肤的 moods 列表
+            let _ = db.update_skin(&skin.id, skins::UpdateSkinData {
+                name: None,
+                author: Some(builtin.author.to_string()),
+                description: None,
+                moods: Some(default_moods.clone()),
+            });
+            println!("[Skins] Updated builtin skin: {} (id: {})", builtin.name, skin.id);
+        } else {
             match db.create_skin(skins::CreateSkinData {
                 name: builtin.name.to_string(),
                 author: Some(builtin.author.to_string()),
                 description: Some(format!("Built-in {} skin", builtin.name)),
                 is_builtin: true,
-                moods: Some(default_moods),
+                moods: Some(default_moods.clone()),
             }) {
                 Ok(skin) => {
                     println!("[Skins] Created builtin skin: {} (id: {})", builtin.name, skin.id);

@@ -6,7 +6,7 @@
  * 2. 系统状态 (由代码控制): thinking, idle-1, idle-2, idle-3
  * 
  * 图片命名规则: {角色名}-{表情名}.png
- * 例如: Jules-normal.png, Jules-smile.png
+ * 例如: Glitch-normal.png, Glitch-smile.png
  */
 
 import { callLLM } from './llm/index.js';

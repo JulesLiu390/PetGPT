@@ -20,14 +20,14 @@ import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
 import { emit, listen } from '@tauri-apps/api/event';
 
 // 预加载所有内置皮肤图片
-import JulesNormal from "../assets/Jules-normal.png";
+import GlitchNormal from "../assets/Glitch-normal.png";
 import MaodieNormal from "../assets/Maodie-normal.png";
 import LittlePonyNormal from "../assets/LittlePony-normal.png";
 
 // 内置皮肤图片映射
 const BUILTIN_SKIN_IMAGES = {
-  'Jules': JulesNormal,
-  'default': JulesNormal,
+  'Glitch': GlitchNormal,
+  'default': GlitchNormal,
   'Maodie': MaodieNormal,
   'LittlePony': LittlePonyNormal,
 };
@@ -40,7 +40,7 @@ const CustomImage = ({ imageName }) => {
   useEffect(() => {
     const loadImage = async () => {
       try {
-        const skinName = imageName === "default" ? "Jules" : imageName;
+        const skinName = imageName === "default" ? "Glitch" : imageName;
         
         // 处理 custom: 前缀的自定义皮肤
         if (skinName && skinName.startsWith("custom:")) {
@@ -55,7 +55,7 @@ const CustomImage = ({ imageName }) => {
             console.warn("Custom skin not found, falling back to default:", e);
           }
           // 回退到默认皮肤
-          setImgSrc(BUILTIN_SKIN_IMAGES['Jules']);
+          setImgSrc(BUILTIN_SKIN_IMAGES['Glitch']);
           return;
         }
         
@@ -79,10 +79,10 @@ const CustomImage = ({ imageName }) => {
         }
         
         // 最终回退到默认 Jules
-        setImgSrc(BUILTIN_SKIN_IMAGES['Jules']);
+        setImgSrc(BUILTIN_SKIN_IMAGES['Glitch']);
       } catch (error) {
         console.error("Error loading image:", error);
-        setImgSrc(BUILTIN_SKIN_IMAGES['Jules']);
+        setImgSrc(BUILTIN_SKIN_IMAGES['Glitch']);
       }
     };
     loadImage();
@@ -125,8 +125,7 @@ const TruncatedText = ({ label, text }) => {
  * 根据 apiFormat 获取默认图片名
  */
 const getDefaultImageForApi = (apiFormat) => {
-  // 新的内置皮肤只有 Jules 和 Maodie，默认使用 Jules
-  return 'Jules';
+  return 'Glitch';
 };
 
 /**
@@ -467,7 +466,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
                 <optgroup label="Built-in">
                   {builtinSkins.map(skin => (
                     <option key={skin.id} value={skin.name}>
-                      {skin.name}{skin.name === 'Jules' ? ' (Default)' : ''}
+                      {skin.name}{skin.name === 'Glitch' ? ' (Default)' : ''}
                     </option>
                   ))}
                 </optgroup>
@@ -2496,7 +2495,7 @@ const SkinPreview = ({ skinId, skinName, isBuiltin }) => {
   useEffect(() => {
     const loadImage = async () => {
       try {
-        const assetName = skinName === 'default' ? 'Jules' : skinName;
+        const assetName = skinName === 'default' ? 'Glitch' : skinName;
         // 先尝试从 assets 加载
         try {
           const module = await import(`../assets/${assetName}-normal.png`);
@@ -2578,7 +2577,7 @@ const SkinMoodPreview = ({ skinId, skinName, isBuiltin, moods: propMoods }) => {
         try {
           if (isBuiltin) {
             // 内置皮肤：从 assets 加载
-            const assetName = skinName === 'default' ? 'Jules' : skinName;
+            const assetName = skinName === 'default' ? 'Glitch' : skinName;
             try {
               const module = await import(`../assets/${assetName}-${mood}.png`);
               loaded[mood] = module.default;

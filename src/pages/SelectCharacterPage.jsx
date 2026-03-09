@@ -12,9 +12,9 @@ const CustomImage = ({ imageName }) => {
   useEffect(() => {
     const loadImage = async () => {
       try {
-        // 内置皮肤：Jules (default)、Maodie、LittlePony
-        if (imageName === "default" || imageName === "Jules") {
-          const module = await import(`../assets/Jules-normal.png`);
+        // 内置皮肤：Glitch (default)、Maodie、LittlePony
+        if (imageName === "default" || imageName === "Glitch") {
+          const module = await import(`../assets/Glitch-normal.png`);
           setImgSrc(module.default);
         } else if(imageName === "Maodie") {
           const module = await import(`../assets/Maodie-normal.png`);

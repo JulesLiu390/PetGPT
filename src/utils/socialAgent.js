@@ -1117,7 +1117,7 @@ async function pollTarget({
               let msgTs = new Date().toISOString();
               try {
                 const parsed = typeof result === 'string' ? JSON.parse(result) : result;
-                msgId = parsed?.message_id || null;
+                msgId = parsed?.message_ids?.[0]?.toString() || parsed?.message_id || null;
                 if (parsed?.timestamp) msgTs = parsed.timestamp;
               } catch { /* ignore */ }
               
@@ -1185,12 +1185,18 @@ async function pollTarget({
         }
         try {
           const sendToolName = `${mcpServerName}__send_message`;
-          await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType, num_chunks: 1 }, { timeout: 10000 });
+          const autoSendResult = await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType, num_chunks: 1 }, { timeout: 10000 });
           sendMessageSuccess = true;
           if (newWatermarkId) watermarks.set(target, newWatermarkId);
-          // 缓存发送记录
+          // 缓存发送记录（提取 message_id 用于去重）
+          let autoMsgId = null;
+          try {
+            const rawText = autoSendResult?.content?.[0]?.text;
+            const p = rawText ? JSON.parse(rawText) : autoSendResult;
+            autoMsgId = p?.message_ids?.[0]?.toString() || p?.message_id || null;
+          } catch { /* ignore */ }
           const arr = sentCache.get(target) || [];
-          arr.push({ content: cleanText, timestamp: new Date().toISOString() });
+          arr.push({ content: cleanText, timestamp: new Date().toISOString(), message_id: autoMsgId });
           sentCache.set(target, arr);
           emitPollLog('replied');
           addLog('info', `✅ Auto-sent for ${targetType}:${target} (LLM forgot tool): ${cleanText.substring(0, 80)}`, null, target);
@@ -1988,13 +1994,36 @@ export async function startSocialLoop(config, onStatusChange) {
     if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
     // Intent 只用文本描述（_imageDescs），剥离未 resolve 的原始图片 URL
     // 避免把未知 MIME 的原始 URL 传给 Gemini（会因 GIF 等不支持格式报错）
-    const recent = buf.messages.slice(-MAX_MSGS).map(m => {
+    let recent = buf.messages.slice(-MAX_MSGS).map(m => {
       if (config.enableImages === false) return { ...m, _images: [] };
       // 保留 _imageDescs（文字描述），剥离未经 resolve 的原始 _images
       // 只保留已 resolve 为 base64 的图片（data 不以 http 开头的）
       const safeImages = (m._images || []).filter(img => img.data && !img.data.startsWith('http'));
       return { ...m, _images: safeImages };
     });
+    // 注入 sentMessagesCache 中的 bot 消息（让 Intent 看到已发送的表情包等）
+    const cachedSent = sentMessagesCache.get(target) || [];
+    if (cachedSent.length > 0) {
+      const existingIds = new Set(
+        recent.filter(m => m.is_self && m.message_id).map(m => m.message_id)
+      );
+      const oldest = recent.length > 0 ? recent[0].timestamp : null;
+      for (const cached of cachedSent) {
+        if (cached.message_id && existingIds.has(cached.message_id)) continue;
+        if (oldest && cached.timestamp < oldest) continue;
+        recent.push({
+          message_id: cached.message_id || `local_${cached.timestamp}`,
+          timestamp: cached.timestamp,
+          sender_id: 'self',
+          sender_name: 'bot',
+          content: cached.content,
+          is_at_me: false,
+          is_self: true,
+          _images: [],
+        });
+      }
+      recent.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
+    }
     // 生成本轮临时安全令牌（每次评估都不同）
     const _rnd = () => crypto.randomUUID().slice(0, 6);
     const eph = {

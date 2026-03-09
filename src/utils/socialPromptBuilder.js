@@ -678,7 +678,8 @@ export async function buildIntentSystemPrompt({
     const historyLines = intentHistory.map(e => {
       const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '?';
       const wTag = e.willingnessLabel || (e.idle ? '(idle)' : '');
-      return `[${time}] ${wTag} ${e.content}`.trim();
+      const actionTag = e.stickerSent ? ' (📎已发送表情包)' : '';
+      return `[${time}] ${wTag}${actionTag} ${e.content}`.trim();
     });
     sections.push(historyLines.join('\n'));
   }

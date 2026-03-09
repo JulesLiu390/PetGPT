@@ -46,6 +46,7 @@ export default function SocialPage() {
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
   const [socialActive, setSocialActive] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
   const [logs, setLogs] = useState([]);
   const [groupsText, setGroupsText] = useState('');
   const [friendsText, setFriendsText] = useState('');
@@ -201,6 +202,7 @@ export default function SocialPage() {
         const { active, petId, lurkModes: lm, pausedTargets: pt } = event.payload;
         if (petId === selectedPetId || !selectedPetId) {
           setSocialActive(active);
+          if (active) setIsStarting(false);
           if (lm) setLurkModes(lm);
           if (pt) setPausedTargets(pt);
         }
@@ -376,12 +378,29 @@ export default function SocialPage() {
     load();
   }, [selectedPetId]);
 
-  // ── Auto-select first assistant ──
+  // ── Auto-select last used assistant (or first) ──
   useEffect(() => {
     if (assistants.length > 0 && !selectedPetId) {
-      setSelectedPetId(assistants[0]._id);
+      (async () => {
+        try {
+          const settings = await tauri.getSettings();
+          const lastId = settings?.social_last_pet_id;
+          if (lastId && assistants.some(a => a._id === lastId)) {
+            setSelectedPetId(lastId);
+            return;
+          }
+        } catch (e) { /* ignore */ }
+        setSelectedPetId(assistants[0]._id);
+      })();
     }
   }, [assistants, selectedPetId]);
+
+  // ── Persist last selected assistant ──
+  useEffect(() => {
+    if (selectedPetId) {
+      tauri.updateSettings({ social_last_pet_id: selectedPetId }).catch(() => {});
+    }
+  }, [selectedPetId]);
 
   // ── Per-server config keys (saved/restored when switching MCP) ──
   const PER_SERVER_KEYS = [
@@ -482,6 +501,7 @@ export default function SocialPage() {
     if (socialActive) {
       emit('social-stop');
     } else {
+      setIsStarting(true);
       const configToStart = buildConfigToSave();
       await saveSocialConfig(selectedPetId, configToStart);
       setConfig(configToStart);
@@ -610,14 +630,16 @@ export default function SocialPage() {
             </button>
             <button
               onClick={handleToggle}
-              disabled={!selectedPetId}
+              disabled={!selectedPetId || isStarting}
               className={`no-drag px-3 py-1.5 text-xs font-medium rounded-lg ${
                 socialActive
                   ? 'bg-red-500 text-white hover:bg-red-600'
                   : 'bg-cyan-500 text-white hover:bg-cyan-600'
               } disabled:opacity-50`}
             >
-              {socialActive ? 'Stop' : 'Start'}
+              {isStarting ? (
+                <FaSpinner className="animate-spin inline-block" />
+              ) : socialActive ? 'Stop' : 'Start'}
             </button>
           </div>
         }
