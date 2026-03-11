@@ -153,6 +153,34 @@ impl WorkspaceEngine {
         Ok(format!("成功写入 {} 字节到 {}", bytes, path))
     }
 
+    /// Append text to a file in the workspace (creates if not exists).
+    pub fn append(
+        &self,
+        pet_id: &str,
+        path: &str,
+        content: &str,
+    ) -> Result<String, WorkspaceError> {
+        let full_path = self.resolve_safe_path(pet_id, path)?;
+
+        // Create parent directories if needed
+        if let Some(parent) = full_path.parent() {
+            fs::create_dir_all(parent).map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
+        }
+
+        use std::io::Write;
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&full_path)
+            .map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
+
+        let bytes = content.as_bytes().len();
+        file.write_all(content.as_bytes())
+            .map_err(|e| WorkspaceError::WriteError(e.to_string()))?;
+
+        Ok(format!("成功追加 {} 字节到 {}", bytes, path))
+    }
+
     /// Write binary data (base64-encoded) to a file in the workspace.
     pub fn write_binary(
         &self,

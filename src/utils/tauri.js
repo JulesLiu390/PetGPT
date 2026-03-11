@@ -715,6 +715,10 @@ export const workspaceWrite = async (petId, path, content) => {
   return invoke('workspace_write', { petId, path, content });
 };
 
+export const workspaceAppend = async (petId, path, content) => {
+  return invoke('workspace_append', { petId, path, content });
+};
+
 export const workspaceEdit = async (petId, path, oldText, newText) => {
   return invoke('workspace_edit', { petId, path, oldText, newText });
 };
@@ -1041,6 +1045,7 @@ const tauri = {
   // Workspace (File-based Personality/Memory)
   workspaceRead,
   workspaceWrite,
+  workspaceAppend,
   workspaceEdit,
   workspaceEnsureDefaultFiles,
   workspaceListDir,

@@ -2652,6 +2652,7 @@ pub fn run() {
             // Workspace commands
             workspace::workspace_read,
             workspace::workspace_write,
+            workspace::workspace_append,
             workspace::workspace_edit,
             workspace::workspace_ensure_default_files,
             workspace::workspace_list_dir,

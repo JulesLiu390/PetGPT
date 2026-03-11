@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
-import { FaCheck, FaSpinner } from "react-icons/fa6";
+import { FaCheck, FaSpinner, FaChevronDown, FaChevronUp } from "react-icons/fa6";
 import { MdCancel } from "react-icons/md";
 import TitleBar from "../components/UI/TitleBar";
 import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/UI/ui";
@@ -54,6 +54,7 @@ export default function SocialPage() {
   // ── Log filtering (superset feature) ──
   const [logFilter, setLogFilter] = useState('all'); // 'all' | 'system' | target string
   const [showConfig, setShowConfig] = useState(false);
+  const [showAdvancedLLM, setShowAdvancedLLM] = useState(false);
   const [lurkModes, setLurkModes] = useState({}); // { [target]: 'normal'|'semi-lurk'|'full-lurk' }
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
@@ -490,8 +491,10 @@ export default function SocialPage() {
       if (socialActive) {
         emit('social-config-updated', configToSave);
       }
+      alert('Social configuration saved successfully!');
     } catch (e) {
       console.error('Failed to save social config:', e);
+      alert('Failed to save social config: ' + (e.message || e));
     } finally {
       setSaving(false);
     }
@@ -801,6 +804,16 @@ export default function SocialPage() {
                     </div>
                   </Card>
 
+                  {/* Advanced LLM Settings — collapsible */}
+                  <button
+                    onClick={() => setShowAdvancedLLM(!showAdvancedLLM)}
+                    className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-slate-600 bg-slate-50 hover:bg-slate-100 rounded-lg transition-colors"
+                  >
+                    <span>Advanced LLM Settings</span>
+                    {showAdvancedLLM ? <FaChevronUp className="w-3 h-3" /> : <FaChevronDown className="w-3 h-3" />}
+                  </button>
+                  {showAdvancedLLM && <>
+
                   {/* Observer LLM — independent toggle */}
                   <Card title="Observer LLM" description="Independent API for group observation and memory recording">
                     <div className="space-y-3">
@@ -1061,6 +1074,8 @@ export default function SocialPage() {
                       )}
                     </div>
                   </Card>
+
+                  </>}
 
                   {/* Additional MCP Servers */}
                   {mcpServers.filter(s => s.name !== config.mcpServerName).length > 0 && (

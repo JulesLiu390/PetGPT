@@ -353,6 +353,80 @@ export async function executeSocialFileTool(toolName, args, context) {
   }
 }
 
+// ============ 缓冲区搜索工具（Observer 用，搜索当前 buffer 中的完整消息） ============
+
+const BUFFER_SEARCH_TOOL_NAMES = new Set(['buffer_search']);
+
+export function isBufferSearchTool(toolName) {
+  return BUFFER_SEARCH_TOOL_NAMES.has(toolName);
+}
+
+export function getBufferSearchToolDefinitions() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'buffer_search',
+        description: '搜索当前群/好友的消息缓冲区。按关键词匹配消息内容和发送者名称，返回匹配的消息（最新的在最后）。用于查找上下文窗口之外的较早消息。',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: {
+              type: 'string',
+              description: '搜索关键词（在消息内容和发送者名称中查找）',
+            },
+            limit: {
+              type: 'number',
+              description: '最多返回条数，默认 20，最大 50',
+            },
+          },
+          required: ['query'],
+        },
+      },
+    },
+  ];
+}
+
+export function executeBufferSearchTool(toolName, args, context) {
+  if (toolName !== 'buffer_search') return { error: `未知工具: ${toolName}` };
+
+  const { query, limit: rawLimit } = args || {};
+  if (!query) return { error: '必须提供 query 参数' };
+
+  const bufferMessages = context.bufferMessages;
+  if (!bufferMessages || bufferMessages.length === 0) {
+    return { text: '缓冲区为空，没有可搜索的消息。' };
+  }
+
+  const maxResults = Math.min(Math.max(rawLimit || 20, 1), 50);
+  const lowerQuery = query.toLowerCase();
+
+  // 从旧到新搜索，收集匹配的消息
+  const matches = [];
+  for (const msg of bufferMessages) {
+    const content = (msg.content || '').toLowerCase();
+    const sender = (msg.sender_name || msg.sender_id || '').toLowerCase();
+    if (content.includes(lowerQuery) || sender.includes(lowerQuery)) {
+      matches.push(msg);
+    }
+  }
+
+  if (matches.length === 0) {
+    return { text: `未找到包含"${query}"的消息。缓冲区共 ${bufferMessages.length} 条消息。` };
+  }
+
+  // 取最新的 N 条
+  const results = matches.slice(-maxResults);
+  const lines = results.map(m => {
+    const time = m.timestamp ? new Date(m.timestamp * 1000).toISOString().slice(11, 19) : '??:??:??';
+    const sender = m.sender_name || m.sender_id || 'unknown';
+    const content = (m.content || '').substring(0, 200);
+    return `[${time}] ${sender}: ${content}`;
+  });
+
+  return { text: `找到 ${matches.length} 条匹配消息（显示最近 ${results.length} 条）：\n\n${lines.join('\n')}` };
+}
+
 // ============ 历史查询工具（保留，有复杂查询逻辑） ============
 
 const HISTORY_TOOL_NAMES = new Set(['history_read', 'daily_read', 'daily_list']);

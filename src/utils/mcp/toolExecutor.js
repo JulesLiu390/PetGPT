@@ -10,7 +10,37 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool } from '../workspace/socialToolExecutor.js';
+
+/**
+ * Normalize usage from different LLM adapters into a unified format.
+ * Gemini: { promptTokenCount, candidatesTokenCount, cachedContentTokenCount }
+ * OpenAI: { prompt_tokens, completion_tokens, total_tokens }
+ */
+export const normalizeUsage = (usage) => {
+  if (!usage) return { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  return {
+    inputTokens: usage.promptTokenCount ?? usage.prompt_tokens ?? 0,
+    outputTokens: usage.candidatesTokenCount ?? usage.completion_tokens ?? 0,
+    cachedTokens: usage.cachedContentTokenCount ?? 0,
+  };
+};
+
+/**
+ * Append a usage record to the daily usage log file.
+ * File: social/usage/YYYY-MM-DD.jsonl
+ */
+export const appendUsageLog = async (petId, record) => {
+  if (!petId) return;
+  try {
+    const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+    const path = `social/usage/${date}.jsonl`;
+    const line = JSON.stringify(record) + '\n';
+    await tauri.workspaceAppend(petId, path, line);
+  } catch (e) {
+    console.warn('[Usage] Failed to append usage log:', e);
+  }
+};
 
 // 默认最大工具调用轮次（当服务器没有配置时使用），防止无限循环
 const DEFAULT_MAX_TOOL_ITERATIONS = 100;
@@ -456,27 +486,35 @@ export const callLLMWithTools = async ({
   onLLMText,        // (text, iterationIndex) => void — called with LLM text each iteration (including intermediate rounds with tool calls)
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
-  builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
+  builtinToolContext,  // { petId, memoryEnabled } — for builtin tool execution
+  usageLabel,       // optional string label for usage logging (e.g. "Observer", "Intent:idle")
+  usageTarget,      // optional string target id for usage logging
+  usagePetId,       // optional petId for usage logging (falls back to builtinToolContext.petId)
+  maxIterations,    // optional max iterations override (default 100)
 }) => {
   const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
-  
+
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
   let initialMessages = [...messages];
   if (apiFormat === 'gemini_official' && geminiAdapter.cleanHistoryForGemini) {
     initialMessages = geminiAdapter.cleanHistoryForGemini(messages, false);
     console.log('[MCP] Cleaned history messages for Gemini:', messages.length, '->', initialMessages.length);
   }
-  
+
   let currentMessages = [...initialMessages];
   const toolCallHistory = [];
-  
+
+  // Usage accumulation
+  const totalUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
+  const usageStartTime = Date.now();
+
   // 跟踪每个服务器的迭代次数
   const serverIterations = new Map();
   // 总迭代次数（防止无限循环的保险）
   let totalIterations = 0;
-  const MAX_TOTAL_ITERATIONS = 100;
-  
+  const MAX_TOTAL_ITERATIONS = maxIterations ?? 100;
+
   while (totalIterations < MAX_TOTAL_ITERATIONS) {
     totalIterations++;
     console.log(`[MCP] Tool loop iteration ${totalIterations}`);
@@ -518,7 +556,13 @@ export const callLLMWithTools = async ({
       throw err;
     }
     const result = adapter.parseResponse(data);
-    
+
+    // Accumulate usage from this iteration
+    const iterUsage = normalizeUsage(result.usage);
+    totalUsage.inputTokens += iterUsage.inputTokens;
+    totalUsage.outputTokens += iterUsage.outputTokens;
+    totalUsage.cachedTokens += iterUsage.cachedTokens;
+
     // Emit LLM text for every iteration (including empty — caller decides what to show)
     if (onLLMText) {
       const toolNames = (result.toolCalls || []).map(tc => tc.name);
@@ -532,10 +576,28 @@ export const callLLMWithTools = async ({
     
     // 如果没有工具调用，返回结果
     if (!result.toolCalls || result.toolCalls.length === 0) {
+      // Write usage log
+      const _petId = usagePetId || builtinToolContext?.petId;
+      if (usageLabel && _petId) {
+        appendUsageLog(_petId, {
+          ts: new Date().toISOString(),
+          label: usageLabel,
+          target: usageTarget || '',
+          model: model || '',
+          apiFormat: apiFormat || '',
+          inputTokens: totalUsage.inputTokens,
+          outputTokens: totalUsage.outputTokens,
+          cachedTokens: totalUsage.cachedTokens,
+          toolCalls: toolCallHistory.length,
+          iterations: totalIterations,
+          durationMs: Date.now() - usageStartTime,
+        });
+      }
       return {
         content: result.content,
         reasoningContent: result.reasoningContent,
-        toolCallHistory
+        toolCallHistory,
+        usage: totalUsage,
       };
     }
     
@@ -601,8 +663,9 @@ export const callLLMWithTools = async ({
           const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
           const isStickerTool = isStickerBuiltinTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool;
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool}`);
+          const isBufferSearch = isBufferSearchTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch;
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch}`);
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
@@ -617,6 +680,8 @@ export const callLLMWithTools = async ({
             toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isStickerTool && builtinToolContext) {
             toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isBufferSearch && builtinToolContext) {
+            toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }
@@ -648,9 +713,19 @@ export const callLLMWithTools = async ({
     
     // 如果所有工具调用都被跳过（达到限制），返回
     if (reachedLimit && toolCallHistory.length === 0) {
+      const _petId = usagePetId || builtinToolContext?.petId;
+      if (usageLabel && _petId) {
+        appendUsageLog(_petId, {
+          ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+          model: model || '', apiFormat: apiFormat || '',
+          inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+          toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+        });
+      }
       return {
         content: `[${limitMessage}]`,
-        toolCallHistory
+        toolCallHistory,
+        usage: totalUsage,
       };
     }
     
@@ -707,9 +782,19 @@ export const callLLMWithTools = async ({
   
   // 达到最大轮次
   console.warn('[MCP] Max total iterations reached');
+  const _petId = usagePetId || builtinToolContext?.petId;
+  if (usageLabel && _petId) {
+    appendUsageLog(_petId, {
+      ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+      model: model || '', apiFormat: apiFormat || '',
+      inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+      toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+    });
+  }
   return {
     content: '[Maximum tool call iterations reached]',
-    toolCallHistory
+    toolCallHistory,
+    usage: totalUsage,
   };
 };
 
@@ -1028,7 +1113,8 @@ export const callLLMStreamWithTools = async ({
           const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
           const isStickerTool = isStickerBuiltinTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool;
+          const isBufferSearch = isBufferSearchTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch;
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
             isError = true;
@@ -1043,6 +1129,8 @@ export const callLLMStreamWithTools = async ({
             toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isStickerTool && builtinToolContext) {
             toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isBufferSearch && builtinToolContext) {
+            toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }

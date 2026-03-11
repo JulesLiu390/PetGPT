@@ -39,6 +39,19 @@ pub fn workspace_write(
         .map_err(|e| e.to_string())
 }
 
+/// Append text to a file in the pet's workspace (creates if not exists)
+#[tauri::command]
+pub fn workspace_append(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+    content: String,
+) -> Result<String, String> {
+    workspace
+        .append(&pet_id, &path, &content)
+        .map_err(|e| e.to_string())
+}
+
 /// Edit a file by exact text find-and-replace
 #[tauri::command]
 pub fn workspace_edit(

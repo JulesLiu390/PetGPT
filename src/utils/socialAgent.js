@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, resetStickerCooldown } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown } from './workspace/socialToolExecutor';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -325,7 +325,7 @@ async function convertGifToPng(base64Data) {
   return { data: result.data, mimeType: result.mime_type };
 }
 
-async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig) {
+async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig, petId) {
   // GIF → PNG 转码（Gemini 不支持 image/gif）
   if (resolvedImage.mimeType === 'image/gif' || resolvedImage.data?.includes('data:image/gif')) {
     try {
@@ -372,6 +372,7 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
     },
   ];
 
+  const _visionStart = Date.now();
   const result = await callLLM({
     messages,
     apiFormat: visionLLMConfig.apiFormat,
@@ -381,6 +382,18 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
     options: { temperature: 0.2 },
     conversationId: `vision-desc-${Date.now()}`,
   });
+
+  // Log vision usage
+  if (petId) {
+    const { normalizeUsage, appendUsageLog } = await import('./mcp/toolExecutor.js');
+    const u = normalizeUsage(result.usage);
+    appendUsageLog(petId, {
+      ts: new Date().toISOString(), label: 'Vision', target: '',
+      model: visionLLMConfig.modelName || '', apiFormat: visionLLMConfig.apiFormat || '',
+      inputTokens: u.inputTokens, outputTokens: u.outputTokens, cachedTokens: u.cachedTokens,
+      toolCalls: 0, iterations: 1, durationMs: Date.now() - _visionStart,
+    });
+  }
 
   if (result.error) {
     throw new Error(result.content || 'Vision LLM call failed');
@@ -618,6 +631,7 @@ async function pollTarget({
   imageDescMode = 'off',
   visionLLMConfig = null,
   botName = '',
+  fullBufferMessages = null,  // Observer 用：完整 buffer（供 buffer_search 搜索）
 }) {
   const groupName = gName || target;
   const compressedSummary = compSummary;
@@ -703,7 +717,7 @@ async function pollTarget({
               const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${msg._images[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
               // 用 retryLLM 包装，inflight 跟踪确保并发去重
               const wrappedDescribe = () => {
-                const p = describeImage(msg._images[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig);
+                const p = describeImage(msg._images[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId);
                 imageDescInflight.set(cacheKey, p);
                 return p;
               };
@@ -719,8 +733,10 @@ async function pollTarget({
             if (msg.message_id) imageDescCache.set(cacheKey, desc);
           } catch (e) {
             addLog('warn', `Vision desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
-            // 失败：保留原始 resolved 图片用于 fallback
-            remainingImages.push(msg._images[j]);
+            // 缓存失败标记，避免对同一张图反复重试 155 秒
+            const fallback = '[图片描述失败]';
+            if (msg.message_id) imageDescCache.set(cacheKey, fallback);
+            descs.push(fallback);
           }
         }
         // 写回消息
@@ -964,6 +980,7 @@ async function pollTarget({
       ...toMcp(getSocialFileToolDefinitions()),
       ...toMcp(getHistoryToolDefinitions()),
       ...toMcp(getStickerToolDefinitions()),
+      ...(fullBufferMessages ? toMcp(getBufferSearchToolDefinitions()) : []),
     ];
   } else {
     // ── Reply: send_message + 外部 MCP + history 工具，无 builtin 读写 ──
@@ -1055,7 +1072,11 @@ async function pollTarget({
       baseUrl: llmConfig.baseUrl,
       mcpTools,
       options: { temperature: 0.7 },
-      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache },
+      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache, bufferMessages: fullBufferMessages || undefined },
+      maxIterations: role === 'observer' ? 25 : undefined,
+      usageLabel: role === 'observer' ? 'Observer' : 'Reply',
+      usageTarget: target,
+      usagePetId: petId,
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -1392,6 +1413,9 @@ ${groupContent}`;
           baseUrl: llmConfig.baseUrl,
           mcpTools: [],
           options: { temperature: 0.3 },
+          usageLabel: 'Compress:daily',
+          usageTarget: target,
+          usagePetId: petId,
         }), { label: `DailyCompress:${target}` });
 
         const summary = result.content || '（压缩失败）';
@@ -1436,6 +1460,9 @@ ${globalInput}`;
         baseUrl: llmConfig.baseUrl,
         mcpTools: [],
         options: { temperature: 0.3 },
+        usageLabel: 'Compress:global',
+        usageTarget: '',
+        usagePetId: petId,
       }), { label: 'DailyCompressGlobal' });
 
       const dailyContent = `# ${dateStr} 社交日报\n\n${globalResult.content || '（压缩失败）'}\n`;
@@ -2102,7 +2129,7 @@ export async function startSocialLoop(config, onStatusChange) {
             const imgData = resolvedImages[j].data || '';
             const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${resolvedImages[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
             const wrappedDescribe = () => {
-              const p = describeImage(resolvedImages[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig);
+              const p = describeImage(resolvedImages[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId);
               imageDescInflight.set(cacheKey, p);
               return p;
             };
@@ -2118,6 +2145,10 @@ export async function startSocialLoop(config, onStatusChange) {
           if (msg.message_id) imageDescCache.set(cacheKey, desc);
         } catch (e) {
           addLog('warn', `Vision-pre desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
+          // 缓存失败标记，避免对同一张图反复重试 155 秒
+          const fallback = '[图片描述失败]';
+          if (msg.message_id) imageDescCache.set(cacheKey, fallback);
+          descs.push(fallback);
         }
       }
       if (descs.length > 0) {
@@ -2248,6 +2279,9 @@ export async function startSocialLoop(config, onStatusChange) {
                   temperature: 0.4,
                 },
                 builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache },
+                usageLabel: 'Intent:idle',
+                usageTarget: target,
+                usagePetId: config.petId,
                 onToolCall: (name, args) => {
                   if (name === 'sticker_send') idleStickerSent = true;
                   addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
@@ -2479,6 +2513,9 @@ export async function startSocialLoop(config, onStatusChange) {
                 temperature: 0.4,
               },
               builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache },
+              usageLabel: 'Intent:msg',
+              usageTarget: target,
+              usagePetId: config.petId,
               onToolCall: (name, args) => {
                 if (name === 'sticker_send') intentStickerSent = true;
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
@@ -2784,7 +2821,22 @@ export async function startSocialLoop(config, onStatusChange) {
         // ── 异步启动 LLM（不阻塞检测循环） ──
         llmRunning = true;
         const snapshotBuf = dataBuffer.get(target);
-        
+
+        // Observer query: 只取水位线之后的新消息 + 最多 OBSERVER_CONTEXT_WINDOW 条旧消息作为上下文
+        const OBSERVER_CONTEXT_WINDOW = 20;
+        const allMsgs = snapshotBuf ? snapshotBuf.messages : buf.messages;
+        const obsWmId = observerWatermarks.get(target);
+        let obsWmIdx = -1;
+        if (obsWmId) {
+          for (let i = allMsgs.length - 1; i >= 0; i--) {
+            if (allMsgs[i].message_id === obsWmId) { obsWmIdx = i; break; }
+          }
+        }
+        // 新消息 = 水位线之后的全部；上下文 = 水位线之前最多 N 条
+        const contextStart = obsWmIdx >= 0 ? Math.max(0, obsWmIdx - OBSERVER_CONTEXT_WINDOW + 1) : Math.max(0, allMsgs.length - OBSERVER_CONTEXT_WINDOW);
+        const observerMessages = allMsgs.slice(contextStart);
+        addLog('info', `${label} observer query: ${allMsgs.length} total, wm@${obsWmIdx}, sending ${observerMessages.length} (${obsWmIdx >= 0 ? observerMessages.length - (allMsgs.length - obsWmIdx - 1) : 0} ctx + ${obsWmIdx >= 0 ? allMsgs.length - obsWmIdx - 1 : observerMessages.length} new)`, null, target);
+
         pollTarget({
           target,
           targetType,
@@ -2794,7 +2846,7 @@ export async function startSocialLoop(config, onStatusChange) {
           promptConfig,
           watermarks: observerWatermarks,
           sentCache: sentMessagesCache,
-          bufferMessages: snapshotBuf ? snapshotBuf.messages : buf.messages,
+          bufferMessages: observerMessages,
           compressedSummary: snapshotBuf ? snapshotBuf.compressedSummary : buf.compressedSummary,
           groupName: (snapshotBuf || buf).metadata?.group_name || (snapshotBuf || buf).metadata?.friend_name || target,
           consumedAtMeIds: new Set(), // Observer 不消费 @me
@@ -2806,6 +2858,7 @@ export async function startSocialLoop(config, onStatusChange) {
           imageDescMode: config.imageDescMode || 'off',
           visionLLMConfig,
           botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
+          fullBufferMessages: allMsgs,
         }).then(result => {
           // 无论成功失败都更新冷却时间，防止错误时 2s 重试风暴
           lastObserveTime.set(target, Date.now());
