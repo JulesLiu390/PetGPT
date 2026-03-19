@@ -377,7 +377,7 @@ export function getBufferSearchToolDefinitions() {
             },
             limit: {
               type: 'number',
-              description: '最多返回条数，默认 20，最大 50',
+              description: '最多返回条数，默认 10，最大 10',
             },
           },
           required: ['query'],
@@ -398,33 +398,40 @@ export function executeBufferSearchTool(toolName, args, context) {
     return { text: '缓冲区为空，没有可搜索的消息。' };
   }
 
-  const maxResults = Math.min(Math.max(rawLimit || 20, 1), 50);
+  const maxResults = Math.min(Math.max(rawLimit || 10, 1), 10);
   const lowerQuery = query.toLowerCase();
+  const queryTerms = lowerQuery.split(/\s+/).filter(Boolean);
 
-  // 从旧到新搜索，收集匹配的消息
-  const matches = [];
+  // 搜索并计算相关度（关键词命中次数）
+  const scored = [];
   for (const msg of bufferMessages) {
     const content = (msg.content || '').toLowerCase();
     const sender = (msg.sender_name || msg.sender_id || '').toLowerCase();
-    if (content.includes(lowerQuery) || sender.includes(lowerQuery)) {
-      matches.push(msg);
+    const text = content + ' ' + sender;
+    let score = 0;
+    for (const term of queryTerms) {
+      // 计算每个关键词在文本中出现的次数
+      let idx = 0;
+      while ((idx = text.indexOf(term, idx)) !== -1) { score++; idx += term.length; }
     }
+    if (score > 0) scored.push({ msg, score });
   }
 
-  if (matches.length === 0) {
+  if (scored.length === 0) {
     return { text: `未找到包含"${query}"的消息。缓冲区共 ${bufferMessages.length} 条消息。` };
   }
 
-  // 取最新的 N 条
-  const results = matches.slice(-maxResults);
-  const lines = results.map(m => {
+  // 按相关度降序，同分按时间降序（最新优先）
+  scored.sort((a, b) => b.score - a.score || (b.msg.timestamp || 0) - (a.msg.timestamp || 0));
+  const results = scored.slice(0, maxResults);
+  const lines = results.map(({ msg: m, score }) => {
     const time = m.timestamp ? new Date(m.timestamp * 1000).toISOString().slice(11, 19) : '??:??:??';
     const sender = m.sender_name || m.sender_id || 'unknown';
     const content = (m.content || '').substring(0, 200);
     return `[${time}] ${sender}: ${content}`;
   });
 
-  return { text: `找到 ${matches.length} 条匹配消息（显示最近 ${results.length} 条）：\n\n${lines.join('\n')}` };
+  return { text: `找到 ${scored.length} 条匹配消息（显示最相关 ${results.length} 条）：\n\n${lines.join('\n')}` };
 }
 
 // ============ 历史查询工具（保留，有复杂查询逻辑） ============
