@@ -1,14 +1,14 @@
-pub mod pets;
-pub mod conversations;
-pub mod messages;
-pub mod settings;
-pub mod mcp_servers;
 pub mod api_providers;
+pub mod conversations;
+pub mod mcp_servers;
+pub mod messages;
+pub mod pets;
+pub mod settings;
 pub mod skins;
 
 use rusqlite::{Connection, Result};
-use std::sync::Mutex;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 pub struct Database {
     pub conn: Mutex<Connection>,
@@ -26,7 +26,7 @@ impl Database {
 
     fn init_tables(&self) -> Result<()> {
         let conn = self.conn.lock().unwrap();
-        
+
         // Pets/Assistants table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pets (
@@ -48,9 +48,12 @@ impl Database {
             )",
             [],
         )?;
-        
+
         // Migration: add type column if not exists
-        let _ = conn.execute("ALTER TABLE pets ADD COLUMN type TEXT DEFAULT 'assistant'", []);
+        let _ = conn.execute(
+            "ALTER TABLE pets ADD COLUMN type TEXT DEFAULT 'assistant'",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN model_config_id TEXT", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN api_format TEXT", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN appearance TEXT", []);
@@ -115,13 +118,28 @@ impl Database {
         )?;
 
         // Migration: add new columns if not exists
-        let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'stdio'", []);
+        let _ = conn.execute(
+            "ALTER TABLE mcp_servers ADD COLUMN transport TEXT DEFAULT 'stdio'",
+            [],
+        );
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN url TEXT", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN api_key TEXT", []);
-        let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN max_iterations INTEGER", []);
+        let _ = conn.execute(
+            "ALTER TABLE mcp_servers ADD COLUMN max_iterations INTEGER",
+            [],
+        );
 
         // Migration: add is_deleted to pets
-        let _ = conn.execute("ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0", []);
+        let _ = conn.execute(
+            "ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0",
+            [],
+        );
+
+        // Migration: fix existing pets without type
+        let _ = conn.execute(
+            "UPDATE pets SET type = 'assistant' WHERE type IS NULL OR type = ''",
+            [],
+        );
 
         // API Providers table
         conn.execute(
@@ -139,9 +157,12 @@ impl Database {
             )",
             [],
         )?;
-        
+
         // Migration: add hidden_models column if not exists
-        let _ = conn.execute("ALTER TABLE api_providers ADD COLUMN hidden_models TEXT", []);
+        let _ = conn.execute(
+            "ALTER TABLE api_providers ADD COLUMN hidden_models TEXT",
+            [],
+        );
 
         // Skins table
         conn.execute(
@@ -159,14 +180,20 @@ impl Database {
         )?;
 
         // Migration: add is_builtin and is_hidden columns if not exists
-        let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_builtin INTEGER DEFAULT 0", []);
+        let _ = conn.execute(
+            "ALTER TABLE skins ADD COLUMN is_builtin INTEGER DEFAULT 0",
+            [],
+        );
 
         // Index: speed up COUNT(*) and message lookups by conversation_id
         let _ = conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id ON messages(conversation_id)",
             [],
         );
-        let _ = conn.execute("ALTER TABLE skins ADD COLUMN is_hidden INTEGER DEFAULT 0", []);
+        let _ = conn.execute(
+            "ALTER TABLE skins ADD COLUMN is_hidden INTEGER DEFAULT 0",
+            [],
+        );
         // Migration: add moods column for dynamic mood/expression support
         // 固定表情系统: ["normal", "smile", "sad", "shocked", "thinking"]
         let _ = conn.execute("ALTER TABLE skins ADD COLUMN moods TEXT", []);

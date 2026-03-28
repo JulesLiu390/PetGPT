@@ -151,8 +151,15 @@ export const createPet = (data) => invoke('create_pet', { data });
 export const updatePet = (id, data) => invoke('update_pet', { id, data });
 export const deletePet = (id) => invoke('delete_pet', { id });
 
+<<<<<<< Updated upstream
 // Alias for consistency
 export const getAssistants = getPets;
+=======
+export const getAssistants = async () => {
+  const pets = await getPets();
+  return pets.filter(p => p.type === 'assistant' || p.modelConfigId);
+};
+>>>>>>> Stashed changes
 export const getAssistant = getPet;
 export const createAssistant = createPet;
 export const updateAssistant = updatePet;
@@ -308,6 +315,15 @@ export const subscribeTabState = async (conversationId, callback) => {
   const eventName = `tab-state:${conversationId}`;
   return listen(eventName, (event) => callback(event.payload));
 };
+
+/**
+ * 获取可用模型列表（绕过 CORS）
+ * @param {string} baseUrl - API 基础 URL
+ * @param {string} apiKey - API 密钥
+ * @returns {Promise<Object>} 模型列表响应
+ */
+export const fetchModels = (baseUrl, apiKey) => 
+  invoke('fetch_models', { baseUrl, apiKey });
 
 // ==================== LLM ====================
 
@@ -937,6 +953,7 @@ const tauri = {
   llmCancelAllStreams,
   llmResetCancellation,
   subscribeLlmStream,
+  fetchModels,
   
   // API Providers
   getApiProviders,
