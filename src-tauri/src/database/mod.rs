@@ -123,6 +123,9 @@ impl Database {
         // Migration: add is_deleted to pets
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0", []);
 
+        // Migration: fix existing pets without type
+        let _ = conn.execute("UPDATE pets SET type = 'assistant' WHERE type IS NULL OR type = ''", []);
+
         // API Providers table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS api_providers (
