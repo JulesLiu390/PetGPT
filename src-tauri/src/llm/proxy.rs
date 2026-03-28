@@ -107,3 +107,55 @@ pub async fn llm_proxy_call(
 
     Ok(data)
 }
+
+/// 获取可用模型列表（绕过 CORS）
+/// 
+/// 通过 Rust 后端代理 GET /v1/models 请求，避免浏览器 CORS 限制。
+/// 支持所有 OpenAI 兼容的本地服务（Ollama、LM Studio 等）。
+#[tauri::command]
+pub async fn fetch_models(
+    proxy: tauri::State<'_, Arc<LlmProxy>>,
+    base_url: String,
+    api_key: String,
+) -> Result<serde_json::Value, String> {
+    // 构建 URL：确保包含 /v1 路径
+    let url = if base_url.contains("/v1") {
+        format!("{}/models", base_url.trim_end_matches('/'))
+    } else {
+        let base = base_url.trim_end_matches('/');
+        format!("{}/v1/models", base)
+    };
+
+    // 获取并发许可
+    let _permit = proxy.semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore closed: {}", e))?;
+
+    let response = proxy.http_client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("Request timed out after {}s", REQUEST_TIMEOUT_SECS)
+            } else {
+                format!("HTTP error: {}", e)
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status.as_u16(), error_text));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    Ok(data)
+}

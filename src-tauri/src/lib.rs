@@ -2649,6 +2649,7 @@ pub fn run() {
             llm_cancel_all_streams,
             llm_reset_cancellation,
             llm::proxy::llm_proxy_call,
+            llm::proxy::fetch_models,
             // Workspace commands
             workspace::workspace_read,
             workspace::workspace_write,

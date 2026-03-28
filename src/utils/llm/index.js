@@ -15,7 +15,7 @@
 
 import * as openaiAdapter from './adapters/openaiCompatible.js';
 import * as geminiAdapter from './adapters/geminiOfficial.js';
-import { llmCall, llmStream, subscribeLlmStream } from '../tauri.js';
+import { llmCall, llmStream, subscribeLlmStream, fetchModels as tauriFetchModels } from '../tauri.js';
 
 // 是否使用 Rust 后端 (可通过环境变量控制，默认启用)
 const USE_RUST_BACKEND = true;
@@ -379,26 +379,14 @@ export const fetchModels = async ({ apiFormat, apiKey, baseUrl }) => {
     return geminiAdapter.fetchModels(apiKey);
   }
   
-  // OpenAI-compatible: 需要传入 baseUrl
-  let url = baseUrl;
-  if (url === 'default' || !url) {
-    url = 'https://api.openai.com/v1';
-  } else if (!url.endsWith('/v1')) {
-    url = url.endsWith('/') ? url + 'v1' : url + '/v1';
+  // OpenAI-compatible: 通过 Rust 后端代理请求（绑过 CORS）
+  try {
+    const data = await tauriFetchModels(baseUrl || 'https://api.openai.com/v1', apiKey);
+    return data.data || [];
+  } catch (error) {
+    console.error('[fetchModels] Error:', error);
+    throw error;
   }
-  
-  const response = await fetch(`${url}/models`, {
-    headers: {
-      'Authorization': `Bearer ${apiKey}`
-    }
-  });
-  
-  if (!response.ok) {
-    throw new Error(`API Error: ${response.statusText}`);
-  }
-  
-  const data = await response.json();
-  return data.data || [];
 };
 
 export default {
