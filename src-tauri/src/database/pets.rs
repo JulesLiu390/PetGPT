@@ -1,8 +1,8 @@
+use super::Database;
+use chrono::Utc;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
-use chrono::Utc;
 use uuid::Uuid;
-use super::Database;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -76,30 +76,32 @@ impl Database {
                     toolbar_order, created_at, updated_at 
              FROM pets 
              WHERE is_deleted = 0 
-             ORDER BY toolbar_order"
+             ORDER BY toolbar_order",
         )?;
-        
-        let pets = stmt.query_map([], |row| {
-            Ok(Pet {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                pet_type: row.get(2)?,
-                model_name: row.get(3)?,
-                model_url: row.get(4)?,
-                model_api_key: row.get(5)?,
-                model_config_id: row.get(6)?,
-                api_format: row.get(7)?,
-                system_instruction: row.get(8)?,
-                appearance: row.get(9)?,
-                has_mood: row.get::<_, i32>(10)? != 0,
-                icon: row.get(11)?,
-                user_memory: row.get(12)?,
-                toolbar_order: row.get(13)?,
-                created_at: row.get(14)?,
-                updated_at: row.get(15)?,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
-        
+
+        let pets = stmt
+            .query_map([], |row| {
+                Ok(Pet {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    pet_type: row.get(2)?,
+                    model_name: row.get(3)?,
+                    model_url: row.get(4)?,
+                    model_api_key: row.get(5)?,
+                    model_config_id: row.get(6)?,
+                    api_format: row.get(7)?,
+                    system_instruction: row.get(8)?,
+                    appearance: row.get(9)?,
+                    has_mood: row.get::<_, i32>(10)? != 0,
+                    icon: row.get(11)?,
+                    user_memory: row.get(12)?,
+                    toolbar_order: row.get(13)?,
+                    created_at: row.get(14)?,
+                    updated_at: row.get(15)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(pets)
     }
 
@@ -109,11 +111,11 @@ impl Database {
             "SELECT id, name, type, model_name, model_url, model_api_key, model_config_id,
                     api_format, system_instruction, appearance, has_mood, icon, user_memory,
                     toolbar_order, created_at, updated_at 
-             FROM pets WHERE id = ?"
+             FROM pets WHERE id = ?",
         )?;
-        
+
         let mut rows = stmt.query(params![id])?;
-        
+
         if let Some(row) = rows.next()? {
             Ok(Some(Pet {
                 id: row.get(0)?,
@@ -140,11 +142,17 @@ impl Database {
 
     pub fn create_pet(&self, data: CreatePetData) -> Result<Pet> {
         let conn = self.conn.lock().unwrap();
-        let id = data.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
+        let id = data
+            .id
+            .clone()
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = Utc::now().to_rfc3339();
         let has_mood = data.has_mood.unwrap_or(true);
-        let pet_type = data.pet_type.clone().unwrap_or_else(|| "assistant".to_string());
-        
+        let pet_type = data
+            .pet_type
+            .clone()
+            .unwrap_or_else(|| "assistant".to_string());
+
         conn.execute(
             "INSERT INTO pets (id, name, type, model_name, model_url, model_api_key, 
                               model_config_id, api_format, system_instruction, appearance,
@@ -167,7 +175,7 @@ impl Database {
                 now
             ],
         )?;
-        
+
         Ok(Pet {
             id,
             name: data.name,
@@ -191,11 +199,11 @@ impl Database {
     pub fn update_pet(&self, id: &str, data: UpdatePetData) -> Result<Option<Pet>> {
         let conn = self.conn.lock().unwrap();
         let now = Utc::now().to_rfc3339();
-        
+
         // Build dynamic UPDATE query
         let mut updates = vec!["updated_at = ?"];
         let mut values: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now.clone())];
-        
+
         if let Some(name) = &data.name {
             updates.push("name = ?");
             values.push(Box::new(name.clone()));
@@ -248,17 +256,14 @@ impl Database {
             updates.push("toolbar_order = ?");
             values.push(Box::new(toolbar_order));
         }
-        
+
         values.push(Box::new(id.to_string()));
-        
-        let sql = format!(
-            "UPDATE pets SET {} WHERE id = ?",
-            updates.join(", ")
-        );
-        
+
+        let sql = format!("UPDATE pets SET {} WHERE id = ?", updates.join(", "));
+
         let params: Vec<&dyn rusqlite::ToSql> = values.iter().map(|v| v.as_ref()).collect();
         conn.execute(&sql, params.as_slice())?;
-        
+
         drop(conn);
         self.get_pet_by_id(id)
     }

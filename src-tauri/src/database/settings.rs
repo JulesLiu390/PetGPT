@@ -1,6 +1,6 @@
+use super::Database;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
-use super::Database;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Setting {
@@ -13,7 +13,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT value FROM settings WHERE key = ?")?;
         let mut rows = stmt.query(params![key])?;
-        
+
         if let Some(row) = rows.next()? {
             let value: String = row.get(0)?;
             // println!("[DEBUG Settings] get_setting: key={}, value={}", key, value);
@@ -27,19 +27,21 @@ impl Database {
     pub fn get_all_settings(&self) -> Result<Vec<Setting>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare("SELECT key, value FROM settings")?;
-        
-        let settings = stmt.query_map([], |row| {
-            Ok(Setting {
-                key: row.get(0)?,
-                value: row.get(1)?,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
-        
+
+        let settings = stmt
+            .query_map([], |row| {
+                Ok(Setting {
+                    key: row.get(0)?,
+                    value: row.get(1)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
         // println!("[DEBUG Settings] get_all_settings: {} settings found", settings.len());
         // for s in &settings {
         //     println!("[DEBUG Settings]   - {} = {}", s.key, s.value);
         // }
-        
+
         Ok(settings)
     }
 

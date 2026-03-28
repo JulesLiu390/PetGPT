@@ -1,8 +1,8 @@
+use super::Database;
+use chrono::Utc;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
-use chrono::Utc;
 use uuid::Uuid;
-use super::Database;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -64,17 +64,19 @@ impl Database {
              ORDER BY c.updated_at DESC"
         )?;
 
-        let conversations = stmt.query_map([], |row| {
-            Ok(ConversationWithPetName {
-                id: row.get(0)?,
-                pet_id: row.get(1)?,
-                title: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                message_count: row.get(5)?,
-                pet_name: row.get(6)?,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
+        let conversations = stmt
+            .query_map([], |row| {
+                Ok(ConversationWithPetName {
+                    id: row.get(0)?,
+                    pet_id: row.get(1)?,
+                    title: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    message_count: row.get(5)?,
+                    pet_name: row.get(6)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
 
         Ok(conversations)
     }
@@ -88,18 +90,20 @@ impl Database {
              WHERE c.pet_id = ? 
              ORDER BY c.updated_at DESC"
         )?;
-        
-        let conversations = stmt.query_map(params![pet_id], |row| {
-            Ok(Conversation {
-                id: row.get(0)?,
-                pet_id: row.get(1)?,
-                title: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                message_count: row.get(5)?,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
-        
+
+        let conversations = stmt
+            .query_map(params![pet_id], |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    pet_id: row.get(1)?,
+                    title: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    message_count: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(conversations)
     }
 
@@ -110,9 +114,9 @@ impl Database {
                     (SELECT COUNT(*) FROM messages m WHERE m.conversation_id = c.id) as message_count
              FROM conversations c WHERE c.id = ?"
         )?;
-        
+
         let mut rows = stmt.query(params![id])?;
-        
+
         if let Some(row) = rows.next()? {
             let conv = Conversation {
                 id: row.get(0)?,
@@ -122,7 +126,10 @@ impl Database {
                 updated_at: row.get(4)?,
                 message_count: row.get(5)?,
             };
-            println!("[Rust get_conversation_by_id] id={}, messageCount={}", conv.id, conv.message_count);
+            println!(
+                "[Rust get_conversation_by_id] id={}, messageCount={}",
+                conv.id, conv.message_count
+            );
             Ok(Some(conv))
         } else {
             println!("[Rust get_conversation_by_id] id={} NOT FOUND", id);
@@ -131,7 +138,10 @@ impl Database {
     }
 
     /// Get conversation + all its messages in a single call (avoids 2 IPC round-trips)
-    pub fn get_conversation_with_history(&self, id: &str) -> Result<Option<ConversationWithHistory>> {
+    pub fn get_conversation_with_history(
+        &self,
+        id: &str,
+    ) -> Result<Option<ConversationWithHistory>> {
         let conv = self.get_conversation_by_id(id)?;
         match conv {
             Some(c) => {
@@ -149,13 +159,13 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        
+
         conn.execute(
             "INSERT INTO conversations (id, pet_id, title, created_at, updated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             params![id, data.pet_id, data.title, now, now],
         )?;
-        
+
         Ok(Conversation {
             id,
             pet_id: data.pet_id,
@@ -179,7 +189,10 @@ impl Database {
     pub fn delete_conversation(&self, id: &str) -> Result<bool> {
         let conn = self.conn.lock().unwrap();
         // Delete messages first
-        conn.execute("DELETE FROM messages WHERE conversation_id = ?", params![id])?;
+        conn.execute(
+            "DELETE FROM messages WHERE conversation_id = ?",
+            params![id],
+        )?;
         // Delete conversation
         let rows = conn.execute("DELETE FROM conversations WHERE id = ?", params![id])?;
         Ok(rows > 0)
@@ -192,14 +205,20 @@ impl Database {
         let conv_ids: Vec<String> = stmt
             .query_map(params![pet_id], |row| row.get(0))?
             .collect::<Result<Vec<_>>>()?;
-        
+
         // Delete messages for each conversation
         for conv_id in &conv_ids {
-            conn.execute("DELETE FROM messages WHERE conversation_id = ?", params![conv_id])?;
+            conn.execute(
+                "DELETE FROM messages WHERE conversation_id = ?",
+                params![conv_id],
+            )?;
         }
-        
+
         // Delete all conversations
-        let rows = conn.execute("DELETE FROM conversations WHERE pet_id = ?", params![pet_id])?;
+        let rows = conn.execute(
+            "DELETE FROM conversations WHERE pet_id = ?",
+            params![pet_id],
+        )?;
         Ok(rows)
     }
 
@@ -216,18 +235,20 @@ impl Database {
              HAVING message_count > 0
              ORDER BY c.updated_at DESC"
         )?;
-        
-        let conversations = stmt.query_map([], |row| {
-            Ok(Conversation {
-                id: row.get(0)?,
-                pet_id: row.get(1)?,
-                title: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
-                message_count: row.get(5)?,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
-        
+
+        let conversations = stmt
+            .query_map([], |row| {
+                Ok(Conversation {
+                    id: row.get(0)?,
+                    pet_id: row.get(1)?,
+                    title: row.get(2)?,
+                    created_at: row.get(3)?,
+                    updated_at: row.get(4)?,
+                    message_count: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(conversations)
     }
 
@@ -271,30 +292,37 @@ impl Database {
              LIMIT 20"
         )?;
 
-        let title_matches: Vec<SearchResult> = title_stmt.query_map(params![like_pattern], |row| {
-            Ok(SearchResult {
-                conversation: Conversation {
-                    id: row.get(0)?,
-                    pet_id: row.get(1)?,
-                    title: row.get(2)?,
-                    created_at: row.get(3)?,
-                    updated_at: row.get(4)?,
-                    message_count: row.get(5)?,
-                },
-                match_type: "title".to_string(),
-                snippet: None,
-                message_role: None,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
+        let title_matches: Vec<SearchResult> = title_stmt
+            .query_map(params![like_pattern], |row| {
+                Ok(SearchResult {
+                    conversation: Conversation {
+                        id: row.get(0)?,
+                        pet_id: row.get(1)?,
+                        title: row.get(2)?,
+                        created_at: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        message_count: row.get(5)?,
+                    },
+                    match_type: "title".to_string(),
+                    snippet: None,
+                    message_role: None,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
 
         // 2) 消息内容匹配（排除已在标题匹配中的对话）
-        let title_matched_ids: Vec<String> = title_matches.iter().map(|r| r.conversation.id.clone()).collect();
-        
+        let title_matched_ids: Vec<String> = title_matches
+            .iter()
+            .map(|r| r.conversation.id.clone())
+            .collect();
+
         // 构建排除条件
         let exclude_clause = if title_matched_ids.is_empty() {
             String::new()
         } else {
-            let placeholders: Vec<String> = title_matched_ids.iter().enumerate()
+            let placeholders: Vec<String> = title_matched_ids
+                .iter()
+                .enumerate()
                 .map(|(i, _)| format!("?{}", i + 2))
                 .collect();
             format!(" AND c.id NOT IN ({})", placeholders.join(","))
@@ -317,18 +345,18 @@ impl Database {
         );
 
         let mut content_stmt = conn.prepare(&content_sql)?;
-        
+
         // 构建参数列表
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         param_values.push(Box::new(like_pattern.clone()));
         for id in &title_matched_ids {
             param_values.push(Box::new(id.clone()));
         }
-        let params_refs: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+        let params_refs: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
 
-        let content_matches: Vec<SearchResult> = content_stmt.query_map(
-            params_refs.as_slice(),
-            |row| {
+        let content_matches: Vec<SearchResult> = content_stmt
+            .query_map(params_refs.as_slice(), |row| {
                 let content: String = row.get(6)?;
                 let role: String = row.get(7)?;
                 // 提取关键词周围的片段（前后各 40 字符）
@@ -346,8 +374,8 @@ impl Database {
                     snippet: Some(snippet),
                     message_role: Some(role),
                 })
-            }
-        )?.collect::<Result<Vec<_>>>()?;
+            })?
+            .collect::<Result<Vec<_>>>()?;
 
         let mut results = title_matches;
         results.extend(content_matches);
@@ -360,8 +388,8 @@ impl Database {
 #[serde(rename_all = "camelCase")]
 pub struct SearchResult {
     pub conversation: Conversation,
-    pub match_type: String,       // "title" | "content"
-    pub snippet: Option<String>,  // 消息内容片段（仅 content 匹配时）
+    pub match_type: String,           // "title" | "content"
+    pub snippet: Option<String>,      // 消息内容片段（仅 content 匹配时）
     pub message_role: Option<String>, // 消息角色（仅 content 匹配时）
 }
 
@@ -369,26 +397,59 @@ pub struct SearchResult {
 fn extract_snippet(content: &str, query: &str, context_chars: usize) -> String {
     let lower_content = content.to_lowercase();
     let lower_query = query.to_lowercase();
-    
+
+    // 辅助函数：找到不小于目标位置的最小有效字符边界
+    fn ceil_char_boundary(s: &str, idx: usize) -> usize {
+        if idx >= s.len() {
+            return s.len();
+        }
+        s.char_indices()
+            .map(|(i, _)| i)
+            .find(|&i| i >= idx)
+            .unwrap_or(s.len())
+    }
+
+    // 辅助函数：找到不大于目标位置的最大有效字符边界
+    fn floor_char_boundary(s: &str, idx: usize) -> usize {
+        if idx == 0 {
+            return 0;
+        }
+        s.char_indices()
+            .map(|(i, _)| i)
+            .filter(|&i| i <= idx)
+            .last()
+            .unwrap_or(0)
+    }
+
     if let Some(pos) = lower_content.find(&lower_query) {
-        let start = if pos > context_chars { pos - context_chars } else { 0 };
+        let start = if pos > context_chars {
+            pos - context_chars
+        } else {
+            0
+        };
         let end = std::cmp::min(pos + query.len() + context_chars, content.len());
-        
+
         // 确保不切断 UTF-8 字符
-        let safe_start = content.floor_char_boundary(start);
-        let safe_end = content.ceil_char_boundary(end);
-        
+        let safe_start = floor_char_boundary(content, start);
+        let safe_end = ceil_char_boundary(content, end);
+
         let mut snippet = String::new();
-        if safe_start > 0 { snippet.push_str("…"); }
+        if safe_start > 0 {
+            snippet.push_str("…");
+        }
         snippet.push_str(&content[safe_start..safe_end]);
-        if safe_end < content.len() { snippet.push_str("…"); }
+        if safe_end < content.len() {
+            snippet.push_str("…");
+        }
         snippet
     } else {
         // 没找到匹配（不应该发生），返回前80字符
         let end = std::cmp::min(80, content.len());
-        let safe_end = content.ceil_char_boundary(end);
+        let safe_end = ceil_char_boundary(content, end);
         let mut s = content[..safe_end].to_string();
-        if safe_end < content.len() { s.push_str("…"); }
+        if safe_end < content.len() {
+            s.push_str("…");
+        }
         s
     }
 }

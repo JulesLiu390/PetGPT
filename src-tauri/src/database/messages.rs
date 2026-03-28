@@ -1,8 +1,8 @@
+use super::Database;
+use chrono::Utc;
 use rusqlite::{params, Result};
 use serde::{Deserialize, Serialize};
-use chrono::Utc;
 use uuid::Uuid;
-use super::Database;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -32,20 +32,22 @@ impl Database {
             "SELECT id, conversation_id, role, content, tool_call_history, created_at 
              FROM messages 
              WHERE conversation_id = ? 
-             ORDER BY created_at ASC"
+             ORDER BY created_at ASC",
         )?;
-        
-        let messages = stmt.query_map(params![conversation_id], |row| {
-            Ok(Message {
-                id: row.get(0)?,
-                conversation_id: row.get(1)?,
-                role: row.get(2)?,
-                content: row.get(3)?,
-                tool_call_history: row.get(4)?,
-                created_at: row.get(5)?,
-            })
-        })?.collect::<Result<Vec<_>>>()?;
-        
+
+        let messages = stmt
+            .query_map(params![conversation_id], |row| {
+                Ok(Message {
+                    id: row.get(0)?,
+                    conversation_id: row.get(1)?,
+                    role: row.get(2)?,
+                    content: row.get(3)?,
+                    tool_call_history: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            })?
+            .collect::<Result<Vec<_>>>()?;
+
         Ok(messages)
     }
 
@@ -53,7 +55,7 @@ impl Database {
         let conn = self.conn.lock().unwrap();
         let id = Uuid::new_v4().to_string();
         let now = Utc::now().to_rfc3339();
-        
+
         conn.execute(
             "INSERT INTO messages (id, conversation_id, role, content, tool_call_history, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
@@ -66,13 +68,13 @@ impl Database {
                 now
             ],
         )?;
-        
+
         // Update conversation's updated_at
         conn.execute(
             "UPDATE conversations SET updated_at = ? WHERE id = ?",
             params![now, data.conversation_id],
         )?;
-        
+
         Ok(Message {
             id,
             conversation_id: data.conversation_id,
