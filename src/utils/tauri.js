@@ -151,8 +151,11 @@ export const createPet = (data) => invoke('create_pet', { data });
 export const updatePet = (id, data) => invoke('update_pet', { id, data });
 export const deletePet = (id) => invoke('delete_pet', { id });
 
-// Alias for consistency
-export const getAssistants = getPets;
+// Filter to return only assistant-type pets
+export const getAssistants = async () => {
+  const pets = await getPets();
+  return pets.filter(p => p.type === 'assistant' || p.modelConfigId);
+};
 export const getAssistant = getPet;
 export const createAssistant = createPet;
 export const updateAssistant = updatePet;

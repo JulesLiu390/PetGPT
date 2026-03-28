@@ -596,9 +596,10 @@ const AssistantsPanel = ({ onNavigate }) => {
   };
 
   const handleSave = async (formData) => {
+    const assistantData = { ...formData, type: 'assistant' };
     if (editingAssistant) {
       // Update existing
-      const updatedAssistant = await tauri.updateAssistant(editingAssistant._id, formData);
+      const updatedAssistant = await tauri.updateAssistant(editingAssistant._id, assistantData);
       // 发送包含 id 的更新事件，确保聊天窗口能匹配到
       tauri.sendPetsUpdate({ 
         action: 'update', 
@@ -610,7 +611,7 @@ const AssistantsPanel = ({ onNavigate }) => {
       tauri.sendCharacterId(editingAssistant._id);
     } else {
       // Create new
-      const newAssistant = await tauri.createAssistant(formData);
+      const newAssistant = await tauri.createAssistant(assistantData);
       if (!newAssistant || !newAssistant._id) {
         throw new Error("Creation failed or no ID returned");
       }
