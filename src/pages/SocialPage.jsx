@@ -58,6 +58,7 @@ export default function SocialPage() {
   const [lurkModes, setLurkModes] = useState({}); // { [target]: 'normal'|'semi-lurk'|'full-lurk' }
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
+  const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
 
   // ── MCP target picker ──
   const [mcpGroups, setMcpGroups] = useState(null); // [{ group_id, group_name, member_count }] or null
@@ -275,6 +276,29 @@ export default function SocialPage() {
         const ids = seenLogIdsRef.current;
         if (entry.id != null && ids.has(entry.id)) return; // already seen
         if (entry.id != null) ids.add(entry.id);
+        // Intent plan updates — drive the dynamic todolist
+        if (entry.level === 'intent-plan' && entry.target && entry.details) {
+          try {
+            const plan = JSON.parse(entry.details);
+            setIntentPlans(prev => ({
+              ...prev,
+              [entry.target]: { planLogId: entry.id, actions: plan.actions || [], state: plan.state || '', done: [] },
+            }));
+          } catch { /* ignore */ }
+          return; // don't add to log list
+        }
+        if (entry.level === 'intent-action-done' && entry.target && entry.details) {
+          try {
+            const data = JSON.parse(entry.details);
+            setIntentPlans(prev => {
+              const cur = prev[entry.target];
+              if (!cur) return prev;
+              return { ...prev, [entry.target]: { ...cur, done: [...cur.done, data] } };
+            });
+          } catch { /* ignore */ }
+          return; // don't add to log list
+        }
+
         setLogs(prev => {
           const next = [...prev, entry];
           if (next.length > UI_MAX_LOGS) {
@@ -568,7 +592,7 @@ export default function SocialPage() {
   // Memoized filtered logs (based on sorted data)
   const filteredLogs = useMemo(() => sortedLogs.filter(log => {
     // Intent logs have target — apply target filter normally
-    if (log.level === 'intent') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'intent' || log.level === 'send') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
@@ -1390,6 +1414,56 @@ export default function SocialPage() {
               })()}
             </div>
 
+            {/* Intent Plan — pinned above logs when a target is selected */}
+            {selectedTarget && (() => {
+              const plan = intentPlans[selectedTarget];
+              const actionLabel = (a) => {
+                if (a.type === 'sticker') return `📎 sticker#${a.id}`;
+                if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
+                if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
+                return `⏸ wait`;
+              };
+              if (!plan) return (
+                <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-3 py-1.5">
+                  <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Plan</span>
+                  <span className="text-[9px] text-slate-400 ml-2">等待 Intent 评估…</span>
+                </div>
+              );
+              const doneStickers = plan.done.filter(d => d.type === 'sticker').length;
+              const doneReplies = plan.done.filter(d => d.type === 'reply').length;
+              let stickerIdx = 0, replyIdx = 0;
+              const isDone = (a) => {
+                if (a.type === 'sticker') return stickerIdx++ < doneStickers;
+                if (a.type === 'reply') return replyIdx++ < doneReplies;
+                return false;
+              };
+              const planHasAction = plan.actions.some(a => a.type === 'sticker' || a.type === 'reply');
+              return (
+                <div className="shrink-0 border-b border-slate-200 bg-slate-50/80 px-3 py-1.5 space-y-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide shrink-0">Plan</span>
+                    {plan.actions
+                      .filter(a => !(planHasAction && (a.type === 'wait' || a.type === 'intent')))
+                      .map((a, i) => {
+                        const done = isDone(a);
+                        return (
+                          <span key={i} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                            done ? 'text-slate-400 bg-slate-100 border-slate-200 line-through' :
+                            a.type === 'wait' || a.type === 'intent' ? 'text-slate-500 bg-white border-slate-200' :
+                            'text-cyan-700 bg-cyan-50 border-cyan-200'
+                          }`}>
+                            {done ? '✓' : '○'} {actionLabel(a)}
+                          </span>
+                        );
+                      })}
+                  </div>
+                  {plan.state && (
+                    <div className="text-[9px] text-slate-400 font-mono whitespace-pre-wrap">{plan.state}</div>
+                  )}
+                </div>
+              );
+            })()}
+
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
               {reversedFilteredLogs.length === 0 ? (
@@ -1400,6 +1474,8 @@ export default function SocialPage() {
                     <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
                   ) : log.level === 'intent' ? (
                     <IntentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'send' ? (
+                    <SendLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'llm' ? (
                     <LlmLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
@@ -1437,6 +1513,27 @@ export default function SocialPage() {
 function IntentLogEntry({ log, logFilter }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = !!log.details;
+
+  // Try to parse plan data from details
+  let plan = null;
+  if (hasDetails && typeof log.details === 'string') {
+    try {
+      const parsed = JSON.parse(log.details);
+      if (parsed && (parsed.actions || parsed.state)) plan = parsed;
+    } catch { /* raw text */ }
+  }
+
+  const hasStateToShow = plan?.state && !plan?.actions?.every(a => a.type === 'sticker');
+
+  const actionLabel = (a) => {
+    if (a.type === 'sticker') return `📎 sticker#${a.id}`;
+    if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
+    if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
+    return `⏸ wait`;
+  };
+
+  const hasAction = plan?.actions?.some(a => a.type === 'sticker' || a.type === 'reply');
+
   return (
     <div className="py-0.5 text-purple-500">
       <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
@@ -1456,10 +1553,52 @@ function IntentLogEntry({ log, logFilter }) {
         </button>
       )}
       {hasDetails && expanded && (
-        <div className="mt-0.5 ml-4 pl-2 border-l-2 border-purple-300/40 text-purple-400 whitespace-pre-wrap break-words">
-          {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        <div className="mt-1 ml-4 pl-2 border-l-2 border-purple-300/40 space-y-1">
+          {plan ? (
+            <>
+              {plan.actions && plan.actions.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {plan.actions
+                    .filter(a => !(hasAction && a.type === 'wait'))
+                    .map((a, i) => (
+                      <span key={i} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                        a.type === 'wait'
+                          ? 'text-slate-500 bg-white border-slate-200'
+                          : 'text-cyan-700 bg-cyan-50 border-cyan-200'
+                      }`}>
+                        {actionLabel(a)}
+                      </span>
+                    ))}
+                </div>
+              )}
+              {hasStateToShow && (
+                <div className="text-[9px] text-purple-400 font-mono whitespace-pre-wrap break-words">
+                  {plan.state}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-purple-400 whitespace-pre-wrap break-words text-[10px]">
+              {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+            </div>
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+function SendLogEntry({ log, logFilter }) {
+  return (
+    <div className="py-0.5 text-teal-600">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold">[send]</span>
+      {log.target && logFilter === 'all' && (
+        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+      )}
+      {' '}
+      {log.message}
     </div>
   );
 }

@@ -10,7 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool } from '../workspace/socialToolExecutor.js';
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
@@ -487,6 +487,7 @@ export const callLLMWithTools = async ({
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
   builtinToolContext,  // { petId, memoryEnabled } — for builtin tool execution
+  stopAfterTool,    // optional string — stop the tool loop after this tool name is called (no further LLM turns)
   usageLabel,       // optional string label for usage logging (e.g. "Observer", "Intent:idle")
   usageTarget,      // optional string target id for usage logging
   usagePetId,       // optional petId for usage logging (falls back to builtinToolContext.petId)
@@ -514,6 +515,7 @@ export const callLLMWithTools = async ({
   // 总迭代次数（防止无限循环的保险）
   let totalIterations = 0;
   const MAX_TOTAL_ITERATIONS = maxIterations ?? 100;
+  let stopEarly = false; // set by stopAfterTool
 
   while (totalIterations < MAX_TOTAL_ITERATIONS) {
     totalIterations++;
@@ -664,8 +666,9 @@ export const callLLMWithTools = async ({
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
           const isStickerTool = isStickerBuiltinTool(call.name);
           const isBufferSearch = isBufferSearchTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch;
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch}`);
+          const isIntentPlan = isIntentPlanTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan;
+          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan}`);
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
             isError = true;
@@ -682,6 +685,8 @@ export const callLLMWithTools = async ({
             toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isBufferSearch && builtinToolContext) {
             toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
+          } else if (isIntentPlan && builtinToolContext) {
+            toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }
@@ -693,7 +698,7 @@ export const callLLMWithTools = async ({
         isError = true;
         toolResult = { error: error.message };
       }
-      
+
       const formattedResult = formatToolResult(toolResult);
       const { images: rawImages } = extractMediaFromToolResult(toolResult);
       const toolImages = await resolveImageUrls(rawImages);
@@ -705,12 +710,20 @@ export const callLLMWithTools = async ({
         result: formattedResult,
         images: toolImages
       });
-      
+
       if (onToolResult) {
         onToolResult(call.name, formattedResult, toolCallId, isError);
       }
+
+      const stopAfterToolMatches = stopAfterTool && (
+        typeof stopAfterTool === 'function' ? stopAfterTool(call.name) : call.name === stopAfterTool
+      );
+      if (stopAfterToolMatches) {
+        stopEarly = true;
+        // don't break — let remaining calls in this batch complete so message indices stay correct
+      }
     }
-    
+
     // 如果所有工具调用都被跳过（达到限制），返回
     if (reachedLimit && toolCallHistory.length === 0) {
       const _petId = usagePetId || builtinToolContext?.petId;
@@ -766,7 +779,7 @@ export const callLLMWithTools = async ({
     } else {
       // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息（支持多模态）
       currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls));
-      
+
       for (let i = 0; i < result.toolCalls.length; i++) {
         const call = result.toolCalls[i];
         const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
@@ -778,8 +791,22 @@ export const callLLMWithTools = async ({
         ));
       }
     }
+
+    // stopAfterTool was triggered — exit loop after adding tool results to history
+    if (stopEarly) {
+      const _petId = usagePetId || builtinToolContext?.petId;
+      if (usageLabel && _petId) {
+        appendUsageLog(_petId, {
+          ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+          model: model || '', apiFormat: apiFormat || '',
+          inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+          toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+        });
+      }
+      return { content: result.content || '', toolCallHistory, usage: totalUsage };
+    }
   }
-  
+
   // 达到最大轮次
   console.warn('[MCP] Max total iterations reached');
   const _petId = usagePetId || builtinToolContext?.petId;
@@ -1114,7 +1141,8 @@ export const callLLMStreamWithTools = async ({
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
           const isStickerTool = isStickerBuiltinTool(call.name);
           const isBufferSearch = isBufferSearchTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch;
+          const isIntentPlan = isIntentPlanTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan;
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
             isError = true;
@@ -1131,11 +1159,13 @@ export const callLLMStreamWithTools = async ({
             toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isBufferSearch && builtinToolContext) {
             toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
+          } else if (isIntentPlan && builtinToolContext) {
+            toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }
         }
-        
+
         if (toolResult && toolResult.error) {
           isError = true;
         }

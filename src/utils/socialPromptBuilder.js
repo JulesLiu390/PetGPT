@@ -42,6 +42,62 @@ export async function readGroupRuleFile(petId, targetId) {
 }
 
 /**
+ * 读取当前对话成员的人物档案缓存（由 socialAgent 在 eval 后并行预取写入）
+ */
+export async function readPeopleCacheFile(petId, targetId, targetType = 'group') {
+  if (!targetId) return null;
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  try {
+    const content = await tauri.workspaceRead(petId, `social/${dir}/PEOPLE_CACHE_${targetId}.md`);
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 安全读取 Reply 交接文件（Intent 写入，Reply 注入）
+ */
+export async function readReplyBriefFile(petId, targetId, targetType = 'group') {
+  if (!targetId) return null;
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  try {
+    const content = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/reply_brief.md`);
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 安全读取 scratch 笔记文件（ground truth 简写索引）
+ */
+export async function readScratchNotesFile(petId, targetId, targetType = 'group') {
+  if (!targetId) return null;
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  try {
+    const content = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/notes.md`);
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 安全读取 Intent 状态感知文件
+ */
+export async function readIntentStateFile(petId, targetId, targetType = 'group') {
+  if (!targetId) return null;
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  try {
+    const content = await tauri.workspaceRead(petId, `social/${dir}/INTENT_${targetId}.md`);
+    return content || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * 安全读取联系人索引文件
  */
 export async function readContactsFile(petId) {
@@ -146,8 +202,7 @@ function groupRuleGuidance(content, targetName, targetId) {
  * @param {boolean} [params.agentCanEditStrategy=false] - 是否注入回复策略编辑工具说明
  * @param {'normal'|'semi-lurk'|'full-lurk'} [params.lurkMode='normal'] - 潜水模式
  * @param {'observer'|'reply'} [params.role='reply'] - 角色：observer(观察记录) / reply(回复)
- * @param {Array} [params.intentHistory] - 该群意图滚动窗口 [{ timestamp, idle, thought, inclination }]
- * @param {boolean} [params.intentSleeping=false] - 该群 intent 是否处于休眠状态
+ * @param {Object|null} [params.intentPlan] - 最新 write_intent_plan 结果 { state, actions[] }
  * @returns {Promise<string>} 完整的 system prompt
  */
 export async function buildSocialPrompt({
@@ -156,6 +211,7 @@ export async function buildSocialPrompt({
   atMustReply = true,
   targetName = '',
   targetId = '',
+  targetType = 'group',
   botQQ = '',
   ownerQQ = '',
   ownerName = '',
@@ -167,8 +223,7 @@ export async function buildSocialPrompt({
   agentCanEditStrategy = false,
   lurkMode = 'normal',
   role = 'reply',
-  intentHistory = [],
-  intentSleeping = false,
+  intentPlan = null,
 }) {
   const sections = [];
 
@@ -311,6 +366,12 @@ export async function buildSocialPrompt({
     if (atMustReply) {
       sections.push('# @提及规则');
       sections.push('当消息中包含 @me 标记时，你必须回复，不可忽略。');
+    }
+
+    // === Intent 交接（reply_brief.md） ===
+    const replyBrief = await readReplyBriefFile(petId, targetId, targetType);
+    if (replyBrief) {
+      sections.push('# Intent 交接\n' + replyBrief);
     }
   }
 
@@ -546,7 +607,7 @@ function buildReplyToolInstruction(targetName, targetId) {
  * @param {string} params.petId - 宠物 ID（用于读取人格文件）
  * @param {string} params.targetName - 群名
  * @param {string} params.targetId - 群号
- * @param {Array} params.intentHistory - 该群意图滚动窗口 [{ timestamp, idle, content }]
+ * @param {Object|null} [params.intentPlan] - 最新 write_intent_plan 结果（未使用，由文件注入）
  * @param {number} [params.sinceLastEvalMin=0] - 距上次评估多少分钟（0=首次）
  * @param {string} [params.socialPersonaPrompt] - 社交场景补充人设
  * @param {string} [params.botQQ] - bot 的 QQ 号
@@ -561,12 +622,15 @@ function buildReplyToolInstruction(targetName, targetId) {
  * @returns {Promise<string>}
  */
 export async function buildIntentSystemPrompt({
-  petId, targetName = '', targetId = '', intentHistory = [], sinceLastEvalMin = 0,
+  petId, targetName = '', targetId = '', targetType = 'group', sinceLastEvalMin = 0,
   socialPersonaPrompt = '', botQQ = '', ownerQQ = '', ownerName = '', ownerSecret = '',
   nameDelimiterL = '', nameDelimiterR = '', msgDelimiterL = '', msgDelimiterR = '',
   lurkMode = 'normal',
 }) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : (targetId || '当前群');
+  const intentStateDir = targetType === 'friend' ? 'friend' : 'group';
+  const intentStatePath = `social/${intentStateDir}/INTENT_${targetId}.md`;
+  const scratchDir = `social/${intentStateDir}/scratch_${targetId}`;
 
   const sections = [];
 
@@ -626,6 +690,14 @@ export async function buildIntentSystemPrompt({
   }
   sections.push('（以上联系人索引为只读参考）');
 
+  // === 当前对话成员档案（由上次 eval 后并行预取，只读） ===
+  const peopleCacheContent = await readPeopleCacheFile(petId, targetId, targetType);
+  if (peopleCacheContent) {
+    sections.push('# 当前对话成员档案');
+    sections.push(truncateContent(peopleCacheContent, SOCIAL_FILE_TRUNCATE));
+    sections.push('（以上为本次对话中出现的人的详细档案，由上次评估后自动预取，只读参考）');
+  }
+
   // === 社交记忆（social/SOCIAL_MEMORY.md，只读） ===
   const socialMemoryContent = await readSocialMemoryFile(petId);
   const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
@@ -670,18 +742,15 @@ export async function buildIntentSystemPrompt({
     sections.push(socialPersonaPrompt.trim());
   }
 
-  // === 想法历史 ===
-  sections.push('# 想法历史（最近，从旧到新）');
-  if (intentHistory.length === 0) {
-    sections.push('（无历史，首次评估）');
-  } else {
-    const historyLines = intentHistory.map(e => {
-      const time = e.timestamp ? new Date(e.timestamp).toLocaleTimeString() : '?';
-      const wTag = e.willingnessLabel || (e.idle ? '(idle)' : '');
-      const actionTag = e.stickerSent ? ' (📎已发送表情包)' : '';
-      return `[${time}] ${wTag}${actionTag} ${e.content}`.trim();
-    });
-    sections.push(historyLines.join('\n'));
+  // === 当前状态感知（来自 Intent 自维护文件） ===
+  const intentStateContent = await readIntentStateFile(petId, targetId, targetType);
+  sections.push('# 当前状态感知');
+  sections.push(intentStateContent || '（本次会话开始，尚无记录）');
+
+  // === 笔记（ground truth 简写索引，来自 scratch/notes.md） ===
+  const scratchNotes = await readScratchNotesFile(petId, targetId, targetType);
+  if (scratchNotes) {
+    sections.push('# 笔记\n' + scratchNotes);
   }
 
   if (sinceLastEvalMin > 0) {
@@ -695,19 +764,24 @@ export async function buildIntentSystemPrompt({
       sections.push(`# 表情包收藏
 ${stickerIndex}
 
-想发表情包时，直接调用 sticker_send 工具（sticker_id=序号）。这是发送表情包的唯一方式——写在文本里不会发送。
-- 当表情包比文字更能表达你的情绪时（好笑、无语、赞同等纯情绪回应），直接调用 sticker_send 就够了，不需要再发文字
-- 发表情包不受回复意愿限制——即使意愿 < 3，你也可以调用 sticker_send 来回应
-- 想发文字 + 表情包时：先调用 sticker_send，再在意愿标签后写格式行（numChunks + replyLen）
+想发表情包时，在 write_intent_plan 的 actions 里加入 {"type":"sticker","id":序号}，系统会自动发送。
+- sticker 和 reply 完全独立，自由搭配：只发 sticker、只发 reply、或同时发都可以
+- 不需要每次都带 sticker，只在表情包真的合适时才用
 `);
     }
   }
 
   // === 工具说明 ===
   sections.push(`# 可用工具
-你有以下工具可以在需要时调用。大部分情况下你不需要用工具——只在你对聊天中提到的某件事缺乏背景信息、或需要核实事实时才使用。
 
-历史查询工具（只读）：
+计划工具（思考完毕后调用一次，且只调用一次）：
+- write_intent_plan(state, actions)：提交状态感知和下一步行动计划。有 reply 或 sticker 时无需额外添加 wait；若无行动则 actions 传空数组。
+- ⚠️ 先完成所有思考和工具查询，最后才调用 write_intent_plan。中途不要提前提交。
+
+文件工具（按需使用）：
+- social_read(path)：按需读取其他社交文件（如 social/notes/、social/REPLY_STRATEGY.md 等）。当前对话成员档案已自动注入上方，无需手动读取。
+
+历史查询工具（只读，按需使用）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
 - daily_read(date?, target?)：读取每日摘要。传 target 读该群详细日报，不传读全局跨群日报
 - daily_list()：列出有哪些日期的日报可读
@@ -716,15 +790,10 @@ ${stickerIndex}
 - group_log_list()：列出所有有日志记录的群
 - group_log_read(targets, query?, start_time?, end_time?)：搜索指定群的 Observer 日志
 
-表情包工具：
-- sticker_send(sticker_id)：发送一个已收藏的表情包到当前群聊（序号见上方表情包收藏列表）
-- sticker_list()：查看已收藏的表情包列表
-
 外部搜索工具（如果已配置）：
 - 你可能还有 tavily_search、fetch 等外部搜索工具可用。当群友在辩论中引用了事实、数据或信息源，而你不确定真假时，用这些工具核实后再下判断
 
-⚠️ 不要每次评估都调查询/搜索工具。只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。
-💡 sticker_send 不受此限制——觉得合适就发。`);
+⚠️ 历史查询和搜索工具只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。`);
 
   // === 评估要求 ===
   sections.push(`# 评估要求
@@ -733,174 +802,139 @@ ${stickerIndex}
 - user 消息 = 群友们的聊天记录（使用上述分隔符格式）
 - assistant 消息 = 你（角色）之前的回复
 
-结合角色人格、群规则、社交记忆和最新聊天动态，写出角色对这个群当前的想法和行为倾向。${lurkMode === 'full-lurk' ? `
+结合角色人格、群规则、社交记忆和最新聊天动态，分析角色当前的想法，然后**调用 write_intent_plan 提交你的状态感知和决策**。${lurkMode === 'full-lurk' ? `
 
-⚠️ 当前模式：纯观察（只看不说）
-角色不会发言，你的分析是纯粹的内心独白。即使很想说话，也知道自己不会开口。回复意愿标签仍然要选，它反映的是“如果能说话的话会有多想说”的程度。` : lurkMode === 'semi-lurk' ? `
+⚠️ 当前模式：纯观察（只看不说）——actions 必须为空数组 []，不可添加任何动作。` : lurkMode === 'semi-lurk' ? `
 
-⚠️ 当前模式：半潜水（仅被 @ 时回复）
-角色只在被 @ 时才说话。主动发言的冲动会被抑制。回复意愿标签反映的是内心真实想法，但要意识到大部分情况下不会真的开口。` : `
+⚠️ 当前模式：半潜水——只有被 @ 时才可添加 reply 动作。` : ''}
 
-⚠️ 当前模式：自由模式
-角色看到感兴趣或与自己相关的话题会主动参与对话。不需要被 @ 也能说话，但仍要遵守回复策略——只在有实质内容可说时才开口，避免水聊和刷存在感。`}
+分析步骤（完成分析后，先调用 social_edit 更新状态感知文件，再调用 write_intent_plan）：
 
-输出格式（严格遵守，共四行，每行都必须有）：
+**分析一：刚刚我在干什么**
+对照上方"当前状态感知"（INTENT 文件内容）和对话记录中的 assistant 消息：
+- 上次状态记录的是什么？（刚苏醒？发了 reply？发了 sticker？）
+- 如果发过 reply：说了什么，有没有人回应？
+- 如果发过 sticker：在回应什么，有没有人理？
 
-第 1 行 —— 回顾：
-以「回顾：」开头，用一两句话总结你（assistant）在对话记录中说过什么、有没有人回应你。如果你之前没有发过言，写「回顾：我还没有在这个群说过话。」这一步不可跳过。
+**分析二：群里现在/刚刚在讨论什么**
+客观分析当前对话记录：
+- 刚才在聊什么话题？现在是否转移，转向了什么？
+- 这轮讨论有没有结论？还是还在继续，或已经冷掉？
+- 谁在主导对话节奏？
+- 有没有人在跟我说话、回应我或 @ 我？
 
-第 2 行 —— 氛围：
-以「氛围：」开头，客观描述群里当前的状态：在聊什么话题、气氛如何（热烈/冷淡/争论/闲聊/沉默）、有没有人在跟你说话或@你、对话的节奏是快还是慢。这是纯观察，不带你自己的主观判断。
+**分析三：我的想法与判断**
+- 我对当前话题的真实反应是什么？有没有实质内容想说？
+- 对话球在我这边吗？（有人直接问我/回应我 vs 球在别人那边）
+- 我插嘴合适吗？会不会打断节奏或显得自说自话？
+- 如果群友反驳或纠正了我，具体错在哪一步？需要搜索工具核实的先搜再判断。
 
-第 3 行 —— 想法：
-以「想法：」开头，基于回顾和氛围，写出你的主观反应：你想跟谁说话、想表达什么观点、还是不想说话。
-⚠️ 诚实反思：如果群友反驳、质疑或纠正了你的观点，在写想法之前先做以下检查：
-1. 对方的反驳具体指出了什么问题？你原来的论点在哪一步有漏洞？
-2. 如果对方引用了事实/数据/信息源来支撑观点，用搜索工具（如 tavily_search、fetch 等，如果可用）去核实这些事实是否属实，再决定是坚持还是修正
-3. 如果你确实错了，在想法里具体写明错在哪里（如「我在 X 这点上判断失误」），而不是含糊带过
-4. 如果对方理解错了你的意思，写明对方把你的什么观点理解成了什么，你的原意是什么
+分析完成后：
+1. 调用 social_edit，path="${intentStatePath}"，更新状态感知文件。
 
-第 4-5 行 —— 意愿标签 + 回复格式（固定格式，必须是输出的最后两行）：
+   写法：先读取文件现有内容，判断哪些历史信息仍然有价值（比如某人持续的态度、上次行动的长期影响、尚未结束的话题线索），保留它们，再融入新的观察，重写以下三段。每段约 500 字，写充分，不要因为省字数而削减有价值的内容。
 
-第 4 行 —— 意愿标签：
-格式为：[标签：理由]
-- 回复意愿分为六档（必须选一个）：
-  1. [不想理：原因]
-  2. [无感：原因]
-  2. [等回复：原因]
-  3. [有点想说：原因]
-  4. [想聊：原因]
-  5. [忍不住：原因]
-- 冒号后面的描述可以根据实际情况自由发挥，不需要照抄模板
-⚠️ 方括号 [ ] 是必须的！正确格式：[想聊：理由]。错误格式：想聊：理由（缺少方括号）。系统依赖方括号来解析你的意愿等级，省略会导致解析失败
+   【我刚做了】
+   上次做了什么（回复/发表情包/等待/刚苏醒）。如果有行动，分析效果：对方有没有回应？回应是正面/冷漠/回避？如果没有回应，是消息被刷走了，还是对方不感兴趣，还是还没看到？上次的行动对当前局面有什么影响？如有更早的行动仍影响当前局面，也一并记录。
 
-第 5 行（最后一行）—— 回复格式（仅当意愿 ≥ 3 时才需要）：
-⚠️ 这一行必须是你输出的最后一行，后面不能再有任何文字。
-⚠️ 意愿 ≤ 2 时，不需要这一行，第 4 行的标签就是最后一行。
-⚠️ 表情包通过调用 sticker_send 工具发送，不要写在格式行里。
-格式为（只写需要的字段，不需要的不写）：
-- numChunks=X —— 消息拆分条数（整数）。拆分规则：
-  · 纯吐槽/接梗（≤10字）→ numChunks=1（太短不需要拆）
-  · 正常回复（10-30字）→ numChunks=2（拆成两条短消息，更像真人节奏）
-  · 稍长回复（大于30字）→ numChunks=1（按语义自然断句拆分）
-  · 核心原则：想象你在手机上打字——你会把这段话分几次按发送键？那就是 numChunks 的值
-- replyLen=N —— 建议回复字数（整数）。接梗/吐槽/附和通常 5-15 字；回答问题/表达观点通常 15-40 字；需要展开论述通常 40 字以上。除非必须长篇大论，否则一般 5-20 字就够（这次没说完下次继续说）
-- at=某人 —— 要@的人的名字或QQ号，不需要@时不写这个字段
-  90% 的情况下不需要@。只有这些情况才考虑@：你要同时回复多人、很多人同时在聊不@会搞不清你在回谁、隔了非常多条消息对方大概率没注意到你在说话
-- 不要用 JSON、不要用 Markdown、不要加任何格式标记（不要用代码围栏、不要用引号包裹）
+   【群里情况】
+   当前话题是什么，进展如何（还在热聊/逐渐冷却/已经转移）。谁在主导节奏，谁是配角，谁在沉默？分析各人可能的情绪和意图：ta 为什么说这句话，想得到什么反应，是在开玩笑还是认真说，是想引我入局还是只是路过？当前气氛是轻松/紧张/无聊/争论/欢乐？有没有潜台词或隐含的情绪？如果历史记录中有对某人性格/关系的有效判断，保留并更新。
 
-⚠️ 表情包和文字是独立的：
-- 只发表情包 → 调用 sticker_send 工具，不需要格式行，意愿可以 < 3
-- 只发文字 → 意愿 ≥ 3，写格式行（numChunks + replyLen）
-- 文字 + 表情包 → 先调用 sticker_send 工具，再写格式行
+   【我的判断】
+   列出几种可能性：如果我开口，最可能的反应是什么（被接住/被忽略/引发更多话题/冷场）？如果我不说，接下来会怎样（话题自然结束/别人接走/对方以为我不感兴趣）？我真正想做的是什么，驱动力是什么（好奇/想表达/想被注意/想逗人/懒得理）？综合以上，当前最合适的动作是什么，理由是什么？
 
-❗ 回复意愿和回复字数是完全独立的两个维度：
-- 意愿 = 你想不想说话（主观冲动）
-- 字数 = 要说的内容本身需要多少字才能说清楚（客观需要）
-- [忍不住] 可以只需要5字——非说不可，但一句吐槽就够了
-- [有点想说] 可以需要50字——兴趣一般，但要说的事情恰巧比较复杂
+2. 如有新的 ground truth（验证过的事实、判断出的关系、搜索得到的结论）：用 social_write 更新 ${scratchDir}/notes.md。
+   格式：每条一行 bullet，写简短结论，括号注明来源或详情文件路径。只记稳定事实，不记当前动态状态（那是 INTENT 文件的职责）。
+   详细内容可另建文件（如 ${scratchDir}/about_张三.md），notes.md 里引用即可。
 
-示例输出（注意每个示例：回顾、氛围、想法、标签行，需要回复时再加格式行）：
+3. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
+   交接内容给 Reply 模块使用，应包含：要表达的核心观点或情绪、建议的语气和措辞方向、需要用到的关键事实或搜索结果（如有）。写清楚，Reply 只凭这份交接发言，不会自己再查资料。
+
+4. 调用 write_intent_plan(actions=[...]) 提交行动决策。
+
+- actions：根据以下规则决定动作
+
+# 动作决策规则
+
+**reply**（触发文字回复）— 加入条件：你有实质内容想说 / 有人@你或直接问你 / 出现你真正感兴趣的话题
+- numChunks：纯吐槽/接梗用1，正常回复用2，较长用1（按语义自然拆）
+- replyLen：接梗5-15字，表达观点15-40字，展开论述40字以上
+- atTarget：90%情况不需要，只在需要明确指向某人时填
+
+**sticker**（发送表情包）— 加入条件：真的忍不住的强烈情绪反应（爆笑/无语到极致/非常赞同），"还不错/挺好笑"的中等反应不够
+- 可与 reply 同时出现（并发发送）
+- id：表情包序号（见上方表情包收藏）
+
+**空数组**（等待）— 以下情况：对话题无感、你刚发过言且对方还没回应、想说的话其他人已表达过、没有实质内容
+
+# 约束规则
+
+🚫 别三连铁律：检查**最近 3 条消息**，如果其中 ≥ 2 条是你（assistant）的发言，**不得添加 reply**，除非你的上一条消息之后已有 ≥ 5 条其他人的消息（计数器重置）
+
+等回复规则：你的消息之后不足 5 条其他人消息且没人回应你 → 不加 reply（除非有人直接回应你或出现全新话题）
+
+内容质量门槛：你要说的话是否已有群友表达过？是否只是"哈哈/确实/是的"？是 → 直接空数组，不用 sticker 填空
+
+大多数日常水聊 → 空数组。有价值的内容才值得 reply，有强烈情绪才值得 sticker。
+
+示例（分析 → social_edit 更新文件 → write_intent_plan）：
 
 示例 1（想聊，发文字）：
-回顾：我还没有在这个群说过话。
-氛围：张三在分享一个技术观点，李四在附和，讨论节奏中等，没有人在跟我说话。
-想法：张三说的技术观点有漏洞，想反驳但论据还没想好。
-[想聊：有话要说但还在组织语言]
-numChunks=2 replyLen=35
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三在分享技术观点，李四附和，话题进行中，张三主导，没人提到我。【我的判断】张三观点有漏洞，想反驳，话题吸引我，决定开口。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":35}])
 
 示例 2（无感）：
-回顾：我还没有在这个群说过话。
-氛围：几个人在聊他们周末去哪玩，气氛轻松闲聊，跟我没关系，没人提到我。
-想法：群里在讨论跟我无关的话题，看看就好。
-[无感：跟我没什么关系]
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】几个人在聊周末计划，气氛轻松，跟我没关系，没人提到我。【我的判断】完全无关的闲聊，球不在我这边，不插嘴。")
+→ write_intent_plan(actions=[])
 
 示例 3（忍不住，发文字）：
-回顾：我之前夸了张三的项目，张三说了谢谢。
-氛围：张三刚夸了我，气氛友好，对话球在我这边。
-想法：被群友夸了挺开心的，想继续聊。
-[忍不住：不回不礼貌而且我也想接话]
-numChunks=2 replyLen=15
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次夸了张三的项目，他说了谢谢。【群里情况】张三刚夸了我，气氛友好，对话球在我这边。【我的判断】被夸了不回有点失礼，而且我也想聊，接话顺理成章。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":15}])
 
-示例 4（无感，发表情包 → 调用 sticker_send 工具）：
-回顾：我还没有在这个群说过话。
-氛围：张三说了件搞笑的事，大家在哈哈哈，气氛欢乐。
-想法：确实好笑，发个表情包乐一下就行。（调用 sticker_send 发送 #3）
-[无感：不需要说话但想表达一下]
+示例 4（无感，发表情包）：
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三说了件搞笑的事，大家在哈哈哈，气氛欢乐，没人提到我。【我的判断】确实好笑，发个表情包就够了，不需要文字。")
+→ write_intent_plan(actions=[{"type":"sticker","id":3}])
 
 示例 5（不想理）：
-回顾：我还没有在这个群说过话。
-氛围：两个人在争论政治话题，气氛有点火药味，没人@我。
-想法：他们在聊政治我不想掺和。
-[不想理：这种话题碰都不想碰]
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】两人在争论政治话题，火药味浓，没人@我，他俩在主导。【我的判断】这种话题掺进去没好处，球不在我这边，不理。")
+→ write_intent_plan(actions=[])
 
 示例 6（有点想说，发文字）：
-回顾：我刚说了一个梗，没人接。
-氛围：有人抛了一个新梗，几个人在猜答案，气氛活跃，没人针对我的话回应。
-想法：这个新梗我也知道但说不说都行。
-[有点想说：知道答案但不说也没损失]
-numChunks=1 replyLen=8
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次说了个梗，没人接，热度低。【群里情况】话题转移到新梗，几人在猜，气氛活跃，没人针对我之前的发言。【我的判断】新梗我知道，说不说都行，不强求，简短回一句。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":8}])
 
 示例 7（等回复）：
-回顾：我刚回答了张三的问题，还没人回应。
-氛围：群里暂时安静，大家可能在看我的回答或者忙别的，没有新话题。
-想法：已经说了我的看法了，等他们回应吧。
-[等回复：刚发完言在等反应]
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次回答了张三的问题，还没收到回应。【群里情况】群里暂时安静，没有新话题，张三还没出现。【我的判断】球在张三那边，已经说完了，继续等。")
+→ write_intent_plan(actions=[])
 
-示例 8（等回复）：
-回顾：我回答了张三的问题，他还没回。
-氛围：李四和王五在聊别的话题，张三没出现，群里节奏正常。
-想法：刚回复了张三的问题，看看他怎么说。
-[等回复：球在对方那边，没必要再说]
+示例 8（等回复，其他人在聊）：
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次回答了张三的问题，他还没回。【群里情况】李四和王五在聊别的，张三缺席，节奏正常。【我的判断】球还在张三那边，李四王五的话题跟我无关，继续等。")
+→ write_intent_plan(actions=[])
 
 示例 9（忍不住，短回复）：
-回顾：我还没有在这个群说过话。
-氛围：有人问了一个简单的问题，其他人还没回，气氛平淡。
-想法：这个事情一句话就能回。
-[忍不住：必须开口]
-numChunks=1 replyLen=5
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】有人问了一个简单问题，其他人还没回，球有点悬空。【我的判断】一句话就能回，说了也不突兀，简短说一下。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":5}])
 
-示例 10（忍不住，文字+表情包 → 先调用 sticker_send 工具，再写格式行）：
-回顾：我之前回了一条闲聊，没人理。
-氛围：姐姐分享了一个超离谱的经历，群里都在起哄。
-想法：太离谱了，想吐槽一句再配个无语表情包。（调用 sticker_send 发送 #1）
-[忍不住：不说会难受]
-numChunks=1 replyLen=12
+示例 10（忍不住，文字+表情包）：
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次回了条闲聊，没人理，热度低。【群里情况】姐姐分享了离谱经历，群里起哄，气氛热闹，话题转移。【我的判断】太离谱了，想吐槽一句配个无语包，比单纯文字更有意思。")
+→ write_intent_plan(actions=[{"type":"sticker","id":1},{"type":"reply","numChunks":1,"replyLen":12}])
 
 示例 11（想聊 + @）：
-回顾：我还没有在这个群说过话。
-氛围：张三和李四同时在聊不同的话题，消息刷得很快，@我的那条已经被刷上去了。
-想法：想回张三的问题但怕他没第一时间看到。
-[想聊：想回答他]
-numChunks=2 replyLen=20 at=张三
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三和李四同时在聊不同话题，消息刷得快，张三@过我但被刷上去了。【我的判断】张三直接问了我，球在我这边，消息快怕他看漏，@一下更稳。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":20,"atTarget":"张三"}])
 
-重要规则：
+重要原则：
 - 你要像一个真人一样思考，而不是模拟 AI 角色
 - 结合人格设定理解角色的价值观和在意的事，据此推断 ta 会怎么想
 - 利用群规则中的成员档案、群内梗、话题偏好等信息，让想法更有针对性
 - 利用社交记忆中的人物信息（性格、关系、偏好），让想法基于你对这些人的了解
-- 从聊天中提取真正值得关注的点：有趣的话题、被挑衅、被夸、无聊的对话、跟自己无关的内容等
-- 大多数日常水聊应该是 [无感] 或 [不想理]，不要对什么都想参与
-- 回复前先想：你要说的话是否已经有群友表达过类似观点？如果是，选 [无感]，不要+1
-- 如果你只是想"刷存在感"但没有实质内容要说，选 [无感] 或 [不想理]。有价值的内容才值得开口
-- 如果你的回复只会是"哈哈"、"确实"、"是的"、"草"之类的废话，选 [无感]——这些不是有意义的发言。但这恰恰是发表情包的好时机，直接调用 sticker_send
-- 严禁自恋：如果话题不是在讨论你，不要强行把话题引向自己，不要复读自己的设定或往自己身上扯。讨论话题本身即可
-- 被群友批评话太多、频率过高时，立即大幅降低意愿——连续多轮选 [无感] 或 [不想理]，学习"潜水"，至少等其他人聊了 5-10 条消息后再考虑参与
-🚫 别三连铁律：检查对话记录中**最近 3 条消息**（不是全部历史），如果其中 ≥ 2 条是你（assistant）的发言，说明你正在刷屏，强制选 [等回复] 或更低。但如果你的上一条消息之后已经有 ≥ 5 条其他人的消息，"三连"计数器重置——此时你的旧发言已经被冲走，不算连续发言
-- 如果你在对话记录中看到自己（assistant）的发言之后只有不到 5 条其他人的消息且没有人回应你，请选 [等回复]。你刚说过话，需要等一等
-- [等回复] 可以被打破的情况：(1) 有群友直接回应了你（追问、反驳、表态、@你），对话球回到了你这边 → 根据你的反应选 [有点想说] 或更高；(2) 群里出现了一个**全新的、跟你之前说的完全无关的话题**，你对这个新话题有想法 → 可以考虑参与；(3) 你的上一条消息之后已经过了至少 5 条其他人的消息，说明对话已经自然翻篇，你不再处于"等回复"状态——如果新内容让你有想法，按正常意愿评估即可（但仍需有实质内容可说）
-- [等回复] 和 [无感] 的区别：[无感] 是对话题不感兴趣；[等回复] 是你刚说完话（后面不超过 5 条别人的消息）、在等回应。如果你的消息之后已经过了 5 条以上别人的消息，你不再"等回复"，按正常意愿评估
-- 一次只聊一个话题：每次评估只针对一个话题输出想法和意愿。不要试图同时回应多个话题或多个人。选你最想参与的那一个
-- 回复意愿标签必须放在末尾，且必须选一个，冒号后写出选择这个档位的理由
-- 想法必须具体，包含你为什么想说（动机）和你大致想说什么（内容方向）：不要说"心情不错"，而是说"张三的段子挺好笑的，想接一句"
-- 字数通过格式行的 replyLen 参数指定：接梗、吐槽、附和、简短回应通常 5-15 字；回答问题、表达一个观点通常 15-40 字；需要解释、展开论述、认真回答通常 40 字以上。选一个具体数字，不要写范围
-- 如果你有比较多想说的内容，不需要一次说完。可以先抛出一个短句（5-15字）制造话题或试探反应，后续再根据对方的回应决定是否展开。这比一次甩出长篇大论更像真人聊天
-- 也可以建议抛出问句来引导他人参与对话，而不是单方面输出观点。"想问个问题"比"想发表看法"更能带动互动
-- 每次输出必须和上一条不同（想法的视角、强度或方向要有变化），不能原地踏步
-- 连续多轮对同类话题的想法应该递减强度——人会习惯重复的刺激
-- 距离上次评估时间越久，回复意愿越应该下降（兴趣自然消退）
-- 如果需要了解聊天中提到的背景信息，可以调用工具查询，但不要滥用
-- 直接输出纯文本，末尾加回复意愿标签`);
+- 严禁自恋：如果话题不是在讨论你，不要强行把话题引向自己
+- 被群友批评话太多时，立即降低参与频率，学习"潜水"
+- 想法必须具体，包含你为什么想说（动机）和大致想说什么（内容方向）
+- 如果你有很多想说的内容，可以先抛出短句试探，后续再展开——比一次甩出长篇更像真人
+- 一次只聚焦一个话题，不要试图同时回应多个话题或多个人
+- 每次输出的想法应有变化（视角、强度或方向），不能原地踏步
+- 距离上次评估时间越久，参与意愿越应该下降（兴趣自然消退）`);
 
   return sections.join('\n\n');
 }

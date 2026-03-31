@@ -1071,16 +1071,16 @@ async function autoCleanupStickers(petId, entries, excludeId) {
   const toRemoveCount = entries.length - STICKER_MAX_COUNT;
   if (toRemoveCount <= 0) return '';
 
-  // 按 used 升序（未使用的排前面），相同 used 按 last_used 升序（最久没用的排前面）
+  // 按 last_used 升序（最久没发的排前面），相同 last_used 再按 used 升序
   const candidates = entries
     .filter(e => e.id !== excludeId)
     .sort((a, b) => {
-      const usedA = a.used || 0;
-      const usedB = b.used || 0;
-      if (usedA !== usedB) return usedA - usedB;
       const timeA = a.last_used ? new Date(a.last_used).getTime() : 0;
       const timeB = b.last_used ? new Date(b.last_used).getTime() : 0;
-      return timeA - timeB;
+      if (timeA !== timeB) return timeA - timeB;
+      const usedA = a.used || 0;
+      const usedB = b.used || 0;
+      return usedA - usedB;
     });
 
   const toRemove = candidates.slice(0, toRemoveCount);
@@ -1209,6 +1209,71 @@ async function executeStickerSend(petId, args, context) {
   } catch (e) {
     return { error: `发送表情包失败: ${e}` };
   }
+}
+
+// ============ Intent 计划工具 ============
+
+export function isIntentPlanTool(toolName) {
+  return toolName === 'write_intent_plan';
+}
+
+export function getIntentPlanToolDefinitions() {
+  return [
+    {
+      type: 'function',
+      function: {
+        name: 'write_intent_plan',
+        description: '提交本次评估的行动计划。调用此工具之前必须先用 social_edit 更新状态感知文件。actions 是要执行的动作列表，不需要任何动作时传空数组。',
+        parameters: {
+          type: 'object',
+          properties: {
+            actions: {
+              type: 'array',
+              description: '要执行的动作列表（并发执行）。不需要任何动作时传空数组。',
+              items: {
+                type: 'object',
+                properties: {
+                  type: {
+                    type: 'string',
+                    enum: ['reply', 'sticker', 'wait'],
+                    description: '"reply" = 触发文字回复；"sticker" = 发送表情包；"wait" = 等新消息后再评估。有 reply 或 sticker 时 wait 可省略。',
+                  },
+                  numChunks: {
+                    type: 'integer',
+                    description: '（reply 专用）消息拆分条数。短消息（≤30字）建议 2-3 条模拟真人节奏；长消息（>30字）建议 1 条避免刷屏。',
+                  },
+                  replyLen: {
+                    type: 'integer',
+                    description: '（reply 专用）建议回复字数。接梗/吐槽/附和通常 5-15 字；回答问题/表达观点通常 15-40 字；展开论述通常 40 字以上。',
+                  },
+                  atTarget: {
+                    type: 'string',
+                    description: '（reply 专用）要@的人的QQ号（纯数字），不需要@时省略。90% 情况下不需要@，只有同时回复多人或消息已被刷远时才用。',
+                  },
+                  id: {
+                    type: 'integer',
+                    description: '（sticker 专用）表情包序号',
+                  },
+                },
+                required: ['type'],
+              },
+            },
+          },
+          required: ['actions'],
+        },
+      },
+    },
+  ];
+}
+
+export async function executeIntentPlanTool(toolName, args, context) {
+  if (toolName !== 'write_intent_plan') return { error: `未知工具: ${toolName}` };
+  const { petId, targetId, targetType } = context;
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+
+  const { actions = [] } = args;
+
+  return { content: [{ type: 'text', text: '✓ 计划已提交' }] };
 }
 
 /**
