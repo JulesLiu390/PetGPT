@@ -10,6 +10,25 @@ import { formatCurrentTime } from './timeInjection';
 import * as tauri from './tauri';
 import { SOCIAL_FILE_MAX_CHARS } from './workspace/socialToolExecutor';
 
+// ── Prompt file cache (30s TTL) ──
+const _fileCache = new Map();
+const _FILE_CACHE_TTL = 30000;
+
+async function cachedRead(readFn, cacheKey) {
+  const entry = _fileCache.get(cacheKey);
+  if (entry && Date.now() - entry.ts < _FILE_CACHE_TTL) return entry.content;
+  const content = await readFn();
+  _fileCache.set(cacheKey, { content, ts: Date.now() });
+  return content;
+}
+
+export function invalidatePromptFileCache(pathFragment) {
+  if (!pathFragment) return;
+  for (const key of _fileCache.keys()) {
+    if (key.includes(pathFragment)) _fileCache.delete(key);
+  }
+}
+
 /** 表情包索引路径 */
 const STICKER_INDEX_PATH = 'social/stickers/index.yaml';
 
@@ -233,10 +252,22 @@ export async function buildSocialPrompt({
   // === 时间上下文 ===
   sections.push(`当前时间：${formatCurrentTime()}`);
 
+  // Parallel cached file reads
+  const [
+    soulContent, userContent, memoryContent, groupRuleContent,
+    contactsContent, socialMemoryContent
+  ] = await Promise.all([
+    cachedRead(() => readSoulFile(petId), `soul_${petId}`),
+    cachedRead(() => readUserFile(petId), `user_${petId}`),
+    cachedRead(() => readMemoryFile(petId), `memory_${petId}`),
+    cachedRead(() => readGroupRuleFile(petId, targetId), `rule_${petId}_${targetId}`),
+    cachedRead(() => readContactsFile(petId), `contacts_${petId}`),
+    cachedRead(() => readSocialMemoryFile(petId), `socmem_${petId}`),
+  ]);
+
   // === 人格（从 SOUL.md 读取） ===
-  const soulContent = await readSoulFile(petId);
   const soulTruncated = truncateContent(soulContent);
-  
+
   sections.push('# 人格');
   if (soulTruncated) {
     sections.push(soulTruncated);
@@ -245,7 +276,6 @@ export async function buildSocialPrompt({
   }
 
   // === 用户画像（USER.md，只读） ===
-  const userContent = await readUserFile(petId);
   const userTruncated = truncateContent(userContent);
   if (userTruncated) {
     sections.push('# 关于主人');
@@ -253,7 +283,6 @@ export async function buildSocialPrompt({
   }
 
   // === 长期记忆（MEMORY.md，只读） ===
-  const memoryContent = await readMemoryFile(petId);
   const memoryTruncated = truncateContent(memoryContent);
   if (memoryTruncated) {
     sections.push('# 记忆');
@@ -261,7 +290,6 @@ export async function buildSocialPrompt({
   }
 
   // === 当前群规则（social/group/RULE_{群号}.md，群专属） ===
-  const groupRuleContent = await readGroupRuleFile(petId, targetId);
   const groupRuleTruncated = truncateContent(groupRuleContent, SOCIAL_FILE_TRUNCATE);
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : (targetId || '当前群');
   sections.push(`# ${groupLabel} 群规则`);
@@ -277,7 +305,6 @@ export async function buildSocialPrompt({
   }
 
   // === 联系人索引（social/CONTACTS.md，常联系人速查） ===
-  const contactsContent = await readContactsFile(petId);
   const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
   sections.push('# 联系人索引');
   if (contactsTruncated) {
@@ -292,7 +319,6 @@ export async function buildSocialPrompt({
   }
 
   // === 社交记忆（social/SOCIAL_MEMORY.md，跨群共享社交态势） ===
-  const socialMemoryContent = await readSocialMemoryFile(petId);
   const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
   sections.push('# 社交记忆（全局）');
   if (socialMemoryTruncated) {
@@ -646,14 +672,29 @@ export async function buildIntentSystemPrompt({
   // === 时间上下文 ===
   sections.push(`当前时间：${formatCurrentTime()}`);
 
+  // Parallel cached file reads
+  const [
+    soulContent, userContent, memoryContent, groupRuleContent,
+    contactsContent, peopleCacheContent, socialMemoryContent,
+    intentStateContent, scratchNotes
+  ] = await Promise.all([
+    cachedRead(() => readSoulFile(petId), `soul_${petId}`),
+    cachedRead(() => readUserFile(petId), `user_${petId}`),
+    cachedRead(() => readMemoryFile(petId), `memory_${petId}`),
+    cachedRead(() => readGroupRuleFile(petId, targetId), `rule_${petId}_${targetId}`),
+    cachedRead(() => readContactsFile(petId), `contacts_${petId}`),
+    cachedRead(() => readPeopleCacheFile(petId, targetId, targetType), `people_${petId}_${targetId}`),
+    cachedRead(() => readSocialMemoryFile(petId), `socmem_${petId}`),
+    cachedRead(() => readIntentStateFile(petId, targetId, targetType), `intent_${petId}_${targetId}`),
+    cachedRead(() => readScratchNotesFile(petId, targetId, targetType), `scratch_${petId}_${targetId}`),
+  ]);
+
   // === 人格（SOUL.md） ===
-  const soulContent = await readSoulFile(petId);
   const soulTruncated = truncateContent(soulContent);
   sections.push('# 角色人格');
   sections.push(soulTruncated || '（未设置人格）');
 
   // === 用户画像（USER.md，只读） ===
-  const userContent = await readUserFile(petId);
   const userTruncated = truncateContent(userContent);
   if (userTruncated) {
     sections.push('# 关于主人');
@@ -661,7 +702,6 @@ export async function buildIntentSystemPrompt({
   }
 
   // === 长期记忆（MEMORY.md，只读） ===
-  const memoryContent = await readMemoryFile(petId);
   const memoryTruncated = truncateContent(memoryContent);
   if (memoryTruncated) {
     sections.push('# 记忆');
@@ -669,7 +709,6 @@ export async function buildIntentSystemPrompt({
   }
 
   // === 当前群规则（social/group/RULE_{群号}.md，只读） ===
-  const groupRuleContent = await readGroupRuleFile(petId, targetId);
   const groupRuleTruncated = truncateContent(groupRuleContent, SOCIAL_FILE_TRUNCATE);
   sections.push(`# ${groupLabel} 群规则`);
   if (groupRuleTruncated) {
@@ -680,7 +719,6 @@ export async function buildIntentSystemPrompt({
   sections.push('（以上群规则为只读参考，帮助你理解群氛围）');
 
   // === 联系人索引（social/CONTACTS.md，只读） ===
-  const contactsContent = await readContactsFile(petId);
   const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
   sections.push('# 联系人索引');
   if (contactsTruncated) {
@@ -691,7 +729,6 @@ export async function buildIntentSystemPrompt({
   sections.push('（以上联系人索引为只读参考）');
 
   // === 当前对话成员档案（由上次 eval 后并行预取，只读） ===
-  const peopleCacheContent = await readPeopleCacheFile(petId, targetId, targetType);
   if (peopleCacheContent) {
     sections.push('# 当前对话成员档案');
     sections.push(truncateContent(peopleCacheContent, SOCIAL_FILE_TRUNCATE));
@@ -699,7 +736,6 @@ export async function buildIntentSystemPrompt({
   }
 
   // === 社交记忆（social/SOCIAL_MEMORY.md，只读） ===
-  const socialMemoryContent = await readSocialMemoryFile(petId);
   const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
   sections.push('# 社交记忆（全局）');
   if (socialMemoryTruncated) {
@@ -743,12 +779,10 @@ export async function buildIntentSystemPrompt({
   }
 
   // === 当前状态感知（来自 Intent 自维护文件） ===
-  const intentStateContent = await readIntentStateFile(petId, targetId, targetType);
   sections.push('# 当前状态感知');
   sections.push(intentStateContent || '（本次会话开始，尚无记录）');
 
   // === 笔记（ground truth 简写索引，来自 scratch/notes.md） ===
-  const scratchNotes = await readScratchNotesFile(petId, targetId, targetType);
   if (scratchNotes) {
     sections.push('# 笔记\n' + scratchNotes);
   }

@@ -11,6 +11,7 @@
 
 import * as tauri from '../tauri';
 import { downloadUrlAsBase64 } from '../tauri';
+import { invalidatePromptFileCache } from '../socialPromptBuilder.js';
 
 // ============ 常量 ============
 
@@ -335,22 +336,33 @@ export async function executeSocialFileTool(toolName, args, context) {
 
   console.log(`[SocialFile] Executing ${toolName}`, { petId, path: args?.path });
 
+  let result;
   switch (toolName) {
     case 'social_tree':
-      return executeSocialTree(petId);
+      result = await executeSocialTree(petId);
+      break;
     case 'social_read':
-      return executeSocialRead(petId, args);
+      result = await executeSocialRead(petId, args);
+      break;
     case 'social_write':
-      return executeSocialWrite(petId, args);
+      result = await executeSocialWrite(petId, args);
+      if (args?.path) invalidatePromptFileCache(args.path);
+      break;
     case 'social_edit':
-      return executeSocialEdit(petId, args);
+      result = await executeSocialEdit(petId, args);
+      if (args?.path) invalidatePromptFileCache(args.path);
+      break;
     case 'social_delete':
-      return executeSocialDelete(petId, args);
+      result = await executeSocialDelete(petId, args);
+      if (args?.path) invalidatePromptFileCache(args.path);
+      break;
     case 'social_rename':
-      return executeSocialRename(petId, args);
+      result = await executeSocialRename(petId, args);
+      break;
     default:
       return { error: `未知的社交文件工具: ${toolName}` };
   }
+  return result;
 }
 
 // ============ 缓冲区搜索工具（Observer 用，搜索当前 buffer 中的完整消息） ============
