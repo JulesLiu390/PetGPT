@@ -11,7 +11,16 @@
 
 import * as tauri from '../tauri';
 import { downloadUrlAsBase64 } from '../tauri';
-import { invalidatePromptFileCache } from '../socialPromptBuilder.js';
+// invalidatePromptFileCache is dynamically imported to avoid circular dependency
+// (socialPromptBuilder → socialToolExecutor → socialPromptBuilder)
+let _invalidateCache = null;
+async function getInvalidateCache() {
+  if (!_invalidateCache) {
+    const mod = await import('../socialPromptBuilder.js');
+    _invalidateCache = mod.invalidatePromptFileCache;
+  }
+  return _invalidateCache;
+}
 
 // ============ 常量 ============
 
@@ -346,15 +355,15 @@ export async function executeSocialFileTool(toolName, args, context) {
       break;
     case 'social_write':
       result = await executeSocialWrite(petId, args);
-      if (args?.path) invalidatePromptFileCache(args.path);
+      if (args?.path) getInvalidateCache().then(fn => fn?.(args.path)).catch(() => {});
       break;
     case 'social_edit':
       result = await executeSocialEdit(petId, args);
-      if (args?.path) invalidatePromptFileCache(args.path);
+      if (args?.path) getInvalidateCache().then(fn => fn?.(args.path)).catch(() => {});
       break;
     case 'social_delete':
       result = await executeSocialDelete(petId, args);
-      if (args?.path) invalidatePromptFileCache(args.path);
+      if (args?.path) getInvalidateCache().then(fn => fn?.(args.path)).catch(() => {});
       break;
     case 'social_rename':
       result = await executeSocialRename(petId, args);
