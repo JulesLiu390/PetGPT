@@ -693,50 +693,46 @@ async function pollTarget({
           .join('\n');
         const sender = msg.sender_name || msg.sender_id || 'unknown';
 
-        const descs = [];
         const remainingImages = [];
-        for (let j = 0; j < msg._images.length; j++) {
+        // 并行描述同一条消息内的所有图片
+        const descPromises = msg._images.map((img, j) => {
           const cacheKey = `${msg.message_id}_${j}`;
           // 检查缓存
           if (msg.message_id && imageDescCache.has(cacheKey)) {
-            descs.push(imageDescCache.get(cacheKey));
             cachedCount++;
-            continue;
+            return Promise.resolve(imageDescCache.get(cacheKey));
           }
           // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用，失败指数重试 5→25→125s）
-          try {
-            let desc;
-            if (imageDescInflight.has(cacheKey)) {
-              // 另一个循环（Observer/Reply）正在描述同一张图，等待它完成
-              desc = await imageDescInflight.get(cacheKey);
-              cachedCount++;
-            } else {
-              const imgData = msg._images[j].data || '';
-              const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${msg._images[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
-              // 用 retryLLM 包装，inflight 跟踪确保并发去重
-              const wrappedDescribe = () => {
-                const p = describeImage(msg._images[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId);
-                imageDescInflight.set(cacheKey, p);
-                return p;
-              };
-              try {
-                desc = await retryLLM(wrappedDescribe, { label: `Vision [${sender}] img${j}`, target });
-              } finally {
-                imageDescInflight.delete(cacheKey);
-              }
+          if (imageDescInflight.has(cacheKey)) {
+            cachedCount++;
+            return imageDescInflight.get(cacheKey);
+          }
+          const imgData = img.data || '';
+          const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
+          const wrappedDescribe = () => {
+            const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId);
+            imageDescInflight.set(cacheKey, p);
+            return p;
+          };
+          const descP = retryLLM(wrappedDescribe, { label: `Vision [${sender}] img${j}`, target })
+            .then(desc => {
               addLog('llm', `🖼️ Vision [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
               describedCount++;
-            }
-            descs.push(desc);
-            if (msg.message_id) imageDescCache.set(cacheKey, desc);
-          } catch (e) {
-            addLog('warn', `Vision desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
-            // 缓存失败标记，避免对同一张图反复重试 155 秒
-            const fallback = '[图片描述失败]';
-            if (msg.message_id) imageDescCache.set(cacheKey, fallback);
-            descs.push(fallback);
-          }
-        }
+              if (msg.message_id) imageDescCache.set(cacheKey, desc);
+              return desc;
+            })
+            .catch(e => {
+              addLog('warn', `Vision desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
+              const fallback = '[图片描述失败]';
+              if (msg.message_id) imageDescCache.set(cacheKey, fallback);
+              return fallback;
+            })
+            .finally(() => {
+              imageDescInflight.delete(cacheKey);
+            });
+          return descP;
+        });
+        const descs = await Promise.all(descPromises);
         // 写回消息
         if (descs.length > 0) {
           msg._imageDescs = descs;
@@ -1093,7 +1089,7 @@ async function pollTarget({
         if ((name === 'social_write' || name === 'social_edit') && args?.path) {
           addLog('memory', `📝 社交文件更新: ${name} → ${args.path}`, JSON.stringify(args).substring(0, 300), target);
         } else {
-          addLog('info', `LLM called tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
+          addLog('info', `LLM called tool: ${name}`, JSON.stringify(args, null, 2), target);
         }
         // 暂存 send_message 的 content，等 onToolResult 确认成功后写入缓存
         if (name.includes('send_message')) {
@@ -2088,45 +2084,42 @@ export async function startSocialLoop(config, onStatusChange) {
         }
       }
 
-      const descs = [];
-      for (let j = 0; j < resolvedImages.length; j++) {
+      // 并行描述同一条消息内的所有图片
+      const descPromises = resolvedImages.map((img, j) => {
         const cacheKey = `${msg.message_id}_${j}`;
         if (msg.message_id && imageDescCache.has(cacheKey)) {
-          descs.push(imageDescCache.get(cacheKey));
           cachedCount++;
-          continue;
+          return Promise.resolve(imageDescCache.get(cacheKey));
         }
-        try {
-          let desc;
-          if (imageDescInflight.has(cacheKey)) {
-            desc = await imageDescInflight.get(cacheKey);
-            cachedCount++;
-          } else {
-            const imgData = resolvedImages[j].data || '';
-            const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${resolvedImages[j].mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
-            const wrappedDescribe = () => {
-              const p = describeImage(resolvedImages[j], ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId);
-              imageDescInflight.set(cacheKey, p);
-              return p;
-            };
-            try {
-              desc = await retryLLM(wrappedDescribe, { label: `Vision-pre [${sender}] img${j}`, target });
-            } finally {
-              imageDescInflight.delete(cacheKey);
-            }
+        if (imageDescInflight.has(cacheKey)) {
+          cachedCount++;
+          return imageDescInflight.get(cacheKey);
+        }
+        const imgData = img.data || '';
+        const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
+        const wrappedDescribe = () => {
+          const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId);
+          imageDescInflight.set(cacheKey, p);
+          return p;
+        };
+        return retryLLM(wrappedDescribe, { label: `Vision-pre [${sender}] img${j}`, target })
+          .then(desc => {
             addLog('llm', `🖼️ Vision-pre [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
             describedCount++;
-          }
-          descs.push(desc);
-          if (msg.message_id) imageDescCache.set(cacheKey, desc);
-        } catch (e) {
-          addLog('warn', `Vision-pre desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
-          // 缓存失败标记，避免对同一张图反复重试 155 秒
-          const fallback = '[图片描述失败]';
-          if (msg.message_id) imageDescCache.set(cacheKey, fallback);
-          descs.push(fallback);
-        }
-      }
+            if (msg.message_id) imageDescCache.set(cacheKey, desc);
+            return desc;
+          })
+          .catch(e => {
+            addLog('warn', `Vision-pre desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
+            const fallback = '[图片描述失败]';
+            if (msg.message_id) imageDescCache.set(cacheKey, fallback);
+            return fallback;
+          })
+          .finally(() => {
+            imageDescInflight.delete(cacheKey);
+          });
+      });
+      const descs = await Promise.all(descPromises);
       if (descs.length > 0) {
         msg._imageDescs = descs;
         // 已描述的图片从 _images 中移除，避免 buildTurnsFromMessages 再把原图发给 LLM
@@ -2336,7 +2329,7 @@ export async function startSocialLoop(config, onStatusChange) {
                   capturedPlan = { actions: args.actions || [] };
                   addLog('intent-plan', '', JSON.stringify(args), target);
                 }
-                addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args).substring(0, 200), target);
+                addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args, null, 2), target);
               },
             });
             intentResult = { content: raw.content, error: null };
@@ -2422,8 +2415,22 @@ export async function startSocialLoop(config, onStatusChange) {
         if (replyAction) {
           replyWakeFlag.set(target, { atMe: false });
           addLog('send', `💬 reply → ${tName()}`, null, target);
+          // 等待 Reply 拿到锁并开始执行，避免 Intent 立刻重新 eval 抢走锁
+          for (let _w = 0; _w < 30; _w++) {
+            await new Promise(r => setTimeout(r, 500));
+            if (processorBusy.get(target) === 'reply') break;
+            if (!replyWakeFlag.has(target)) break; // Reply 已消费 flag
+          }
+          // Reply 正在执行 → 等它完成
+          if (processorBusy.get(target) === 'reply') {
+            addLog('intent', `🧠 [${tName()}] waiting for Reply to finish`, null, target);
+            while (processorBusy.get(target) === 'reply') {
+              await sleepInterruptible(state, 500);
+            }
+          }
+        } else {
+          await sleepInterruptible(state, 500);
         }
-        await sleepInterruptible(state, 500);
       } catch (e) {
         addLog('intent', `Intent loop error [${tName()}]`, e.message || e, target);
         processorBusy.delete(target);

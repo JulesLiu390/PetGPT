@@ -1510,6 +1510,50 @@ export default function SocialPage() {
 
 // ==================== Helper Components ====================
 
+/** Render tool call details — parse JSON and show content fields as readable text */
+function ToolDetailsBlock({ details }) {
+  let parsed = null;
+  if (typeof details === 'string') {
+    try { parsed = JSON.parse(details); } catch { /* raw text */ }
+  } else if (typeof details === 'object') {
+    parsed = details;
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    // Show each field: render 'content'/'newText'/'old_text'/'new_text' as readable text, others as labels
+    const textKeys = ['content', 'newText', 'new_text', 'oldText', 'old_text', 'text', 'query'];
+    const entries = Object.entries(parsed);
+    return (
+      <div className="text-purple-400 text-[10px] space-y-1">
+        {entries.map(([key, val]) => {
+          if (textKeys.includes(key) && typeof val === 'string') {
+            return (
+              <div key={key}>
+                <span className="text-purple-300 font-semibold">{key}:</span>
+                <div className="ml-2 whitespace-pre-wrap break-words text-slate-500">{val}</div>
+              </div>
+            );
+          }
+          const display = typeof val === 'string' ? val : JSON.stringify(val);
+          return (
+            <div key={key} className="truncate">
+              <span className="text-purple-300 font-semibold">{key}:</span>{' '}
+              <span className="text-slate-500">{display}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Fallback: raw text
+  return (
+    <div className="text-purple-400 whitespace-pre-wrap break-words text-[10px]">
+      {typeof details === 'string' ? details : JSON.stringify(details, null, 2)}
+    </div>
+  );
+}
+
 function IntentLogEntry({ log, logFilter }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = !!log.details;
@@ -1578,9 +1622,7 @@ function IntentLogEntry({ log, logFilter }) {
               )}
             </>
           ) : (
-            <div className="text-purple-400 whitespace-pre-wrap break-words text-[10px]">
-              {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
-            </div>
+            <ToolDetailsBlock details={log.details} />
           )}
         </div>
       )}
