@@ -1752,8 +1752,6 @@ export async function startSocialLoop(config, onStatusChange) {
   const dataBuffer = new Map(); // target → { messages: [], metadata: {}, compressedSummary, seenIds: Set }
   const BUFFER_HARD_CAP = 500; // 安全阀：单 target 最大缓存消息数
   const BUFFER_COMPRESS_THRESHOLD = 30; // 旧消息超过此数触发 compress
-  // Intent ↔ Reply 互斥锁：同一 target 同时只能有一个在跑 LLM
-  const processorBusy = new Map(); // target → 'intent' | 'reply' | null
   // Fetcher 的定时器 ID
   let fetcherTimeoutId = null;
   // 用于区分新旧循环的 generation ID，stopSocialLoop 后立即 start 时防止旧闭包继续调度
@@ -1768,8 +1766,6 @@ export async function startSocialLoop(config, onStatusChange) {
   const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次，指数退避 5s/25s/125s
   const INTENT_RETRY_DELAYS = [5000, 25000, 125000];
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
-  const intentGate = new Map();                  // target → lock timestamp（Reply 发完消息后锁住，等 Intent 重评后解锁）
-  const INTENT_GATE_TIMEOUT_MS = 30 * 1000;      // 门控安全超时：30s 后自动解锁
   const replyWakeFlag = new Map();                // target → true（Intent 评出 ≥3 时置位，Reply 消费后清除）
 
   /** 获取/创建某群的 IntentState */
@@ -2203,18 +2199,6 @@ export async function startSocialLoop(config, onStatusChange) {
           }
         }
 
-        // ── 互斥：等待 Reply 完成 ──
-        if (processorBusy.get(target) === 'reply') {
-          if (!state._waitingForReply) {
-            state._waitingForReply = true;
-            addLog('intent', `🧠 [${tName()}] waiting for Reply to finish`, null, target);
-          }
-          await sleepInterruptible(state, 500);
-          continue;
-        }
-        state._waitingForReply = false;
-        processorBusy.set(target, 'intent');
-
         // ── 常规意图评估（带重试） ──
         const intentModel = intentLLMConfig.modelName;
         addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
@@ -2347,8 +2331,6 @@ export async function startSocialLoop(config, onStatusChange) {
 
         if (intentResult.error) {
           addLog('intent', `Intent LLM error [${tName()}]: ${intentResult.content}`, null, target);
-          intentGate.delete(target); // 解锁门控（即使出错也要解锁，避免死锁）
-          processorBusy.delete(target);
           await sleepInterruptible(state, 2000);
           continue;
         }
@@ -2365,11 +2347,6 @@ export async function startSocialLoop(config, onStatusChange) {
         const actions = capturedPlan?.actions || [];
         const replyAction = actions.find(a => a.type === 'reply');
         const stickerActions = actions.filter(a => a.type === 'sticker');
-        // 解锁 Intent 门控（Reply 可以重新发言了）
-        if (intentGate.has(target)) {
-          intentGate.delete(target);
-          addLog('intent', `🔓 [${tName()}] intent gate unlocked`, null, target);
-        }
 
         // 更新 intent 水位线到 buffer 最新消息
         const bufAfterEval = dataBuffer.get(target);
@@ -2410,30 +2387,13 @@ export async function startSocialLoop(config, onStatusChange) {
         // 并行预取当前对话人物档案，供下次 eval 注入（fire-and-forget）
         updatePeopleCache(target, targetType).catch(() => {});
 
-        // 先释放锁，再唤醒 Reply（避免 Reply 因锁未释放而等待）
-        processorBusy.delete(target);
         if (replyAction) {
           replyWakeFlag.set(target, { atMe: false });
           addLog('send', `💬 reply → ${tName()}`, null, target);
-          // 等待 Reply 拿到锁并开始执行，避免 Intent 立刻重新 eval 抢走锁
-          for (let _w = 0; _w < 30; _w++) {
-            await new Promise(r => setTimeout(r, 500));
-            if (processorBusy.get(target) === 'reply') break;
-            if (!replyWakeFlag.has(target)) break; // Reply 已消费 flag
-          }
-          // Reply 正在执行 → 等它完成
-          if (processorBusy.get(target) === 'reply') {
-            addLog('intent', `🧠 [${tName()}] waiting for Reply to finish`, null, target);
-            while (processorBusy.get(target) === 'reply') {
-              await sleepInterruptible(state, 500);
-            }
-          }
-        } else {
-          await sleepInterruptible(state, 500);
         }
+        await sleepInterruptible(state, 500);
       } catch (e) {
         addLog('intent', `Intent loop error [${tName()}]`, e.message || e, target);
-        processorBusy.delete(target);
         await sleepInterruptible(state, 2000);
       }
     }
@@ -2724,7 +2684,6 @@ export async function startSocialLoop(config, onStatusChange) {
 
     let llmRunning = false;        // 本 target 的 LLM 是否正在执行
     let lastLoggedNewCount = 0;    // 上次日志记录的新消息条数（去重用）
-    let waitingForIntent = false;  // 日志去重：等待 Intent 完成
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
       try {
@@ -2785,17 +2744,6 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
 
-        // ── 互斥：等待 Intent 完成 ──
-        if (processorBusy.get(target) === 'intent') {
-          if (!waitingForIntent) {
-            waitingForIntent = true;
-            addLog('info', `⏳ Reply ${label}: waiting for Intent to finish`, null, target);
-          }
-          await new Promise(r => setTimeout(r, 1000));
-          continue;
-        }
-        waitingForIntent = false;
-        
         // ── 潜水模式决定是否跳过回复 ──
         const targetLurkMode = lurkModes.get(target) || 'normal';
         if (targetLurkMode === 'full-lurk') {
@@ -2813,18 +2761,6 @@ export async function startSocialLoop(config, onStatusChange) {
           continue;
         }
         
-        // ── Intent 门控：Reply 发完消息后等 Intent 重新评估才能再次发言 ──
-        const gateLockTime = intentGate.get(target);
-        if (gateLockTime) {
-          if (Date.now() - gateLockTime < INTENT_GATE_TIMEOUT_MS) {
-            await new Promise(r => setTimeout(r, 1000));
-            continue;
-          }
-          // 安全超时 — 自动解锁
-          intentGate.delete(target);
-          addLog('warn', `🔓 Reply ${label}: intent gate timeout-unlocked (${INTENT_GATE_TIMEOUT_MS / 1000}s)`, null, target);
-        }
-
         // Reply 冷却（replyIntervalMs，默认 0 = 无冷却）
         if (replyIntervalMs > 0) {
           const now = Date.now();
@@ -2845,7 +2781,6 @@ export async function startSocialLoop(config, onStatusChange) {
         // ── 启动 LLM（单轮，不再自主 catchup，新消息交还 Intent 决策） ──
         llmRunning = true;
         lastLoggedNewCount = 0;
-        processorBusy.set(target, 'reply');
 
         const runReplyLLM = async () => {
           try {
@@ -2877,9 +2812,6 @@ export async function startSocialLoop(config, onStatusChange) {
             if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
             if (result && result.action === 'replied') {
               addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
-              // 锁定门控，等 Intent 自然重评后解锁（不再强制唤醒 Intent）
-              intentGate.set(target, Date.now());
-              addLog('info', `🔒 Reply ${label}: gate locked`, null, target);
               // 发完消息后，Intent 休息 20s 再重评（有新消息则提前结束休息）
               getIntentState(target).postReplyRestUntil = Date.now() + 20 * 1000;
             }
@@ -2888,7 +2820,6 @@ export async function startSocialLoop(config, onStatusChange) {
           } finally {
             llmRunning = false;
             lastLoggedNewCount = 0;
-            processorBusy.delete(target);
           }
         };
 
@@ -2898,9 +2829,8 @@ export async function startSocialLoop(config, onStatusChange) {
         await new Promise(r => setTimeout(r, 1000));
       } catch (e) {
         addLog('error', `Reply ${label} loop error`, e.message || e, target);
-        // 安全清理：防止崩溃后 processorBusy/llmRunning 卡死导致 Intent 死锁
+        // 安全清理：防止崩溃后 llmRunning 卡死
         llmRunning = false;
-        processorBusy.delete(target);
         await new Promise(r => setTimeout(r, 3000));
       }
     }
