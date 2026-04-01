@@ -1763,6 +1763,7 @@ export async function startSocialLoop(config, onStatusChange) {
 
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // semi-lurk / full-lurk 模式的评估冷却
   const INTENT_MIN_INTERVAL_MS = 15 * 1000;   // normal 模式最小评估间隔（防连消息密集重评）
+  const INTENT_IDLE_SLEEP_MS = 3 * 60 * 1000;    // 3 分钟无新消息 → 休眠
   const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次，指数退避 5s/25s/125s
   const INTENT_RETRY_DELAYS = [5000, 25000, 125000];
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
@@ -1948,6 +1949,18 @@ export async function startSocialLoop(config, onStatusChange) {
     const newMessages = wmIdx >= 0 ? messages.slice(wmIdx + 1) : messages;
     return newMessages.some(m => !m.is_self);
   };
+
+  function getLastNonSelfMessageTime(target) {
+    const buf = dataBuffer.get(target);
+    if (!buf || buf.messages.length === 0) return 0;
+    for (let i = buf.messages.length - 1; i >= 0; i--) {
+      const msg = buf.messages[i];
+      if (!msg.is_self && msg.timestamp) {
+        return new Date(msg.timestamp).getTime() || 0;
+      }
+    }
+    return 0;
+  }
 
   // ============ 层4: Intent Loop — 每群独立意图循环 ============
 
@@ -2182,6 +2195,13 @@ export async function startSocialLoop(config, onStatusChange) {
           } else {
             const hasNewMessages = intentDetection && intentDetection.changed;
             if (!hasNewMessages) {
+              const lastNonSelfTime = getLastNonSelfMessageTime(target);
+              const idleMs = lastNonSelfTime > 0 ? Date.now() - lastNonSelfTime : 0;
+              if (idleMs > INTENT_IDLE_SLEEP_MS) {
+                addLog('intent', `🧠 [${tName()}] idle sleep (${Math.round(idleMs / 60000)}min no msgs)`, null, target);
+                await sleepInterruptible(state, 30000);
+                continue;
+              }
               await sleepInterruptible(state, 500);
               continue;
             }
