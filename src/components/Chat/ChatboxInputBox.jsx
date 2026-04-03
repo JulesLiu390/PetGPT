@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera } from "react-icons/fa6";
+import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera, FaRobot } from "react-icons/fa6";
 import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { promptSuggestion, callOpenAILib, callOpenAILibStream } from '../../utils/openai';
@@ -11,6 +11,9 @@ import { SiQuicktype } from "react-icons/si";
 import { useMcpTools } from '../../utils/mcp/useMcpTools';
 import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
+import SubagentPanel from './SubagentPanel';
+import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount } from '../../utils/subagentManager';
+import { getSubagentToolDefinition } from '../../utils/workspace/socialToolExecutor';
 import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
 import { listen } from '@tauri-apps/api/event';
@@ -160,6 +163,9 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   // Per-Conversation 工具栏状态
   // 记忆功能开关状态 { [conversationId]: boolean }
   const [memoryEnabledByConversation, setMemoryEnabledByConversation] = useState({});
+  // Subagent 状态
+  const [showSubagentPanel, setShowSubagentPanel] = useState(false);
+  const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   // MCP 服务器启用状态 { [conversationId]: Set<string> }
   const [enabledMcpServersByConversation, setEnabledMcpServersByConversation] = useState({});
   // 追踪每个会话创建时的默认值（用于新 Tab 固化当时的默认值）
@@ -926,6 +932,19 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     fetchPetInfo();
   }, [characterId]);
 
+  // Subscribe to subagent changes
+  useEffect(() => {
+    const unsub = onSubagentChange(() => setActiveSubagentCount(getActiveCount()));
+    return unsub;
+  }, []);
+
+  // Initialize subagent listeners when petInfo is available
+  useEffect(() => {
+    if (petInfo?._id) {
+      initSubagentListeners({ petId: petInfo._id, addLog: null, wakeIntent: null });
+    }
+  }, [petInfo]);
+
   // 监听助手更新事件，当当前助手被修改时重新加载 petInfo
   useEffect(() => {
     if (!characterId) return;
@@ -1348,7 +1367,9 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
 
     // 获取内置工具定义（read/write/edit）
     const builtinTools = getBuiltinToolDefinitions(memoryEnabled);
-    
+    const subagentDef = getSubagentToolDefinition();
+    if (subagentDef) builtinTools.push(subagentDef);
+
     // 合并 MCP 工具和内置工具
     const allMcpTools = [...(mcpEnabled && hasTools ? mcpTools : [])];
     const allToolsForLLM = allMcpTools.length > 0 || builtinTools.length > 0;
@@ -1453,7 +1474,9 @@ When using tools, please follow these guidelines:
           abortSignal: controller.signal,
           builtinToolContext: {
             petId: petInfo._id,
-            memoryEnabled
+            memoryEnabled,
+            subagentRegistry,
+            subagentConfig: { enabled: true, model: 'sonnet', timeoutSecs: 300 },
           }
         });
         
@@ -1967,7 +1990,29 @@ const handleStop = async () => {
                 >
                     <FaCamera className="w-4 h-4" />
                 </button>
-                
+
+                {/* Subagent 按钮 */}
+                <div className="relative">
+                  <button
+                    onClick={() => setShowSubagentPanel(!showSubagentPanel)}
+                    className={`relative flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
+                      activeSubagentCount > 0
+                        ? 'px-3 py-1.5 text-blue-700 bg-blue-100 border border-blue-300'
+                        : 'p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent'
+                    }`}
+                    title={`CC Subagent (${activeSubagentCount} running)`}
+                  >
+                    <FaRobot className="w-4 h-4" />
+                    {activeSubagentCount > 0 && (
+                      <span className="text-xs">{activeSubagentCount}</span>
+                    )}
+                  </button>
+                  <SubagentPanel
+                    isOpen={showSubagentPanel}
+                    onClose={() => setShowSubagentPanel(false)}
+                  />
+                </div>
+
                 <button
                     onClick={toggleMemory}
                     className={`flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
