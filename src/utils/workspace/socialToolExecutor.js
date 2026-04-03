@@ -1303,7 +1303,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1443,6 +1443,21 @@ export function getImageSendToolDefinition() {
   };
 }
 
+/** 获取 image_list 工具的 function calling 定义 */
+export function getImageListToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'image_list',
+      description: '列出已保存的截图/图片。返回文件名、描述和创建时间。用于查看有哪些图片可以用 image action 发送。',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  };
+}
+
 /**
  * 执行 subagent 相关工具
  */
@@ -1451,6 +1466,7 @@ export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'md_organize') return executeMdOrganize(args, context);
   if (toolName === 'cc_read') return executeCcRead(args, context);
   if (toolName === 'screenshot') return executeScreenshot(args, context);
+  if (toolName === 'image_list') return executeImageList(context);
   if (toolName === 'image_send') return executeImageSend(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
@@ -1666,6 +1682,45 @@ async function executeScreenshot(args, context) {
 }
 
 /** 发送已保存的图片 */
+/** 列出已保存的截图/图片 */
+async function executeImageList(context) {
+  const { petId } = context;
+  if (!petId) return { error: '缺少 petId' };
+
+  try {
+    const raw = await tauri.workspaceRead(petId, 'social/images/index.toml').catch(() => '');
+    if (!raw || !raw.trim()) {
+      return { content: [{ type: 'text', text: '（暂无已保存的图片）' }] };
+    }
+    // 简单解析 toml: 提取 file, desc, created_at
+    const entries = [];
+    let current = {};
+    for (const line of raw.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed === '[[screenshots]]') {
+        if (current.file) entries.push(current);
+        current = {};
+      } else if (trimmed.startsWith('file = ')) {
+        current.file = trimmed.slice(8, -1); // remove quotes
+      } else if (trimmed.startsWith('desc = ')) {
+        current.desc = trimmed.slice(8, -1);
+      } else if (trimmed.startsWith('created_at = ')) {
+        current.created_at = trimmed.slice(14, -1);
+      }
+    }
+    if (current.file) entries.push(current);
+
+    if (entries.length === 0) {
+      return { content: [{ type: 'text', text: '（暂无已保存的图片）' }] };
+    }
+
+    const lines = entries.map(e => `🖼️ ${e.file} — ${e.desc || '无描述'} (${e.created_at?.substring(0, 10) || '?'})`);
+    return { content: [{ type: 'text', text: `已保存 ${entries.length} 张图片：\n${lines.join('\n')}` }] };
+  } catch (e) {
+    return { error: `读取图片列表失败: ${e.message || e}` };
+  }
+}
+
 async function executeImageSend(args, context) {
   const { file } = args;
   const { petId, targetId, targetType, mcpServerName } = context;

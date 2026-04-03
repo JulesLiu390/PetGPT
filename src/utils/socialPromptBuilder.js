@@ -855,8 +855,9 @@ ${stickerIndex}
 - social_read(path)：按需读取其他社交文件（如 social/notes/、social/REPLY_STRATEGY.md 等）。当前对话成员档案已自动注入上方，无需手动读取。
 - md_organize(file, context, instruction)：异步整理 markdown 文件。整理助手会自动用 social_read + social_edit 修改文件。用于追加教训、精简文件、合并重复条目等。调用后不需要等待。
 
-截图工具：
+截图/图片工具：
 - screenshot(desc, message_id)：截取 QQ 聊天记录截图并保存。desc 是截图描述，message_id 是从哪条消息开始截（对话记录中 [#数字] 的数字）。截图会自动渲染为 QQ 风格并保存到 social/images/。
+- image_list()：列出已保存的截图/图片（文件名、描述、日期）。发送前先看看有哪些可用。
 - image_send(file)：发送已保存的图片到当前群聊。file 是 social/images/ 下的文件名。
 
 历史查询工具（只读，按需使用）：
