@@ -42,6 +42,11 @@ export default function SocialPage() {
     intentApiProviderId: '',
     compressApiProviderId: '',
     compressModelName: '',
+    // Subagent
+    subagentEnabled: true,
+    subagentMaxConcurrent: 5,
+    subagentTimeoutSecs: 300,
+    subagentModel: 'sonnet',
   });
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -437,6 +442,7 @@ export default function SocialPage() {
     'replyInterval', 'observerInterval',
     'botQQ', 'ownerQQ', 'ownerName',
     'enabledMcpServers',
+    'subagentEnabled', 'subagentMaxConcurrent', 'subagentTimeoutSecs', 'subagentModel',
   ];
 
   // ── Handlers ──
@@ -1287,6 +1293,50 @@ export default function SocialPage() {
                         />
                       </FormGroup>
                     </div>
+                  </Card>
+
+                  {/* CC Subagent */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={config.subagentEnabled !== false}
+                        onChange={(e) => handleConfigChange('subagentEnabled', e.target.checked)}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">CC Subagent</span>
+                      <span className="text-xs text-gray-400">后台研究任务</span>
+                    </div>
+                    {config.subagentEnabled !== false && (
+                      <div className="grid grid-cols-3 gap-3">
+                        <FormGroup label="Max Concurrent" hint="同时运行上限">
+                          <Input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={config.subagentMaxConcurrent ?? 5}
+                            onChange={(e) => handleConfigChange('subagentMaxConcurrent', parseInt(e.target.value) || 5)}
+                          />
+                        </FormGroup>
+                        <FormGroup label="Timeout (seconds)" hint="兜底超时">
+                          <Input
+                            type="number"
+                            min={30}
+                            max={600}
+                            value={config.subagentTimeoutSecs ?? 300}
+                            onChange={(e) => handleConfigChange('subagentTimeoutSecs', parseInt(e.target.value) || 300)}
+                          />
+                        </FormGroup>
+                        <FormGroup label="Model" hint="CC 模型">
+                          <Input
+                            type="text"
+                            value={config.subagentModel || 'sonnet'}
+                            onChange={(e) => handleConfigChange('subagentModel', e.target.value)}
+                            placeholder="sonnet"
+                          />
+                        </FormGroup>
+                      </div>
+                    )}
                   </Card>
                 </div>
               )}
