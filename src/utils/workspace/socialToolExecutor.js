@@ -1309,7 +1309,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1338,13 +1338,26 @@ export function getSubagentToolDefinition() {
   };
 }
 
+/** 获取 cc_history 工具的 function calling 定义 */
+export function getCcHistoryToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'cc_history',
+      description: '查看当前群/好友的 CC 后台研究任务历史。返回所有已完成/失败/超时的任务列表（包含任务描述、状态、结果文件路径）。用 social_read 读取具体结果文件。',
+      parameters: {
+        type: 'object',
+        properties: {},
+      },
+    },
+  };
+}
+
 /**
- * 执行 dispatch_subagent 工具
- * @param {string} toolName
- * @param {Object} args - { task, maxLen }
- * @param {Object} context - { petId, targetId, targetType, subagentRegistry, subagentConfig }
+ * 执行 subagent 相关工具
  */
 export async function executeSubagentTool(toolName, args, context) {
+  if (toolName === 'cc_history') return executeCcHistory(context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
   const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
@@ -1392,8 +1405,11 @@ ${task.trim()}
       claudeMd,
     );
 
+    // 生成描述性文件名: cc_{task前20字}_{taskId}.md
+    const safeName = task.trim().substring(0, 20).replace(/[\/\\:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    const resultFileName = `cc_${safeName}_${taskId}.md`;
     const outputPath = source === 'social' && targetId
-      ? `social/${dir}/scratch_${targetId}/subagent_${taskId}.md`
+      ? `social/${dir}/scratch_${targetId}/${resultFileName}`
       : null;
 
     if (subagentRegistry) {
@@ -1404,6 +1420,7 @@ ${task.trim()}
         targetType: targetType || 'chat',
         dir,
         outputPath,
+        resultFileName,
         source,
         createdAt: Date.now(),
       });
@@ -1415,6 +1432,50 @@ ${task.trim()}
   } catch (e) {
     return { error: `Subagent 发起失败: ${e.message || e}` };
   }
+}
+
+/** 读取 cc_index.jsonl + 当前 running 任务，返回格式化的任务历史 */
+async function executeCcHistory(context) {
+  const { petId, targetId, targetType, subagentRegistry } = context;
+  if (!petId) return { error: '缺少 petId' };
+
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const lines = [];
+
+  // 1. 正在执行的任务（从 live registry）
+  if (subagentRegistry) {
+    for (const [tid, e] of subagentRegistry) {
+      if (e.target === targetId && e.status === 'running') {
+        const elapsed = Math.round((Date.now() - e.createdAt) / 1000);
+        lines.push(`⏳ [${tid}] ${e.task} — 执行中 (${elapsed}s)`);
+      }
+    }
+  }
+
+  // 2. 已完成的任务（从 cc_index.jsonl）
+  const indexPath = targetId ? `social/${dir}/scratch_${targetId}/cc_index.jsonl` : null;
+  if (indexPath) {
+    try {
+      const raw = await tauri.workspaceRead(petId, indexPath).catch(() => '');
+      if (raw && raw.trim()) {
+        for (const line of raw.trim().split('\n').filter(Boolean)) {
+          try {
+            const e = JSON.parse(line);
+            const icon = e.status === 'done' ? '✅' : e.status === 'timeout' ? '⏰' : '❌';
+            const fileHint = e.status === 'done' && e.file
+              ? ` → 用 social_read("social/${dir}/scratch_${targetId}/${e.file}") 查看`
+              : e.error ? ` (${e.error.substring(0, 80)})` : '';
+            lines.push(`${icon} [${e.taskId}] ${e.task} (${e.elapsed ?? '?'}s)${fileHint}`);
+          } catch { /* skip */ }
+        }
+      }
+    } catch { /* best-effort */ }
+  }
+
+  if (lines.length === 0) {
+    return { content: [{ type: 'text', text: '（暂无 CC 任务记录）' }] };
+  }
+  return { content: [{ type: 'text', text: `CC 任务记录 (${lines.length} 条):\n${lines.join('\n')}` }] };
 }
 
 /**

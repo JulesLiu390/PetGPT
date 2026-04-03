@@ -37,6 +37,8 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
     const entry = subagentRegistry.get(taskId);
     if (!entry) return;
 
+    const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
+
     try {
       const result = await tauri.workspaceRead(petId, `subagents/${taskId}/output/result.md`).catch(() => '');
       if (result && result.trim()) {
@@ -45,10 +47,11 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
         }
         entry.status = 'done';
         entry.result = result;
-        const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
         addLog?.('subagent', `✅ subagent done: ${taskId} (${elapsed}s, ${result.length}字)`,
           JSON.stringify({ taskId, task: entry.task, elapsed, resultPreview: result.substring(0, 500), resultLen: result.length, status: 'done' }),
           entry.target);
+        // Append to cc_index.jsonl
+        _appendIndex(petId, entry, { status: 'done', elapsed, resultLen: result.length });
       } else {
         entry.status = 'failed';
         const stderrPreview = stderr ? stderr.substring(0, 500) : '';
@@ -56,11 +59,13 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
         addLog?.('subagent', `❌ subagent error: ${taskId}: ${entry.error}`,
           JSON.stringify({ taskId, task: entry.task, status: 'failed', error: entry.error, stderr: stderrPreview }),
           entry.target);
+        _appendIndex(petId, entry, { status: 'failed', elapsed, error: entry.error });
       }
     } catch (e) {
       entry.status = 'failed';
       entry.error = e.message || String(e);
       addLog?.('error', `❌ subagent error: ${taskId}: ${entry.error}`, null, entry.target);
+      _appendIndex(petId, entry, { status: 'failed', elapsed, error: entry.error });
     }
 
     _cleanupWorkspace(petId, taskId);
@@ -77,6 +82,7 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
     addLog?.('subagent', `⏰ subagent timeout: ${taskId} (${elapsed}s)`,
       JSON.stringify({ taskId, task: entry.task, status: 'timeout' }),
       entry.target);
+    _appendIndex(petId, entry, { status: 'timeout', elapsed });
     _cleanupWorkspace(petId, taskId);
     _notify('timeout', { taskId, entry });
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
@@ -88,9 +94,11 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
     if (!entry) return;
     entry.status = 'failed';
     entry.error = error;
+    const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
     addLog?.('subagent', `❌ subagent error: ${taskId}: ${error}`,
       JSON.stringify({ taskId, task: entry.task, status: 'failed', error }),
       entry.target);
+    _appendIndex(petId, entry, { status: 'failed', elapsed, error });
     _cleanupWorkspace(petId, taskId);
     _notify('error', { taskId, entry });
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
@@ -137,5 +145,28 @@ async function _cleanupWorkspace(petId, taskId) {
     await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/result.md`).catch(() => {});
     await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/.gitkeep`).catch(() => {});
     await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/CLAUDE.md`).catch(() => {});
+  } catch { /* best-effort */ }
+}
+
+/** Append a completed task entry to cc_index.jsonl in the target's scratch dir */
+async function _appendIndex(petId, entry, extra) {
+  if (!entry.target || entry.target === 'chat') return;
+  try {
+    const dir = entry.targetType === 'friend' ? 'friend' : 'group';
+    const indexPath = `social/${dir}/scratch_${entry.target}/cc_index.jsonl`;
+    // Find taskId from registry
+    let taskId = '';
+    for (const [k, v] of subagentRegistry) {
+      if (v === entry) { taskId = k; break; }
+    }
+    const line = JSON.stringify({
+      taskId,
+      task: entry.task,
+      file: entry.resultFileName || null,
+      createdAt: new Date(entry.createdAt).toISOString(),
+      completedAt: new Date().toISOString(),
+      ...extra,
+    });
+    await tauri.workspaceAppend(petId, indexPath, line + '\n');
   } catch { /* best-effort */ }
 }
