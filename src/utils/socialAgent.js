@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -974,8 +974,12 @@ async function pollTarget({
     } catch (e) {
       addLog('warn', 'Failed to get MCP tools, proceeding without tools', e.message, target);
     }
-    // Reply 有 history 只读工具 + 跨群日志工具（表情包已移至 Intent 端处理）
-    const builtinDefs = [...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
+    // Reply 有 history 只读工具 + 跨群日志工具 + cc_history + cc_read（读 CC 结果）
+    const builtinDefs = [
+      ...getHistoryToolDefinitions(),
+      ...getGroupLogToolDefinitions(),
+      ...(config?.subagentEnabled !== false ? [getCcHistoryToolDefinition(), getCcReadToolDefinition()] : []),
+    ];
     const builtinToolsAsMcp = builtinDefs.map(t => ({
       name: t.function.name,
       description: t.function.description,
@@ -1058,7 +1062,7 @@ async function pollTarget({
       baseUrl: llmConfig.baseUrl,
       mcpTools,
       options: { temperature: 0.7 },
-      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache, bufferMessages: fullBufferMessages || undefined },
+      builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache, bufferMessages: fullBufferMessages || undefined, subagentRegistry },
       maxIterations: role === 'observer' ? 25 : undefined,
       stopAfterTool: role === 'reply' ? (name) => name.includes('send_message') : undefined,
       usageLabel: role === 'observer' ? 'Observer' : 'Reply',
@@ -2233,6 +2237,7 @@ export async function startSocialLoop(config, onStatusChange) {
         if (config.subagentEnabled !== false) {
           intentToolDefs.push(getSubagentToolDefinition());
           intentToolDefs.push(getCcHistoryToolDefinition());
+          intentToolDefs.push(getCcReadToolDefinition());
         }
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,

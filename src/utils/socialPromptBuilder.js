@@ -870,10 +870,11 @@ ${stickerIndex}
 
 后台研究工具（也叫 CC / Claude Code，需要深入调研或用户明确要求"用CC查"时使用）：
 - cc_history()：查看 CC 任务历史（正在执行 + 已完成 + 失败）。两种场景下使用：
-  (1) 需要引用事实、数据或调研结果时，先查 cc_history 看是否已有相关研究可以复用（用 social_read 读取结果文件）
+  (1) 需要引用事实、数据或调研结果时，先查 cc_history 看是否已有相关研究可以复用（用 cc_read 读取结果文件）
   (2) 准备 dispatch 新任务前，查 cc_history 避免重复研究已有结果
   只有历史中没有相关结果、或结果明显过时（比如几天前查的时效性信息），才 dispatch 新任务。
-- dispatch_subagent(task, maxLen=500)：发起一个 CC 后台研究任务。task 写明确的指令，CC 会在独立沙箱中自主完成（可用 web search 等工具），比普通搜索更深入全面。结果异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。当有人说"用CC搜/查"时，就是指这个工具。
+- cc_read(file)：读取 CC 研究结果文件。file 参数为 cc_history 返回的文件名（cc_ 开头）。
+- dispatch_subagent(task, maxLen=500)：发起一个 CC 后台研究任务。task 写明确的指令，CC 会在独立沙箱中自主完成（可用 web search 等工具），比普通搜索更深入全面。结果异步写入，完成后用 cc_read 读取。当有人说"用CC搜/查"时，就是指这个工具。
   ⚠️ 派出 CC 搜索任务后：(1) 不要再用 tavily_search 搜索相同内容，CC 会搜得更全面；(2) 在状态感知里写明"已派CC查 XXX，等结果再给结论"；(3) 不要在没有CC结果前就对搜索主题下结论——可以正常回复对话（比如"让我查查"），但不要编造搜索结果。等 CC 结果返回后再给出有依据的结论。
   注意：非搜索类任务（如内容生成、分析等）不受此限制，你仍然可以自由使用 tavily_search。
 

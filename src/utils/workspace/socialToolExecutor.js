@@ -1309,7 +1309,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1344,10 +1344,31 @@ export function getCcHistoryToolDefinition() {
     type: 'function',
     function: {
       name: 'cc_history',
-      description: '查看当前群/好友的 CC 后台研究任务历史。返回所有已完成/失败/超时的任务列表（包含任务描述、状态、结果文件路径）。用 social_read 读取具体结果文件。',
+      description: '查看当前群/好友的 CC 后台研究任务历史。返回正在执行/已完成/失败/超时的任务列表，已完成的任务会给出结果文件名，用 cc_read 读取内容。',
       parameters: {
         type: 'object',
         properties: {},
+      },
+    },
+  };
+}
+
+/** 获取 cc_read 工具的 function calling 定义（只能读取 CC 结果文件） */
+export function getCcReadToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'cc_read',
+      description: '读取 CC 研究结果文件。只能读取 cc_ 开头的文件（由 cc_history 列出的结果文件名）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file: {
+            type: 'string',
+            description: 'cc_history 返回的结果文件名，例如 "cc_查Qwen最新模型_sa_abc123.md"',
+          },
+        },
+        required: ['file'],
       },
     },
   };
@@ -1358,6 +1379,7 @@ export function getCcHistoryToolDefinition() {
  */
 export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'cc_history') return executeCcHistory(context);
+  if (toolName === 'cc_read') return executeCcRead(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
   const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
@@ -1476,6 +1498,29 @@ async function executeCcHistory(context) {
     return { content: [{ type: 'text', text: '（暂无 CC 任务记录）' }] };
   }
   return { content: [{ type: 'text', text: `CC 任务记录 (${lines.length} 条):\n${lines.join('\n')}` }] };
+}
+
+/** 读取 CC 结果文件（只允许读 cc_ 开头的文件） */
+async function executeCcRead(args, context) {
+  const { petId, targetId, targetType } = context;
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+
+  const { file } = args;
+  if (!file || typeof file !== 'string') return { error: '缺少 file 参数' };
+  if (!file.startsWith('cc_')) return { error: '只能读取 cc_ 开头的文件（CC 结果文件）' };
+
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const fullPath = `social/${dir}/scratch_${targetId}/${file}`;
+
+  try {
+    const content = await tauri.workspaceRead(petId, fullPath);
+    return { content: [{ type: 'text', text: content || '（空文件）' }] };
+  } catch (e) {
+    if (e?.toString?.()?.includes('不存在') || e?.toString?.()?.includes('FileNotFound')) {
+      return { content: [{ type: 'text', text: `（文件不存在: ${file}）` }] };
+    }
+    return { error: `读取失败: ${e}` };
+  }
 }
 
 /**
