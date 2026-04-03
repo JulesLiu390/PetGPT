@@ -758,6 +758,22 @@ export const workspaceGetPath = async (petId, path, ensureExists = false) => {
   return invoke('workspace_get_path', { petId, path, ensureExists });
 };
 
+// ==================== Subagent (CC CLI 子进程) ====================
+
+export const subagentSpawn = (taskId, cwd, model = 'sonnet', timeoutSecs = 300) =>
+  invoke('subagent_spawn', { taskId, cwd, model, timeoutSecs });
+
+export const subagentKill = (taskId) =>
+  invoke('subagent_kill', { taskId });
+
+export const subagentSetMaxConcurrent = (n) =>
+  invoke('subagent_set_max_concurrent', { n });
+
+export const onSubagentEvent = (eventName, callback) =>
+  listen(eventName, (event) => callback(event.payload));
+
+// ==================== Workspace Management ====================
+
 export const workspaceDeleteFolder = async (petId) => {
   return invoke('workspace_delete_folder', { petId });
 };
@@ -1061,6 +1077,12 @@ const tauri = {
   workspaceOpenFolder,
   workspaceOpenFile,
   
+  // Subagent
+  subagentSpawn,
+  subagentKill,
+  subagentSetMaxConcurrent,
+  onSubagentEvent,
+
   // Dragging
   startDragging,
   
