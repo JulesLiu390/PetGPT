@@ -1385,6 +1385,7 @@ ${task.trim()}
       cwd,
       subagentConfig.model || 'sonnet',
       subagentConfig.timeoutSecs || 300,
+      claudeMd,
     );
 
     const outputPath = source === 'social' && targetId

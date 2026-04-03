@@ -33,7 +33,7 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
   if (_initialized) return;
   _initialized = true;
 
-  const ul1 = await tauri.onSubagentEvent('subagent-done', async ({ taskId, exitCode }) => {
+  const ul1 = await tauri.onSubagentEvent('subagent-done', async ({ taskId, exitCode, stderr }) => {
     const entry = subagentRegistry.get(taskId);
     if (!entry) return;
 
@@ -51,9 +51,10 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
           entry.target);
       } else {
         entry.status = 'failed';
-        entry.error = `CC exited (code=${exitCode}) but no result.md`;
-        addLog?.('subagent', `❌ subagent error: ${taskId}: no output`,
-          JSON.stringify({ taskId, task: entry.task, status: 'failed', error: entry.error }),
+        const stderrPreview = stderr ? stderr.substring(0, 500) : '';
+        entry.error = `CC exited (code=${exitCode}) no result.md${stderrPreview ? ` | stderr: ${stderrPreview}` : ''}`;
+        addLog?.('subagent', `❌ subagent error: ${taskId}: ${entry.error}`,
+          JSON.stringify({ taskId, task: entry.task, status: 'failed', error: entry.error, stderr: stderrPreview }),
           entry.target);
       }
     } catch (e) {

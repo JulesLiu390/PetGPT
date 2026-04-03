@@ -19,6 +19,8 @@ struct SubagentDonePayload {
     task_id: String,
     #[serde(rename = "exitCode")]
     exit_code: Option<i32>,
+    /// CC 进程的 stderr 输出（用于调试）
+    stderr: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -71,6 +73,7 @@ pub async fn subagent_spawn(
     cwd: String,
     model: Option<String>,
     timeout_secs: Option<u64>,
+    system_prompt: Option<String>,
 ) -> Result<(), String> {
     let timeout = timeout_secs.unwrap_or(300);
     let model_arg = model.unwrap_or_else(|| "sonnet".to_string());
@@ -85,18 +88,24 @@ pub async fn subagent_spawn(
     let permit = pool.semaphore.clone().acquire_owned().await
         .map_err(|e| format!("Semaphore error: {}", e))?;
 
-    let mut child = Command::new("claude")
-        .arg("-p")
+    let mut cmd = Command::new("claude");
+    cmd.arg("-p")
         .arg("--model").arg(&model_arg)
-        .arg("--bare")
         .arg("--tools").arg("Read,Write,WebSearch,WebFetch")
         .arg("--strict-mcp-config")
-        .arg("--no-session-persistence")
-        .arg("按照 CLAUDE.md 里的任务执行")
+        .arg("--no-session-persistence");
+
+    // Pass task content as system prompt (instead of relying on CLAUDE.md auto-discovery)
+    if let Some(ref sp) = system_prompt {
+        cmd.arg("--system-prompt").arg(sp);
+    }
+
+    cmd.arg("按照 CLAUDE.md 里的任务执行")
         .current_dir(&cwd)
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = cmd.spawn()
         .map_err(|e| format!("Failed to spawn claude: {}", e))?;
 
     let pid = child.id();
@@ -109,8 +118,14 @@ pub async fn subagent_spawn(
 
     let wait_handle = tokio::spawn(async move {
         let _permit = permit;
-        let status = child.wait().await;
-        let exit_code = status.ok().and_then(|s| s.code());
+        let output = child.wait_with_output().await;
+        let (exit_code, stderr_str) = match output {
+            Ok(out) => (
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).to_string(),
+            ),
+            Err(e) => (None, format!("wait error: {}", e)),
+        };
 
         let mut procs = pool_arc_wait.processes.lock().await;
         if let Some(proc) = procs.remove(&task_id_wait) {
@@ -120,6 +135,7 @@ pub async fn subagent_spawn(
         let _ = app_wait.emit("subagent-done", SubagentDonePayload {
             task_id: task_id_wait,
             exit_code,
+            stderr: stderr_str,
         });
     });
 

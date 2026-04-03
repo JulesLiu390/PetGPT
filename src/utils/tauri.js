@@ -760,8 +760,8 @@ export const workspaceGetPath = async (petId, path, ensureExists = false) => {
 
 // ==================== Subagent (CC CLI 子进程) ====================
 
-export const subagentSpawn = (taskId, cwd, model = 'sonnet', timeoutSecs = 300) =>
-  invoke('subagent_spawn', { taskId, cwd, model, timeoutSecs });
+export const subagentSpawn = (taskId, cwd, model = 'sonnet', timeoutSecs = 300, systemPrompt = null) =>
+  invoke('subagent_spawn', { taskId, cwd, model, timeoutSecs, systemPrompt });
 
 export const subagentKill = (taskId) =>
   invoke('subagent_kill', { taskId });
