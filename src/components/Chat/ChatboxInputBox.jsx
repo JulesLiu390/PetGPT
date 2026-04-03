@@ -932,9 +932,26 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     fetchPetInfo();
   }, [characterId]);
 
+  // Completed subagent notifications (chat-source only)
+  const [subagentNotifications, setSubagentNotifications] = useState([]);
+  const [expandedNotification, setExpandedNotification] = useState(null);
+
   // Subscribe to subagent changes
   useEffect(() => {
-    const unsub = onSubagentChange(() => setActiveSubagentCount(getActiveCount()));
+    const unsub = onSubagentChange((eventType, payload) => {
+      setActiveSubagentCount(getActiveCount());
+      // When a chat-source subagent finishes, add notification
+      if (payload?.entry?.source === 'chat' && (eventType === 'done' || eventType === 'timeout' || eventType === 'error')) {
+        setSubagentNotifications(prev => [...prev, {
+          taskId: payload.taskId,
+          task: payload.entry.task,
+          status: payload.entry.status,
+          result: payload.entry.result || null,
+          error: payload.entry.error || null,
+          timestamp: Date.now(),
+        }]);
+      }
+    });
     return unsub;
   }, []);
 
@@ -1124,6 +1141,26 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   }, [dispatch]);
 
   
+
+  // 注入 subagent 结果到对话
+  const handleInjectSubagentResult = useCallback((notification) => {
+    const resultText = notification.status === 'done' && notification.result
+      ? notification.result
+      : notification.status === 'timeout'
+      ? `（后台任务超时：${notification.task}）`
+      : `（后台任务失败：${notification.error || '未知错误'}）`;
+
+    const injectMsg = `[后台研究结果] 任务：${notification.task}\n\n${resultText}`;
+    setUserText(injectMsg);
+    // Remove this notification
+    setSubagentNotifications(prev => prev.filter(n => n.taskId !== notification.taskId));
+    setExpandedNotification(null);
+  }, []);
+
+  const handleDismissNotification = useCallback((taskId) => {
+    setSubagentNotifications(prev => prev.filter(n => n.taskId !== taskId));
+    if (expandedNotification === taskId) setExpandedNotification(null);
+  }, [expandedNotification]);
 
   // 发送消息
   const handleSend = async () => {
@@ -1892,6 +1929,50 @@ const handleStop = async () => {
 
   return (
     <div className="relative w-full max-w-3xl mx-auto px-4 pb-4 no-drag">
+      {/* Subagent 完成通知条 */}
+      {subagentNotifications.length > 0 && (
+        <div className="mb-2 space-y-1.5">
+          {subagentNotifications.map(n => (
+            <div key={n.taskId} className={`rounded-xl border px-3 py-2 text-xs shadow-sm transition-all ${
+              n.status === 'done' ? 'bg-emerald-50 border-emerald-200' :
+              n.status === 'timeout' ? 'bg-amber-50 border-amber-200' :
+              'bg-red-50 border-red-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                <span>{n.status === 'done' ? '✅' : n.status === 'timeout' ? '⏰' : '❌'}</span>
+                <span className="flex-1 font-medium text-gray-700 truncate">
+                  {n.task?.substring(0, 60)}
+                </span>
+                <button
+                  onClick={() => setExpandedNotification(expandedNotification === n.taskId ? null : n.taskId)}
+                  className="text-[10px] text-gray-500 hover:text-gray-700 px-1.5 py-0.5 rounded hover:bg-black/5"
+                >
+                  {expandedNotification === n.taskId ? '收起' : '查看'}
+                </button>
+                <button
+                  onClick={() => handleInjectSubagentResult(n)}
+                  className="text-[10px] text-blue-600 hover:text-blue-800 px-1.5 py-0.5 rounded hover:bg-blue-50 font-medium"
+                >
+                  注入对话
+                </button>
+                <button
+                  onClick={() => handleDismissNotification(n.taskId)}
+                  className="text-gray-400 hover:text-gray-600 text-sm leading-none"
+                >
+                  ×
+                </button>
+              </div>
+              {expandedNotification === n.taskId && (
+                <div className="mt-1.5 p-2 rounded bg-white/80 border border-gray-100 text-[10px] text-gray-600 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                  {n.status === 'done' && n.result
+                    ? n.result
+                    : n.error || '(无内容)'}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {/* 主输入框容器：模仿图2的紧凑风格 */}
       <div 
         className={`relative rounded-[20px] p-3 shadow-sm border transition-all no-drag  ${
