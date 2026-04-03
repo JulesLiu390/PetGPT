@@ -653,6 +653,11 @@ function buildReplyToolInstruction(targetName, targetId) {
 - group_log_list()：列出所有有日志记录的群（群号+群名）
 - group_log_read(targets, query?, start_time?, end_time?)：搜索指定群的原始日志。targets 为群号数组，query 可选（不传则返回最新内容）
 
+CC 研究结果工具（只读）：
+- cc_history()：查看 CC 后台研究任务列表（正在执行/已完成/失败）
+- cc_read(file)：读取 CC 研究结果文件（file 为 cc_ 开头的文件名，从 cc_history 或 reply_brief 中获取）
+- 如果 reply_brief 中包含 cc_read 指引（如"请先用 cc_read(...) 读取研究结果"），你必须先调 cc_read 读取完整内容，然后基于内容写一段有深度的详细回复。读了研究报告就要体现出来——回复要比普通回复更长更有料
+
 ⚠️ 你没有社交文件写入工具。群档案、人物档案和社交记忆的维护由独立的观察者负责，你只需专注于回复决策。
 
 ⚠️ 【再次提醒】想说话 → 必须调用 send_message 工具。直接输出纯文本群友看不到。发送前先回顾上方 assistant 消息，确认没有重复。如果已经说过类似的话，输出"[沉默]：<理由>"。`;
@@ -935,7 +940,8 @@ ${stickerIndex}
    详细内容可另建文件（如 ${scratchDir}/about_张三.md），notes.md 里引用即可。
 
 3. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
-   交接内容给 Reply 模块使用，应包含：要表达的核心观点或情绪、建议的语气和措辞方向、需要用到的关键事实或搜索结果（如有）。如果 reply action 有 replyTo，也在交接里注明"引用回复消息 #xxx"。写清楚，Reply 只凭这份交接发言，不会自己再查资料。
+   交接内容给 Reply 模块使用，应包含：要表达的核心观点或情绪、建议的语气和措辞方向、需要用到的关键事实或搜索结果（如有）。如果 reply action 有 replyTo，也在交接里注明"引用回复消息 #xxx"。
+   如果回复需要引用 CC 研究结果：不要把完整内容抄进 brief，而是写 cc_read 指引，例如"请先用 cc_read(\"cc_查Qwen最新模型_sa_abc123.md\") 读取完整研究结果，基于结果详细回复"。Reply 模块有 cc_read 工具，会自己读取并写出有深度的长回复。
 
 4. 调用 write_intent_plan(actions=[...]) 提交行动决策。
 
