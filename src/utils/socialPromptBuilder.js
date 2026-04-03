@@ -855,6 +855,10 @@ ${stickerIndex}
 - social_read(path)：按需读取其他社交文件（如 social/notes/、social/REPLY_STRATEGY.md 等）。当前对话成员档案已自动注入上方，无需手动读取。
 - md_organize(file, context, instruction)：异步整理 markdown 文件。整理助手会自动用 social_read + social_edit 修改文件。用于追加教训、精简文件、合并重复条目等。调用后不需要等待。
 
+截图工具：
+- screenshot(desc, message_id)：截取 QQ 聊天记录截图并保存。desc 是截图描述，message_id 是从哪条消息开始截（对话记录中 [#数字] 的数字）。截图会自动渲染为 QQ 风格并保存到 social/images/。
+- image_send(file)：发送已保存的图片到当前群聊。file 是 social/images/ 下的文件名。
+
 历史查询工具（只读，按需使用）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
 - daily_read(date?, target?)：读取每日摘要。传 target 读该群详细日报，不传读全局跨群日报
@@ -975,6 +979,9 @@ ${stickerIndex}
 **sticker**（发送表情包）— 加入条件：真的忍不住的强烈情绪反应（爆笑/无语到极致/非常赞同），"还不错/挺好笑"的中等反应不够
 - 可与 reply 同时出现（并发发送）
 - id：表情包序号（见上方表情包收藏）
+
+**image**（发送截图/图片）— 加入条件：需要用截图佐证自己的观点 / 有人要求截图 / 展示之前截取的内容
+- file：social/images/ 下的文件名（先用 screenshot 截图保存，再用 image action 发送）
 
 **dispatch_subagent**（CC 研究）— 调用时机：话题中出现不确定的事实或数据 / 有人要求"用CC查" / 辩论中需要证据支撑 / 复杂问题需要深入调研
 - 可以和 reply 同时出现（先 dispatch，再 reply 告诉群友"我让CC去查了"）

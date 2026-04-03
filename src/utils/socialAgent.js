@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -2310,6 +2310,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           intentToolDefs.push(getCcReadToolDefinition());
           intentToolDefs.push(getMdOrganizeToolDefinition());
         }
+        intentToolDefs.push(getScreenshotToolDefinition());
+        intentToolDefs.push(getImageSendToolDefinition());
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
@@ -2529,7 +2531,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
         // 日志
         const actionDesc = actions.filter(a => a.type !== 'wait')
-          .map(a => a.type === 'sticker' ? `📎sticker#${a.id}` : `reply(${a.numChunks ?? 1}条 ${a.replyLen ?? '?'}字)`).join(' + ')
+          .map(a => a.type === 'sticker' ? `📎sticker#${a.id}` : a.type === 'image' ? `🖼️image(${a.file})` : `reply(${a.numChunks ?? 1}条 ${a.replyLen ?? '?'}字)`).join(' + ')
           || 'wait';
         addLog('intent', `🧠 [${tName()}] ${actionDesc}`, JSON.stringify({ state: capturedPlan?.state || '', actions: capturedPlan?.actions || [] }), target);
 
@@ -2554,6 +2556,30 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             const updated = current.replace(/【我刚做了】[^\n]*/, `【我刚做了】发了表情包 ${stickerDesc}`);
             if (updated !== current) await tauri.workspaceWrite(config.petId, intentPath, updated);
           } catch { /* 非致命 */ }
+        }
+
+        // Image actions: 发送已保存的图片（和 sticker 类似，fire-and-forget）
+        const imageActions = actions.filter(a => a.type === 'image');
+        if (imageActions.length > 0) {
+          const imagePromises = imageActions.map(async (ia) => {
+            try {
+              const base64Data = await tauri.workspaceReadBinary(config.petId, `social/images/${ia.file}`);
+              if (!base64Data) {
+                addLog('warn', `image_send failed: file empty ${ia.file}`, null, target);
+                return;
+              }
+              const sendToolName = `${config.mcpServerName}__send_image`;
+              await tauri.mcp.callToolByName(sendToolName, {
+                target,
+                target_type: targetType,
+                image: base64Data,
+              });
+              addLog('send', `🖼️ image → ${tName()}: ${ia.file}`, null, target);
+            } catch (e) {
+              addLog('warn', `image_send failed: ${e.message}`, null, target);
+            }
+          });
+          await Promise.all(imagePromises);
         }
 
         // 并行预取当前对话人物档案，供下次 eval 注入（fire-and-forget）

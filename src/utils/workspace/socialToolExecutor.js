@@ -1303,7 +1303,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1397,6 +1397,52 @@ export function getMdOrganizeToolDefinition() {
   };
 }
 
+/** 获取 screenshot 工具的 function calling 定义 */
+export function getScreenshotToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'screenshot',
+      description: '截取 QQ 聊天记录的截图并保存。传入截图描述和起始消息 ID（对话记录中 [#数字] 标注的 ID），系统会自动渲染 QQ 风格截图并保存到 workspace。',
+      parameters: {
+        type: 'object',
+        properties: {
+          desc: {
+            type: 'string',
+            description: '截图描述，例如"关于Qwen性能对比的讨论"',
+          },
+          message_id: {
+            type: 'string',
+            description: '从哪条消息开始截图（消息 ID，对话记录中 [#数字] 标注的数字）',
+          },
+        },
+        required: ['desc', 'message_id'],
+      },
+    },
+  };
+}
+
+/** 获取 image_send 工具的 function calling 定义 */
+export function getImageSendToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'image_send',
+      description: '发送一张已保存的图片到当前群聊。file 为 social/images/ 下的文件名。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file: {
+            type: 'string',
+            description: '图片文件名（如 "screenshot_关于Qwen讨论_001.png"）',
+          },
+        },
+        required: ['file'],
+      },
+    },
+  };
+}
+
 /**
  * 执行 subagent 相关工具
  */
@@ -1404,6 +1450,8 @@ export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'cc_history') return executeCcHistory(context);
   if (toolName === 'md_organize') return executeMdOrganize(args, context);
   if (toolName === 'cc_read') return executeCcRead(args, context);
+  if (toolName === 'screenshot') return executeScreenshot(args, context);
+  if (toolName === 'image_send') return executeImageSend(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
   const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
@@ -1560,6 +1608,90 @@ async function executeMdOrganize(args, context) {
     return { content: [{ type: 'text', text: `✓ 已派整理助手处理 ${file}` }] };
   }
   return { error: 'md_organize 不可用（缺少 dispatchMdOrganizer 回调）' };
+}
+
+/** 截取聊天截图并保存到 workspace */
+async function executeScreenshot(args, context) {
+  const { desc, message_id } = args;
+  const { petId, targetId, targetType, mcpServerName } = context;
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+  if (!desc || !message_id) return { error: '缺少 desc 或 message_id' };
+  if (!mcpServerName) return { error: '缺少 mcpServerName' };
+
+  try {
+    // 1. 调 MCP screenshot_chat
+    const screenshotToolName = `${mcpServerName}__screenshot_chat`;
+    const result = await tauri.mcp.callToolByName(screenshotToolName, {
+      target: targetId,
+      message_id: String(message_id),
+      target_type: targetType || 'group',
+    });
+
+    // 解析结果
+    let base64Data = null;
+    if (result?.content) {
+      for (const item of result.content) {
+        if (item.type === 'text') {
+          try {
+            const parsed = JSON.parse(item.text);
+            if (parsed.success && parsed.image) {
+              base64Data = parsed.image;
+            } else if (parsed.error) {
+              return { error: `截图失败: ${parsed.error}` };
+            }
+          } catch { /* not JSON */ }
+        }
+      }
+    }
+    if (!base64Data) return { error: '截图失败: 未获取到图片数据' };
+
+    // 2. 生成文件名
+    const safeName = desc.trim().substring(0, 30).replace(/[/\\:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    const id = Date.now().toString(36);
+    const fileName = `screenshot_${safeName}_${id}.png`;
+
+    // 3. 保存到 workspace
+    await tauri.workspaceWriteBinary(petId, `social/images/${fileName}`, base64Data);
+
+    // 4. 追加 index.toml
+    const tomlEntry = `\n[[screenshots]]\nfile = "${fileName}"\ndesc = "${desc.trim().replace(/"/g, '\\"')}"\nmessage_id = "${message_id}"\ncreated_at = "${new Date().toISOString()}"\n`;
+    await tauri.workspaceAppend(petId, 'social/images/index.toml', tomlEntry);
+
+    return {
+      content: [{ type: 'text', text: `✓ 截图已保存: ${fileName}\n描述: ${desc}\n起始消息: #${message_id}` }],
+    };
+  } catch (e) {
+    return { error: `截图失败: ${e.message || e}` };
+  }
+}
+
+/** 发送已保存的图片 */
+async function executeImageSend(args, context) {
+  const { file } = args;
+  const { petId, targetId, targetType, mcpServerName } = context;
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+  if (!file) return { error: '缺少 file 参数' };
+  if (!mcpServerName) return { error: '缺少 mcpServerName' };
+
+  try {
+    // 读取 base64 图片
+    const base64Data = await tauri.workspaceReadBinary(petId, `social/images/${file}`);
+    if (!base64Data) return { error: `图片文件为空: ${file}` };
+
+    // 调 MCP send_image
+    const sendToolName = `${mcpServerName}__send_image`;
+    await tauri.mcp.callToolByName(sendToolName, {
+      target: targetId,
+      target_type: targetType || 'group',
+      image: base64Data,
+    });
+
+    return {
+      content: [{ type: 'text', text: `✓ 图片已发送: ${file}` }],
+    };
+  } catch (e) {
+    return { error: `发送图片失败: ${e.message || e}` };
+  }
 }
 
 /**
