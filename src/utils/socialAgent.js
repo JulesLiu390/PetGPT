@@ -2284,6 +2284,9 @@ export async function startSocialLoop(config, onStatusChange) {
         // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
         await preprocessBufferImages(target);
 
+        // 记录 eval 前的水位线，用于检测 eval 期间是否有新消息到达
+        const wmBeforeEval = intentWatermarks.get(target);
+
         let intentResult;
         let capturedPlan = null;
         let intentStickerSent = false; // 追踪 Intent 是否通过工具调用发送了表情包
@@ -2379,11 +2382,28 @@ export async function startSocialLoop(config, onStatusChange) {
         const replyAction = actions.find(a => a.type === 'reply');
         const stickerActions = actions.filter(a => a.type === 'sticker');
 
-        // 更新 intent 水位线到 buffer 最新消息
+        // 更新 intent 水位线到 buffer 最新消息，并检测 eval 期间是否有新消息被跳过
         const bufAfterEval = dataBuffer.get(target);
         if (bufAfterEval && bufAfterEval.messages.length > 0) {
           const lastMsgAfterEval = bufAfterEval.messages[bufAfterEval.messages.length - 1];
-          if (lastMsgAfterEval?.message_id) intentWatermarks.set(target, lastMsgAfterEval.message_id);
+          if (lastMsgAfterEval?.message_id) {
+            // 检查 eval 期间是否有新的非自身消息到达（水位线会跳过它们）
+            if (wmBeforeEval && lastMsgAfterEval.message_id !== wmBeforeEval) {
+              let wmIdx = -1;
+              for (let i = bufAfterEval.messages.length - 1; i >= 0; i--) {
+                if (bufAfterEval.messages[i].message_id === wmBeforeEval) { wmIdx = i; break; }
+              }
+              if (wmIdx >= 0) {
+                const skippedMsgs = bufAfterEval.messages.slice(wmIdx + 1);
+                const skippedNonSelf = skippedMsgs.filter(m => !m.is_self);
+                if (skippedNonSelf.length > 0) {
+                  addLog('intent', `🧠 [${tName()}] +${skippedNonSelf.length} new msg during eval → re-eval`, null, target);
+                  state.forceEval = true;
+                }
+              }
+            }
+            intentWatermarks.set(target, lastMsgAfterEval.message_id);
+          }
         }
 
         // 日志
