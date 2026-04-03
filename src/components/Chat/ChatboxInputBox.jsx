@@ -1290,7 +1290,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     }
 
     // 新方案: 使用 Rust TabState 添加用户消息
-    const userMsg = { role: "user", content: displayContent };
+    const userMsg = { role: "user", content: displayContent, createdAt: new Date().toISOString() };
     if (!isRunFromHere && sendingConversationId) {
       console.log('[ChatboxInputBox] Adding user message to Rust TabState');
       await tauri.pushTabMessage(sendingConversationId, userMsg);
@@ -1334,7 +1334,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     } else {
       thisModel = petInfo;
     }
-      
+
       // Use llmContent (with base64 data) for sending to LLM
       // If llmContent is an array (multimodal), process it to ensure all images are base64
       let content = llmContent;
@@ -1348,45 +1348,67 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
           setAttachments([]);
       }
 
-      // 检查是否需要注入时间信息
-      const lastInjectionTimestamp = lastTimeInjection[sendingConversationId];
-      const needTimeInjection = shouldInjectTime(lastInjectionTimestamp);
-      const timeContext = needTimeInjection ? buildTimeContext() : '';
-      
-      // 如果注入了时间，更新时间戳
-      if (needTimeInjection) {
-        console.log('[ChatboxInputBox] Injecting time context:', timeContext);
-        dispatch({
-          type: actionType.UPDATE_TIME_INJECTION,
-          conversationId: sendingConversationId,
-          timestamp: Date.now()
-        });
-      }
+      // ── 每条 user 消息注入时间戳 ──
+      // 历史消息：用 createdAt（来自 TabState / 数据库）
+      // 当前消息：用 Date.now()
+      const _fmtTime = (isoStr) => {
+        try {
+          const d = new Date(isoStr);
+          if (isNaN(d.getTime())) return '';
+          return d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        } catch { return ''; }
+      };
+      const _prependTimestamp = (msg) => {
+        if (msg.role !== 'user') return msg;
+        const ts = msg.createdAt ? _fmtTime(msg.createdAt) : '';
+        if (!ts) return msg;
+        // 文字消息：直接加前缀；多模态消息：只改第一个 text part
+        if (typeof msg.content === 'string') {
+          return { ...msg, content: `[${ts}]\n${msg.content}` };
+        }
+        if (Array.isArray(msg.content)) {
+          const parts = [...msg.content];
+          const textIdx = parts.findIndex(p => p.type === 'text');
+          if (textIdx >= 0) {
+            parts[textIdx] = { ...parts[textIdx], text: `[${ts}]\n${parts[textIdx].text}` };
+          }
+          return { ...msg, content: parts };
+        }
+        return msg;
+      };
+
+      const timestampedHistory = historyMessages.map(_prependTimestamp);
+      const nowTs = _fmtTime(new Date().toISOString());
+      const timestampedContent = typeof content === 'string'
+        ? `[${nowTs}]\n${content}`
+        : (() => {
+            if (Array.isArray(content)) {
+              const parts = [...content];
+              const textIdx = parts.findIndex(p => p.type === 'text');
+              if (textIdx >= 0) parts[textIdx] = { ...parts[textIdx], text: `[${nowTs}]\n${parts[textIdx].text}` };
+              return parts;
+            }
+            return content;
+          })();
 
       if (!isDefaultPersonality) {
-        // 新方案: 使用 buildSystemPrompt 从 SOUL.md/USER.md/MEMORY.md 构建 system prompt
         const systemContent = await buildSystemPrompt({
           petId: petInfo._id,
           memoryEnabled,
-          timeContext: timeContext || undefined,
         });
         const systemPrompt = { role: "system", content: systemContent };
-        fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content }];
+        fullMessages = [...timestampedHistory, systemPrompt, { role: "user", content: timestampedContent }];
       } else {
-        // Default personality: 简单的 helpful assistant + 时间上下文
-        let systemContent = timeContext ? `${timeContext}\n\n` : '';
+        let systemContent = '';
         if (memoryEnabled) {
-          // 即使是 default personality，记忆 ON 时也读取 USER.md/MEMORY.md
-          const memoryPrompt = await buildSystemPrompt({
+          systemContent = await buildSystemPrompt({
             petId: petInfo._id,
             memoryEnabled: true,
-            timeContext: timeContext || undefined,
           });
-          systemContent = memoryPrompt;
         }
         systemContent += '\nYou are a helpful assistant.';
         const systemPrompt = { role: "system", content: systemContent };
-        fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content }];
+        fullMessages = [...timestampedHistory, systemPrompt, { role: "user", content: timestampedContent }];
       }
       
       if (attachments.length > 0) {
@@ -1577,9 +1599,10 @@ When using tools, please follow these guidelines:
         reply = { content: "Error: No response from AI.", mood: "normal" };
     }
 
-    const botReply = { 
-      role: "assistant", 
+    const botReply = {
+      role: "assistant",
       content: reply.content || "Error: Empty response",
+      createdAt: new Date().toISOString(),
       // 保存 MCP 工具调用历史到消息中
       ...(reply.toolCallHistory && reply.toolCallHistory.length > 0 && { toolCallHistory: reply.toolCallHistory })
     };

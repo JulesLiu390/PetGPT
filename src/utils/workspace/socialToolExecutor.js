@@ -1360,7 +1360,10 @@ export async function executeSubagentTool(toolName, args, context) {
   const source = targetId ? 'social' : 'chat';
   const dir = targetType === 'friend' ? 'friend' : 'group';
 
+  const nowDate = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   const claudeMd = `# Task
+
+当前日期：${nowDate}
 
 ${task.trim()}
 
