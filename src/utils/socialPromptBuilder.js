@@ -406,23 +406,8 @@ export async function buildSocialPrompt({
     }
   }
 
-  // === 回复策略 / @必回 —— 仅 Reply 模式 ===
+  // === Intent 交接 —— 仅 Reply 模式 ===
   if (role === 'reply') {
-    const replyStrategyContent = await readReplyStrategyFile(petId);
-    const replyStrategyTruncated = truncateContent(replyStrategyContent, SOCIAL_FILE_TRUNCATE);
-    sections.push('# 回复策略');
-    if (replyStrategyTruncated) {
-      sections.push(replyStrategyTruncated);
-    } else {
-      sections.push(DEFAULT_REPLY_STRATEGY);
-    }
-
-    if (atMustReply) {
-      sections.push('# @提及规则');
-      sections.push('当消息中包含 @me 标记时，你必须回复，不可忽略。');
-    }
-
-    // === Intent 交接（reply_brief.md） ===
     const replyBrief = await readReplyBriefFile(petId, targetId, targetType);
     if (replyBrief) {
       sections.push('# Intent 交接\n' + replyBrief);
