@@ -4,6 +4,7 @@ mod message_cache;
 mod tab_state;
 mod llm;
 mod workspace;
+mod subagent;
 mod platform;
 mod window_layout;
 #[cfg(target_os = "linux")]
@@ -42,6 +43,9 @@ type McpState = Arc<tokio::sync::RwLock<McpManager>>;
 
 // Type alias for workspace state
 type WorkspaceFileState = Arc<WorkspaceEngine>;
+
+// Type alias for subagent pool state
+type SubagentPoolState = Arc<subagent::SubagentPool>;
 
 // Type alias for window layout state
 type WinState = Arc<WindowState>;
@@ -2223,6 +2227,9 @@ pub fn run() {
             let workspace_engine: WorkspaceFileState = Arc::new(WorkspaceEngine::new(workspace_dir));
             app.manage(workspace_engine);
 
+            let subagent_pool: SubagentPoolState = Arc::new(subagent::SubagentPool::new());
+            app.manage(subagent_pool);
+
             // Initialize window state (replaces scattered static variables)
             let win_state: WinState = Arc::new(WindowState::new());
             app.manage(win_state.clone());
@@ -2665,6 +2672,9 @@ pub fn run() {
             workspace::workspace_delete_folder,
             workspace::workspace_open_folder,
             workspace::workspace_open_file,
+            subagent::subagent_spawn,
+            subagent::subagent_kill,
+            subagent::subagent_set_max_concurrent,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
