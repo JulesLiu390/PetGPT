@@ -1778,7 +1778,7 @@ export async function startSocialLoop(config, onStatusChange) {
         lastEvalTime: 0,
         loopTimeoutId: null,
         _wake: null,          // 可中断 sleep 的 resolve 回调
-        forceEval: false,     // Reply 发完消息后强制立即评估（跳过 detectChange）
+        forceEval: null,      // 强制评估来源: null | 'reply' | 'subagent' | 'newmsg'
         postReplyRestUntil: 0, // Reply 发完后的休息截止时间（20s 内有新消息则提前结束）
       });
     }
@@ -2176,13 +2176,14 @@ export async function startSocialLoop(config, onStatusChange) {
             await sleepInterruptible(state, remaining);
           }
           state.postReplyRestUntil = 0;
-          state.forceEval = true; // 休息结束后必定触发一次 eval
+          state.forceEval = 'reply'; // 休息结束后必定触发一次 eval
         }
 
-        const wasForceEval = state.forceEval;
+        const wasForceEval = state.forceEval; // null | 'reply' | 'subagent' | 'newmsg'
         if (state.forceEval) {
-          state.forceEval = false;
-          addLog('intent', `🧠 [${tName()}] force-eval after Reply`, null, target);
+          state.forceEval = null;
+          const sourceLabel = wasForceEval === 'subagent' ? 'Subagent done' : wasForceEval === 'newmsg' ? 'new msgs during eval' : 'Reply';
+          addLog('intent', `🧠 [${tName()}] force-eval: ${sourceLabel}`, null, target);
         } else if (intentLurkMode === 'normal') {
           // normal 模式：等新消息触发
           const sinceLastEval = state.lastEvalTime > 0 ? now - state.lastEvalTime : Infinity;
@@ -2275,9 +2276,9 @@ export async function startSocialLoop(config, onStatusChange) {
           }
         }
 
-        // force-eval: 注入最近发送的消息原文，让 LLM 明确知道"我已经说过什么"
+        // force-eval (reply/newmsg): 注入最近发送的消息原文，让 LLM 明确知道"我已经说过什么"
         let forceEvalRecentSent = '';
-        if (wasForceEval) {
+        if (wasForceEval === 'reply' || wasForceEval === 'newmsg') {
           const cached = sentMessagesCache.get(target) || [];
           // 取最近 60s 内发的消息
           const cutoff = Date.now() - 60000;
@@ -2289,11 +2290,18 @@ export async function startSocialLoop(config, onStatusChange) {
             forceEvalRecentSent = '\n\n【我刚发出的原文】\n' + recentSent.map(m => `> ${m.content}`).join('\n');
           }
         }
-        const intentEvalPrompt = wasForceEval
-            ? `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}\n\n⚠️ 以上是你刚才发出的原文。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`
-            : state.lastPlan === null
-              ? `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`
-              : `请分析当前想法和行为倾向，先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。${newMsgHint}`;
+        let intentEvalPrompt;
+        if (wasForceEval === 'reply') {
+          intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}\n\n⚠️ 以上是你刚才发出的原文。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+        } else if (wasForceEval === 'subagent') {
+          intentEvalPrompt = `你的后台研究任务（CC）刚刚完成。请查看上方"后台任务状态"中标记为 ✅ 的任务，用 social_read 读取结果文件，然后基于结果决定下一步行动。\n如果结果有用，可以 reply 把研究结论分享到群里（详细展开，不要只说一句"查到了"）。\n如果结果不理想，可以重新 dispatch 或放弃。\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+        } else if (wasForceEval === 'newmsg') {
+          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。${forceEvalRecentSent ? `${forceEvalRecentSent}\n\n注意不要重复已经表达过的内容。` : ''}\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+        } else if (state.lastPlan === null) {
+          intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`;
+        } else {
+          intentEvalPrompt = `请分析当前想法和行为倾向，先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。${newMsgHint}`;
+        }
 
         // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
         await preprocessBufferImages(target);
@@ -2412,7 +2420,7 @@ export async function startSocialLoop(config, onStatusChange) {
                 const skippedNonSelf = skippedMsgs.filter(m => !m.is_self);
                 if (skippedNonSelf.length > 0) {
                   addLog('intent', `🧠 [${tName()}] +${skippedNonSelf.length} new msg during eval → re-eval`, null, target);
-                  state.forceEval = true;
+                  state.forceEval = 'newmsg';
                 }
               }
             }
@@ -2986,7 +2994,7 @@ export async function startSocialLoop(config, onStatusChange) {
       wakeIntent: (target) => {
         const iState = intentMap.get(target);
         if (iState) {
-          iState.forceEval = true;
+          iState.forceEval = 'subagent';
           if (iState._wake) { iState._wake(); iState._wake = null; }
         }
       },
