@@ -1013,3 +1013,209 @@ Expected: either succeeds (if `claude` is in PATH) or returns a clear error abou
 git add -A
 git commit -m "fix(subagent): integration fixups"
 ```
+
+---
+
+### Task 10: Frontend — subagent 日志展示 + 选项卡 + 状态栏
+
+**Files:**
+- Modify: `src/pages/SocialPage.jsx`
+- Modify: `src/utils/socialAgent.js` (emit subagent log events)
+
+- [ ] **Step 1: Add `showSubagent` toggle state and `subagent` log level**
+
+In SocialPage.jsx, alongside existing toggles (line ~149-153):
+
+```js
+const [showSubagent, setShowSubagent] = useState(true);
+```
+
+In the `addLog` calls in socialAgent.js event listeners (Task 6), use a dedicated level `'subagent'` instead of `'info'`/`'warn'`/`'error'`:
+
+```js
+// subagent-done event handler:
+addLog('subagent', `✅ subagent done: ${taskId} (${elapsed}s, ${result.length}字)`, 
+  JSON.stringify({ taskId, task: entry.task, elapsed, resultPreview: result.substring(0, 500), resultLen: result.length }), entry.target);
+
+// subagent-timeout event handler:
+addLog('subagent', `⏰ subagent timeout: ${taskId} (${Math.round((Date.now() - entry.createdAt) / 1000)}s)`,
+  JSON.stringify({ taskId, task: entry.task, status: 'timeout' }), entry.target);
+
+// subagent-error event handler:
+addLog('subagent', `❌ subagent error: ${taskId}: ${error}`,
+  JSON.stringify({ taskId, task: entry.task, status: 'failed', error }), entry.target);
+
+// dispatch_subagent tool executor (Task 4), on success:
+addLog('subagent', `🚀 subagent dispatched: ${taskId} "${task.trim().substring(0, 50)}"`,
+  JSON.stringify({ taskId, task: task.trim(), maxLen, status: 'dispatched' }), targetId);
+```
+
+- [ ] **Step 2: Add 🤖 Subagent toggle button in filter bar**
+
+In the toggle button row (line ~1372-1376), add after the Intent button:
+
+```jsx
+<ToggleBtn active={showSubagent} onClick={() => setShowSubagent(!showSubagent)} icon="🤖" label="Subagent" />
+```
+
+- [ ] **Step 3: Add subagent log filtering**
+
+In the `filteredLogs` useMemo (around line 590-601), add subagent level filtering:
+
+```js
+if (log.level === 'subagent') return showSubagent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+```
+
+- [ ] **Step 4: Create `SubagentLogEntry` component**
+
+After the existing `LlmLogEntry` component (around line 1648), add:
+
+```jsx
+function SubagentLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const ts = new Date(log.timestamp).toLocaleTimeString();
+
+  let details = {};
+  try { details = typeof log.details === 'string' ? JSON.parse(log.details) : (log.details || {}); } catch { details = {}; }
+
+  const statusColor = details.status === 'timeout' ? 'text-amber-500'
+    : details.status === 'failed' ? 'text-red-500'
+    : details.status === 'dispatched' ? 'text-blue-500'
+    : 'text-emerald-500';
+
+  return (
+    <div className="py-0.5">
+      <div
+        className={`flex items-start gap-1 cursor-pointer hover:bg-slate-50 rounded px-1 -mx-1 ${statusColor}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-slate-400 shrink-0">{ts}</span>
+        <span className="text-slate-400 shrink-0">[subagent]</span>
+        {log.target && logFilter === 'all' && (
+          <span className="text-slate-300 shrink-0">[{log.target}]</span>
+        )}
+        <span className="font-medium">🤖</span>
+        <span className="flex-1 break-words">{log.message}</span>
+        <span className="text-slate-300 shrink-0">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && details && (
+        <div className="ml-16 mt-0.5 p-2 rounded bg-slate-50 border border-slate-200 text-[10px] space-y-1">
+          {details.task && (
+            <div>
+              <span className="text-slate-400 font-semibold">Task: </span>
+              <span className="text-slate-600">{details.task}</span>
+            </div>
+          )}
+          {details.elapsed != null && (
+            <div>
+              <span className="text-slate-400 font-semibold">耗时: </span>
+              <span className="text-slate-600">{details.elapsed}s</span>
+            </div>
+          )}
+          {details.resultLen != null && (
+            <div>
+              <span className="text-slate-400 font-semibold">结果: </span>
+              <span className="text-slate-600">{details.resultLen}字</span>
+            </div>
+          )}
+          {details.resultPreview && (
+            <div className="mt-1 p-1.5 rounded bg-white border border-slate-150 whitespace-pre-wrap text-slate-600">
+              {details.resultPreview}
+            </div>
+          )}
+          {details.error && (
+            <div className="text-red-500">
+              <span className="font-semibold">错误: </span>{details.error}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 5: Wire SubagentLogEntry into log renderer**
+
+In the log rendering switch (around line 1472-1490), add before the default case:
+
+```jsx
+) : log.level === 'subagent' ? (
+  <SubagentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+```
+
+- [ ] **Step 6: Add subagent running count to status bar (right side)**
+
+In the status/toolbar area next to the Running/Paused button (around line 1382-1392), add a subagent counter. This requires tracking active subagent count via a state variable.
+
+Add state:
+
+```js
+const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+```
+
+Listen for subagent events to update the count. In the `useEffect` that sets up Tauri event listeners, add:
+
+```js
+const ul1 = await tauri.onSubagentEvent('subagent-done', () => setActiveSubagentCount(c => Math.max(0, c - 1)));
+const ul2 = await tauri.onSubagentEvent('subagent-timeout', () => setActiveSubagentCount(c => Math.max(0, c - 1)));
+const ul3 = await tauri.onSubagentEvent('subagent-error', () => setActiveSubagentCount(c => Math.max(0, c - 1)));
+```
+
+Also listen for dispatched events. In socialAgent.js, emit a Tauri event on dispatch:
+
+```js
+// In dispatch_subagent handler, after successful spawn:
+import { emit } from '@tauri-apps/api/event';
+emit('subagent-dispatched', { taskId });
+```
+
+And in SocialPage:
+
+```js
+const ul4 = await listen('subagent-dispatched', () => setActiveSubagentCount(c => c + 1));
+```
+
+Render the counter in the status bar, after the Running/Paused button area:
+
+```jsx
+{socialActive && activeSubagentCount > 0 && (
+  <span className="ml-2 px-2 py-0.5 text-[10px] font-medium rounded-full bg-blue-100 text-blue-700 border border-blue-200 shrink-0"
+    title={`${activeSubagentCount} CC subagent(s) running`}
+  >
+    🤖 {activeSubagentCount}
+  </span>
+)}
+```
+
+- [ ] **Step 7: Add subagent info in Intent plan display**
+
+In the Plan section (around line 1440-1462), when an Intent plan includes a `dispatch_subagent` action, show it. The `write_intent_plan` actions array may now include `{ type: 'subagent', taskId: '...' }` items. Update the `actionLabel` function to handle this:
+
+```js
+// In actionLabel function:
+if (a.type === 'subagent') return `subagent:${a.taskId || '?'}`;
+```
+
+And style subagent actions distinctly (blue background):
+
+```jsx
+a.type === 'subagent' ? 'text-blue-700 bg-blue-50 border-blue-200' :
+```
+
+Note: This requires the Intent LLM to emit subagent actions in write_intent_plan, which happens naturally when it calls dispatch_subagent before write_intent_plan. We can also track dispatched subagents from the tool call log and show them in the Plan area.
+
+- [ ] **Step 8: Reset subagent count on agent stop**
+
+In the event listener that handles `social-status-changed` (agent start/stop), reset the counter:
+
+```js
+if (!isRunning) setActiveSubagentCount(0);
+```
+
+- [ ] **Step 9: Commit**
+
+```bash
+git add src/pages/SocialPage.jsx src/utils/socialAgent.js
+git commit -m "feat(subagent): frontend log display, filter tab, status bar counter, plan integration"
+```
