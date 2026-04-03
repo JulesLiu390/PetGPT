@@ -639,6 +639,7 @@ function buildReplyToolInstruction(targetName, targetId) {
 - 调用 send_message 时只需提供 content 参数（回复内容），target 和 target_type 会自动填充，不要自己填写
 - 调用 send_message 时，num_chunks 参数控制消息拆分条数。请参考 Intent 建议的值（会写在 num_chunks 参数说明里），按建议值设置即可
 - 引用回复：如果想回复某条特定消息（对话记录中标注了 [#消息ID]），可以在 send_message 中传 reply_to 参数（填消息 ID 数字）。不是每次都要引用，只在明确回应某人某句话时使用。如果 Intent 的 reply_brief 中指定了 replyTo，优先使用它
+- ⚠️ 引用回复 + 拆分消息时：reply_to 只会应用到第一条拆分消息。所以如果使用了 reply_to，被引用回复的内容必须写在消息最前面
 - send_message 的返回结果中会附带最近的群消息（包括你自己的回复，标注为 [bot(你自己)]）。请仔细查看，避免重复表达相同观点
 - 🚫 严禁用 send_message 发送"[沉默]"——"[沉默]"是你的内部指令，不是群消息
 
