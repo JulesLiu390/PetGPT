@@ -2320,7 +2320,7 @@ export async function startSocialLoop(config, onStatusChange) {
 
         // force-eval (reply/newmsg): 注入最近发送的消息原文，让 LLM 明确知道"我已经说过什么"
         let forceEvalRecentSent = '';
-        if (wasForceEval === 'reply') {
+        if (wasForceEval === 'reply' || wasForceEval === 'newmsg') {
           const cached = sentMessagesCache.get(target) || [];
           // 取最近 60s 内发的消息
           const cutoff = Date.now() - 60000;
@@ -2337,6 +2337,8 @@ export async function startSocialLoop(config, onStatusChange) {
           intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}\n\n⚠️ 以上是你刚才发出的原文。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
         } else if (wasForceEval === 'subagent') {
           intentEvalPrompt = `你的后台研究任务（CC）刚刚完成。请查看上方"后台任务状态"中标记为 ✅ 的任务，用 social_read 读取结果文件，然后基于结果决定下一步行动。\n如果结果有用，可以 reply 把研究结论分享到群里（详细展开，不要只说一句"查到了"）。\n如果结果不理想，可以重新 dispatch 或放弃。\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+        } else if (wasForceEval === 'newmsg') {
+          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。${forceEvalRecentSent ? `${forceEvalRecentSent}\n\n注意不要重复已经表达过的内容。` : ''}\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
         } else if (state.lastPlan === null) {
           intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`;
         } else {
@@ -2454,8 +2456,7 @@ export async function startSocialLoop(config, onStatusChange) {
         if (bufAfterEval && bufAfterEval.messages.length > 0) {
           const lastMsgAfterEval = bufAfterEval.messages[bufAfterEval.messages.length - 1];
           if (lastMsgAfterEval?.message_id) {
-            // 检查 eval 期间是否有新的非自身消息到达
-            let hasSkippedMsgs = false;
+            // 检查 eval 期间是否有新的非自身消息到达（水位线会跳过它们）
             if (wmBeforeEval && lastMsgAfterEval.message_id !== wmBeforeEval) {
               let wmIdx = -1;
               for (let i = bufAfterEval.messages.length - 1; i >= 0; i--) {
@@ -2464,16 +2465,12 @@ export async function startSocialLoop(config, onStatusChange) {
               if (wmIdx >= 0) {
                 const skippedNonSelf = bufAfterEval.messages.slice(wmIdx + 1).filter(m => !m.is_self);
                 if (skippedNonSelf.length > 0) {
-                  hasSkippedMsgs = true;
-                  addLog('intent', `🧠 [${tName()}] +${skippedNonSelf.length} new msg arrived during eval`, null, target);
+                  addLog('intent', `🧠 [${tName()}] +${skippedNonSelf.length} new msg during eval → re-eval`, null, target);
+                  state.forceEval = 'newmsg';
                 }
               }
             }
-            // 如果有跳过的消息：不推进水位线，让下一轮 detectChange 自然捕获
-            // 如果没有：正常推进到最新
-            if (!hasSkippedMsgs) {
-              intentWatermarks.set(target, lastMsgAfterEval.message_id);
-            }
+            intentWatermarks.set(target, lastMsgAfterEval.message_id);
           }
         }
 
