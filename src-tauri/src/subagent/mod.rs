@@ -91,7 +91,8 @@ pub async fn subagent_spawn(
     let mut cmd = Command::new("claude");
     cmd.arg("-p")
         .arg("--model").arg(&model_arg)
-        .arg("--tools").arg("Read,Write,WebSearch,WebFetch")
+        .arg("--tools").arg("Read,Write,WebSearch,WebFetch,Bash(git clone:*)")
+        .arg("--disallowed-tools").arg("Bash(git add:*),Bash(git commit:*),Bash(git push:*),Bash(git pull:*),Bash(git merge:*),Bash(git rebase:*),Bash(git checkout:*),Bash(git branch:*),Bash(git reset:*),Bash(git stash:*),Bash(git remote:*),Bash(git pr:*),Bash(gh:*)")
         .arg("--strict-mcp-config")
         .arg("--no-session-persistence");
 
