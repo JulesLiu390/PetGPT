@@ -5,7 +5,7 @@ import TitleBar from "../components/UI/TitleBar";
 import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/UI/ui";
 import * as tauri from "../utils/tauri";
 import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
-import { onSubagentChange, getActiveCount } from "../utils/subagentManager";
+import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/subagentManager";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { listen, emit } from "@tauri-apps/api/event";
 
@@ -1524,6 +1524,20 @@ export default function SocialPage() {
                           </span>
                         );
                       })}
+                    {/* Running subagent tasks for this target */}
+                    {(() => {
+                      const targetRunning = [];
+                      for (const [tid, e] of subagentRegistry) {
+                        if (e.target === selectedTarget && e.status === 'running') {
+                          targetRunning.push({ tid, task: e.task, elapsed: Math.round((Date.now() - e.createdAt) / 1000) });
+                        }
+                      }
+                      return targetRunning.map(r => (
+                        <span key={r.tid} className="text-[10px] font-mono px-1.5 py-0.5 rounded border text-blue-600 bg-blue-50 border-blue-200 animate-pulse">
+                          🤖 {r.task?.substring(0, 30)}{r.task?.length > 30 ? '…' : ''} ({r.elapsed}s)
+                        </span>
+                      ));
+                    })()}
                   </div>
                   {plan.state && (
                     <div className="text-[9px] text-slate-400 font-mono whitespace-pre-wrap">{plan.state}</div>
@@ -1658,6 +1672,23 @@ function IntentLogEntry({ log, logFilter }) {
       )}
       {' '}
       {log.message}
+      {/* Running subagent indicator for this target */}
+      {log.target && (() => {
+        let count = 0;
+        const tasks = [];
+        for (const [, e] of subagentRegistry) {
+          if (e.target === log.target && e.status === 'running') {
+            count++;
+            tasks.push(e.task?.substring(0, 20));
+          }
+        }
+        if (count === 0) return null;
+        return (
+          <span className="ml-1.5 text-[9px] text-blue-500 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200" title={tasks.join(', ')}>
+            🤖 {count} task{count > 1 ? 's' : ''} running
+          </span>
+        );
+      })()}
       {hasDetails && (
         <button
           onClick={() => setExpanded(v => !v)}
