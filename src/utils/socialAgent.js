@@ -979,7 +979,7 @@ async function pollTarget({
     const builtinDefs = [
       ...getHistoryToolDefinitions(),
       ...getGroupLogToolDefinitions(),
-      ...(config?.subagentEnabled !== false ? [getCcHistoryToolDefinition(), getCcReadToolDefinition()] : []),
+      ...[getCcHistoryToolDefinition(), getCcReadToolDefinition()],
     ];
     const builtinToolsAsMcp = builtinDefs.map(t => ({
       name: t.function.name,
