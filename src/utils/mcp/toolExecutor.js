@@ -10,7 +10,7 @@ import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
@@ -667,7 +667,8 @@ export const callLLMWithTools = async ({
           const isStickerTool = isStickerBuiltinTool(call.name);
           const isBufferSearch = isBufferSearchTool(call.name);
           const isIntentPlan = isIntentPlanTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan;
+          const isSubagent = isSubagentTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent;
           console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan}`);
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
@@ -687,6 +688,8 @@ export const callLLMWithTools = async ({
             toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
           } else if (isIntentPlan && builtinToolContext) {
             toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSubagent && builtinToolContext) {
+            toolResult = await executeSubagentTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }
@@ -1142,7 +1145,8 @@ export const callLLMStreamWithTools = async ({
           const isStickerTool = isStickerBuiltinTool(call.name);
           const isBufferSearch = isBufferSearchTool(call.name);
           const isIntentPlan = isIntentPlanTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan;
+          const isSubagent = isSubagentTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent;
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
             isError = true;
@@ -1161,6 +1165,8 @@ export const callLLMStreamWithTools = async ({
             toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
           } else if (isIntentPlan && builtinToolContext) {
             toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSubagent && builtinToolContext) {
+            toolResult = await executeSubagentTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }

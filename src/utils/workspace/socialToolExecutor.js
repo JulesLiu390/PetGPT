@@ -1297,6 +1297,113 @@ export async function executeIntentPlanTool(toolName, args, context) {
   return { content: [{ type: 'text', text: '✓ 计划已提交' }] };
 }
 
+// ============ Subagent 工具 ============
+
+/** 检查是否为 subagent 工具 */
+export function isSubagentTool(toolName) {
+  return toolName === 'dispatch_subagent';
+}
+
+/** 获取 dispatch_subagent 工具的 function calling 定义 */
+export function getSubagentToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'dispatch_subagent',
+      description: '发起一个后台研究任务。CC 会在独立沙箱中自主完成任务（可能用 web search 等工具）。结果会异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。发起后请 write_intent_plan(actions=[]) 等待结果。',
+      parameters: {
+        type: 'object',
+        properties: {
+          task: {
+            type: 'string',
+            description: '明确的任务描述，例如"查一下 Therac-25 事故经过，200字总结"',
+          },
+          maxLen: {
+            type: 'number',
+            description: '结果最大字数限制',
+            default: 500,
+          },
+        },
+        required: ['task'],
+      },
+    },
+  };
+}
+
+/**
+ * 执行 dispatch_subagent 工具
+ * @param {string} toolName
+ * @param {Object} args - { task, maxLen }
+ * @param {Object} context - { petId, targetId, targetType, subagentRegistry, subagentConfig }
+ */
+export async function executeSubagentTool(toolName, args, context) {
+  if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
+
+  const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
+  if (!petId) return { error: '缺少 petId' };
+  if (!subagentConfig?.enabled) return { error: 'Subagent 功能未启用' };
+
+  const { task, maxLen = 500 } = args;
+  if (!task || typeof task !== 'string' || task.trim().length === 0) {
+    return { error: '缺少 task 参数' };
+  }
+
+  const taskId = `sa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+  const source = targetId ? 'social' : 'chat';
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+
+  const claudeMd = `# Task
+
+${task.trim()}
+
+## Output
+
+把结果写入 output/result.md。完成后直接退出。
+
+## Constraints
+- 结果控制在 ${maxLen} 字以内
+- 只输出最终结果，不要输出思考过程
+- 用中文
+`;
+
+  try {
+    await tauri.workspaceWrite(petId, `subagents/${taskId}/CLAUDE.md`, claudeMd);
+    await tauri.workspaceWrite(petId, `subagents/${taskId}/output/.gitkeep`, '');
+
+    const cwd = await tauri.workspaceGetPath(petId, `subagents/${taskId}`, false);
+
+    await tauri.subagentSpawn(
+      taskId,
+      cwd,
+      subagentConfig.model || 'sonnet',
+      subagentConfig.timeoutSecs || 300,
+    );
+
+    const outputPath = source === 'social' && targetId
+      ? `social/${dir}/scratch_${targetId}/subagent_${taskId}.md`
+      : null;
+
+    if (subagentRegistry) {
+      subagentRegistry.set(taskId, {
+        status: 'running',
+        task: task.trim(),
+        target: targetId || 'chat',
+        targetType: targetType || 'chat',
+        dir,
+        outputPath,
+        source,
+        createdAt: Date.now(),
+      });
+    }
+
+    return {
+      content: [{ type: 'text', text: `✓ 后台任务已发起: ${taskId}\n任务: ${task.trim()}${outputPath ? `\n结果将写入 ${outputPath}` : ''}` }],
+    };
+  } catch (e) {
+    return { error: `Subagent 发起失败: ${e.message || e}` };
+  }
+}
+
 /**
  * 执行表情包内置工具
  */
