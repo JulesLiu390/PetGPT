@@ -5,6 +5,7 @@ import TitleBar from "../components/UI/TitleBar";
 import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/UI/ui";
 import * as tauri from "../utils/tauri";
 import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
+import { onSubagentChange, getActiveCount } from "../utils/subagentManager";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { listen, emit } from "@tauri-apps/api/event";
 
@@ -156,6 +157,8 @@ export default function SocialPage() {
   const [showTools, setShowTools] = useState(true);
   const [showSystem, setShowSystem] = useState(true);
   const [showIntent, setShowIntent] = useState(true);
+  const [showSubagent, setShowSubagent] = useState(true);
+  const [activeSubagentCount, setActiveSubagentCount] = useState(0);
 
   // ── Load assistants + providers ──
   useEffect(() => {
@@ -210,6 +213,7 @@ export default function SocialPage() {
         if (petId === selectedPetId || !selectedPetId) {
           setSocialActive(active);
           if (active) setIsStarting(false);
+          if (!active) setActiveSubagentCount(0);
           if (lm) setLurkModes(lm);
           if (pt) setPausedTargets(pt);
         }
@@ -244,6 +248,12 @@ export default function SocialPage() {
     };
     setup();
     return () => { unlisten?.(); };
+  }, []);
+
+  // ── Subscribe to subagent registry changes ──
+  useEffect(() => {
+    const unsub = onSubagentChange(() => setActiveSubagentCount(getActiveCount()));
+    return unsub;
   }, []);
 
   // ── Listen for full log responses (initial load / clear) ──
@@ -599,12 +609,13 @@ export default function SocialPage() {
   const filteredLogs = useMemo(() => sortedLogs.filter(log => {
     // Intent logs have target — apply target filter normally
     if (log.level === 'intent' || log.level === 'send') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'subagent') return showSubagent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [sortedLogs, logFilter, showSystem, showIntent]);
+  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent]);
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
@@ -1424,6 +1435,7 @@ export default function SocialPage() {
               <ToggleBtn active={showTools} onClick={() => setShowTools(!showTools)} icon="🔧" label="Tools" />
               <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
               <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
+              <ToggleBtn active={showSubagent} onClick={() => setShowSubagent(!showSubagent)} icon="🤖" label="Subagent" />
               {/* Lurk mode buttons for selected target */}
               {selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
@@ -1441,6 +1453,12 @@ export default function SocialPage() {
                     >
                       {isPaused ? '⏸️ Paused' : '▶️ Running'}
                     </button>
+                    {socialActive && activeSubagentCount > 0 && (
+                      <span className="ml-1 px-2 py-0.5 text-[10px] font-medium rounded-full bg-blue-100 text-blue-700 border border-blue-200 shrink-0"
+                        title={`${activeSubagentCount} CC subagent(s) running`}>
+                        🤖 {activeSubagentCount}
+                      </span>
+                    )}
                     {socialActive && <>
                       <div className="w-px h-4 bg-slate-200 mx-0.5" />
                       {LURK_OPTIONS.map(opt => {
@@ -1528,6 +1546,8 @@ export default function SocialPage() {
                     <SendLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'llm' ? (
                     <LlmLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'subagent' ? (
+                    <SubagentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
@@ -1719,6 +1739,56 @@ function LlmLogEntry({ log, logFilter }) {
       {hasDetails && expanded && (
         <div className="mt-0.5 ml-4 pl-2 border-l-2 border-blue-300/40 text-blue-400 whitespace-pre-wrap break-words">
           {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubagentLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const ts = new Date(log.timestamp).toLocaleTimeString();
+
+  let details = {};
+  try { details = typeof log.details === 'string' ? JSON.parse(log.details) : (log.details || {}); } catch { details = {}; }
+
+  const statusColor = details.status === 'timeout' ? 'text-amber-500'
+    : details.status === 'failed' ? 'text-red-500'
+    : details.status === 'dispatched' ? 'text-blue-500'
+    : 'text-emerald-500';
+
+  return (
+    <div className="py-0.5">
+      <div
+        className={`flex items-start gap-1 cursor-pointer hover:bg-slate-50 rounded px-1 -mx-1 ${statusColor}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-slate-400 shrink-0 tabular-nums">{ts}</span>
+        <span className="text-slate-400 shrink-0">[subagent]</span>
+        {log.target && logFilter === 'all' && (
+          <span className="text-slate-300 shrink-0">[{log.target}]</span>
+        )}
+        <span className="font-medium">🤖</span>
+        <span className="flex-1 break-words">{log.message}</span>
+        <span className="text-slate-300 shrink-0">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && details && (
+        <div className="ml-16 mt-0.5 p-2 rounded bg-slate-50 border border-slate-200 text-[10px] space-y-1">
+          {details.task && (
+            <div><span className="text-slate-400 font-semibold">Task: </span><span className="text-slate-600">{details.task}</span></div>
+          )}
+          {details.elapsed != null && (
+            <div><span className="text-slate-400 font-semibold">耗时: </span><span className="text-slate-600">{details.elapsed}s</span></div>
+          )}
+          {details.resultLen != null && (
+            <div><span className="text-slate-400 font-semibold">结果: </span><span className="text-slate-600">{details.resultLen}字</span></div>
+          )}
+          {details.resultPreview && (
+            <div className="mt-1 p-1.5 rounded bg-white border border-slate-150 whitespace-pre-wrap text-slate-600">{details.resultPreview}</div>
+          )}
+          {details.error && (
+            <div className="text-red-500"><span className="font-semibold">错误: </span>{details.error}</div>
+          )}
         </div>
       )}
     </div>
