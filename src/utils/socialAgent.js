@@ -2275,8 +2275,22 @@ export async function startSocialLoop(config, onStatusChange) {
           }
         }
 
+        // force-eval: 注入最近发送的消息原文，让 LLM 明确知道"我已经说过什么"
+        let forceEvalRecentSent = '';
+        if (wasForceEval) {
+          const cached = sentMessagesCache.get(target) || [];
+          // 取最近 60s 内发的消息
+          const cutoff = Date.now() - 60000;
+          const recentSent = cached.filter(m => {
+            const t = new Date(m.timestamp).getTime();
+            return t > cutoff;
+          });
+          if (recentSent.length > 0) {
+            forceEvalRecentSent = '\n\n【我刚发出的原文】\n' + recentSent.map(m => `> ${m.content}`).join('\n');
+          }
+        }
         const intentEvalPrompt = wasForceEval
-            ? `你的 Reply 模块刚刚发了消息（可能尚未出现在对话记录中）。请重新评估当前状态。你刚发了言，除非有人直接回应你，否则 actions 不应包含 reply 或 sticker（不要重复刚才的动作）。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`
+            ? `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}\n\n⚠️ 以上是你刚才发出的原文。检查你已经表达过的观点，不要重复相同或相似的内容。除非有人提出了新的论点需要你回应，否则 actions 应为空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`
             : state.lastPlan === null
               ? `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`
               : `请分析当前想法和行为倾向，先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。${newMsgHint}`;
