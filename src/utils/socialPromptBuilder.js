@@ -336,32 +336,28 @@ export async function buildSocialPrompt({
     sections.push('（以上群规则为只读参考，帮助你理解群氛围）');
   }
 
-  // === 联系人索引（social/CONTACTS.md，常联系人速查） ===
-  const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
-  sections.push('# 联系人索引');
-  if (contactsTruncated) {
-    sections.push(contactsTruncated);
-  } else {
-    sections.push('（空）');
-  }
+  // === 联系人索引（social/CONTACTS.md）— 仅 Observer 需要 ===
   if (role === 'observer') {
+    const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
+    sections.push('# 联系人索引');
+    if (contactsTruncated) {
+      sections.push(contactsTruncated);
+    } else {
+      sections.push('（空）');
+    }
     sections.push(contactsGuidance(contactsContent));
-  } else {
-    sections.push('（以上联系人索引为只读参考）');
   }
 
-  // === 社交记忆（social/SOCIAL_MEMORY.md，跨群共享社交态势） ===
-  const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
-  sections.push('# 社交记忆（全局）');
-  if (socialMemoryTruncated) {
-    sections.push(socialMemoryTruncated);
-  } else {
-    sections.push('（空）');
-  }
+  // === 社交记忆（social/SOCIAL_MEMORY.md）— 仅 Observer 需要 ===
   if (role === 'observer') {
+    const socialMemoryTruncated = truncateContent(socialMemoryContent, SOCIAL_FILE_TRUNCATE);
+    sections.push('# 社交记忆（全局）');
+    if (socialMemoryTruncated) {
+      sections.push(socialMemoryTruncated);
+    } else {
+      sections.push('（空）');
+    }
     sections.push(socialMemoryGuidance(socialMemoryContent, targetName, targetId));
-  } else {
-    sections.push('（以上社交记忆为只读参考）');
   }
 
   // === 消息格式说明 ===
