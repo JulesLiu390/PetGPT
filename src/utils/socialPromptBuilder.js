@@ -229,13 +229,14 @@ export async function readReplyStrategyFile(petId) {
 function groupRuleGuidance(content, targetName, targetId) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : targetId;
   const rulePath = `social/group/RULE_${targetId}.md`;
+  const noPersonRule = `\n🚫 RULE 文件只记录群级别信息，不要记录任何个人动态或个人档案。个人信息写到 social/people/{QQ号}.md。`;
   if (!content) {
-    return `⚠️ ${groupLabel}还没有专属规则。请用 social_write(path="${rulePath}", ...) 记录你对这个群的第一印象：这个群是干什么的、聊天氛围如何、话题偏好、禁忌、需要注意的事项等。这是你理解每个群的基础，务必完成。`;
+    return `⚠️ ${groupLabel}还没有专属规则。请用 social_write(path="${rulePath}", ...) 记录你对这个群的第一印象：群定位（技术群/闲聊群/兴趣群）、聊天氛围、话题偏好、禁忌、群内梗/黑话、活跃时段等。${noPersonRule}`;
   }
   if (content.length > SOCIAL_FILE_TRUNCATE * 0.8) {
-    return `⚠️ 当前群规则文件快满了。请用 social_edit 或 social_write 精简 ${rulePath}，保留最重要的观察。`;
+    return `⚠️ 当前群规则文件快满了。请用 social_edit 或 social_write 精简 ${rulePath}，删除个人档案条目（移到 social/people/），只保留群级别信息。`;
   }
-  return `留意${groupLabel}的群特征变化：新的话题趋势、群内梗/暗语、活跃成员变化、氛围转变、敏感话题等。发现新情况就用 social_edit 更新 ${rulePath}。如果需要回忆之前的群聊内容，可以用 history_read 或 daily_read 查询。`;
+  return `留意${groupLabel}的群级别特征变化：话题趋势、群内梗/黑话、氛围转变、敏感话题、活跃时段等。发现新情况就用 social_edit 更新 ${rulePath}。${noPersonRule}`;
 }
 
 /**
