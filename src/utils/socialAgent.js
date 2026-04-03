@@ -926,6 +926,7 @@ async function pollTarget({
     }
     intentBlock += '\n---';
     intentBlock += '\n⚠️ 回复前请回顾上方 assistant 消息（你之前说过的话）。如果你想表达的观点已经出现过，且没有人针对你的发言追问或回应，请选择沉默。但如果有群友回应或追问了你刚才说的话，回答他们是对话的延续，不是重复——即使话题相同，你也应该回应。';
+    intentBlock += '\n⚠️ 你必须通过 send_message 工具发送回复，不要直接输出文字。所有要说的内容都放在 send_message 的 content 参数里。';
 
     // 找到最后一条 user turn 并追加
     for (let i = historyTurns.length - 1; i >= 0; i--) {
@@ -1167,15 +1168,12 @@ async function pollTarget({
       // LLM 没调 send_message — 检查是否想说话但忘了用工具
       const text = (result.content || '').trim();
       const isTrueSilent = !text || text === '[沉默]' || text.includes('[沉默]');
-      
+
       if (!isTrueSilent && text.length > 2 && role !== 'observer') {
         // LLM 输出了实际内容但没调 send_message → 补发（先句内去重）
-        // 句内去重：按中英文标点拆句，去掉连续重复段
         const dedup = (s) => {
-          // 按句末标点拆分，保留分隔符
           const parts = s.split(/(?<=[。！？!?\n])\s*/).filter(p => p.trim());
           if (parts.length <= 1) {
-            // 无标点 → 尝试按空格拆分（处理 "X X" 模式）
             const words = s.split(/\s+/).filter(w => w);
             if (words.length >= 2) {
               const half = Math.ceil(words.length / 2);
@@ -1195,29 +1193,43 @@ async function pollTarget({
         if (cleanText !== text) {
           addLog('info', `🔁 Auto-send dedup: "${text.substring(0, 60)}" → "${cleanText.substring(0, 60)}"`, null, target);
         }
-        try {
-          const sendToolName = `${mcpServerName}__send_message`;
-          const autoSendResult = await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType, num_chunks: 1 }, { timeout: 10000 });
-          sendMessageSuccess = true;
-          if (newWatermarkId) watermarks.set(target, newWatermarkId);
-          // 缓存发送记录（提取 message_id 用于去重）
-          let autoMsgId = null;
+        // 尝试发送，失败则重试一次
+        const sendToolName = `${mcpServerName}__send_message`;
+        for (let autoAttempt = 0; autoAttempt < 2; autoAttempt++) {
           try {
-            const rawText = autoSendResult?.content?.[0]?.text;
-            const p = rawText ? JSON.parse(rawText) : autoSendResult;
-            autoMsgId = p?.message_ids?.[0]?.toString() || p?.message_id || null;
-          } catch { /* ignore */ }
-          const arr = sentCache.get(target) || [];
-          arr.push({ content: cleanText, timestamp: new Date().toISOString(), message_id: autoMsgId });
-          sentCache.set(target, arr);
-          emitPollLog('replied');
-          addLog('info', `✅ Auto-sent for ${targetType}:${target} (LLM forgot tool): ${cleanText.substring(0, 80)}`, null, target);
-          return { action: 'replied', detail: cleanText };
-        } catch (e) {
-          addLog('warn', `Auto-send fallback failed for ${target}: ${e.message}`, null, target);
+            const autoSendResult = await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType, num_chunks: 1 }, { timeout: 10000 });
+            sendMessageSuccess = true;
+            if (newWatermarkId) watermarks.set(target, newWatermarkId);
+            let autoMsgId = null;
+            try {
+              const rawText = autoSendResult?.content?.[0]?.text;
+              const p = rawText ? JSON.parse(rawText) : autoSendResult;
+              autoMsgId = p?.message_ids?.[0]?.toString() || p?.message_id || null;
+            } catch { /* ignore */ }
+            const arr = sentCache.get(target) || [];
+            arr.push({ content: cleanText, timestamp: new Date().toISOString(), message_id: autoMsgId });
+            sentCache.set(target, arr);
+            emitPollLog('replied');
+            addLog('info', `✅ Auto-sent for ${targetType}:${target} (LLM forgot tool): ${cleanText.substring(0, 80)}`, null, target);
+            return { action: 'replied', detail: cleanText };
+          } catch (e) {
+            addLog('warn', `Auto-send attempt ${autoAttempt + 1} failed for ${target}: ${e.message}`, null, target);
+            if (autoAttempt === 0) await new Promise(r => setTimeout(r, 2000)); // 2s 后重试
+          }
         }
+        // 两次都失败 → send_failed，不是 silent
+        emitPollLog('send_failed');
+        addLog('error', `❌ Auto-send failed after 2 attempts for ${targetType}:${target}: ${cleanText.substring(0, 80)}`, null, target);
+        return { action: 'send_failed', detail: cleanText };
       }
-      
+
+      // Reply 被调用但 LLM 输出为空/沉默 — 这也不应该是正常的 silent
+      if (role === 'reply') {
+        emitPollLog('silent');
+        addLog('warn', `⚠️ Reply produced no sendable content for ${targetType}:${target}`, text?.substring(0, 50), target);
+        return { action: 'silent', detail: text };
+      }
+
       emitPollLog('silent');
       addLog('info', `😶 Silent for ${targetType}:${target}`, result.content?.substring(0, 50), target);
       return { action: 'silent', detail: result.content };
