@@ -1219,3 +1219,507 @@ if (!isRunning) setActiveSubagentCount(0);
 git add src/pages/SocialPage.jsx src/utils/socialAgent.js
 git commit -m "feat(subagent): frontend log display, filter tab, status bar counter, plan integration"
 ```
+
+---
+
+### Task 11: Extract global subagent registry module
+
+Currently `subagentRegistry` lives inside `socialAgent.js`. Chat window also needs it, so extract to a shared module.
+
+**Files:**
+- Create: `src/utils/subagentManager.js`
+- Modify: `src/utils/socialAgent.js` (import from new module instead of local Map)
+
+- [ ] **Step 1: Create `src/utils/subagentManager.js`**
+
+```js
+/**
+ * subagentManager.js — 全局 CC Subagent 状态管理
+ *
+ * 被 socialAgent.js（社交代理）和 ChatboxInputBox.jsx（聊天窗口）共享。
+ * Rust 端 SubagentPool 天然全局，JS 侧也统一管理。
+ */
+
+import * as tauri from './tauri';
+import { listen } from '@tauri-apps/api/event';
+
+// ============ 全局状态 ============
+
+/** taskId → { status, task, target, targetType, dir, outputPath, source, createdAt, readByIntent, error } */
+export const subagentRegistry = new Map();
+// source: 'social' | 'chat' — 区分来源
+
+/** 事件回调列表 */
+const _listeners = new Set(); // (eventType, payload) => void
+
+/** 注册状态变更监听器 */
+export function onSubagentChange(cb) {
+  _listeners.add(cb);
+  return () => _listeners.delete(cb);
+}
+
+function _notify(eventType, payload) {
+  for (const cb of _listeners) {
+    try { cb(eventType, payload); } catch { /* ignore */ }
+  }
+}
+
+// ============ Tauri event 监听 ============
+
+let _unlisteners = [];
+let _initialized = false;
+
+/**
+ * 初始化 subagent event 监听器（全局只调用一次）
+ * @param {Object} opts
+ * @param {string} opts.petId — 当前 pet ID（用于读写 workspace 文件）
+ * @param {Function} opts.addLog — 日志函数 (level, msg, details, target)
+ * @param {Function} opts.wakeIntent — 唤醒 Intent 的回调 (target) => void，可选
+ */
+export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
+  if (_initialized) return;
+  _initialized = true;
+
+  const ul1 = await tauri.onSubagentEvent('subagent-done', async ({ taskId, exitCode }) => {
+    const entry = subagentRegistry.get(taskId);
+    if (!entry) return;
+
+    try {
+      const result = await tauri.workspaceRead(petId, `subagents/${taskId}/output/result.md`).catch(() => '');
+      if (result && result.trim()) {
+        // 写入主 workspace scratch 文件（social 来源才写 scratch）
+        if (entry.outputPath) {
+          await tauri.workspaceWrite(petId, entry.outputPath, result);
+        }
+        entry.status = 'done';
+        entry.result = result;
+        const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
+        addLog?.('subagent', `✅ subagent done: ${taskId} (${elapsed}s, ${result.length}字)`,
+          JSON.stringify({ taskId, task: entry.task, elapsed, resultPreview: result.substring(0, 500), resultLen: result.length, status: 'done' }),
+          entry.target);
+      } else {
+        entry.status = 'failed';
+        entry.error = `CC exited (code=${exitCode}) but no result.md`;
+        addLog?.('subagent', `❌ subagent error: ${taskId}: no output`,
+          JSON.stringify({ taskId, task: entry.task, status: 'failed', error: entry.error }),
+          entry.target);
+      }
+    } catch (e) {
+      entry.status = 'failed';
+      entry.error = e.message || String(e);
+      addLog?.('error', `❌ subagent error: ${taskId}: ${entry.error}`, null, entry.target);
+    }
+
+    _cleanupWorkspace(petId, taskId);
+    _notify('done', { taskId, entry });
+    if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
+  });
+  _unlisteners.push(ul1);
+
+  const ul2 = await tauri.onSubagentEvent('subagent-timeout', async ({ taskId }) => {
+    const entry = subagentRegistry.get(taskId);
+    if (!entry) return;
+    entry.status = 'timeout';
+    const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
+    addLog?.('subagent', `⏰ subagent timeout: ${taskId} (${elapsed}s)`,
+      JSON.stringify({ taskId, task: entry.task, status: 'timeout' }),
+      entry.target);
+    _cleanupWorkspace(petId, taskId);
+    _notify('timeout', { taskId, entry });
+    if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
+  });
+  _unlisteners.push(ul2);
+
+  const ul3 = await tauri.onSubagentEvent('subagent-error', async ({ taskId, error }) => {
+    const entry = subagentRegistry.get(taskId);
+    if (!entry) return;
+    entry.status = 'failed';
+    entry.error = error;
+    addLog?.('subagent', `❌ subagent error: ${taskId}: ${error}`,
+      JSON.stringify({ taskId, task: entry.task, status: 'failed', error }),
+      entry.target);
+    _cleanupWorkspace(petId, taskId);
+    _notify('error', { taskId, entry });
+    if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
+  });
+  _unlisteners.push(ul3);
+}
+
+/** 清理全局状态和事件监听 */
+export function destroySubagentListeners() {
+  for (const ul of _unlisteners) ul();
+  _unlisteners = [];
+  _initialized = false;
+}
+
+/** Kill 所有 running subagents 并清空 registry */
+export function killAll() {
+  for (const [taskId, entry] of subagentRegistry) {
+    if (entry.status === 'running') {
+      tauri.subagentKill(taskId).catch(() => {});
+    }
+  }
+  subagentRegistry.clear();
+  _notify('clear', {});
+}
+
+/** Kill 某个 source 的所有 running subagents */
+export function killBySource(source) {
+  for (const [taskId, entry] of subagentRegistry) {
+    if (entry.source === source && entry.status === 'running') {
+      tauri.subagentKill(taskId).catch(() => {});
+      subagentRegistry.delete(taskId);
+    }
+  }
+  _notify('clear', { source });
+}
+
+/** 获取当前 active (running) 数量 */
+export function getActiveCount() {
+  let n = 0;
+  for (const entry of subagentRegistry.values()) {
+    if (entry.status === 'running') n++;
+  }
+  return n;
+}
+
+/** 获取指定 source 的 active 数量 */
+export function getActiveCountBySource(source) {
+  let n = 0;
+  for (const entry of subagentRegistry.values()) {
+    if (entry.source === source && entry.status === 'running') n++;
+  }
+  return n;
+}
+
+// ============ 内部 ============
+
+async function _cleanupWorkspace(petId, taskId) {
+  try {
+    await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/result.md`).catch(() => {});
+    await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/.gitkeep`).catch(() => {});
+    await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/CLAUDE.md`).catch(() => {});
+  } catch { /* best-effort */ }
+}
+```
+
+- [ ] **Step 2: Refactor socialAgent.js to use shared module**
+
+Replace the local `subagentRegistry` Map and event listener setup in socialAgent.js (Task 6) with imports from `subagentManager.js`:
+
+```js
+// At imports:
+import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
+
+// In startSocialLoop, replace setupSubagentListeners(config) with:
+await initSubagentListeners({
+  petId: config.petId,
+  addLog,
+  wakeIntent: (target) => {
+    const iState = intentMap.get(target);
+    if (iState) {
+      iState.forceEval = true;
+      if (iState._wake) { iState._wake(); iState._wake = null; }
+    }
+  },
+});
+
+// In stopSocialLoop, replace the local cleanup with:
+killBySource('social');
+destroySubagentListeners();
+```
+
+Remove the local `subagentRegistry`, `setupSubagentListeners`, `cleanupSubagentWorkspace`, and `wakeIntentForTarget` from socialAgent.js — they now live in `subagentManager.js`.
+
+- [ ] **Step 3: Update socialToolExecutor.js dispatch_subagent to set source='social'**
+
+In `executeSubagentTool` (Task 4), when registering to `subagentRegistry`, add `source: 'social'`.
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/utils/subagentManager.js src/utils/socialAgent.js src/utils/workspace/socialToolExecutor.js
+git commit -m "refactor(subagent): extract global subagentManager module for shared registry"
+```
+
+---
+
+### Task 12: Chat window — dispatch_subagent tool + 🤖 status panel
+
+**Files:**
+- Modify: `src/components/Chat/ChatboxInputBox.jsx`
+- Create: `src/components/Chat/SubagentPanel.jsx`
+- Modify: `src/utils/workspace/socialToolExecutor.js` (add chat-mode dispatch)
+
+- [ ] **Step 1: Add chat-mode `dispatch_subagent` to builtin tools**
+
+In `ChatboxInputBox.jsx`, the builtin tools come from `getBuiltinToolDefinitions()` (line 1350). We need to add `dispatch_subagent` to the chat's tool set.
+
+In `src/utils/promptBuilder.js`, find `getBuiltinToolDefinitions` and add:
+
+```js
+import { getSubagentToolDefinition } from './workspace/socialToolExecutor.js';
+
+// Inside getBuiltinToolDefinitions(), add to the returned array:
+// (conditionally — only if subagent is available)
+const subagentDef = getSubagentToolDefinition();
+if (subagentDef) tools.push(subagentDef);
+```
+
+- [ ] **Step 2: Pass subagent context into builtinToolContext for chat**
+
+In `ChatboxInputBox.jsx` line 1454, the `builtinToolContext` is:
+
+```js
+builtinToolContext: {
+  petId: petInfo._id,
+  memoryEnabled
+}
+```
+
+Extend it:
+
+```js
+builtinToolContext: {
+  petId: petInfo._id,
+  memoryEnabled,
+  subagentRegistry,         // from import
+  subagentConfig: {
+    enabled: true,
+    model: 'sonnet',        // could read from settings later
+    timeoutSecs: 300,
+  },
+}
+```
+
+Add import at top:
+
+```js
+import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount } from '../../utils/subagentManager';
+```
+
+- [ ] **Step 3: Initialize subagent listeners in ChatboxInputBox**
+
+In the main `useEffect` that loads settings (the one that runs on mount), add:
+
+```js
+// Initialize subagent manager (global, idempotent)
+if (petInfo?._id) {
+  initSubagentListeners({ petId: petInfo._id, addLog: null, wakeIntent: null });
+}
+```
+
+- [ ] **Step 4: Set source='chat' for chat-originated dispatches**
+
+In `executeSubagentTool`, detect chat source: if `context.targetId` is undefined (chat doesn't have a targetId), set `source: 'chat'` and skip `outputPath` (chat subagent results don't go to scratch files, they're returned inline via the tool result).
+
+Update the executor:
+
+```js
+const source = context.targetId ? 'social' : 'chat';
+const outputPath = source === 'social'
+  ? `social/${dir}/scratch_${targetId}/subagent_${taskId}.md`
+  : null;
+
+subagentRegistry.set(taskId, {
+  status: 'running',
+  task: task.trim(),
+  target: targetId || 'chat',
+  targetType: targetType || 'chat',
+  dir,
+  outputPath,
+  source,
+  createdAt: Date.now(),
+});
+```
+
+For chat mode, the LLM gets back `{ taskId, status: 'dispatched' }` and the tool loop continues. When the subagent finishes, the result is available in `subagentRegistry.get(taskId).result`. The chat LLM won't automatically re-check (unlike Intent's wake mechanism), but the user can ask "结果出来了吗" and the LLM can check.
+
+Alternatively, for chat mode, we can make `dispatch_subagent` **synchronous** — wait for the CC subagent to finish before returning the tool result. This is simpler for chat UX:
+
+```js
+if (source === 'chat') {
+  // Synchronous mode: wait for result
+  return new Promise((resolve) => {
+    const checkInterval = setInterval(() => {
+      const entry = subagentRegistry.get(taskId);
+      if (!entry || entry.status !== 'running') {
+        clearInterval(checkInterval);
+        if (entry?.status === 'done' && entry.result) {
+          resolve({ content: [{ type: 'text', text: entry.result }] });
+        } else {
+          resolve({ error: `Subagent ${entry?.status || 'unknown'}: ${entry?.error || 'no result'}` });
+        }
+      }
+    }, 1000);
+    // Safety timeout
+    setTimeout(() => {
+      clearInterval(checkInterval);
+      resolve({ error: 'Subagent wait timeout' });
+    }, 330000); // slightly longer than CC timeout
+  });
+}
+```
+
+This way chat users see the tool call spinning while CC works, then get the result inline.
+
+- [ ] **Step 5: Create `SubagentPanel.jsx` — status popover**
+
+```jsx
+/**
+ * SubagentPanel.jsx — CC Subagent 状态面板
+ * 点击 🤖 按钮弹出，显示当前所有 subagent 状态
+ */
+import React, { useState, useEffect } from 'react';
+import { subagentRegistry, onSubagentChange, getActiveCount } from '../../utils/subagentManager';
+
+export default function SubagentPanel({ isOpen, onClose }) {
+  const [entries, setEntries] = useState([]);
+  const [, forceUpdate] = useState(0);
+
+  // Re-render on subagent state changes
+  useEffect(() => {
+    const unsub = onSubagentChange(() => forceUpdate(n => n + 1));
+    return unsub;
+  }, []);
+
+  useEffect(() => {
+    setEntries([...subagentRegistry.entries()].sort((a, b) => b[1].createdAt - a[1].createdAt));
+  }, [forceUpdate]);
+
+  if (!isOpen) return null;
+
+  const statusIcon = (status) => ({
+    running: '⏳',
+    done: '✅',
+    timeout: '⏰',
+    failed: '❌',
+  }[status] || '?');
+
+  const statusColor = (status) => ({
+    running: 'text-blue-600',
+    done: 'text-emerald-600',
+    timeout: 'text-amber-600',
+    failed: 'text-red-600',
+  }[status] || 'text-gray-500');
+
+  return (
+    <div className="absolute bottom-full left-0 mb-2 w-80 max-h-96 overflow-y-auto bg-white rounded-xl shadow-xl border border-gray-200 z-50">
+      <div className="sticky top-0 bg-white border-b px-3 py-2 flex items-center justify-between">
+        <span className="text-sm font-semibold text-gray-700">🤖 CC Subagents</span>
+        <span className="text-xs text-gray-400">{getActiveCount()} running</span>
+      </div>
+      {entries.length === 0 ? (
+        <div className="px-3 py-6 text-center text-xs text-gray-400">No subagent tasks</div>
+      ) : (
+        <div className="divide-y divide-gray-100">
+          {entries.map(([taskId, entry]) => (
+            <SubagentEntry key={taskId} taskId={taskId} entry={entry} statusIcon={statusIcon} statusColor={statusColor} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubagentEntry({ taskId, entry, statusIcon, statusColor }) {
+  const [expanded, setExpanded] = useState(false);
+  const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
+
+  return (
+    <div className="px-3 py-2">
+      <div className="flex items-center gap-1.5 cursor-pointer" onClick={() => setExpanded(!expanded)}>
+        <span>{statusIcon(entry.status)}</span>
+        <span className={`text-xs font-medium flex-1 truncate ${statusColor(entry.status)}`}>
+          {entry.task?.substring(0, 60)}
+        </span>
+        <span className="text-[10px] text-gray-400">{elapsed}s</span>
+        <span className="text-gray-300 text-xs">{expanded ? '▾' : '▸'}</span>
+      </div>
+      <div className="flex items-center gap-1.5 mt-0.5">
+        <span className="text-[9px] text-gray-300 font-mono">{taskId}</span>
+        <span className="text-[9px] text-gray-300">from:{entry.source}</span>
+      </div>
+      {expanded && (
+        <div className="mt-1.5 p-2 bg-gray-50 rounded text-[10px] text-gray-600 whitespace-pre-wrap">
+          {entry.status === 'done' && entry.result
+            ? entry.result.substring(0, 500) + (entry.result.length > 500 ? '...' : '')
+            : entry.status === 'failed'
+            ? `Error: ${entry.error}`
+            : entry.status === 'timeout'
+            ? 'Task timed out'
+            : 'Running...'}
+        </div>
+      )}
+    </div>
+  );
+}
+```
+
+- [ ] **Step 6: Add 🤖 button and SubagentPanel to ChatboxInputBox**
+
+In `ChatboxInputBox.jsx`, after the screenshot button (line ~1969) and before the Memory button (line ~1971), add:
+
+```jsx
+import SubagentPanel from './SubagentPanel';
+import { FaRobot } from 'react-icons/fa6';
+
+// In component state:
+const [showSubagentPanel, setShowSubagentPanel] = useState(false);
+const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+
+// Subscribe to count changes:
+useEffect(() => {
+  const unsub = onSubagentChange(() => setActiveSubagentCount(getActiveCount()));
+  return unsub;
+}, []);
+
+// In JSX, after screenshot button:
+<div className="relative">
+  <button
+    onClick={() => setShowSubagentPanel(!showSubagentPanel)}
+    className={`relative flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
+      activeSubagentCount > 0
+        ? 'px-3 py-1.5 text-blue-700 bg-blue-100 border border-blue-300'
+        : 'p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent'
+    }`}
+    title={`CC Subagent (${activeSubagentCount} running)`}
+  >
+    <FaRobot className="w-4 h-4" />
+    {activeSubagentCount > 0 && (
+      <span className="text-xs">{activeSubagentCount}</span>
+    )}
+  </button>
+  <SubagentPanel
+    isOpen={showSubagentPanel}
+    onClose={() => setShowSubagentPanel(false)}
+  />
+</div>
+```
+
+The button style mirrors the Memory button pattern: collapsed (just icon) when no subagents, expanded (icon + count) when active. Blue highlight when running.
+
+- [ ] **Step 7: Close panel on outside click**
+
+Add a click-outside handler for SubagentPanel (same pattern as model selector dropdown already in ChatboxInputBox):
+
+```js
+// In SubagentPanel.jsx:
+useEffect(() => {
+  if (!isOpen) return;
+  const handleClick = (e) => {
+    if (!e.target.closest('.subagent-panel-container')) onClose();
+  };
+  document.addEventListener('mousedown', handleClick);
+  return () => document.removeEventListener('mousedown', handleClick);
+}, [isOpen, onClose]);
+
+// Add className="subagent-panel-container" to the outer div
+```
+
+- [ ] **Step 8: Commit**
+
+```bash
+git add src/components/Chat/SubagentPanel.jsx src/components/Chat/ChatboxInputBox.jsx src/utils/promptBuilder.js src/utils/workspace/socialToolExecutor.js
+git commit -m "feat(subagent): chat window dispatch_subagent support + SubagentPanel UI"
+```

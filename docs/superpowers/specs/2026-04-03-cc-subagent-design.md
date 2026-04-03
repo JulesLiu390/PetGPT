@@ -245,14 +245,43 @@ dispatch_subagent(task, maxLen=500)
 
 ---
 
-## 7. 文件改动清单
+## 7. 聊天窗口集成
+
+Subagent 不仅服务于 Social Agent，也在普通聊天窗口中可用。
+
+### 全局 Registry
+
+`subagentRegistry` 从 `socialAgent.js` 提取为独立模块 `src/utils/subagentManager.js`，被 Social Agent 和 Chat 窗口共享。每个 entry 有 `source` 字段区分来源（`'social'` / `'chat'`）。
+
+### Chat 窗口行为
+
+- `dispatch_subagent` 作为 builtin tool 注入聊天 LLM 的工具集
+- Chat 模式下 dispatch 是**同步等待**：tool call 显示 spinning 状态，CC 完成后结果直接作为 tool result 返回给 LLM
+- 输入框工具栏新增 🤖 按钮（与截图、Memory 并列），点击弹出 `SubagentPanel` popover
+- 按钮在有 active subagent 时高亮蓝色 + 显示数量，无任务时收起为灰色图标
+- SubagentPanel 列出所有 subagent 状态（running/done/failed/timeout），展开可看结果预览
+
+### Social Agent 前端
+
+- SocialPage 日志面板新增 `🤖 Subagent` 选项卡（与 Chat/LLM/Tools/System/Intent 并列）
+- `SubagentLogEntry` 组件：展开可看任务描述、耗时、结果预览
+- 右侧状态栏显示 active subagent 数量 badge
+- Intent Plan 区域显示 subagent action badge
+
+---
+
+## 8. 文件改动清单
 
 | 文件 | 操作 | 说明 |
 |------|------|------|
 | `src-tauri/src/subagent/mod.rs` | 新增 | SubagentPool + Tauri commands + events |
 | `src-tauri/src/lib.rs` | 编辑 | 注册 SubagentPool state + commands |
 | `src/utils/tauri.js` | 编辑 | 新增 invoke wrappers |
-| `src/utils/workspace/socialToolExecutor.js` | 编辑 | 新增 `dispatch_subagent` handler |
-| `src/utils/socialAgent.js` | 编辑 | subagentRegistry + event 监听 + 停止清理 |
+| `src/utils/subagentManager.js` | 新增 | 全局 subagent registry + event 监听 |
+| `src/utils/workspace/socialToolExecutor.js` | 编辑 | 新增 `dispatch_subagent` handler（支持 social/chat 两种模式） |
+| `src/utils/socialAgent.js` | 编辑 | 引用全局 registry + 停止清理 |
 | `src/utils/socialPromptBuilder.js` | 编辑 | Intent 工具定义 + 状态注入 |
-| `src/pages/SocialPage.jsx` | 编辑 | config 新增 subagent 相关字段 |
+| `src/utils/promptBuilder.js` | 编辑 | Chat builtin tools 加入 dispatch_subagent |
+| `src/pages/SocialPage.jsx` | 编辑 | config + 日志选项卡 + 状态栏 |
+| `src/components/Chat/SubagentPanel.jsx` | 新增 | 🤖 状态面板 popover |
+| `src/components/Chat/ChatboxInputBox.jsx` | 编辑 | 🤖 按钮 + subagent context 注入 |
