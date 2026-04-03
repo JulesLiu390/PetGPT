@@ -1085,6 +1085,8 @@ async function pollTarget({
           // reply_to: 优先用 LLM 自己传的，其次用 Intent plan 里的
           const replyTo = args?.reply_to || intentEntry?.replyTo || undefined;
           if (replyTo) extra.reply_to = String(replyTo);
+          // 过滤 LLM 误抄的占位符
+          content = content.replace(/\[图片\]/g, '').replace(/\[视频\]/g, '').replace(/\[语音\]/g, '').replace(/\[文件\]/g, '').trim();
           return { ...args, content, ...extra, target, target_type: targetType };
         }
         return args;
