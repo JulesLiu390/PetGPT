@@ -2298,6 +2298,25 @@ export async function startSocialLoop(config, onStatusChange) {
           }
         }
 
+        // 检查 Reply 是否正在执行（上一轮 plan 有 reply，且 sentMessagesCache 里还没有对应的新消息）
+        // 如果是，读 reply_brief.md 注入，防止 Intent 重复 Reply 即将说的内容
+        let pendingReplyBrief = '';
+        if (state.lastPlan?.actions?.some(a => a.type === 'reply')) {
+          const cached = sentMessagesCache.get(target) || [];
+          const lastPlanTime = state.lastEvalTime || 0;
+          // 如果上次 plan 有 reply 但 sentCache 里没有比 plan 更新的消息 → Reply 可能还在跑
+          const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > lastPlanTime);
+          if (!hasSentAfterPlan) {
+            try {
+              const intentDir = targetType === 'friend' ? 'friend' : 'group';
+              const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`).catch(() => '');
+              if (brief && brief.trim()) {
+                pendingReplyBrief = `\n\n【Reply 模块正在基于以下交接内容发言（尚未发出）】\n${brief.trim()}\n\n⚠️ 以上内容即将被发送，不要重复这些观点。`;
+              }
+            } catch { /* ignore */ }
+          }
+        }
+
         // force-eval (reply/newmsg): 注入最近发送的消息原文，让 LLM 明确知道"我已经说过什么"
         let forceEvalRecentSent = '';
         if (wasForceEval === 'reply' || wasForceEval === 'newmsg') {
@@ -2323,6 +2342,11 @@ export async function startSocialLoop(config, onStatusChange) {
           intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`;
         } else {
           intentEvalPrompt = `请分析当前想法和行为倾向，先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。${newMsgHint}`;
+        }
+
+        // 追加 pending reply brief（Reply 正在执行但尚未发出的内容）
+        if (pendingReplyBrief) {
+          intentEvalPrompt += pendingReplyBrief;
         }
 
         // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
