@@ -22,6 +22,38 @@ async function cachedRead(readFn, cacheKey) {
   return content;
 }
 
+/**
+ * Build subagent status section for Intent prompt injection
+ */
+export function buildSubagentStatusSection(subagentRegistry, targetId) {
+  if (!subagentRegistry || subagentRegistry.size === 0) return '';
+
+  const lines = [];
+  for (const [taskId, entry] of subagentRegistry) {
+    if (entry.target !== targetId) continue;
+    const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
+    switch (entry.status) {
+      case 'done':
+        if (!entry.readByIntent) {
+          lines.push(`- ✅ ${taskId}: "${entry.task}" → 已完成，结果在 ${entry.outputPath}`);
+        }
+        break;
+      case 'running':
+        lines.push(`- ⏳ ${taskId}: "${entry.task}" → 执行中 (已耗时 ${elapsed}s)`);
+        break;
+      case 'timeout':
+        lines.push(`- ⏰ ${taskId}: "${entry.task}" → 超时`);
+        break;
+      case 'failed':
+        lines.push(`- ❌ ${taskId}: "${entry.task}" → 失败 (${entry.error || '未知错误'})`);
+        break;
+    }
+  }
+
+  if (lines.length === 0) return '';
+  return `## 后台任务状态\n${lines.join('\n')}`;
+}
+
 export function invalidatePromptFileCache(pathFragment) {
   if (!pathFragment) return;
   for (const key of _fileCache.keys()) {
@@ -652,6 +684,7 @@ export async function buildIntentSystemPrompt({
   socialPersonaPrompt = '', botQQ = '', ownerQQ = '', ownerName = '', ownerSecret = '',
   nameDelimiterL = '', nameDelimiterR = '', msgDelimiterL = '', msgDelimiterR = '',
   lurkMode = 'normal',
+  subagentRegistry = null,
 }) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : (targetId || '当前群');
   const intentStateDir = targetType === 'friend' ? 'friend' : 'group';
@@ -805,6 +838,14 @@ ${stickerIndex}
     }
   }
 
+  // === 后台任务状态 ===
+  if (subagentRegistry) {
+    const subagentStatus = buildSubagentStatusSection(subagentRegistry, targetId);
+    if (subagentStatus) {
+      sections.push(subagentStatus);
+    }
+  }
+
   // === 工具说明 ===
   sections.push(`# 可用工具
 
@@ -826,6 +867,9 @@ ${stickerIndex}
 
 外部搜索工具（如果已配置）：
 - 你可能还有 tavily_search、fetch 等外部搜索工具可用。当群友在辩论中引用了事实、数据或信息源，而你不确定真假时，用这些工具核实后再下判断
+
+后台研究工具（需要深入调查或查阅外部资料时使用）：
+- dispatch_subagent(task, maxLen=500)：发起一个后台研究任务。task 写明确的指令，CC 会在独立沙箱中自主完成（可用 web search）。结果异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。发起后 write_intent_plan(actions=[]) 等待结果。
 
 ⚠️ 历史查询和搜索工具只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。`);
 

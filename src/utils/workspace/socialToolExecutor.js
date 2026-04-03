@@ -352,6 +352,14 @@ export async function executeSocialFileTool(toolName, args, context) {
       break;
     case 'social_read':
       result = await executeSocialRead(petId, args);
+      // Mark subagent results as read by Intent
+      if (args?.path?.includes('subagent_sa_') && context.subagentRegistry) {
+        const match = args.path.match(/subagent_(sa_[^./]+)/);
+        if (match) {
+          const entry = context.subagentRegistry.get(match[1]);
+          if (entry) entry.readByIntent = true;
+        }
+      }
       break;
     case 'social_write':
       result = await executeSocialWrite(petId, args);

@@ -8,7 +8,8 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition } from './workspace/socialToolExecutor';
+import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -1762,7 +1763,7 @@ export async function startSocialLoop(config, onStatusChange) {
   const intentMap = new Map();                // target → IntentState { lastPlan, lastEvalTime, loopTimeoutId, _wake, forceEval }
 
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // semi-lurk / full-lurk 模式的评估冷却
-  const INTENT_MIN_INTERVAL_MS = 15 * 1000;   // normal 模式最小评估间隔（防连消息密集重评）
+  const INTENT_MIN_INTERVAL_MS = 0;            // 无冷却，新消息立刻触发 eval
   const INTENT_IDLE_SLEEP_MS = 3 * 60 * 1000;    // 3 分钟无新消息 → 休眠
   const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次，指数退避 5s/25s/125s
   const INTENT_RETRY_DELAYS = [5000, 25000, 125000];
@@ -2228,6 +2229,9 @@ export async function startSocialLoop(config, onStatusChange) {
         const intentPlanDefs = getIntentPlanToolDefinitions();
         const intentFileDefs = getSocialFileToolDefinitions().filter(t => ['social_read', 'social_edit', 'social_write'].includes(t.function.name));
         const intentToolDefs = [...intentPlanDefs, ...intentFileDefs, ...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
+        if (config.subagentEnabled !== false) {
+          intentToolDefs.push(getSubagentToolDefinition());
+        }
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
@@ -2286,6 +2290,12 @@ export async function startSocialLoop(config, onStatusChange) {
         for (let attempt = 0; ; attempt++) {
           // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
           capturedPlan = null;
+          // Purge consumed subagent entries for this target
+          for (const [taskId, entry] of subagentRegistry) {
+            if (entry.target === target && entry.readByIntent) {
+              subagentRegistry.delete(taskId);
+            }
+          }
           const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
           const sinceMin = state.lastEvalTime > 0
             ? Math.round((Date.now() - state.lastEvalTime) / 60000) : 0;
@@ -2306,6 +2316,7 @@ export async function startSocialLoop(config, onStatusChange) {
             msgDelimiterL: eph?.msgL || '',
             msgDelimiterR: eph?.msgR || '',
             lurkMode: targetLurkMode,
+            subagentRegistry,
           });
 
           try {
@@ -2323,7 +2334,7 @@ export async function startSocialLoop(config, onStatusChange) {
               options: {
                 temperature: 0.4,
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 } },
               stopAfterTool: 'write_intent_plan',
               usageLabel: 'Intent:msg',
               usageTarget: target,
@@ -2932,7 +2943,25 @@ export async function startSocialLoop(config, onStatusChange) {
   };
   
   scheduleDailyCompressTimer();
-  
+
+  // Setup subagent event listeners
+  if (config.subagentEnabled !== false) {
+    await initSubagentListeners({
+      petId: config.petId,
+      addLog,
+      wakeIntent: (target) => {
+        const iState = intentMap.get(target);
+        if (iState) {
+          iState.forceEval = true;
+          if (iState._wake) { iState._wake(); iState._wake = null; }
+        }
+      },
+    });
+    if (config.subagentMaxConcurrent) {
+      tauri.subagentSetMaxConcurrent(config.subagentMaxConcurrent).catch(() => {});
+    }
+  }
+
   // 启动层 1: Fetcher 循环（每 1s batch 拉取）
   fetcherLoop();
   
@@ -2977,6 +3006,8 @@ export function stopSocialLoop() {
       _persistDebounceTimer = null;
       persistKnownTargets(activeLoop.petId, knownTargets);
     }
+    killBySource('social');
+    destroySubagentListeners();
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
     sentMessagesCache.clear();
