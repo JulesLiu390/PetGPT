@@ -1007,14 +1007,21 @@ ${stickerIndex}
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三和李四同时在聊不同话题，消息刷得快，张三@过我但被刷上去了。【我的判断】张三直接问了我，球在我这边，消息快怕他看漏，@一下更稳。")
 → write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":20,"atTarget":"张三"}])
 
-示例 12（CC 研究 + 回复"我去查了"）：
+示例 12（有人让我查 → 随口应一句 + dispatch）：
 → cc_history() → （没有相关结果）
 → dispatch_subagent(task="查一下 2026 年 Qwen 3.5 的最新发布情况和核心特性", maxLen=500)
-→ social_edit(path="${intentStatePath}", content="【我刚做了】上次在围观话题。【群里情况】姐姐让我用CC查 Qwen 最新动态。【我的判断】姐姐直接点名了，CC 已经派出去了，先告诉她我在查。")
-→ social_write(path="${scratchDir}/reply_brief.md", content="告诉姐姐 CC 已经派出去了，稍等一下就有结果。语气轻松。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次在围观话题。【群里情况】姐姐让我用CC查 Qwen 最新动态。【我的判断】姐姐直接点名了，CC 已经派出去了，随口应一句就行。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="随口说一句'等下我查查'或'稍等，CC去翻了'。不要长篇大论。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":8}])
 
-示例 13（CC 研究 + 静默等待）：
+示例 13（听到不确定的事实 → "真的假的？" + dispatch 验证）：
+→ cc_history() → （没有相关结果）
+→ dispatch_subagent(task="验证：某公司是否真的在 2026 年 3 月裁员 40%，查新闻源", maxLen=300)
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次在潜水。【群里情况】张三说某公司裁了40%，大家在惊叹。【我的判断】这数据听着夸张，不确定真假，先让CC去查，顺便在群里表示一下怀疑。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="质疑一下，随口说'真的假的？我查查'。语气随意。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":6}])
+
+示例 14（话题水深 → 静默 dispatch，不急着说话）：
 → cc_history() → （没有相关结果）
 → dispatch_subagent(task="调查最近 AI 圈传闻的某个漏洞的具体原理和涉及平台", maxLen=500)
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次吐槽了一句。【群里情况】大家在讨论一个技术漏洞，细节不明，各说各的。【我的判断】这个话题水很深，我不确定真相，先让CC去扒拉一下，不急着下结论。已派CC查，等结果再说。")
