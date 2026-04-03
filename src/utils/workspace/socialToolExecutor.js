@@ -1318,7 +1318,7 @@ export function getSubagentToolDefinition() {
     type: 'function',
     function: {
       name: 'dispatch_subagent',
-      description: '发起一个后台研究任务。CC 会在独立沙箱中自主完成任务（可能用 web search 等工具）。结果会异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。发起后请 write_intent_plan(actions=[]) 等待结果。',
+      description: '发起一个后台研究任务（也叫 CC / Claude Code）。当用户要求"用CC查"或需要深入调研时使用。CC 会在独立沙箱中自主完成任务（可用 web search 等工具），比普通搜索更深入。结果会异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。发起后请 write_intent_plan(actions=[]) 等待结果。',
       parameters: {
         type: 'object',
         properties: {

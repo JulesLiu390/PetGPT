@@ -868,8 +868,8 @@ ${stickerIndex}
 外部搜索工具（如果已配置）：
 - 你可能还有 tavily_search、fetch 等外部搜索工具可用。当群友在辩论中引用了事实、数据或信息源，而你不确定真假时，用这些工具核实后再下判断
 
-后台研究工具（需要深入调查或查阅外部资料时使用）：
-- dispatch_subagent(task, maxLen=500)：发起一个后台研究任务。task 写明确的指令，CC 会在独立沙箱中自主完成（可用 web search）。结果异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。发起后 write_intent_plan(actions=[]) 等待结果。
+后台研究工具（也叫 CC / Claude Code，需要深入调研或用户明确要求"用CC查"时使用）：
+- dispatch_subagent(task, maxLen=500)：发起一个 CC 后台研究任务。task 写明确的指令，CC 会在独立沙箱中自主完成（可用 web search 等工具），比普通搜索更深入全面。结果异步写入 scratch 文件，你在后续 eval 中用 social_read 读取。发起后 write_intent_plan(actions=[]) 等待结果。当有人说"用CC搜/查"时，就是指这个工具。
 
 ⚠️ 历史查询和搜索工具只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。`);
 
