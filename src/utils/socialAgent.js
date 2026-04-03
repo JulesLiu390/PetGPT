@@ -2245,6 +2245,7 @@ export async function startSocialLoop(config, onStatusChange) {
         // ── 常规意图评估（带重试） ──
         const intentModel = intentLLMConfig.modelName;
         addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
+        const prevEvalTime = state.lastEvalTime; // 保存上轮 eval 时间（用于 pendingReplyBrief 判断）
         state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
 
         // 构建工具集（write_intent_plan + social_read + history + groupLog + 外部 MCP 只读工具）
@@ -2304,15 +2305,14 @@ export async function startSocialLoop(config, onStatusChange) {
         let pendingReplyBrief = '';
         if (state.lastPlan?.actions?.some(a => a.type === 'reply')) {
           const cached = sentMessagesCache.get(target) || [];
-          const lastPlanTime = state.lastEvalTime || 0;
-          // 如果上次 plan 有 reply 但 sentCache 里没有比 plan 更新的消息 → Reply 可能还在跑
-          const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > lastPlanTime);
+          // 用上轮 eval 时间判断 Reply 是否已发出（不是当前 eval 时间）
+          const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
           if (!hasSentAfterPlan) {
             try {
               const intentDir = targetType === 'friend' ? 'friend' : 'group';
               const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`).catch(() => '');
               if (brief && brief.trim()) {
-                pendingReplyBrief = `\n\n【Reply 模块正在基于以下交接内容发言（尚未发出）】\n${brief.trim()}\n\n⚠️ 以上内容即将被发送，不要重复这些观点。`;
+                pendingReplyBrief = `\n\n【以下内容已经发送或正在发送，视为已表达】\n${brief.trim()}\n\n🚫 以上观点已经表达完毕。严禁再次表达相同或相似的内容，包括：\n- 换个说法重复同样的结论\n- 把长内容拆开再发一遍`;
               }
             } catch { /* ignore */ }
           }
