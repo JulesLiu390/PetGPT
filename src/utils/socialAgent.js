@@ -462,8 +462,9 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
         }
       }
       const idTag = isOwner && ownerSecret ? `owner:${ownerSecret}` : String(msg.sender_id || '');
+      const msgIdTag = msg.message_id ? ` [#${msg.message_id}]` : '';
       let msgContent = stripSecrets(msg.content || '');
-      text = `${nameL}${name}(${idTag})${nameR} ${msgL}${msgContent}${msgR}`;
+      text = `${nameL}${name}(${idTag})${msgIdTag}${nameR} ${msgL}${msgContent}${msgR}`;
     }
 
     if (sanitizeAtMe) {
@@ -1081,6 +1082,9 @@ async function pollTarget({
           const intentEntry = pollIntentPlan?.actions?.find(a => a.type === 'reply');
           const numChunks = intentEntry?.numChunks ?? 1;
           const extra = numChunks >= 2 ? { num_chunks: numChunks } : {};
+          // reply_to: 优先用 LLM 自己传的，其次用 Intent plan 里的
+          const replyTo = args?.reply_to || intentEntry?.replyTo || undefined;
+          if (replyTo) extra.reply_to = String(replyTo);
           return { ...args, content, ...extra, target, target_type: targetType };
         }
         return args;

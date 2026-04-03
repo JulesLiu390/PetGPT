@@ -935,10 +935,6 @@ export function getStickerToolDefinitions() {
               type: 'number',
               description: '要发送的表情包序号（从 sticker_list 获取）',
             },
-            reply_to: {
-              type: 'string',
-              description: '（可选）要回复的消息 ID',
-            },
           },
           required: ['sticker_id'],
         },
@@ -1157,7 +1153,7 @@ async function executeStickerList(petId) {
 }
 
 async function executeStickerSend(petId, args, context) {
-  const { sticker_id, reply_to } = args;
+  const { sticker_id } = args;
   if (!sticker_id) return { error: '缺少 sticker_id 参数' };
 
   const { targetId, targetType, mcpServerName } = context;
@@ -1204,8 +1200,6 @@ async function executeStickerSend(petId, args, context) {
     target_type: targetType || 'group',
     image: base64Data, // base64 without prefix
   };
-  if (reply_to) sendArgs.reply_to = reply_to;
-
   try {
     const fullToolName = `${mcpServerName}__send_image`;
     const result = await tauri.mcp.callToolByName(fullToolName, sendArgs);

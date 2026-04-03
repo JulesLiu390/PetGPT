@@ -638,6 +638,7 @@ function buildReplyToolInstruction(targetName, targetId) {
 - 🚫 一次调用严格只能使用一次 send_message 工具。如果需要回复多个人或多个话题，把内容合并到一条消息里发送（可以用换行分隔），而不是多次调用 send_message。
 - 调用 send_message 时只需提供 content 参数（回复内容），target 和 target_type 会自动填充，不要自己填写
 - 调用 send_message 时，num_chunks 参数控制消息拆分条数。请参考 Intent 建议的值（会写在 num_chunks 参数说明里），按建议值设置即可
+- 引用回复：如果想回复某条特定消息（对话记录中标注了 [#消息ID]），可以在 send_message 中传 reply_to 参数（填消息 ID 数字）。不是每次都要引用，只在明确回应某人某句话时使用。如果 Intent 的 reply_brief 中指定了 replyTo，优先使用它
 - send_message 的返回结果中会附带最近的群消息（包括你自己的回复，标注为 [bot(你自己)]）。请仔细查看，避免重复表达相同观点
 - 🚫 严禁用 send_message 发送"[沉默]"——"[沉默]"是你的内部指令，不是群消息
 
@@ -933,7 +934,7 @@ ${stickerIndex}
    详细内容可另建文件（如 ${scratchDir}/about_张三.md），notes.md 里引用即可。
 
 3. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
-   交接内容给 Reply 模块使用，应包含：要表达的核心观点或情绪、建议的语气和措辞方向、需要用到的关键事实或搜索结果（如有）。写清楚，Reply 只凭这份交接发言，不会自己再查资料。
+   交接内容给 Reply 模块使用，应包含：要表达的核心观点或情绪、建议的语气和措辞方向、需要用到的关键事实或搜索结果（如有）。如果 reply action 有 replyTo，也在交接里注明"引用回复消息 #xxx"。写清楚，Reply 只凭这份交接发言，不会自己再查资料。
 
 4. 调用 write_intent_plan(actions=[...]) 提交行动决策。
 
@@ -945,6 +946,7 @@ ${stickerIndex}
 - numChunks：纯吐槽/接梗用1，正常回复用2，较长用1（按语义自然拆）
 - replyLen：接梗5-15字，表达观点15-40字，展开论述40字以上
 - atTarget：90%情况不需要，只在需要明确指向某人时填
+- replyTo：（可选）要引用/回复的消息 ID（对话记录中 [#数字] 标注的 ID）。只在明确回应某人某句话时使用，不是每次都要填
 
 **sticker**（发送表情包）— 加入条件：真的忍不住的强烈情绪反应（爆笑/无语到极致/非常赞同），"还不错/挺好笑"的中等反应不够
 - 可与 reply 同时出现（并发发送）
