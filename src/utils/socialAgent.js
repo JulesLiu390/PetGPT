@@ -1789,6 +1789,7 @@ export async function startSocialLoop(config, onStatusChange) {
   const INTENT_RETRY_DELAYS = [5000, 25000, 125000];
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
   const replyWakeFlag = new Map();                // target → true（Intent 评出 ≥3 时置位，Reply 消费后清除）
+  const replyWakeResolvers = new Map();           // target → resolve 回调（用于中断 Reply loop 的 sleep）
 
   /** 获取/创建某群的 IntentState */
   const getIntentState = (target) => {
@@ -2508,6 +2509,9 @@ export async function startSocialLoop(config, onStatusChange) {
 
         if (replyAction) {
           replyWakeFlag.set(target, { atMe: false });
+          // 立即唤醒 Reply loop（中断其 sleep）
+          const rWake = replyWakeResolvers.get(target);
+          if (rWake) { rWake(); replyWakeResolvers.delete(target); }
           addLog('send', `💬 reply → ${tName()}`, null, target);
         }
         await sleepInterruptible(state, 500);
@@ -2799,7 +2803,11 @@ export async function startSocialLoop(config, onStatusChange) {
    */
   const replyLoop = async (target, targetType) => {
     const label = `${targetType}:${target}`;
-    await new Promise(r => setTimeout(r, Math.random() * 2000));
+    /** Reply 专用可中断 sleep — Intent 设 replyWakeFlag 时可立即唤醒 */
+    const replySleep = (ms) => new Promise(r => {
+      replyWakeResolvers.set(target, r);
+      setTimeout(() => { replyWakeResolvers.delete(target); r(); }, ms);
+    });
 
     let llmRunning = false;        // 本 target 的 LLM 是否正在执行
     let lastLoggedNewCount = 0;    // 上次日志记录的新消息条数（去重用）
@@ -2808,21 +2816,21 @@ export async function startSocialLoop(config, onStatusChange) {
       try {
         // ── 暂停检查 ──
         if (pausedTargets.get(target)) {
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
-        
+
         const buf = dataBuffer.get(target);
         if (!buf || buf.messages.length === 0) {
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
-        
-        // ── 检测变化（每 1s 无论 LLM 是否运行都执行） ──
+
+        // ── 检测变化 ──
         const detection = detectChange(target, replyWatermarks);
-        
+
         if (!detection) {
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
         
@@ -2839,7 +2847,7 @@ export async function startSocialLoop(config, onStatusChange) {
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
           addLog('info', `${label} reply first run, watermark set`, null, target);
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
         
@@ -2851,7 +2859,7 @@ export async function startSocialLoop(config, onStatusChange) {
             const lastMsg = buf.messages[buf.messages.length - 1];
             if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
           }
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
         replyWakeFlag.delete(target);
@@ -2859,24 +2867,22 @@ export async function startSocialLoop(config, onStatusChange) {
         
         // ── LLM 正在执行 → 等待完成 ──
         if (llmRunning) {
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
 
         // ── 潜水模式决定是否跳过回复 ──
         const targetLurkMode = lurkModes.get(target) || 'normal';
         if (targetLurkMode === 'full-lurk') {
-          // full-lurk：Reply 不运行，只推进水位线到最新
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
-        // semi-lurk 且本次唤醒不是因为 @me → 跳过回复，推进水位线
         if (targetLurkMode === 'semi-lurk' && !intentWoke?.atMe) {
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          await new Promise(r => setTimeout(r, 1000));
+          await replySleep(1000);
           continue;
         }
         
@@ -2885,7 +2891,7 @@ export async function startSocialLoop(config, onStatusChange) {
           const now = Date.now();
           const sinceLastReply = now - (lastReplyTime.get(target) || 0);
           if (sinceLastReply < replyIntervalMs) {
-            await new Promise(r => setTimeout(r, 1000));
+            await replySleep(1000);
             continue;
           }
         }
@@ -2932,7 +2938,7 @@ export async function startSocialLoop(config, onStatusChange) {
             if (result && result.action === 'replied') {
               addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
               // 发完消息后，Intent 休息 20s 再重评（有新消息则提前结束休息）
-              getIntentState(target).postReplyRestUntil = Date.now() + 20 * 1000;
+              getIntentState(target).postReplyRestUntil = Date.now() + 1000;
             }
           } catch (e) {
             addLog('error', `Reply ${label} LLM error`, e.message || e, target);
@@ -2944,8 +2950,8 @@ export async function startSocialLoop(config, onStatusChange) {
 
         // 不 await — 异步执行，检测循环继续运行（但 llmRunning 会阻止重复启动）
         runReplyLLM();
-        
-        await new Promise(r => setTimeout(r, 1000));
+
+        await replySleep(1000);
       } catch (e) {
         addLog('error', `Reply ${label} loop error`, e.message || e, target);
         // 安全清理：防止崩溃后 llmRunning 卡死
