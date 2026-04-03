@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -1990,6 +1990,58 @@ export async function startSocialLoop(config, onStatusChange) {
    * eval 完成后，并行预取当前 buffer 中发言人的人物档案，写入缓存文件供下次 eval 注入。
    * fire-and-forget，不阻塞 eval 流程。
    */
+  /**
+   * 异步整理 markdown 文件（fire-and-forget）
+   * 启动一个轻量 LLM 调用，只给 social_read + social_edit 两个工具
+   */
+  const dispatchMdOrganizer = ({ file, context: fileContext, instruction }) => {
+    // fire-and-forget — 不阻塞调用者
+    (async () => {
+      try {
+        // 只给 social_read 和 social_edit 工具
+        const readDef = getSocialFileToolDefinitions().find(t => t.function.name === 'social_read');
+        const editDef = getSocialFileToolDefinitions().find(t => t.function.name === 'social_edit');
+        const tools = [readDef, editDef].filter(Boolean).map(t => ({
+          name: t.function.name,
+          description: t.function.description,
+          inputSchema: t.function.parameters,
+          serverName: null,
+        }));
+
+        const systemPrompt = `你是一个 Markdown 文件整理助手。你有 social_read 和 social_edit 两个工具。
+根据指令读取并整理指定文件。用 social_edit 做精确修改，不要全量覆写。
+完成后不需要输出任何文字。`;
+
+        const userMsg = `文件路径：${file}
+${fileContext ? `\n文件说明：${fileContext}\n` : ''}
+指令：${instruction}
+
+请先用 social_read("${file}") 读取文件内容，然后根据指令用 social_edit 修改。`;
+
+        // 使用 Intent 的 LLM 配置（便宜的模型）
+        await callLLMWithTools({
+          messages: [
+            { role: 'system', content: systemPrompt },
+            { role: 'user', content: userMsg },
+          ],
+          apiFormat: intentLLMConfig.apiFormat,
+          apiKey: intentLLMConfig.apiKey,
+          model: intentLLMConfig.modelName,
+          baseUrl: intentLLMConfig.baseUrl,
+          mcpTools: tools,
+          options: { temperature: 0.2 },
+          builtinToolContext: { petId: config.petId },
+          maxIterations: 10,
+          usageLabel: 'MdOrganizer',
+          usagePetId: config.petId,
+        });
+        addLog('info', `📝 md_organize done: ${file}`, null);
+      } catch (e) {
+        addLog('warn', `md_organize error: ${file}: ${e.message || e}`, null);
+      }
+    })();
+  };
+
   const updatePeopleCache = async (target, targetType) => {
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return;
@@ -2256,6 +2308,7 @@ export async function startSocialLoop(config, onStatusChange) {
           intentToolDefs.push(getSubagentToolDefinition());
           intentToolDefs.push(getCcHistoryToolDefinition());
           intentToolDefs.push(getCcReadToolDefinition());
+          intentToolDefs.push(getMdOrganizeToolDefinition());
         }
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
@@ -2406,7 +2459,7 @@ export async function startSocialLoop(config, onStatusChange) {
               options: {
                 temperature: 0.4,
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 } },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer },
               stopAfterTool: 'write_intent_plan',
               usageLabel: 'Intent:msg',
               usageTarget: target,

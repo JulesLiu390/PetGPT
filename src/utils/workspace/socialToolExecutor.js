@@ -1303,7 +1303,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1368,11 +1368,41 @@ export function getCcReadToolDefinition() {
   };
 }
 
+/** 获取 md_organize 工具的 function calling 定义 */
+export function getMdOrganizeToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'md_organize',
+      description: '异步整理一个 social/ 下的 markdown 文件。会启动一个后台整理助手，用 social_read + social_edit 自动读取并整理文件内容。适用于：追加教训并自动去重排序、精简过长文件、合并重复条目等。调用后不需要等待，继续你的工作即可。',
+      parameters: {
+        type: 'object',
+        properties: {
+          file: {
+            type: 'string',
+            description: '要整理的文件路径（social/ 开头），例如 "social/group/scratch_902317662/lessons.md"',
+          },
+          context: {
+            type: 'string',
+            description: '文件背景说明：这个文件是什么、格式规则是什么',
+          },
+          instruction: {
+            type: 'string',
+            description: '本次具体指令：要新增什么内容、如何整理、控制条数等',
+          },
+        },
+        required: ['file', 'instruction'],
+      },
+    },
+  };
+}
+
 /**
  * 执行 subagent 相关工具
  */
 export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'cc_history') return executeCcHistory(context);
+  if (toolName === 'md_organize') return executeMdOrganize(args, context);
   if (toolName === 'cc_read') return executeCcRead(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
@@ -1515,6 +1545,21 @@ async function executeCcRead(args, context) {
     }
     return { error: `读取失败: ${e}` };
   }
+}
+
+/** 执行 md_organize — 验证参数后委托给 context.dispatchMdOrganizer */
+async function executeMdOrganize(args, context) {
+  const { file, context: fileContext, instruction } = args;
+  if (!file || typeof file !== 'string') return { error: '缺少 file 参数' };
+  if (!instruction || typeof instruction !== 'string') return { error: '缺少 instruction 参数' };
+  if (!file.startsWith('social/')) return { error: '文件路径必须以 social/ 开头' };
+
+  // 委托给 socialAgent 提供的回调（fire-and-forget LLM 调用）
+  if (context.dispatchMdOrganizer) {
+    context.dispatchMdOrganizer({ file, context: fileContext || '', instruction });
+    return { content: [{ type: 'text', text: `✓ 已派整理助手处理 ${file}` }] };
+  }
+  return { error: 'md_organize 不可用（缺少 dispatchMdOrganizer 回调）' };
 }
 
 /**

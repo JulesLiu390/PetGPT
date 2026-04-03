@@ -698,7 +698,7 @@ export async function buildIntentSystemPrompt({
   const [
     soulContent, userContent, memoryContent, groupRuleContent,
     contactsContent, peopleCacheContent, socialMemoryContent,
-    intentStateContent, scratchNotes
+    intentStateContent, scratchNotes, lessonsContent
   ] = await Promise.all([
     cachedRead(() => readSoulFile(petId), `soul_${petId}`),
     cachedRead(() => readUserFile(petId), `user_${petId}`),
@@ -709,6 +709,10 @@ export async function buildIntentSystemPrompt({
     cachedRead(() => readSocialMemoryFile(petId), `socmem_${petId}`),
     cachedRead(() => readIntentStateFile(petId, targetId, targetType), `intent_${petId}_${targetId}`),
     cachedRead(() => readScratchNotesFile(petId, targetId, targetType), `scratch_${petId}_${targetId}`),
+    cachedRead(async () => {
+      const dir = targetType === 'friend' ? 'friend' : 'group';
+      try { return await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/lessons.md`); } catch { return null; }
+    }, `lessons_${petId}_${targetId}`),
   ]);
 
   // === 人格（SOUL.md） ===
@@ -809,6 +813,11 @@ export async function buildIntentSystemPrompt({
     sections.push('# 笔记\n' + scratchNotes);
   }
 
+  // === 行为教训（scratch/lessons.md，由 md_organize 维护） ===
+  if (lessonsContent) {
+    sections.push('# 行为教训（从过去的经验中学到的，按重要性排序）\n' + lessonsContent);
+  }
+
   if (sinceLastEvalMin > 0) {
     sections.push(`# 时间提示\n距离上次评估已经过去了约 ${sinceLastEvalMin} 分钟。`);
   }
@@ -844,6 +853,7 @@ ${stickerIndex}
 
 文件工具（按需使用）：
 - social_read(path)：按需读取其他社交文件（如 social/notes/、social/REPLY_STRATEGY.md 等）。当前对话成员档案已自动注入上方，无需手动读取。
+- md_organize(file, context, instruction)：异步整理 markdown 文件。整理助手会自动用 social_read + social_edit 修改文件。用于追加教训、精简文件、合并重复条目等。调用后不需要等待。
 
 历史查询工具（只读，按需使用）：
 - history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
@@ -942,11 +952,15 @@ ${stickerIndex}
    格式：每条一行 bullet，写简短结论，括号注明来源或详情文件路径。只记稳定事实，不记当前动态状态（那是 INTENT 文件的职责）。
    详细内容可另建文件（如 ${scratchDir}/about_张三.md），notes.md 里引用即可。
 
-3. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
+3. 如果【效果复盘】中发现了值得记住的教训（不是显而易见的常识），调用 md_organize 追加到教训文件：
+   md_organize(file="${scratchDir}/lessons.md", context="行为教训文件。每条格式：[N] 教训 — 情境 (日期)，N是触发次数。相似教训合并计数，按频率降序排列，控制在15条以内。", instruction="新增教训：[1] 你的教训内容 — 具体情境 (日期)")
+   整理助手会自动判断是否有重复、合并计数、排序整理，你不需要自己操心格式。
+
+4. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
    交接内容给 Reply 模块使用，应包含：要表达的核心观点或情绪、建议的语气和措辞方向、需要用到的关键事实或搜索结果（如有）。如果 reply action 有 replyTo，也在交接里注明"引用回复消息 #xxx"。
    如果回复需要引用 CC 研究结果：不要把完整内容抄进 brief，而是写 cc_read 指引，例如"请先用 cc_read(\"cc_查Qwen最新模型_sa_abc123.md\") 读取完整研究结果，基于结果详细回复"。Reply 模块有 cc_read 工具，会自己读取并写出有深度的长回复。
 
-4. 调用 write_intent_plan(actions=[...]) 提交行动决策。
+5. 调用 write_intent_plan(actions=[...]) 提交行动决策。
 
 - actions：根据以下规则决定动作
 
