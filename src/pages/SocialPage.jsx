@@ -1487,6 +1487,7 @@ export default function SocialPage() {
               const plan = intentPlans[selectedTarget];
               const actionLabel = (a) => {
                 if (a.type === 'sticker') return `📎 sticker#${a.id}`;
+                if (a.type === 'image') return `🖼️ ${a.file || 'image'}`;
                 if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
                 if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
                 return `⏸ wait`;
@@ -1499,13 +1500,15 @@ export default function SocialPage() {
               );
               const doneStickers = plan.done.filter(d => d.type === 'sticker').length;
               const doneReplies = plan.done.filter(d => d.type === 'reply').length;
-              let stickerIdx = 0, replyIdx = 0;
+              const doneImages = plan.done.filter(d => d.type === 'image').length;
+              let stickerIdx = 0, replyIdx = 0, imageIdx = 0;
               const isDone = (a) => {
                 if (a.type === 'sticker') return stickerIdx++ < doneStickers;
                 if (a.type === 'reply') return replyIdx++ < doneReplies;
+                if (a.type === 'image') return imageIdx++ < doneImages;
                 return false;
               };
-              const planHasAction = plan.actions.some(a => a.type === 'sticker' || a.type === 'reply');
+              const planHasAction = plan.actions.some(a => a.type === 'sticker' || a.type === 'reply' || a.type === 'image');
               return (
                 <div className="shrink-0 border-b border-slate-200 bg-slate-50/80 px-3 py-1.5 space-y-1">
                   <div className="flex items-center gap-1.5 flex-wrap">
@@ -1655,6 +1658,7 @@ function IntentLogEntry({ log, logFilter }) {
 
   const actionLabel = (a) => {
     if (a.type === 'sticker') return `📎 sticker#${a.id}`;
+    if (a.type === 'image') return `🖼️ ${a.file || 'image'}`;
     if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
     if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
     return `⏸ wait`;

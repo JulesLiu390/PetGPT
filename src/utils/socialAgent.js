@@ -2577,6 +2577,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 target_type: targetType,
                 image: base64Data,
               });
+              addLog('intent-action-done', '', JSON.stringify({ type: 'image', file: ia.file }), target);
               addLog('send', `🖼️ image → ${tName()}: ${ia.file}`, null, target);
             } catch (e) {
               addLog('warn', `image_send failed: ${e.message}`, null, target);
