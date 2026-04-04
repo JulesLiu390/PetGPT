@@ -3043,7 +3043,23 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
             if (result && result.action === 'replied') {
               addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
-              // 发完消息后，Intent 休息 20s 再重评（有新消息则提前结束休息）
+              // 发完消息后回写 INTENT 文件的【我刚做了】，让下次 eval 知道刚发了什么
+              try {
+                const intentDir = targetType === 'friend' ? 'friend' : 'group';
+                const intentPath = `social/${intentDir}/INTENT_${target}.md`;
+                const current = await tauri.workspaceRead(config.petId, intentPath) || '';
+                // 读 reply_brief 获取具体内容
+                let briefSummary = '';
+                try {
+                  const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`) || '';
+                  briefSummary = brief.trim().substring(0, 200);
+                } catch { /* ignore */ }
+                const sentContent = result.detail ? String(result.detail).substring(0, 100) : '';
+                const replyDesc = briefSummary || sentContent || '发了回复';
+                const updated = current.replace(/【我刚做了】[\s\S]*?(?=\n【|$)/, `【我刚做了】\n发了回复：${replyDesc}\n`);
+                if (updated !== current) await tauri.workspaceWrite(config.petId, intentPath, updated);
+              } catch { /* 非致命 */ }
+              // 发完消息后，Intent 休息再重评（有新消息则提前结束休息）
               getIntentState(target).postReplyRestUntil = Date.now() + 1000;
             }
           } catch (e) {
