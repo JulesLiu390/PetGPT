@@ -2583,6 +2583,17 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             }
           });
           await Promise.all(imagePromises);
+          // 发完图片后回写 INTENT 文件的【我刚做了】
+          const intentDir2 = targetType === 'friend' ? 'friend' : 'group';
+          const intentPath2 = `social/${intentDir2}/INTENT_${target}.md`;
+          try {
+            const current2 = await tauri.workspaceRead(config.petId, intentPath2) || '';
+            const imageDesc = imageActions.map(ia => ia.file).join('、');
+            const prefix = current2.includes('发了表情包') ? current2.match(/【我刚做了】[^\n]*/)?.[0] + '，并发了图片 ' + imageDesc
+              : `【我刚做了】发了图片 ${imageDesc}`;
+            const updated2 = current2.replace(/【我刚做了】[^\n]*/, prefix);
+            if (updated2 !== current2) await tauri.workspaceWrite(config.petId, intentPath2, updated2);
+          } catch { /* 非致命 */ }
         }
 
         // 并行预取当前对话人物档案，供下次 eval 注入（fire-and-forget）
