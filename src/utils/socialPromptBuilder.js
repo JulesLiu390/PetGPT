@@ -964,12 +964,12 @@ ${stickerIndex}
 4. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
    交接内容必须具体到：
    - 对谁说了什么（@谁 + 具体论点/数据/结论，不要只写"调侃"或"反驳"）
-   - 引用了哪些数据/事实（写出具体数字和来源，如"GPQA 88.4%"，不要只写"引用CC数据"）
+   - 引用了哪些数据/事实（写出具体数字和来源 URL，如"GPQA 88.4%（https://xxx）"，不要只写"引用CC数据"）
    - 用了什么逻辑攻击（写出完整推理链，如"判断力没有记忆沉淀→概率拟合→无灵魂"）
    - 建议的语气和措辞方向
    - 如果有 replyTo，注明"引用回复消息 #xxx"
    ⚠️ 这份交接同时用于防止下次 eval 重复相同内容——写得越具体，越不容易重复。如果你写"攻击 Amadeus"，下次 eval 不知道具体攻击了什么，可能会再说一遍。
-   如果回复需要引用 CC 研究结果：不要把完整内容抄进 brief，而是写 cc_read 指引，例如"请先用 cc_read(\"cc_查Qwen最新模型_sa_abc123.md\") 读取完整研究结果，基于结果详细回复"。Reply 模块有 cc_read 工具，会自己读取并写出有深度的长回复。
+   如果回复需要引用 CC 研究结果：不要把完整内容抄进 brief，而是写 cc_read 指引，例如"请先用 cc_read(\"cc_查Qwen最新模型_sa_abc123.md\") 读取完整研究结果，基于结果详细回复，引用关键数据时附上来源 URL"。Reply 模块有 cc_read 工具，会自己读取并写出有深度的长回复。
 
 5. 调用 write_intent_plan(actions=[...]) 提交行动决策。
 
@@ -1074,7 +1074,7 @@ ${stickerIndex}
 示例 14（CC 结果返回后引用回复）：
 → cc_history() → ✅ sa_abc123: "查 Qwen 3.5" → cc_查Qwen3.5最新情况_sa_abc123.md
 → social_edit(path="${intentStatePath}", content="【我刚做了】之前派CC查了 Qwen 3.5，结果已经回来了。【群里情况】姐姐还在等结果。【我的判断】CC 报告到了，内容很详细，该给姐姐交差了。")
-→ social_write(path="${scratchDir}/reply_brief.md", content="请先用 cc_read(\\"cc_查Qwen3.5最新情况_sa_abc123.md\\") 读取完整研究结果，基于结果详细回复姐姐。语气专业。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="请先用 cc_read(\\"cc_查Qwen3.5最新情况_sa_abc123.md\\") 读取完整研究结果。回复时引用关键数据并附上来源 URL，例如'GPQA 88.4%（https://xxx）'。语气专业。")
 → write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":80}])
 
 示例 15（有人说了抽象的话 → 截图留档，不发）：
