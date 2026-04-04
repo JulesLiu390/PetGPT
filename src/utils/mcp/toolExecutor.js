@@ -90,7 +90,7 @@ if (tauri.mcp?.onServersUpdated) {
 }
 
 // 工具执行超时配置 (毫秒)
-const TOOL_EXECUTION_TIMEOUT_MS = 300000; // 5 minutes for individual tool call
+const TOOL_EXECUTION_TIMEOUT_MS = 64000; // 64s for individual tool call
 const DEFAULT_TOOL_TIMEOUT_MS = 60000; // 1 minute default
 
 /**
