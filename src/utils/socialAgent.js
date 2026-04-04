@@ -1565,9 +1565,9 @@ export async function startSocialLoop(config, onStatusChange) {
         const entries = await tauri.workspaceListDir(config.petId, `social/${dir}/scratch_${t}`);
         if (entries && entries.length > 0) {
           for (const entry of entries) {
-            // 保留 lessons.md、cc_index.jsonl、cc_* 结果文件（跨会话持久化）
+            // 保留 lessons.md（跨会话持久化），其他全部清空
             const filename = entry.split('/').pop();
-            if (!entry.endsWith('/') && filename !== 'lessons.md' && filename !== 'cc_index.jsonl' && !filename.startsWith('cc_')) {
+            if (!entry.endsWith('/') && filename !== 'lessons.md') {
               await tauri.workspaceDeleteFile(config.petId, entry);
             }
           }
