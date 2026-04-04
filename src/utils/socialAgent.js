@@ -2390,13 +2390,22 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             forceEvalRecentSent = '\n\n【我刚发出的原文】\n' + recentSent.map(m => `> ${m.content}`).join('\n');
           }
         }
+        // 构建已发图片提示（防止重复发同一张图）
+        let recentSentImages = '';
+        if (state.lastPlan?.actions?.some(a => a.type === 'image')) {
+          const sentFiles = state.lastPlan.actions.filter(a => a.type === 'image').map(a => a.file);
+          if (sentFiles.length > 0) {
+            recentSentImages = `\n\n【我刚发出的图片】\n${sentFiles.map(f => `> ${f}`).join('\n')}\n🚫 以上图片已经发过，不要再次发送。`;
+          }
+        }
+
         let intentEvalPrompt;
         if (wasForceEval === 'reply') {
-          intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}\n\n⚠️ 以上是你刚才发出的原文。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+          intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}${recentSentImages}\n\n⚠️ 以上是你刚才发出的内容。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 已经发过的图片不要再发\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
         } else if (wasForceEval === 'subagent') {
           intentEvalPrompt = `你的后台研究任务（CC）刚刚完成。请查看上方"后台任务状态"中标记为 ✅ 的任务，用 social_read 读取结果文件，然后基于结果决定下一步行动。\n如果结果有用，可以 reply 把研究结论分享到群里（详细展开，不要只说一句"查到了"）。\n如果结果不理想，可以重新 dispatch 或放弃。\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
         } else if (wasForceEval === 'newmsg') {
-          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。${forceEvalRecentSent ? `${forceEvalRecentSent}\n\n注意不要重复已经表达过的内容。` : ''}\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。${forceEvalRecentSent}${recentSentImages}${(forceEvalRecentSent || recentSentImages) ? '\n\n注意不要重复已经表达过的内容或已发的图片。' : ''}\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
         } else if (state.lastPlan === null) {
           intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`;
         } else {
