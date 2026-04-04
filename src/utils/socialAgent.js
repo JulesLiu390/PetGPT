@@ -3043,16 +3043,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
             if (result && result.action === 'replied') {
               addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
-              // 发完消息后回写 INTENT 文件的【我刚做了】，用实际发送的内容
-              try {
-                const intentDir = targetType === 'friend' ? 'friend' : 'group';
-                const intentPath = `social/${intentDir}/INTENT_${target}.md`;
-                const current = await tauri.workspaceRead(config.petId, intentPath) || '';
-                const sentContent = result.detail ? String(result.detail) : '发了回复';
-                const updated = current.replace(/【我刚做了】[\s\S]*?(?=\n【|$)/, `【我刚做了】\n发了回复：${sentContent}\n`);
-                if (updated !== current) await tauri.workspaceWrite(config.petId, intentPath, updated);
-              } catch { /* 非致命 */ }
               // 发完消息后，Intent 休息再重评（有新消息则提前结束休息）
+              // Intent 自己通过读群消息分析【我刚做了】，不由代码覆盖
               getIntentState(target).postReplyRestUntil = Date.now() + 1000;
             }
           } catch (e) {
