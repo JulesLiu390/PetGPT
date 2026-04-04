@@ -1565,7 +1565,11 @@ export async function startSocialLoop(config, onStatusChange) {
         const entries = await tauri.workspaceListDir(config.petId, `social/${dir}/scratch_${t}`);
         if (entries && entries.length > 0) {
           for (const entry of entries) {
-            if (!entry.endsWith('/')) await tauri.workspaceDeleteFile(config.petId, entry);
+            // 保留 lessons.md 和 cc_index.jsonl（跨会话持久化）
+            const filename = entry.split('/').pop();
+            if (!entry.endsWith('/') && filename !== 'lessons.md' && filename !== 'cc_index.jsonl') {
+              await tauri.workspaceDeleteFile(config.petId, entry);
+            }
           }
         }
       } catch { /* 目录不存在，忽略 */ }
