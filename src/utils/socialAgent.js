@@ -2073,7 +2073,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
    * 返回 { turns: [{role, content}], ephemeral: {ownerSecret, nameL, nameR, msgL, msgR} }
    */
   const buildIntentTurns = (target) => {
-    const MAX_MSGS = 30;
+    const MAX_MSGS = 64;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
     // Intent 只用文本描述（_imageDescs），剥离未 resolve 的原始图片 URL
