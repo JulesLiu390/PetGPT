@@ -1303,7 +1303,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list' || toolName === 'webshot' || toolName === 'webshot_send';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1468,6 +1468,8 @@ export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'screenshot') return executeScreenshot(args, context);
   if (toolName === 'image_list') return executeImageList(context);
   if (toolName === 'image_send') return executeImageSend(args, context);
+  if (toolName === 'webshot') return executeWebshot(args, context);
+  if (toolName === 'webshot_send') return executeWebshotSend(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
   const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
@@ -1746,6 +1748,160 @@ async function executeImageSend(args, context) {
     };
   } catch (e) {
     return { error: `发送图片失败: ${e.message || e}` };
+  }
+}
+
+/** 获取 webshot 工具定义（截图网页，只存不发） */
+export function getWebshotToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'webshot',
+      description: '截取网页中匹配关键词的内容块截图并保存。只保存不发送，要发送请用 image action 或 webshot_send。keyword 用 CC 报告或搜索结果中的有意义英文/中文短语（如"faculty searches"），不要用纯数字或特殊符号。失败可换词重试。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: '目标网页 URL',
+          },
+          keyword: {
+            type: 'string',
+            description: '要定位的关键词，系统会模糊匹配并截取关键词所在的内容块',
+          },
+          desc: {
+            type: 'string',
+            description: '截图描述（可选，不填则用 keyword）',
+          },
+        },
+        required: ['url', 'keyword'],
+      },
+    },
+  };
+}
+
+/** 获取 webshot_send 工具定义（截图网页并立即发送） */
+export function getWebshotSendToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'webshot_send',
+      description: '截取网页中匹配关键词的内容块截图，保存并立即发送到当前群聊。适合甩截图佐证观点、分享数据。keyword 用有意义的英文/中文短语，不要用纯数字或特殊符号。失败可换词重试。',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: '目标网页 URL',
+          },
+          keyword: {
+            type: 'string',
+            description: '要定位的关键词，系统会模糊匹配并截取关键词所在的内容块',
+          },
+          desc: {
+            type: 'string',
+            description: '截图描述（可选，不填则用 keyword）',
+          },
+        },
+        required: ['url', 'keyword'],
+      },
+    },
+  };
+}
+
+/** webshot 核心：调 MCP 截图 + 保存到 workspace */
+async function _webshotCapture(args, context) {
+  const { url, keyword, desc } = args;
+  const { petId } = context;
+  if (!petId) return { error: '缺少 petId' };
+  if (!url || !keyword) return { error: '缺少 url 或 keyword' };
+
+  try {
+    // 调 webshot MCP
+    const result = await tauri.mcp.callToolByName('webshot__webshot', { url, keyword });
+
+    let base64Data = null;
+    let matchedText = '';
+    if (result?.content) {
+      for (const item of result.content) {
+        if (item.type === 'text') {
+          try {
+            const parsed = JSON.parse(item.text);
+            if (parsed.success && parsed.image) {
+              base64Data = parsed.image;
+              matchedText = parsed.matched_text || '';
+            } else if (!parsed.success) {
+              return { error: `网页截图失败: ${parsed.error || '未知错误'}。可以换个关键词重试——避免特殊符号（%#$等），用页面上实际出现的中文或英文短语。` };
+            }
+          } catch { /* not JSON */ }
+        }
+      }
+    }
+    if (!base64Data) return { error: '网页截图失败: 未获取到图片数据' };
+
+    // 生成文件名
+    const label = (desc || keyword).trim();
+    const safeName = label.substring(0, 30).replace(/[/\\:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+    const id = Date.now().toString(36);
+    const fileName = `webshot_${safeName}_${id}.png`;
+
+    // 保存到 workspace
+    await tauri.workspaceWriteBinary(petId, `social/images/${fileName}`, base64Data);
+
+    // 追加 index.toml
+    const tomlEntry = `\n[[screenshots]]\nfile = "${fileName}"\ndesc = "${label.replace(/"/g, '\\"')}"\ntype = "webshot"\nurl = "${url.replace(/"/g, '\\"')}"\nmatched_text = "${matchedText.substring(0, 100).replace(/"/g, '\\"')}"\ncreated_at = "${new Date().toISOString()}"\n`;
+    await tauri.workspaceAppend(petId, 'social/images/index.toml', tomlEntry);
+
+    return { fileName, label };
+  } catch (e) {
+    return { error: `网页截图失败: ${e.message || e}` };
+  }
+}
+
+/** 执行 webshot（只截图保存） */
+async function executeWebshot(args, context) {
+  const result = await _webshotCapture(args, context);
+  if (result.error) return result;
+  return {
+    content: [{ type: 'text', text: `✓ 网页截图已保存: ${result.fileName}\n描述: ${result.label}\nURL: ${args.url}` }],
+  };
+}
+
+/** 执行 webshot_send（截图 + 保存 + 发送 + INTENT 回写） */
+async function executeWebshotSend(args, context) {
+  const { petId, targetId, targetType, mcpServerName } = context;
+  if (!mcpServerName) return { error: '缺少 mcpServerName' };
+
+  const result = await _webshotCapture(args, context);
+  if (result.error) return result;
+
+  try {
+    // 读取刚保存的图片并发送
+    const base64Data = await tauri.workspaceReadBinary(petId, `social/images/${result.fileName}`);
+    if (!base64Data) return { error: `图片文件为空: ${result.fileName}` };
+
+    const sendToolName = `${mcpServerName}__send_image`;
+    await tauri.mcp.callToolByName(sendToolName, {
+      target: targetId,
+      target_type: targetType || 'group',
+      image: base64Data,
+    });
+
+    // INTENT 回写
+    const intentDir = targetType === 'friend' ? 'friend' : 'group';
+    const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
+    try {
+      const current = await tauri.workspaceRead(petId, intentPath) || '';
+      const prefix = `【我刚做了】发了网页截图 ${result.fileName}`;
+      const updated = current.replace(/【我刚做了】[^\n]*/, prefix);
+      if (updated !== current) await tauri.workspaceWrite(petId, intentPath, updated);
+    } catch { /* 非致命 */ }
+
+    return {
+      content: [{ type: 'text', text: `✓ 网页截图已保存并发送: ${result.fileName}\n描述: ${result.label}\nURL: ${args.url}` }],
+    };
+  } catch (e) {
+    return { error: `发送网页截图失败: ${e.message || e}` };
   }
 }
 

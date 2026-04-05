@@ -158,6 +158,7 @@ export default function SocialPage() {
   const [showSystem, setShowSystem] = useState(true);
   const [showIntent, setShowIntent] = useState(true);
   const [showSubagent, setShowSubagent] = useState(true);
+  const [showReflect, setShowReflect] = useState(true);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
 
   // ── Load assistants + providers ──
@@ -610,12 +611,13 @@ export default function SocialPage() {
     // Intent logs have target — apply target filter normally
     if (log.level === 'intent' || log.level === 'send') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (log.level === 'subagent') return showSubagent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'reflect') return showReflect && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent]);
+  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent, showReflect]);
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
@@ -1436,6 +1438,7 @@ export default function SocialPage() {
               <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
               <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
               <ToggleBtn active={showSubagent} onClick={() => setShowSubagent(!showSubagent)} icon="🤖" label="Subagent" />
+              <ToggleBtn active={showReflect} onClick={() => setShowReflect(!showReflect)} icon="🪞" label="Reflect" />
               {/* Lurk mode buttons for selected target */}
               {selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
@@ -1565,6 +1568,8 @@ export default function SocialPage() {
                     <LlmLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'subagent' ? (
                     <SubagentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'reflect' ? (
+                    <ReflectLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
@@ -1774,6 +1779,79 @@ function LlmLogEntry({ log, logFilter }) {
       {hasDetails && expanded && (
         <div className="mt-0.5 ml-4 pl-2 border-l-2 border-blue-300/40 text-blue-400 whitespace-pre-wrap break-words">
           {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReflectLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const ts = new Date(log.timestamp).toLocaleTimeString();
+
+  let details = {};
+  try { details = typeof log.details === 'string' ? JSON.parse(log.details) : (log.details || {}); } catch { details = {}; }
+
+  const statusColor = details.status === 'failed' ? 'text-red-500'
+    : details.status === 'dispatched' ? 'text-blue-500'
+    : 'text-teal-600';
+
+  return (
+    <div className="py-0.5">
+      <div
+        className={`flex items-start gap-1 cursor-pointer hover:bg-slate-50 rounded px-1 -mx-1 ${statusColor}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-slate-400 shrink-0 tabular-nums">{ts}</span>
+        <span className="text-teal-500 shrink-0">[reflect]</span>
+        {log.target && logFilter === 'all' && (
+          <span className="text-slate-300 shrink-0">[{log.target}]</span>
+        )}
+        <span className="font-medium">🪞</span>
+        <span className="flex-1 break-words">{log.message}</span>
+        <span className="text-slate-300 shrink-0">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && details && (
+        <div className="ml-16 mt-0.5 p-2 rounded bg-teal-50 border border-teal-200 text-[10px] space-y-2">
+          {details.elapsed != null && (
+            <div><span className="text-teal-600 font-semibold">耗时: </span><span className="text-slate-600">{details.elapsed}s</span></div>
+          )}
+          {details.replyCount != null && (
+            <div><span className="text-teal-600 font-semibold">Review 轮数: </span><span className="text-slate-600">{details.replyCount}</span></div>
+          )}
+          {details.lessons && (
+            <div>
+              <div className="text-teal-600 font-semibold mb-1">📋 Lessons 变化:</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">Before:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.lessons.before}</div>
+                </div>
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">After:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.lessons.after}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {details.principles && (
+            <div>
+              <div className="text-teal-600 font-semibold mb-1">⭐ Principles 变化:</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">Before:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.principles.before}</div>
+                </div>
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">After:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.principles.after}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {details.error && (
+            <div className="text-red-500"><span className="font-semibold">错误: </span>{details.error}</div>
+          )}
         </div>
       )}
     </div>

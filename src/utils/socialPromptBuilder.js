@@ -698,7 +698,7 @@ export async function buildIntentSystemPrompt({
   const [
     soulContent, userContent, memoryContent, groupRuleContent,
     contactsContent, peopleCacheContent, socialMemoryContent,
-    intentStateContent, scratchNotes, lessonsContent
+    intentStateContent, scratchNotes, lessonsContent, principlesContent
   ] = await Promise.all([
     cachedRead(() => readSoulFile(petId), `soul_${petId}`),
     cachedRead(() => readUserFile(petId), `user_${petId}`),
@@ -711,8 +711,23 @@ export async function buildIntentSystemPrompt({
     cachedRead(() => readScratchNotesFile(petId, targetId, targetType), `scratch_${petId}_${targetId}`),
     cachedRead(async () => {
       const dir = targetType === 'friend' ? 'friend' : 'group';
-      try { return await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/lessons.md`); } catch { return null; }
+      try {
+        const raw = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/lessons.json`);
+        if (!raw || !raw.trim()) return null;
+        const lessons = JSON.parse(raw);
+        if (!Array.isArray(lessons) || lessons.length === 0) return null;
+        // 按 count 降序，取前 10
+        const top = lessons.sort((a, b) => (b.count || 0) - (a.count || 0)).slice(0, 10);
+        return top.map(l => l.problem
+          ? `- (${l.count}次) ${l.problem} → ${l.action || ''}`
+          : `- (${l.count}次) ${l.lesson || ''}`
+        ).join('\n');
+      } catch { return null; }
     }, `lessons_${petId}_${targetId}`),
+    cachedRead(async () => {
+      const dir = targetType === 'friend' ? 'friend' : 'group';
+      try { return await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/principles.md`); } catch { return null; }
+    }, `principles_${petId}_${targetId}`),
   ]);
 
   // === 人格（SOUL.md） ===
@@ -813,9 +828,16 @@ export async function buildIntentSystemPrompt({
     sections.push('# 笔记\n' + scratchNotes);
   }
 
-  // === 行为教训（scratch/lessons.md，由 md_organize 维护） ===
-  if (lessonsContent) {
-    sections.push('# 行为教训（从过去的经验中学到的，按重要性排序）\n' + lessonsContent);
+  // === 行为准则 + 近期教训（由 Lessons Subagent 自动维护） ===
+  if (principlesContent || lessonsContent) {
+    let behaviorSection = '# 行为准则与教训\n';
+    if (principlesContent) {
+      behaviorSection += '## 核心原则（从长期经验中提炼，务必遵守）\n' + principlesContent + '\n';
+    }
+    if (lessonsContent) {
+      behaviorSection += '## 近期教训（最近犯过的错，避免重复）\n' + lessonsContent;
+    }
+    sections.push(behaviorSection);
   }
 
   if (sinceLastEvalMin > 0) {
@@ -853,10 +875,12 @@ ${stickerIndex}
 
 文件工具（按需使用）：
 - social_read(path)：按需读取其他社交文件（如 social/notes/、social/REPLY_STRATEGY.md 等）。当前对话成员档案已自动注入上方，无需手动读取。
-- md_organize(file, context, instruction)：异步整理 markdown 文件。整理助手会自动用 social_read + social_edit 修改文件。用于追加教训、精简文件、合并重复条目等。调用后不需要等待。
+- md_organize(file, context, instruction)：异步整理 markdown 文件。用于精简文件、合并重复条目等。调用后不需要等待。
 
 截图/图片工具：
 - screenshot(desc, message_id)：截取 QQ 聊天记录截图并保存。desc 是截图描述，message_id 是从哪条消息开始截（对话记录中 [#数字] 的数字）。截图会自动渲染为 QQ 风格并保存到 social/images/。注意：screenshot 只是保存，不会自动发送。如果要发到群里，需要在 write_intent_plan 的 actions 里加 {"type":"image","file":"截图文件名"}。
+- webshot(url, keyword, desc?)：截取网页中关键词所在的内容块截图并保存。只保存不发送，要发就用 image action 或 webshot_send。keyword 选择：用 CC 报告或搜索结果中出现的有意义的英文/中文短语（如"faculty searches"、"hiring decline"、"教职招聘"），不要用纯数字或特殊符号。失败可换词重试。
+- webshot_send(url, keyword, desc?)：截取网页截图并立即发送到群里。适合甩截图佐证观点、分享数据。会自动保存 + 发送 + 更新状态。keyword 选择同上。
 - image_list()：列出已保存的截图/图片（文件名、描述、日期）。发送前先看看有哪些可用。
 - image_send(file)：发送已保存的图片到当前群聊。file 是 social/images/ 下的文件名。
 
@@ -951,11 +975,20 @@ ${stickerIndex}
    - 放弃条件：什么情况下放弃这个计划
    下次 eval 时回顾这个策略，看进展到哪一步了，根据实际情况推进或调整。如果不需要多步计划，可以不写这段。
 
-**分析 3.5：值得截图吗？**（快速过一遍，不需要就跳过）
-- 刚才有没有特别好笑/离谱/名场面的发言？→ screenshot 存档
+**分析 3.5：值得截图吗？有图可以打脸吗？**（快速过一遍，不需要就跳过）
+
+截图存档：
+- 刚才有没有特别好笑/离谱/名场面的发言？→ screenshot，然后想想：这张截图本身就够搞笑/经典吗？够的话加 image action 发出来配一句评论
 - 有人说了以后可能会否认的话？→ screenshot 留证据
 - 有值得记录的技术共识或结论？→ screenshot 存档
-- 截图是随手的事，不需要理由也不需要发出来，觉得有意思就截
+- CC 调研拿到了关键数据的网页来源？→ webshot/webshot_send 截取关键段落
+- 辩论中需要网页数据打脸？→ webshot_send 一步截图+发送
+- 截图是随手的事。截完再想一步：这张图发出来大家会乐/会有反应吗？会就发，不会就留着
+
+打脸直觉（主动翻旧图）：
+- 有人在否认自己说过的话？→ image_list 看看有没有截过 ta 当时的发言
+- 有人的立场和之前明显矛盾（前几天还说A，现在说B）？→ image_list 翻翻有没有相关截图
+- 找到了就直接甩出来 + 配一句短评，效果远比文字引用强
 
 **分析四：有没有值得用 CC 研究的内容？**
 - 群里有人提到了我不确定的事实、技术细节或新闻？→ 先 cc_history 看有没有查过，没有就 dispatch
@@ -967,11 +1000,7 @@ ${stickerIndex}
    格式：每条一行 bullet，写简短结论，括号注明来源或详情文件路径。只记稳定事实，不记当前动态状态（那是 INTENT 文件的职责）。
    详细内容可另建文件（如 ${scratchDir}/about_张三.md），notes.md 里引用即可。
 
-3. 如果【效果复盘】中发现了值得记住的教训（不是显而易见的常识），调用 md_organize 追加到教训文件：
-   md_organize(file="${scratchDir}/lessons.md", context="行为教训文件。每条格式：[N] 教训 — 情境 (日期)，N是触发次数。相似教训合并计数，按频率降序排列，控制在15条以内。", instruction="新增教训：[1] 你的教训内容 — 具体情境 (日期)")
-   整理助手会自动判断是否有重复、合并计数、排序整理，你不需要自己操心格式。
-
-4. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
+3. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
    交接内容必须具体到：
    - 对谁说了什么（@谁 + 具体论点/数据/结论，不要只写"调侃"或"反驳"）
    - 引用了哪些数据/事实（写出具体数字和来源 URL，如"GPQA 88.4%（https://xxx）"，不要只写"引用CC数据"）
@@ -1120,6 +1149,33 @@ ${stickerIndex}
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次在潜水。【群里情况】张三问怎么配置 MCP server，其他人没回。【我的判断】这个我懂，而且没人答，写个详细回复帮他。")
 → social_write(path="${scratchDir}/reply_brief.md", content="详细回答张三的 MCP 配置问题。用连贯的段落解释，中间自然嵌入关键配置片段（直接贴纯文本，不用代码块格式）。先说结论怎么配，再解释为什么这样配，最后提一个常见坑。300字左右。")
 → write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":300}])
+
+示例 21（CC 查到数据 + 网页截图佐证 → 截图直接发）：
+→ cc_history() → ✅ sa_xyz789: "查 Claude 4 benchmark" → cc_查Claude4benchmark_sa_xyz789.md
+→ cc_read("cc_查Claude4benchmark_sa_xyz789.md") → 内容含 URL https://example.com/benchmarks
+→ webshot_send(url="https://example.com/benchmarks", keyword="Claude 4", desc="Claude 4 benchmark 数据")
+→ social_edit(path="${intentStatePath}", content="【我刚做了】CC 查到了 Claude 4 的 benchmark 数据，已截图发到群里。【群里情况】大家在讨论各家模型性能。【我的判断】配一句简短点评。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="点评截图中的数据，语气客观。一句话总结关键发现。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":20}])
+
+示例 22（有人质疑数据来源，已知 URL → webshot 直接截图打脸）：
+→ webshot_send(url="https://arxiv.org/abs/xxxx", keyword="GPQA 88.4", desc="GPQA benchmark 原始数据")
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次引用了 GPQA 数据被质疑。【群里情况】张三要求看来源。【我的判断】直接截论文页面打脸，配一句'数据在这'。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="配截图说'来源在此'，简短得意。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":8}])
+
+示例 23（被质疑但不记得来源 → CC 查找 → 下轮拿到 URL 再截图）：
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次说了某个数据。【群里情况】张三质疑我的数据来源，让我拿出证据。【我的判断】确实不记得来源了，先让 CC 去找原始出处，找到后截图发出来。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="先告诉张三'等我翻一下来源'，语气淡定。")
+→ write_intent_plan(actions=[{"type":"dispatch_subagent","task":"帮我找 XXX 数据的原始来源，需要具体 URL"},{"type":"reply","numChunks":1,"replyLen":8}])
+（下轮 CC 结果回来后 → cc_read 拿到 URL → webshot_send 截图发送）
+
+示例 24（被质疑 → 用 Tavily/fetch 搜到来源 → 截图佐证）：
+→ tavily__search(query="XXX benchmark 原始数据 site:arxiv.org") → 搜到 URL
+→ webshot_send(url="搜到的URL", keyword="关键数据", desc="XXX 数据来源")
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次的数据被质疑。【群里情况】张三要证据。【我的判断】搜到了原文，截图发出来。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="'来源找到了，截图在上面'，附一句数据解读。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
 
 重要原则：
 - 你要像一个真人一样思考，而不是模拟 AI 角色

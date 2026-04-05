@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -1565,9 +1565,9 @@ export async function startSocialLoop(config, onStatusChange) {
         const entries = await tauri.workspaceListDir(config.petId, `social/${dir}/scratch_${t}`);
         if (entries && entries.length > 0) {
           for (const entry of entries) {
-            // 保留 lessons.md（跨会话持久化），其他全部清空
+            // 保留 lessons.json 和 principles.md（跨会话持久化），其他全部清空
             const filename = entry.split('/').pop();
-            if (!entry.endsWith('/') && filename !== 'lessons.md') {
+            if (!entry.endsWith('/') && filename !== 'lessons.json' && filename !== 'principles.md') {
               await tauri.workspaceDeleteFile(config.petId, entry);
             }
           }
@@ -1796,6 +1796,216 @@ export async function startSocialLoop(config, onStatusChange) {
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
   const replyWakeFlag = new Map();                // target → true（Intent 评出 ≥3 时置位，Reply 消费后清除）
   const replyWakeResolvers = new Map();           // target → resolve 回调（用于中断 Reply loop 的 sleep）
+
+  // === Lessons Review 机制 ===
+  const LESSONS_MAX_WAIT_MS = 30 * 60 * 1000;       // 最长 30 分钟必须 review
+  const pendingReviews = new Map();                  // target → [{ intentSnapshot, replyTime, chatSnapshot }]
+  const lessonsReviewTimers = new Map();             // target → setTimeout id（30 分钟兜底计时器）
+
+  /**
+   * 快照 INTENT 文件 + 对话记录，加入待 review 队列
+   */
+  const snapshotForReview = async (target, targetType) => {
+    try {
+      const intentDir = targetType === 'friend' ? 'friend' : 'group';
+      const intentContent = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`).catch(() => '');
+      const buf = dataBuffer.get(target);
+      const messages = buf ? buf.messages.slice(-30) : []; // 最近 30 条作为上下文
+      const chatSnapshot = messages.map(m => {
+        const isBotMsg = m.sender_id === config.botQQ;
+        const name = isBotMsg ? '[BOT]' : (m.sender_name || m.sender_id);
+        return `[${name}] ${m.content || ''}`;
+      }).join('\n');
+
+      if (!pendingReviews.has(target)) pendingReviews.set(target, []);
+      pendingReviews.get(target).push({
+        intentSnapshot: intentContent,
+        replyTime: Date.now(),
+        chatSnapshot,
+      });
+
+      // 设置 30 分钟兜底计时器（如果没有的话）
+      if (!lessonsReviewTimers.has(target)) {
+        const timerId = setTimeout(() => {
+          lessonsReviewTimers.delete(target);
+          dispatchLessonsReview(target, targetType);
+        }, LESSONS_MAX_WAIT_MS);
+        lessonsReviewTimers.set(target, timerId);
+      }
+    } catch (e) {
+      addLog('warn', `Lessons snapshot failed: ${e.message}`, null, target);
+    }
+  };
+
+  /**
+   * 发起 Lessons Review Subagent
+   */
+  const dispatchLessonsReview = async (target, targetType) => {
+    const reviews = pendingReviews.get(target);
+    if (!reviews || reviews.length === 0) return;
+
+    // 取出所有待 review 并清空队列
+    const batch = reviews.splice(0, reviews.length);
+    pendingReviews.delete(target);
+
+    // 清除兜底计时器
+    const timerId = lessonsReviewTimers.get(target);
+    if (timerId) { clearTimeout(timerId); lessonsReviewTimers.delete(target); }
+
+    const dir = targetType === 'friend' ? 'friend' : 'group';
+    const taskId = `lr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
+
+    try {
+      // 读取当前 lessons + principles
+      const lessonsContent = await tauri.workspaceRead(config.petId, `social/${dir}/scratch_${target}/lessons.json`).catch(() => '');
+      const principlesContent = await tauri.workspaceRead(config.petId, `social/${dir}/scratch_${target}/principles.md`).catch(() => '');
+
+      // 构建 review 输入
+      const reviewSections = batch.map((r, i) => {
+        const time = new Date(r.replyTime).toLocaleTimeString();
+        return `### Reply ${i + 1} (${time})\n\n**INTENT 文件（bot 当时的判断）：**\n${r.intentSnapshot || '（无）'}\n\n**对话记录：**\n${r.chatSnapshot || '（无）'}`;
+      }).join('\n\n---\n\n');
+
+      const nowDate = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' });
+
+      const claudeMd = `# Reflect Task
+
+当前日期：${nowDate}
+
+你是一个独立的行为分析师。你的任务是分析 [BOT] 在群聊中的行为表现，更新教训记录和核心原则。
+
+## 系统限制（bot 的能力边界，不要把系统限制当成 bot 的错误）
+- 图片和文字消息无法合并为一条发送，图片（image action）和回复（reply action）是两个独立动作，分开发送是正常行为
+- bot 无法编辑已发送的消息，只能发新消息
+- bot 无法撤回已发送的消息
+- bot 无法看到谁在打字、谁在线
+- 消息有延迟，bot 看到的消息可能不是最新的
+
+## 待 Review 的行为（共 ${batch.length} 轮）
+
+${reviewSections}
+
+## 当前教训文件 (lessons.json)
+
+\`\`\`json
+${lessonsContent || '[]'}
+\`\`\`
+
+## 当前核心原则 (principles.md)
+
+${principlesContent || '（空）'}
+
+## 你的工作
+
+### 1. 分析每轮 Reply 的效果
+对照 INTENT 文件（bot 的意图）和对话记录（实际效果），判断 bot 这轮行为有没有问题：
+- 有没有被无视、被反驳、被嫌话多、被说杠？
+- 有没有打断别人、抢话、自说自话？
+- 有没有说错事实、误导别人？
+- 时机和语气合适吗？
+- 只关注负面问题。表现正常或好的不需要记录。
+
+### 2. 更新 lessons.json（只记负面教训）
+JSON 数组格式，每条：
+\`\`\`json
+{"problem": "什么行为在什么场景下出了问题", "action": "什么情况该做什么、什么情况不该做什么", "count": N, "lastDate": "YYYY-MM-DD"}
+\`\`\`
+- problem：写清楚具体行为和场景（如"对方还在连续发言时插话打断"），但不要复述具体事件经过或绑定具体人名
+- action：写清楚判断标准和行为指导（如"同一人连发多条时等对方说完再回应，不要看到第一条就急着回"），要让 bot 看了知道什么时候该做什么时候不该做
+- count：触发次数
+- lastDate：最近触发日期
+- 相似问题合并（按 problem 语义匹配，更新 count、lastDate，action 可更新为更好的表述）
+- 控制在 15 条以内
+- 如果本轮没有负面问题，保持原样不新增
+
+### 3. 更新 principles.md（如果需要）
+当同一 problem 主题下的教训总触发次数（相关条目的 count 之和）达到 100 次：
+- 把相关 lessons 合并提炼为一条核心原则
+- 原则要写清楚：什么场景 + 具体怎么做 + 为什么。把 lessons 里积累的 action 合并成完整的行为指南
+- 提炼后从 lessons.json 删除被吸收的条目
+- 核心原则控制在 8 条以内
+
+每条 principle 的格式：先写总则，再列出不同情境下的具体动作（该回应/无视/用工具/截图等）。
+
+示例——假设 lessons.json 中有以下相关条目（count 之和 ≥ 100）：
+\`\`\`
+(45次) 未核实就下技术结论，忽略已有的反例 → 发表前先检查有没有反例或补充说明
+(35次) 对自身底层架构凭直觉猜测，被当场纠正 → 不确定时先查代码确认再说
+(25次) 被纠正的技术错误在后续回复中再次犯 → 被纠正过的错误记住不要重复
+\`\`\`
+
+提炼为 principles.md 中的一条：
+\`\`\`
+技术判断必须有依据：发表观点前先核实有没有反例或已有的补充信息，没把握的技术细节宁可不说。
+→ 不确定时：先 dispatch CC 查证据或用 Tavily 搜索，拿到数据再发言
+→ 被当场纠正时：立刻认错，不要辩解或找借口
+→ 有数据支撑时：正常发言，附上来源 URL 或 webshot 截图佐证
+→ 涉及自身架构时：先查代码确认，不要凭直觉猜
+\`\`\`
+
+再一个示例：
+\`\`\`
+(50次) 同一内容或高度相似的观点重复发送多次 → 同一观点说一次就够
+(30次) 对方还在连续发言时插话打断 → 等对方说完再回应
+(25次) 群聊话题转移时强行拉回旧话题 → 跟随自然话题流转
+\`\`\`
+
+提炼为：
+\`\`\`
+控制发言节奏和频率：说话的时机和频率比内容更重要。
+→ 同一观点已经说过：不再重复，无视这个冲动
+→ 对方还在连续发消息：等对方说完再回应，不要看到第一条就急着回
+→ 群聊话题自然转移了：跟随新话题，不要强行拉回旧话题
+→ 被要求少说话时：立即降低频率，简短回应表示收到
+\`\`\`
+
+### 4. 违反检测
+如果 bot 的行为违反了已有核心原则：
+- 不要写入 lessons.json（那是重复信息）
+- 直接在 principles.md 中加强该原则，在末尾追加违反记录：
+  ⚠️ 原则内容（最近违反：日期 简述什么行为违反了）
+- 连续 3 次以上违反升级为：
+  🚫 原则内容（连续N次违反，上次：日期）
+
+## Output
+
+1. 把修改后的 lessons 写入 output/lessons.json（必须是 valid JSON 数组）
+2. 把修改后的 principles 写入 output/principles.md
+3. **验证**：写完 output/lessons.json 后，用 Read 工具读回来，确认是 valid JSON。如果解析失败，修复后重新写入。
+
+只输出文件内容，不要输出分析过程。
+`;
+
+      // 写入 subagent workspace
+      await tauri.workspaceWrite(config.petId, `subagents/${taskId}/CLAUDE.md`, claudeMd);
+      await tauri.workspaceWrite(config.petId, `subagents/${taskId}/output/.gitkeep`, '');
+
+      const cwd = await tauri.workspaceGetPath(config.petId, `subagents/${taskId}`, false);
+
+      await tauri.subagentSpawn(
+        taskId,
+        cwd,
+        config.subagentModel || 'sonnet',
+        120, // 2 分钟超时足够
+        claudeMd,
+      );
+
+      // 注册到 subagentRegistry
+      subagentRegistry.set(taskId, {
+        status: 'running',
+        task: `Lessons review (${batch.length} replies)`,
+        target,
+        targetType,
+        dir,
+        source: 'lessons', // 特殊标记，区别于 'social'
+        createdAt: Date.now(),
+      });
+
+      addLog('reflect', `🪞 Reflect dispatched (${batch.length} replies)`, JSON.stringify({ taskId, replyCount: batch.length, status: 'dispatched' }), target);
+    } catch (e) {
+      addLog('warn', `Reflect dispatch failed: ${e.message}`, null, target);
+    }
+  };
 
   /** 获取/创建某群的 IntentState */
   const getIntentState = (target) => {
@@ -2318,7 +2528,9 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         }
         intentToolDefs.push(getScreenshotToolDefinition());
         intentToolDefs.push(getImageSendToolDefinition());
-          intentToolDefs.push(getImageListToolDefinition());
+        intentToolDefs.push(getImageListToolDefinition());
+        intentToolDefs.push(getWebshotToolDefinition());
+        intentToolDefs.push(getWebshotSendToolDefinition());
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
@@ -3009,6 +3221,9 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           consumedAtMe.set(target, consumed);
         }
         
+        // ── Lessons Review: 在下一次 Reply 启动前 review 上一次 ──
+        dispatchLessonsReview(target, targetType).catch(() => {});
+
         // ── 启动 LLM（单轮，不再自主 catchup，新消息交还 Intent 决策） ──
         llmRunning = true;
         lastLoggedNewCount = 0;
@@ -3046,6 +3261,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               // 发完消息后，Intent 休息再重评（有新消息则提前结束休息）
               // Intent 自己通过读群消息分析【我刚做了】，不由代码覆盖
               getIntentState(target).postReplyRestUntil = Date.now() + 1000;
+              // Lessons: 快照 INTENT + 对话记录，加入待 review 队列
+              snapshotForReview(target, targetType).catch(() => {});
             }
           } catch (e) {
             addLog('error', `Reply ${label} LLM error`, e.message || e, target);

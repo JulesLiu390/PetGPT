@@ -39,6 +39,61 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
 
     const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
 
+    // === Reflect (lessons review) subagent: special handling ===
+    if (entry.source === 'lessons') {
+      try {
+        const dir = entry.dir || 'group';
+        const scratchPath = `social/${dir}/scratch_${entry.target}`;
+
+        // 读取旧内容（用于 diff）
+        const oldLessons = await tauri.workspaceRead(petId, `${scratchPath}/lessons.json`).catch(() => '');
+        const oldPrinciples = await tauri.workspaceRead(petId, `${scratchPath}/principles.md`).catch(() => '');
+
+        const lessonsOut = await tauri.workspaceRead(petId, `subagents/${taskId}/output/lessons.json`).catch(() => '');
+        const principlesOut = await tauri.workspaceRead(petId, `subagents/${taskId}/output/principles.md`).catch(() => '');
+
+        if (lessonsOut || principlesOut) {
+          if (lessonsOut) {
+            // 验证 JSON 有效性，无效则跳过
+            let lessonsValid = false;
+            try { JSON.parse(lessonsOut); lessonsValid = true; } catch {
+              addLog?.('warn', `🪞 Reflect: lessons.json invalid, skipping`, null, entry.target);
+            }
+            if (lessonsValid) {
+              await tauri.workspaceWrite(petId, `${scratchPath}/lessons.json`, lessonsOut);
+            }
+          }
+          if (principlesOut) {
+            await tauri.workspaceWrite(petId, `${scratchPath}/principles.md`, principlesOut);
+          }
+          entry.status = 'done';
+          addLog?.('reflect', `🪞 Reflect done (${elapsed}s)`,
+            JSON.stringify({
+              taskId, elapsed, status: 'done',
+              lessons: { before: oldLessons || '（空）', after: lessonsOut || '（无变化）' },
+              principles: { before: oldPrinciples || '（空）', after: principlesOut || '（无变化）' },
+            }),
+            entry.target);
+        } else {
+          entry.status = 'failed';
+          entry.error = 'No output files';
+          addLog?.('reflect', `🪞 Reflect failed — no output`,
+            JSON.stringify({ taskId, elapsed, status: 'failed', error: 'No output files' }),
+            entry.target);
+        }
+      } catch (e) {
+        entry.status = 'failed';
+        entry.error = e.message || String(e);
+        addLog?.('reflect', `🪞 Reflect error: ${entry.error}`,
+          JSON.stringify({ taskId, elapsed, status: 'failed', error: entry.error }),
+          entry.target);
+      }
+      _cleanupWorkspace(petId, taskId);
+      _notify('done', { taskId, entry });
+      return;
+    }
+
+    // === Normal CC subagent handling ===
     try {
       const result = await tauri.workspaceRead(petId, `subagents/${taskId}/output/result.md`).catch(() => '');
       if (result && result.trim()) {
@@ -143,6 +198,9 @@ export function getActiveCount() {
 async function _cleanupWorkspace(petId, taskId) {
   try {
     await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/result.md`).catch(() => {});
+    await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/lessons.md`).catch(() => {});
+    await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/lessons.json`).catch(() => {});
+    await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/principles.md`).catch(() => {});
     await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/.gitkeep`).catch(() => {});
     await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/CLAUDE.md`).catch(() => {});
   } catch { /* best-effort */ }
