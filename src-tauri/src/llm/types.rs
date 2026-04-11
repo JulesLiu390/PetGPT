@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 pub enum ApiFormat {
     OpenaiCompatible,
     GeminiOfficial,
+    AnthropicNative,
 }
 
 impl Default for ApiFormat {
@@ -20,6 +21,7 @@ impl From<&str> for ApiFormat {
     fn from(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "gemini_official" | "gemini" => Self::GeminiOfficial,
+            "anthropic_native" | "anthropic" => Self::AnthropicNative,
             _ => Self::OpenaiCompatible,
         }
     }

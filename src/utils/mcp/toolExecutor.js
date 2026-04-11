@@ -7,6 +7,14 @@
 import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
+import * as anthropicAdapter from '../llm/adapters/anthropicNative.js';
+
+/** 根据 apiFormat 选择 adapter */
+function pickAdapter(apiFormat) {
+  if (apiFormat === 'gemini_official') return geminiAdapter;
+  if (apiFormat === 'anthropic_native') return anthropicAdapter;
+  return openaiAdapter;
+}
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
@@ -493,7 +501,7 @@ export const callLLMWithTools = async ({
   usagePetId,       // optional petId for usage logging (falls back to builtinToolContext.petId)
   maxIterations,    // optional max iterations override (default 100)
 }) => {
-  const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
+  const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
 
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
@@ -854,7 +862,7 @@ export const callLLMStreamWithTools = async ({
   abortSignal,
   builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
 }) => {
-  const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
+  const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
   
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用

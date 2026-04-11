@@ -1,13 +1,14 @@
 /**
  * LLM 统一入口
- * 
+ *
  * 提供统一的 callLLM / callLLMStream 接口，
  * 根据 apiFormat 自动选择合适的 adapter
- * 
+ *
  * API Formats:
  * - openai_compatible: OpenAI / Grok / Ollama / 其他兼容服务
  * - gemini_official: Google Gemini 官方 REST API (支持更多多模态)
- * 
+ * - anthropic_native: Anthropic Messages API (原生，支持 prompt caching)
+ *
  * 后端模式:
  * - Rust: 通过 Tauri invoke 调用 Rust 后端 (推荐)
  * - JS: 直接在前端使用 fetch 调用 API (兼容模式)
@@ -15,6 +16,7 @@
 
 import * as openaiAdapter from './adapters/openaiCompatible.js';
 import * as geminiAdapter from './adapters/geminiOfficial.js';
+import * as anthropicAdapter from './adapters/anthropicNative.js';
 import { llmCall, llmStream, subscribeLlmStream } from '../tauri.js';
 
 // 是否使用 Rust 后端 (可通过环境变量控制，默认启用)
@@ -22,11 +24,14 @@ const USE_RUST_BACKEND = true;
 
 /**
  * 根据 apiFormat 获取对应的 adapter
- * @param {string} apiFormat - 'openai_compatible' | 'gemini_official'
+ * @param {string} apiFormat - 'openai_compatible' | 'gemini_official' | 'anthropic_native'
  */
 const getAdapter = (apiFormat) => {
   if (apiFormat === 'gemini_official') {
     return geminiAdapter;
+  }
+  if (apiFormat === 'anthropic_native') {
+    return anthropicAdapter;
   }
   // 默认走 OpenAI-compatible (包括旧 provider 值的兼容)
   return openaiAdapter;

@@ -6,7 +6,7 @@ import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
 import { getSafeMood, EMOTION_MOODS, SYSTEM_STATES, ALL_MOODS, getRandomIdleState } from '../utils/moodDetector';
-import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames } from '../utils/socialAgent';
+import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
@@ -628,7 +628,7 @@ export const Character = () => {
 
   // 监听来自其他窗口的社交控制事件（ManagementPage SocialPanel）
   useEffect(() => {
-    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenSetTargetPaused, unlistenQueryTargetNames;
+    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenSetCustomRule, unlistenSetTargetPaused, unlistenQueryTargetNames;
     let cancelled = false;
     const setup = async () => {
       const { listen: listenEvent, emit: emitEvent } = await import('@tauri-apps/api/event');
@@ -673,6 +673,12 @@ export const Character = () => {
         emitEvent('social-lurk-mode-changed', { target, lurkModes: getLurkModes() });
       });
 
+      // 用户自定义群规则热更新（per-target）
+      unlistenSetCustomRule = await listenEvent('social-set-custom-rule', (event) => {
+        const { target, rules } = event.payload || {};
+        setCustomGroupRule(target, rules);
+      });
+
       // 暂停/恢复单群处理（per-target）
       unlistenSetTargetPaused = await listenEvent('social-set-target-paused', (event) => {
         const { target, paused } = event.payload || {};
@@ -711,6 +717,7 @@ export const Character = () => {
       unlistenClearLogs?.();
       unlistenConfigUpdated?.();
       unlistenSetLurkMode?.();
+      unlistenSetCustomRule?.();
       unlistenSetTargetPaused?.();
       unlistenQueryTargetNames?.();
     };

@@ -674,6 +674,8 @@ export async function buildIntentSystemPrompt({
   nameDelimiterL = '', nameDelimiterR = '', msgDelimiterL = '', msgDelimiterR = '',
   lurkMode = 'normal',
   subagentRegistry = null,
+  customGroupRules = '',
+  voiceEnabled = false,
 }) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : (targetId || '当前群');
   const intentStateDir = targetType === 'friend' ? 'friend' : 'group';
@@ -749,15 +751,22 @@ export async function buildIntentSystemPrompt({
     sections.push(memoryTruncated);
   }
 
+  // === 用户自定义群规则（最高优先级，不可违反） ===
+  if (customGroupRules && customGroupRules.trim()) {
+    sections.push(`# ⚠️ ${groupLabel} 自定义规则（最高优先级）`);
+    sections.push(customGroupRules.trim());
+    sections.push('⚠️ 以上是用户设定的硬性规则，必须严格遵守，优先级高于所有其他判断。');
+  }
+
   // === 当前群规则（social/group/RULE_{群号}.md，只读） ===
   const groupRuleTruncated = truncateContent(groupRuleContent, SOCIAL_FILE_TRUNCATE);
-  sections.push(`# ${groupLabel} 群规则`);
+  sections.push(`# ${groupLabel} 群信息`);
   if (groupRuleTruncated) {
     sections.push(groupRuleTruncated);
   } else {
     sections.push('（空）');
   }
-  sections.push('（以上群规则为只读参考，帮助你理解群氛围）');
+  sections.push('（以上群信息由 bot 自动学习积累，只读参考）');
 
   // === 联系人索引（social/CONTACTS.md，只读） ===
   const contactsTruncated = truncateContent(contactsContent, SOCIAL_FILE_TRUNCATE);
@@ -883,11 +892,29 @@ ${stickerIndex}
 - webshot_send(url, keyword, desc?)：截取网页截图并立即发送到群里。适合甩截图佐证观点、分享数据。会自动保存 + 发送 + 更新状态。keyword 选择同上。
 - image_list()：列出已保存的截图/图片（文件名、描述、日期）。发送前先看看有哪些可用。
 - image_send(file)：发送已保存的图片到当前群聊。file 是 social/images/ 下的文件名。
+${voiceEnabled ? `
+语音工具（独立于 reply 的副通道）：
+- voice_send(text)：用 TTS 把一句话朗读成语音发到群里。
+  ⚠️ **硬限 50 字**（含标点和空格），超 1 字都会被拒。**实际请控制在 30-40 字以内**给自己留容错。
+  ⚠️ **voice ≠ reply 的语音版**。voice 是氛围/情绪/卖萌的副通道，不是用来传递信息的。所有"内容/观点/解释/回答"必须走 reply 文字，语音只承载短促的情绪表达。
+  ⚠️ **voice_send 是即时调用，不要写进 write_intent_plan.actions**。直接在 Intent 这一轮里 call 这个 tool 即可，发送会立刻完成。和 webshot_send / sticker_send 同类。
+  ⚠️ **voice 和 reply 可以并行**：想"发语音 + 发干货回复"时，先 voice_send 一句短的（"早呀～"/"嘿嘿来啦"），然后在 plan 里照常写 reply action 发文字。**不要**把所有想说的话都塞进 voice 然后省略 reply。
+  ⚠️ **每轮 Intent 最多 voice_send 一次**。已经发过别再发。
+  适用场景：
+  - 群友明确说"发个语音听听" → voice_send 一句简短问候/卖萌（≤30 字），同时 reply 发完整回答
+  - 适合配音的短句：打招呼、撒娇、惊呼、感叹、自嘲（"啊啊啊我懂了"/"嘿嘿被发现了"）
+  - **不**适合的场景：解释概念、引用 URL、回答技术问题、@多人 —— 这些走文字 reply
+  写 voice text 之前先数一遍字数，超过 40 就立刻砍短或重写。` : ''}
 
 历史查询工具（只读，按需使用）：
-- history_read(query, start_time, end_time?)：搜索${groupLabel}的历史聊天原文，按关键词 + 时间范围过滤
-- daily_read(date?, target?)：读取每日摘要。传 target 读该群详细日报，不传读全局跨群日报
-- daily_list()：列出有哪些日期的日报可读
+- chat_search(keywords, sender?, start?, end?, sort?, limit?)：⭐ 关键词全文搜索（FTS5）。
+  - keywords 必填。语法："Claude" / "Claude benchmark" (AND) / "Claude OR GPT" / '"精确短语"' / "Claude*" (前缀)
+  - sender 必须传 QQ号（纯数字），不接受昵称
+  - start/end 用相对时间（"7d"/"1h"/"30m"）或绝对时间（"2026-04-05"）。同时传 = 时间区间
+  - sort: relevance(默认) / newest / oldest
+  - 用途：找特定话题/某人发言、找原话打脸、回顾某话题的所有讨论
+- chat_context(message_id, before?, after?)：根据消息 ID 取前后 N 条同群消息（默认前后各 5 条）。先用 chat_search 找到锚点，再用 chat_context 看上下文。
+- history_read / daily_read / daily_list：（旧）QQ MCP 提供的历史查询，慢且不全。优先用 chat_search。
 
 跨群日志工具（只读）：
 - group_log_list()：列出所有有日志记录的群
@@ -936,6 +963,15 @@ ${stickerIndex}
 - 谁在主导对话节奏？
 - 有没有人在跟我说话、回应我或 @ 我？
 - 有没有值得截图的名场面？（如有，分析 3.5 处理）
+- 有没有需要查历史的线索？（如有，分析 2.5 处理）
+
+**分析 2.5：要不要查历史？**（快速判断，不需要就跳过）
+- 有人否认说过某话 / 引用某句话 / 让我"翻翻聊天记录"？→ chat_search(keywords="关键词") 找原文
+- 想知道某人对某话题的态度？→ chat_search(keywords="话题词", sender="QQ号", start="3d")
+- 想回顾某段时间内某话题的讨论？→ chat_search(keywords="话题词", start="2026-04-05", end="2026-04-06")
+- 找到一条相关消息后想看它周围发生了什么？→ chat_context(message_id) 取前后 5 条
+- ⚠️ chat_search 必须传 keywords。想纯按时间或发送者拉消息时，至少要给一个有意义的关键词
+- buffer 里只有最近 64 条，更早的对话只能靠这些工具拿到 — 别凭印象瞎猜
 
 **分析三：我的想法与判断**
 - 我对当前话题的真实反应是什么？有没有实质内容想说？
@@ -1176,6 +1212,43 @@ ${stickerIndex}
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次的数据被质疑。【群里情况】张三要证据。【我的判断】搜到了原文，截图发出来。")
 → social_write(path="${scratchDir}/reply_brief.md", content="'来源找到了，截图在上面'，附一句数据解读。")
 → write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
+
+示例 25（有人否认说过某话 → chat_search 找原文打脸）：
+→ chat_search(keywords="GPQA 88.4", sender="1094950020", start="7d") → 找到原话 msg_id: abc123
+→ chat_context(message_id="abc123", before=3, after=3) → 看看上下文确认语境
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次在围观。【群里情况】张三现在否认自己说过 GPQA 88.4，但我找到了 ta 之前的原话。【我的判断】直接引用打脸。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="引用张三 N 天前的原话（msg_id: abc123），简短说'你这不是说过吗'。语气淡定但有据。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
+
+示例 26（有人提到"上午聊的 Claude" → chat_search 找相关讨论 → chat_context 看完整上下文）：
+→ chat_search(keywords="Claude", start="3h", end="2h", limit=20) → 找到上午关于 Claude 的讨论 msg_id: abc123
+→ chat_context(message_id="abc123", before=5, after=10) → 看完整对话片段
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚醒。【群里情况】李四提到'上午聊的 Claude'，我去翻了一下是关于部署成本的讨论。【我的判断】顺着话题接，给出一个相关补充。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="基于上午的讨论给一个补充观点。结合具体内容（不是空泛附和）。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":40}])
+
+示例 27（想知道某人对话题的态度 → chat_search 用关键词+sender）：
+→ chat_search(keywords="工作 OR 加班 OR 累", sender="7654321", start="3d") → 看李四最近 3 天关于工作的发言
+→ social_edit(path="${intentStatePath}", content="【我刚做了】刚被李四 @了。【群里情况】李四最近 3 天发言里多次抱怨加班，态度偏负面。【我的判断】回应时避免过于积极，先共情再给建议。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="先共情李四最近的工作压力（基于查到的发言模式），再给一个具体建议。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":50}])
+${voiceEnabled ? `
+示例 28（群友要求发语音 → voice_send 短语音 + reply 干货 并行）：
+→ voice_send(text="嘿嘿嘿来啦～") // ⚠️ 11字 ≪ 50 字硬限。voice 只发短情绪，不要塞答案
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次发了文字。【群里情况】姐姐让我发个语音听听，DolphinDB 在问技术问题。【我的判断】voice 发个短问候卖萌就行，技术回答走 reply 文字。")
+→ social_write(path="${scratchDir}/reply_brief.md", content="回答 DolphinDB 的技术问题，简短具体，语气淡定。")
+→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":80}])
+
+示例 29（用语音传递情绪/感叹 → 一句话即可）：
+→ voice_send(text="啊啊啊我懂了！") // 7 字
+→ social_edit(path="${intentStatePath}", content="【我刚做了】上次在听讲。【群里情况】姐姐讲明白了一个我之前没懂的概念。【我的判断】语音感叹一句更生动，文字反而显得敷衍。")
+→ write_intent_plan(actions=[])
+
+⚠️ 关于 voice_send 的反例（不要这样做）：
+✗ voice_send(text="@1099208199 七子哥好呀，还有 Amadeus，以后请多指教。姐姐说这是军备竞赛，那我是不是该表现得更有威胁一点？嘿嘿。") // 52 字超限被拒，且内容/@ 不适合配音
+✗ 把要回答的技术内容塞进 voice （voice 是情绪通道，不是信息通道）
+✗ 同一轮 Intent 调两次 voice_send
+✗ 写完 voice text 不数字数 → 经常踩 50 字硬限` : ''}
 
 重要原则：
 - 你要像一个真人一样思考，而不是模拟 AI 角色

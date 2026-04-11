@@ -361,10 +361,75 @@ export async function executeSocialFileTool(toolName, args, context) {
         }
       }
       break;
-    case 'social_write':
+    case 'social_write': {
+      // 拦截写入 reply_brief.md 的调用：如果思考过程中有新消息，强制先 social_edit 再重试
+      const isReplyBrief = args?.path?.includes('reply_brief.md');
+      const injectionWatermarks = context.intentInjectionWatermarks;
+      const interceptCounts = context.intentInterceptCounts;
+      const buf = context.dataBuffer?.get(context.targetId);
+      const MAX_INTERCEPTS = 5;
+
+      if (isReplyBrief && injectionWatermarks && interceptCounts && buf) {
+        const watermark = injectionWatermarks.get(context.targetId) || '';
+        const currentIntercepts = interceptCounts.get(context.targetId) || 0;
+        const customRules = context.customGroupRules || '';
+
+        // 找到水位线之后的新消息
+        let newMessages = [];
+        if (watermark) {
+          const idx = buf.messages.findIndex(m => m.message_id === watermark);
+          if (idx >= 0) newMessages = buf.messages.slice(idx + 1);
+        }
+
+        if (newMessages.length > 0 && currentIntercepts < MAX_INTERCEPTS) {
+          // 推进水位线 + 拦截计数
+          const lastNewMsg = newMessages[newMessages.length - 1];
+          if (lastNewMsg?.message_id) injectionWatermarks.set(context.targetId, lastNewMsg.message_id);
+          interceptCounts.set(context.targetId, currentIntercepts + 1);
+
+          // 格式化新消息
+          const botId = context.botQQ || '';
+          const updateText = newMessages.map(m => {
+            const name = m.sender_id === botId ? '[BOT]' : (m.sender_name || m.sender_id || '?');
+            return `[${name}] ${m.content || ''}`;
+          }).join('\n');
+
+          // 写日志（独立条目，用户可看到拦截事件和注入的新消息）
+          if (context.addLog) {
+            context.addLog(
+              'intent',
+              `🛑 intercept social_write: ${newMessages.length} 条新消息 (${currentIntercepts + 1}/${MAX_INTERCEPTS})`,
+              JSON.stringify({
+                intercepted: 'reply_brief.md',
+                newMessages: newMessages.map(m => ({
+                  sender: m.sender_name || m.sender_id,
+                  content: m.content,
+                  isBot: m.sender_id === botId,
+                })),
+                interceptCount: currentIntercepts + 1,
+                maxIntercepts: MAX_INTERCEPTS,
+              }),
+              context.targetId
+            );
+          }
+
+          const customRulesBlock = customRules && customRules.trim()
+            ? `\n\n⚠️ 自定义群规则（最高优先级，必须严格遵守）：\n${customRules.trim()}\n`
+            : '';
+
+          return {
+            content: [{
+              type: 'text',
+              text: `⚠️ social_write 暂缓执行。你在思考过程中，群里出现了 ${newMessages.length} 条新消息（含 bot 自己刚发送的）：\n\n${updateText}\n\n你必须：\n1. 先用 social_edit 重新更新 INTENT 状态文件（【我刚做了】【群里情况】【我的判断】要反映这些新消息）\n2. 然后再次调用 social_write 写 reply_brief（可能需要调整内容或取消回复）\n\n不要直接跳到 write_intent_plan — 基于旧状态的 plan 已经过时了。${customRulesBlock}\n(第 ${currentIntercepts + 1}/${MAX_INTERCEPTS} 次拦截)`
+            }],
+          };
+        }
+      }
+
       result = await executeSocialWrite(petId, args);
       if (args?.path) getInvalidateCache().then(fn => fn?.(args.path)).catch(() => {});
       break;
+    }
     case 'social_edit':
       result = await executeSocialEdit(petId, args);
       if (args?.path) getInvalidateCache().then(fn => fn?.(args.path)).catch(() => {});
@@ -1303,7 +1368,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list' || toolName === 'webshot' || toolName === 'webshot_send';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list' || toolName === 'webshot' || toolName === 'webshot_send' || toolName === 'chat_search' || toolName === 'chat_context' || toolName === 'voice_send';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1470,6 +1535,9 @@ export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'image_send') return executeImageSend(args, context);
   if (toolName === 'webshot') return executeWebshot(args, context);
   if (toolName === 'webshot_send') return executeWebshotSend(args, context);
+  if (toolName === 'chat_search') return executeChatSearch(args, context);
+  if (toolName === 'chat_context') return executeChatContext(args, context);
+  if (toolName === 'voice_send') return executeVoiceSend(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
   const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
@@ -1809,6 +1877,158 @@ export function getWebshotSendToolDefinition() {
   };
 }
 
+// ============ chat_search / chat_context（QQ 历史检索） ============
+
+/** 解析时间字符串 → 毫秒时间戳。支持相对（"7d"/"1h"/"30m"/"30s"）和绝对（ISO 日期）。 */
+function _parseTimeArg(s) {
+  if (!s || typeof s !== 'string') return null;
+  const trimmed = s.trim();
+  if (!trimmed) return null;
+  // 相对时间
+  const m = trimmed.match(/^(\d+)([smhd])$/);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    const unit = m[2];
+    const ms = unit === 's' ? n * 1000
+             : unit === 'm' ? n * 60 * 1000
+             : unit === 'h' ? n * 3600 * 1000
+             : n * 86400 * 1000;
+    return Date.now() - ms;
+  }
+  // 绝对时间
+  const t = Date.parse(trimmed);
+  if (!isNaN(t)) return t;
+  return null;
+}
+
+/** 格式化一条消息为人类可读 */
+function _formatChatMessage(m) {
+  const time = new Date(m.timestamp).toLocaleString('zh-CN', { hour12: false });
+  const sender = m.isBot ? '[BOT]' : m.senderId;
+  const replyTo = m.replyToId ? ` (reply→${m.replyToId})` : '';
+  return `[${time}] ${sender}: ${m.content}\n  ↳ msg_id: ${m.messageId}${replyTo}`;
+}
+
+export function getChatSearchToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'chat_search',
+      description: '搜索群聊历史消息（本地 SQLite + FTS5 全文搜索）。\n\nkeywords 语法（必填）：\n  "Claude" → 模糊匹配\n  "Claude benchmark" → AND\n  "Claude OR GPT" → OR\n  \'"Claude 4"\' → 精确短语\n  "Claude*" → 前缀匹配\n\n时间格式：相对（"30m"/"1h"/"7d"）或绝对（"2026-04-05"）\n\nsender 必须传 QQ号（纯数字），不接受昵称。',
+      parameters: {
+        type: 'object',
+        properties: {
+          keywords: { type: 'string', description: 'FTS5 全文搜索语法（必填）' },
+          sender: { type: 'string', description: '发送者 QQ号（纯数字）' },
+          target: { type: 'string', description: '群号；不传 = 当前群' },
+          start: { type: 'string', description: '起始时间，相对（"7d"）或绝对（"2026-04-05"）' },
+          end: { type: 'string', description: '结束时间，同上格式，默认 now' },
+          sort: { type: 'string', enum: ['relevance', 'newest', 'oldest'], description: '排序方式。默认 relevance' },
+          limit: { type: 'integer', description: '最多返回条数，默认 20，最大 200' },
+        },
+        required: ['keywords'],
+      },
+    },
+  };
+}
+
+export function getChatContextToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'chat_context',
+      description: '获取某条消息前后的同群消息上下文。先用 chat_search 找到一条相关消息，再用 chat_context 看周围对话。',
+      parameters: {
+        type: 'object',
+        properties: {
+          message_id: { type: 'string', description: '锚点消息 ID（从 chat_search 结果获取）' },
+          before: { type: 'integer', description: '取前 N 条，默认 5' },
+          after: { type: 'integer', description: '取后 N 条，默认 5' },
+        },
+        required: ['message_id'],
+      },
+    },
+  };
+}
+
+
+async function executeChatSearch(args, context) {
+  const { keywords, sender, target, start, end, sort, limit } = args;
+  const { targetId } = context;
+
+  // keywords 必填
+  if (!keywords || typeof keywords !== 'string' || !keywords.trim()) {
+    return { error: '缺少 keywords 参数（必填）' };
+  }
+
+  // target 默认为当前群
+  const finalTarget = target || targetId || '';
+
+  // 时间解析
+  const startTs = _parseTimeArg(start);
+  const endTs = _parseTimeArg(end);
+  if (start && startTs === null) return { error: `start 参数解析失败: "${start}"。请用 "7d" / "1h" / "2026-04-05" 等格式` };
+  if (end && endTs === null) return { error: `end 参数解析失败: "${end}"` };
+
+  try {
+    const result = await tauri.chatHistorySearch({
+      keywords: keywords.trim(),
+      sender: sender || null,
+      target: finalTarget || null,
+      startTs,
+      endTs,
+      sort: sort || null,
+      limit: limit || 20,
+    });
+
+    if (!result.messages || result.messages.length === 0) {
+      return { content: [{ type: 'text', text: '未找到匹配的历史消息。' }] };
+    }
+
+    const lines = result.messages.map(_formatChatMessage);
+    const sortLabel = sort || 'relevance';
+    return {
+      content: [{
+        type: 'text',
+        text: `找到 ${result.total} 条消息（按 ${sortLabel} 排序）：\n\n${lines.join('\n\n')}`,
+      }],
+    };
+  } catch (e) {
+    return { error: `chat_search 失败: ${e.message || e}` };
+  }
+}
+
+async function executeChatContext(args, context) {
+  void context;
+  const { message_id, before = 5, after = 5 } = args;
+  if (!message_id) return { error: '缺少 message_id 参数' };
+
+  try {
+    const result = await tauri.chatHistoryContext(String(message_id), Number(before), Number(after));
+    if (!result.anchor) {
+      return { error: `未找到消息 ${message_id}（可能尚未被记录到 chat_history）` };
+    }
+
+    const sections = [];
+    if (result.before && result.before.length > 0) {
+      sections.push(result.before.map(_formatChatMessage).join('\n\n'));
+    }
+    sections.push('▶ ' + _formatChatMessage(result.anchor) + '   ← 锚点');
+    if (result.after && result.after.length > 0) {
+      sections.push(result.after.map(_formatChatMessage).join('\n\n'));
+    }
+
+    return {
+      content: [{
+        type: 'text',
+        text: `消息 ${message_id} 前后上下文（前 ${result.before.length} 条 + 后 ${result.after.length} 条）：\n\n${sections.join('\n\n')}`,
+      }],
+    };
+  } catch (e) {
+    return { error: `chat_context 失败: ${e.message || e}` };
+  }
+}
+
 /** webshot 核心：调 MCP 截图 + 保存到 workspace */
 async function _webshotCapture(args, context) {
   const { url, keyword, desc } = args;
@@ -1903,6 +2123,150 @@ async function executeWebshotSend(args, context) {
   } catch (e) {
     return { error: `发送网页截图失败: ${e.message || e}` };
   }
+}
+
+// ============ voice_send（ElevenLabs TTS → qq mcp send_voice） ============
+
+/** voice_send 文字硬限：超过即拒绝（控费 + SILK 时长） */
+const VOICE_SEND_MAX_CHARS = 50;
+
+/** 获取 voice_send 工具定义 */
+export function getVoiceSendToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'voice_send',
+      description: `用配置的 TTS 音色把文字朗读成语音并发送到当前会话。仅在用户明确要求语音、需要卖萌、或有声音表达更合适的场景使用，普通对话不要用。文字最多 ${VOICE_SEND_MAX_CHARS} 字。`,
+      parameters: {
+        type: 'object',
+        properties: {
+          text: {
+            type: 'string',
+            description: `要朗读的文字内容，最多 ${VOICE_SEND_MAX_CHARS} 字`,
+          },
+        },
+        required: ['text'],
+      },
+    },
+  };
+}
+
+/** 把成功/失败信息回写到 INTENT 文件的【我刚做了】行 */
+async function _writeVoiceIntent(petId, targetId, targetType, line) {
+  const intentDir = targetType === 'friend' ? 'friend' : 'group';
+  const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
+  try {
+    const current = (await tauri.workspaceRead(petId, intentPath)) || '';
+    const updated = current.replace(/【我刚做了】[^\n]*/, `【我刚做了】${line}`);
+    if (updated !== current) {
+      await tauri.workspaceWrite(petId, intentPath, updated);
+    }
+  } catch { /* 非致命 */ }
+}
+
+/** 执行 voice_send：TTS → 暂存 → 发送 → sentCache + INTENT 回写 */
+async function executeVoiceSend(args, context) {
+  const { petId, targetId, targetType, mcpServerName, ttsConfig, sentCache } = context;
+
+  // 校验
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+  if (!mcpServerName) return { error: '缺少 mcpServerName' };
+  if (!ttsConfig || !ttsConfig.enabled) {
+    const err = 'TTS 未在社交设置中启用';
+    await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
+    return { error: err };
+  }
+  if (!ttsConfig.apiKey || !ttsConfig.voiceId) {
+    const err = 'TTS 缺少 apiKey 或 voiceId';
+    await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
+    return { error: err };
+  }
+  const text = (args?.text || '').trim();
+  if (!text) {
+    return { error: 'text 为空' };
+  }
+  if (text.length > VOICE_SEND_MAX_CHARS) {
+    const err = `text 超过 ${VOICE_SEND_MAX_CHARS} 字（实际 ${text.length}），拒绝发送`;
+    await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
+    return { error: err };
+  }
+
+  // 1. 调 ElevenLabs 生成 base64 音频
+  let base64Audio;
+  try {
+    base64Audio = await tauri.elevenlabsTts({
+      apiKey: ttsConfig.apiKey,
+      voiceId: ttsConfig.voiceId,
+      text,
+      modelId: ttsConfig.modelId || undefined,
+    });
+  } catch (e) {
+    const err = `TTS 生成失败: ${e?.message || e}`;
+    await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err.slice(0, 80)}`);
+    return { error: err };
+  }
+  if (!base64Audio) {
+    const err = 'TTS 返回空数据';
+    await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
+    return { error: err };
+  }
+
+  // 2. 暂存到 workspace
+  const fileName = `voice_${Date.now().toString(36)}.mp3`;
+  try {
+    await tauri.workspaceWriteBinary(petId, `social/voices/${fileName}`, base64Audio);
+  } catch (e) {
+    // 暂存失败不阻止发送，但记日志
+    console.warn('[voice_send] 暂存失败:', e);
+  }
+
+  // 3. 调 qq mcp 的 send_voice
+  let sendResult;
+  try {
+    const sendToolName = `${mcpServerName}__send_voice`;
+    sendResult = await tauri.mcp.callToolByName(sendToolName, {
+      target: targetId,
+      target_type: targetType || 'group',
+      audio: base64Audio, // 不带 base64:// 前缀
+    });
+  } catch (e) {
+    const err = `send_voice 失败: ${e?.message || e}`;
+    await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err.slice(0, 80)}`);
+    return { error: err };
+  }
+
+  // 4. 解析 message_id
+  let msgId = null;
+  try {
+    const rawText = sendResult?.content?.[0]?.text;
+    const parsed = rawText ? JSON.parse(rawText) : sendResult;
+    if (parsed?.success === false) {
+      const err = `send_voice 返回失败: ${parsed.error || '未知错误'}`;
+      await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err.slice(0, 80)}`);
+      return { error: err };
+    }
+    msgId = parsed?.message_id?.toString() || parsed?.message_ids?.[0]?.toString() || null;
+  } catch { /* 非致命 */ }
+
+  // 5. 写入 sentCache（消息池子），让 bot 下一轮 Intent 知道自己说了什么
+  // qq mcp 服务端 buffer 里只会出现 [语音]，如果不写这里 bot 会失忆
+  if (sentCache) {
+    const arr = sentCache.get(targetId) || [];
+    arr.push({
+      content: `[发送了语音："${text}"]`,
+      timestamp: new Date().toISOString(),
+      message_id: msgId,
+      _isVoiceSend: true,
+    });
+    sentCache.set(targetId, arr);
+  }
+
+  // 6. INTENT 回写
+  await _writeVoiceIntent(petId, targetId, targetType, `发了语音："${text}"`);
+
+  return {
+    content: [{ type: 'text', text: `✓ 已发送语音: "${text}"` }],
+  };
 }
 
 /**

@@ -105,6 +105,7 @@ pub async fn stream_chat(
     match request.api_format {
         ApiFormat::OpenaiCompatible => stream_openai(app, client, request, cancel_token).await,
         ApiFormat::GeminiOfficial => stream_gemini(app, client, request, cancel_token).await,
+        ApiFormat::AnthropicNative => stream_anthropic(app, client, request, cancel_token).await,
     }
 }
 
@@ -502,6 +503,203 @@ async fn stream_gemini(
         done: true,
     };
     
+    let event_name = format!("llm-chunk:{}", conversation_id);
+    let _ = app.emit(&event_name, &done_chunk);
+
+    if cancelled {
+        Ok(LlmResponse {
+            content: full_text,
+            mood: "normal".to_string(),
+            error: Some("Stream cancelled by user".to_string()),
+            tool_calls: None,
+        })
+    } else {
+        Ok(LlmResponse {
+            content: full_text,
+            mood: "normal".to_string(),
+            error: None,
+            tool_calls: None,
+        })
+    }
+}
+
+/// Anthropic Messages API 流式调用
+async fn stream_anthropic(
+    app: AppHandle,
+    client: Client,
+    request: LlmRequest,
+    cancel_token: Arc<AtomicBool>,
+) -> Result<LlmResponse, String> {
+    let base = request.base_url.as_deref().unwrap_or("https://api.anthropic.com/v1");
+    let base = if base == "default" { "https://api.anthropic.com/v1" } else { base };
+    let base = if !base.contains("/v1") {
+        if base.ends_with('/') { format!("{}v1", base) } else { format!("{}/v1", base) }
+    } else {
+        base.to_string()
+    };
+    let endpoint = format!("{}/messages", base.trim_end_matches('/'));
+
+    // 提取 system 消息
+    let system_text: String = request.messages.iter()
+        .filter(|m| m.role == Role::System)
+        .map(|m| m.content.as_text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    // 构建 messages
+    let messages: Vec<serde_json::Value> = request.messages.iter()
+        .filter(|m| m.role != Role::System)
+        .map(|msg| {
+            let role = match msg.role {
+                Role::User | Role::Tool => "user",
+                Role::Assistant => "assistant",
+                Role::System => "user",
+            };
+            let content = match &msg.content {
+                MessageContent::Text(s) => serde_json::json!([{ "type": "text", "text": s }]),
+                MessageContent::Parts(parts) => {
+                    let blocks: Vec<serde_json::Value> = parts.iter().filter_map(|p| {
+                        match p {
+                            ContentPart::Text { text } => Some(serde_json::json!({
+                                "type": "text",
+                                "text": text
+                            })),
+                            ContentPart::ImageUrl { image_url } => {
+                                let url = &image_url.url;
+                                if url.starts_with("data:") {
+                                    if let Some(idx) = url.find(",") {
+                                        let header = &url[5..idx];
+                                        let data = &url[idx + 1..];
+                                        let media_type = header.split(';').next().unwrap_or("image/jpeg");
+                                        Some(serde_json::json!({
+                                            "type": "image",
+                                            "source": {
+                                                "type": "base64",
+                                                "media_type": media_type,
+                                                "data": data
+                                            }
+                                        }))
+                                    } else { None }
+                                } else if url.starts_with("http") {
+                                    Some(serde_json::json!({
+                                        "type": "image",
+                                        "source": { "type": "url", "url": url }
+                                    }))
+                                } else { None }
+                            }
+                            ContentPart::FileUrl { .. } => None,
+                        }
+                    }).collect();
+                    serde_json::json!(blocks)
+                }
+            };
+            serde_json::json!({ "role": role, "content": content })
+        })
+        .collect();
+
+    let mut body = serde_json::json!({
+        "model": request.model,
+        "max_tokens": request.max_tokens.unwrap_or(4096),
+        "messages": messages,
+        "stream": true,
+        "temperature": request.temperature.unwrap_or(0.7),
+    });
+
+    if !system_text.is_empty() {
+        body["system"] = serde_json::json!([
+            {
+                "type": "text",
+                "text": system_text,
+                "cache_control": { "type": "ephemeral" }
+            }
+        ]);
+    }
+
+    let response = client
+        .post(&endpoint)
+        .header("x-api-key", &request.api_key)
+        .header("anthropic-version", "2023-06-01")
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("HTTP error: {}", e))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status, error_text));
+    }
+
+    let mut stream = response.bytes_stream();
+    let mut buffer = String::new();
+    let mut full_text = String::new();
+    let conversation_id = request.conversation_id.clone();
+    let mut cancelled = false;
+
+    while let Some(chunk_result) = stream.next().await {
+        if cancel_token.load(Ordering::SeqCst) {
+            log::info!("[LLM] Anthropic stream cancelled for conversation: {}", conversation_id);
+            cancelled = true;
+            break;
+        }
+
+        let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
+        let chunk_str = String::from_utf8_lossy(&chunk);
+        buffer.push_str(&chunk_str);
+
+        // Anthropic SSE 事件：
+        //   message_start | content_block_start | content_block_delta | content_block_stop | message_delta | message_stop | ping
+        let lines: Vec<&str> = buffer.split('\n').collect();
+        let remaining = lines.last().cloned().unwrap_or("");
+
+        for line in &lines[..lines.len().saturating_sub(1)] {
+            let line = line.trim();
+            if !line.starts_with("data: ") {
+                continue;
+            }
+            let json_str = line[6..].trim();
+            if json_str.is_empty() {
+                continue;
+            }
+            let evt: serde_json::Value = match serde_json::from_str(json_str) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let evt_type = evt["type"].as_str().unwrap_or("");
+            // 只处理 content_block_delta 中的 text_delta（流式文本输出）
+            if evt_type == "content_block_delta" {
+                if let Some(delta) = evt["delta"].as_object() {
+                    if delta.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                        if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                            full_text.push_str(text);
+                            let stream_chunk = StreamChunk {
+                                conversation_id: conversation_id.clone(),
+                                delta: text.to_string(),
+                                full_text: full_text.clone(),
+                                done: false,
+                            };
+                            let event_name = format!("llm-chunk:{}", conversation_id);
+                            if let Err(e) = app.emit(&event_name, &stream_chunk) {
+                                eprintln!("[LLM Stream] Failed to emit chunk: {:?}", e);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        buffer = remaining.to_string();
+    }
+
+    // 完成事件
+    let done_chunk = StreamChunk {
+        conversation_id: conversation_id.clone(),
+        delta: String::new(),
+        full_text: full_text.clone(),
+        done: true,
+    };
     let event_name = format!("llm-chunk:{}", conversation_id);
     let _ = app.emit(&event_name, &done_chunk);
 

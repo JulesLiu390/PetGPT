@@ -5,6 +5,7 @@ pub mod settings;
 pub mod mcp_servers;
 pub mod api_providers;
 pub mod skins;
+pub mod chat_history;
 
 use rusqlite::{Connection, Result};
 use std::sync::Mutex;
@@ -21,6 +22,7 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.init_tables()?;
+        db.init_chat_history()?;
         Ok(db)
     }
 

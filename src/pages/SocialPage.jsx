@@ -72,6 +72,23 @@ export default function SocialPage() {
   const [fetchingGroups, setFetchingGroups] = useState(false);
   const [fetchingFriends, setFetchingFriends] = useState(false);
 
+  // ── ElevenLabs TTS models ──
+  // 兜底模型列表：当 API key 没有 models_read 权限时仍可选择
+  const FALLBACK_TTS_MODELS = [
+    { model_id: 'eleven_multilingual_v2', name: 'Multilingual v2 (推荐，多语言)' },
+    { model_id: 'eleven_flash_v2_5', name: 'Flash v2.5 (超低延迟，多语言)' },
+    { model_id: 'eleven_turbo_v2_5', name: 'Turbo v2.5 (低延迟，多语言)' },
+    { model_id: 'eleven_flash_v2', name: 'Flash v2 (超低延迟，英文)' },
+    { model_id: 'eleven_turbo_v2', name: 'Turbo v2 (低延迟，英文)' },
+    { model_id: 'eleven_monolingual_v1', name: 'Monolingual v1 (英文)' },
+    { model_id: 'eleven_multilingual_v1', name: 'Multilingual v1 (旧版)' },
+  ];
+  const [ttsModels, setTtsModels] = useState(FALLBACK_TTS_MODELS); // [{ model_id, name }]
+  const [loadingTtsModels, setLoadingTtsModels] = useState(false);
+  const [ttsModelsError, setTtsModelsError] = useState('');
+  const [testingVoice, setTestingVoice] = useState(false);
+  const [testVoiceError, setTestVoiceError] = useState('');
+
   // Helper: ensure MCP server is running, then call a tool
   const callMcpTool = async (toolName, args = {}) => {
     const serverName = config.mcpServerName;
@@ -1351,6 +1368,107 @@ export default function SocialPage() {
                       </div>
                     )}
                   </Card>
+
+                  {/* TTS / 语音 (ElevenLabs) */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={!!config.ttsConfig?.enabled}
+                        onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">TTS 语音 (ElevenLabs)</span>
+                      <span className="text-xs text-gray-400">启用 voice_send 内置工具，最多 50 字</span>
+                    </div>
+                    {config.ttsConfig?.enabled && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <FormGroup label="API Key" hint="ElevenLabs xi-api-key">
+                          <Input
+                            type="password"
+                            value={config.ttsConfig?.apiKey || ''}
+                            onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), apiKey: e.target.value })}
+                            placeholder="sk_..."
+                          />
+                        </FormGroup>
+                        <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? '生成中...' : 'ElevenLabs voice id')}>
+                          <div className="flex gap-2">
+                            <Input
+                              type="text"
+                              value={config.ttsConfig?.voiceId || ''}
+                              onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), voiceId: e.target.value })}
+                              placeholder="21m00Tcm4TlvDq8ikWAM"
+                            />
+                            <button
+                              type="button"
+                              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
+                              disabled={testingVoice || !config.ttsConfig?.apiKey || !config.ttsConfig?.voiceId}
+                              onClick={async () => {
+                                setTestingVoice(true);
+                                setTestVoiceError('');
+                                try {
+                                  const base64 = await tauri.elevenlabsTts({
+                                    apiKey: config.ttsConfig.apiKey,
+                                    voiceId: config.ttsConfig.voiceId,
+                                    text: 'hello',
+                                    modelId: config.ttsConfig.modelId || undefined,
+                                  });
+                                  if (!base64) throw new Error('返回为空');
+                                  const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
+                                  await audio.play();
+                                } catch (err) {
+                                  setTestVoiceError(String(err?.message || err).slice(0, 80));
+                                } finally {
+                                  setTestingVoice(false);
+                                }
+                              }}
+                            >
+                              {testingVoice ? '测试中...' : '测试'}
+                            </button>
+                          </div>
+                        </FormGroup>
+                        <FormGroup label="Model" hint={ttsModelsError ? `刷新失败: ${ttsModelsError}（仍可使用兜底列表）` : `${ttsModels.length} 个模型可选`}>
+                          <div className="flex gap-2">
+                            <select
+                              className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                              value={config.ttsConfig?.modelId || ''}
+                              onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), modelId: e.target.value })}
+                            >
+                              <option value="">默认 (eleven_multilingual_v2)</option>
+                              {ttsModels.map(m => (
+                                <option key={m.model_id} value={m.model_id}>{m.name} ({m.model_id})</option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                              disabled={loadingTtsModels || !config.ttsConfig?.apiKey}
+                              title="拉取最新模型列表（需要 API key 有 models_read 权限）"
+                              onClick={async () => {
+                                setLoadingTtsModels(true);
+                                setTtsModelsError('');
+                                try {
+                                  const list = await tauri.elevenlabsListModels(config.ttsConfig.apiKey);
+                                  if (Array.isArray(list) && list.length > 0) {
+                                    setTtsModels(list);
+                                  } else {
+                                    setTtsModelsError('返回为空');
+                                  }
+                                } catch (err) {
+                                  // 失败保留原有列表（兜底或上次成功的）
+                                  setTtsModelsError(String(err?.message || err).slice(0, 80));
+                                } finally {
+                                  setLoadingTtsModels(false);
+                                }
+                              }}
+                            >
+                              {loadingTtsModels ? '加载中...' : '刷新'}
+                            </button>
+                          </div>
+                        </FormGroup>
+                      </div>
+                    )}
+                  </Card>
                 </div>
               )}
 
@@ -1484,6 +1602,28 @@ export default function SocialPage() {
                 );
               })()}
             </div>
+
+            {/* Custom Group Rules — editable per target */}
+            {selectedTarget && (
+              <CustomGroupRules
+                target={selectedTarget}
+                value={(config.customGroupRules || {})[selectedTarget] || ''}
+                onChange={async (text) => {
+                  const updated = { ...(config.customGroupRules || {}), [selectedTarget]: text };
+                  // 1. 更新本地 state
+                  setConfig(prev => ({ ...prev, customGroupRules: updated }));
+                  // 2. 立即持久化到 DB（下次重启会自动加载）
+                  if (selectedPetId) {
+                    try {
+                      const configToSave = { ...config, customGroupRules: updated, petId: selectedPetId };
+                      await saveSocialConfig(selectedPetId, configToSave);
+                    } catch (e) {
+                      console.error('Failed to persist custom rules:', e);
+                    }
+                  }
+                }}
+              />
+            )}
 
             {/* Intent Plan — pinned above logs when a target is selected */}
             {selectedTarget && (() => {
@@ -1779,6 +1919,95 @@ function LlmLogEntry({ log, logFilter }) {
       {hasDetails && expanded && (
         <div className="mt-0.5 ml-4 pl-2 border-l-2 border-blue-300/40 text-blue-400 whitespace-pre-wrap break-words">
           {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CustomGroupRules({ target, value, onChange }) {
+  const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState(value || '');
+  const [showConfirm, setShowConfirm] = useState(false);
+  const hasContent = value && value.trim();
+  const isDirty = draft !== (value || '');
+
+  // Sync draft when value changes externally (e.g. switching target)
+  useEffect(() => { setDraft(value || ''); }, [value]);
+
+  const handleApply = () => {
+    setShowConfirm(true);
+  };
+
+  const confirmApply = () => {
+    onChange(draft);
+    // 通知运行中的 agent 热更新（立即生效）
+    emit('social-set-custom-rule', { target, rules: draft });
+    setShowConfirm(false);
+  };
+
+  return (
+    <div className="shrink-0 border-b border-slate-100 bg-amber-50/30 px-3 py-1">
+      <div
+        className="flex items-center gap-1 cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-[9px] font-semibold text-amber-600 uppercase tracking-wide">⚠️ Custom Rules</span>
+        {hasContent && !expanded && (
+          <span className="text-[9px] text-amber-500 ml-1 truncate max-w-[300px]">{value.trim().split('\n')[0]}</span>
+        )}
+        <span className="text-slate-300 ml-auto text-[10px]">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && (
+        <div className="mt-1">
+          <textarea
+            className="w-full p-2 text-xs font-mono rounded border border-amber-200 bg-white resize-y min-h-[60px] max-h-[200px] focus:outline-none focus:ring-1 focus:ring-amber-300"
+            placeholder="输入该群的自定义规则（最高优先级，bot 必须遵守）&#10;例如：不要主动提起政治话题&#10;对群主要尊敬"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <div className="flex items-center gap-2 mt-1 mb-0.5">
+            {isDirty && (
+              <span className="text-[9px] text-amber-500">未保存的修改</span>
+            )}
+            <button
+              onClick={handleApply}
+              disabled={!isDirty}
+              className={`ml-auto px-3 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                isDirty
+                  ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                  : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+              }`}
+            >
+              应用规则
+            </button>
+          </div>
+        </div>
+      )}
+      {/* 确认弹窗 */}
+      {showConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-lg shadow-xl p-4 max-w-md w-full mx-4">
+            <div className="text-sm font-semibold text-slate-800 mb-2">⚠️ 确认应用自定义规则</div>
+            <div className="text-xs text-slate-600 mb-3">以下规则将立即注入到下一轮 Intent 评估中，优先级最高：</div>
+            <div className="p-2 rounded bg-amber-50 border border-amber-200 text-xs font-mono whitespace-pre-wrap max-h-[200px] overflow-y-auto mb-3">
+              {draft.trim() || '（空，将清除所有自定义规则）'}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="px-3 py-1 text-xs rounded border border-slate-300 text-slate-600 hover:bg-slate-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmApply}
+                className="px-3 py-1 text-xs rounded bg-amber-500 text-white hover:bg-amber-600"
+              >
+                确认应用
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

@@ -92,11 +92,32 @@ export const GEMINI_OFFICIAL_PRESETS = [
 ];
 
 /**
+ * Anthropic Native 格式的预设端点
+ */
+export const ANTHROPIC_NATIVE_PRESETS = [
+  {
+    id: 'anthropic',
+    label: 'Anthropic (Official)',
+    baseUrl: 'https://api.anthropic.com/v1',
+    notes: 'Official Anthropic Messages API (with prompt caching)'
+  },
+  {
+    id: 'custom',
+    label: 'Custom URL',
+    baseUrl: '',
+    notes: 'Enter your own endpoint (e.g., proxy)'
+  }
+];
+
+/**
  * 根据 apiFormat 获取对应的预设列表
  */
 export const getPresetsForFormat = (apiFormat) => {
   if (apiFormat === 'gemini_official') {
     return GEMINI_OFFICIAL_PRESETS;
+  }
+  if (apiFormat === 'anthropic_native') {
+    return ANTHROPIC_NATIVE_PRESETS;
   }
   return OPENAI_COMPATIBLE_PRESETS;
 };
@@ -107,6 +128,9 @@ export const getPresetsForFormat = (apiFormat) => {
 export const getDefaultBaseUrl = (apiFormat) => {
   if (apiFormat === 'gemini_official') {
     return 'https://generativelanguage.googleapis.com';
+  }
+  if (apiFormat === 'anthropic_native') {
+    return 'https://api.anthropic.com/v1';
   }
   return 'https://api.openai.com/v1';
 };
@@ -139,6 +163,7 @@ export const getDetectionCandidates = (includeLocal = false) => {
 export default {
   OPENAI_COMPATIBLE_PRESETS,
   GEMINI_OFFICIAL_PRESETS,
+  ANTHROPIC_NATIVE_PRESETS,
   getPresetsForFormat,
   getDefaultBaseUrl,
   findPresetByUrl,

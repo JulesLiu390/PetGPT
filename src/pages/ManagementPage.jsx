@@ -778,8 +778,8 @@ const firstApiKey = (raw) => parseApiKeys(raw)[0] || '';
 const detectProviderFromKey = (apiKeysRaw) => {
   const apiKey = firstApiKey(apiKeysRaw);
   if (!apiKey) return null;
-  // Anthropic 使用 OpenAI 兼容格式（通过其兼容端点）
-  if (apiKey.startsWith("sk-ant-")) return { format: "openai_compatible", name: "Anthropic", baseUrl: "https://api.anthropic.com/v1" };
+  // Anthropic 原生 Messages API（支持 prompt caching、原生工具调用等）
+  if (apiKey.startsWith("sk-ant-")) return { format: "anthropic_native", name: "Anthropic", baseUrl: "https://api.anthropic.com/v1" };
   if (apiKey.startsWith("AIza")) return { format: "gemini_official", name: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com" };
   if (apiKey.startsWith("gsk_")) return { format: "openai_compatible", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" };
   if (apiKey.startsWith("sk-or-")) return { format: "openai_compatible", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" };
@@ -959,10 +959,39 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     
     // Get candidates including local servers
     const candidates = getDetectionCandidates(true);
-    
+
+    // Anthropic native: 用 sk-ant- 前缀检测
+    const isAnthropicKey = key.startsWith("sk-ant-");
+    if (isAnthropicKey) {
+      setAutoDetectProgress("Detected Anthropic API key, using native format...");
+      // Anthropic 没有 /v1/models 端点（且需要不同 header），直接配置不实际探测
+      const knownAnthropicModels = [
+        'claude-opus-4-5',
+        'claude-sonnet-4-5',
+        'claude-haiku-4-5',
+        'claude-opus-4-20250514',
+        'claude-sonnet-4-20250514',
+        'claude-3-7-sonnet-20250219',
+        'claude-3-5-sonnet-20241022',
+        'claude-3-5-haiku-20241022',
+      ];
+      setFormData(prev => ({
+        ...prev,
+        baseUrl: "https://api.anthropic.com/v1",
+        apiFormat: "anthropic_native",
+        name: prev.name || "Anthropic",
+      }));
+      setFetchedModels(knownAnthropicModels);
+      setTestResult(`✓ Configured Anthropic Native (${knownAnthropicModels.length} known models, supports prompt caching)`);
+      setTestSuccess(true);
+      setIsAutoDetecting(false);
+      setAutoDetectProgress("");
+      return;
+    }
+
     // Also try Gemini format for Google keys
     const isGoogleKey = key.startsWith("AIza");
-    
+
     if (isGoogleKey) {
       // For Google keys, directly use Gemini endpoint
       setAutoDetectProgress("Testing Google Gemini...");
@@ -1055,6 +1084,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const formatOptions = [
     { value: "openai_compatible", label: "OpenAI Compatible" },
     { value: "gemini_official", label: "Google Gemini" },
+    { value: "anthropic_native", label: "Anthropic (Native)" },
   ];
   
   // 预设选项

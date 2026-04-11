@@ -8,7 +8,7 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -23,6 +23,14 @@ const lurkModes = new Map();
 
 /** 每个 target 的暂停状态 Map<target, boolean> —— 暂停后 Observer 和 Reply 均跳过 */
 const pausedTargets = new Map();
+
+/** 每个 target 的用户自定义规则 Map<target, string> —— 运行时可热更新 */
+const customGroupRulesMap = new Map();
+
+/** Intent eval 内部的消息注入水位线 Map<target, lastMessageId> —— 单次 eval 内生效，防止重复注入 */
+const intentInjectionWatermarks = new Map();
+/** Intent eval 内部的拦截次数 Map<target, count> —— 上限 5，防死循环 */
+const intentInterceptCounts = new Map();
 
 /** 已知的所有 target Set<string> —— 用于持久化时保存 enabled 状态（false）而不只是 paused（true） */
 const knownTargets = new Set();
@@ -1546,6 +1554,14 @@ export async function startSocialLoop(config, onStatusChange) {
     addLog('warn', 'Failed to restore lurk modes', e.message);
   }
 
+  // 初始化用户自定义群规则（从 config 加载）
+  customGroupRulesMap.clear();
+  if (config.customGroupRules && typeof config.customGroupRules === 'object') {
+    for (const [target, rules] of Object.entries(config.customGroupRules)) {
+      if (rules && rules.trim()) customGroupRulesMap.set(target, rules);
+    }
+  }
+
   // 注册所有已知 target（用于持久化 enabled 状态）
   const allTargetIds = [
     ...(config.watchedGroups || []).map(g => g.trim()).filter(Boolean),
@@ -1756,6 +1772,7 @@ export async function startSocialLoop(config, onStatusChange) {
     ownerQQ: config.ownerQQ || '',
     ownerName: config.ownerName || '',
     enabledMcpServers: config.enabledMcpServers || [],
+    // customGroupRules 从 live map 读取（支持运行时热更新）
   };
   
   const replyIntervalMs = (config.replyInterval ?? 0) * 1000;
@@ -1986,7 +2003,7 @@ JSON 数组格式，每条：
         taskId,
         cwd,
         config.subagentModel || 'sonnet',
-        120, // 2 分钟超时足够
+        180, // 3 分钟超时
         claudeMd,
       );
 
@@ -2531,6 +2548,12 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         intentToolDefs.push(getImageListToolDefinition());
         intentToolDefs.push(getWebshotToolDefinition());
         intentToolDefs.push(getWebshotSendToolDefinition());
+        intentToolDefs.push(getChatSearchToolDefinition());
+        intentToolDefs.push(getChatContextToolDefinition());
+        // voice_send 仅在 ttsConfig 启用时暴露给 LLM
+        if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
+          intentToolDefs.push(getVoiceSendToolDefinition());
+        }
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
@@ -2672,7 +2695,17 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             msgDelimiterR: eph?.msgR || '',
             lurkMode: targetLurkMode,
             subagentRegistry,
+            customGroupRules: customGroupRulesMap.get(target) || '',
+            voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
           });
+
+          // 初始化本次 Intent eval 的注入水位线（= buffer 当前最后一条消息 id）
+          {
+            const bufInit = dataBuffer.get(target);
+            const lastInitMsg = bufInit?.messages?.[bufInit.messages.length - 1];
+            intentInjectionWatermarks.set(target, lastInitMsg?.message_id || '');
+            intentInterceptCounts.set(target, 0);
+          }
 
           try {
             const raw = await callLLMWithTools({
@@ -2689,7 +2722,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               options: {
                 temperature: 0.4,
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig },
               stopAfterTool: 'write_intent_plan',
               usageLabel: 'Intent:msg',
               usageTarget: target,
@@ -2714,6 +2747,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             intentResult = { content: e.message || e, error: true };
           }
         }
+
+        // 清理本次 eval 的注入水位线
+        intentInjectionWatermarks.delete(target);
+        intentInterceptCounts.delete(target);
 
         if (intentResult.error) {
           addLog('intent', `Intent LLM error [${tName()}]: ${intentResult.content}`, null, target);
@@ -2892,10 +2929,36 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       // 在 appendToBuffer 前记录哪些 bot 自发消息是新的（用于排除自激活）
       const bufRef = getBuffer(target);
       let newSelfCount = 0;
+      // 同时收集所有"新消息"（未在 seenIds 中），用于稍后插入 SQLite chat_history
+      const trulyNewMsgs = [];
       for (const m of fetchedMessages) {
-        if (m.is_self && m.message_id && !bufRef.seenIds.has(m.message_id)) newSelfCount++;
+        if (m.message_id && !bufRef.seenIds.has(m.message_id)) {
+          trulyNewMsgs.push(m);
+          if (m.is_self) newSelfCount++;
+        }
       }
       const added = appendToBuffer(target, fetchedMessages, targetData);
+
+      // ─── 写入 SQLite chat_history（fire-and-forget，不阻塞主流程）───
+      if (trulyNewMsgs.length > 0) {
+        const targetTypeForDb = targetData.target_type || (targetData.friend_name ? 'friend' : 'group');
+        const dbBatch = trulyNewMsgs.map(m => ({
+          messageId: String(m.message_id),
+          targetId: String(target),
+          targetType: targetTypeForDb,
+          senderId: String(m.sender_id || ''),
+          content: m.content || '',
+          timestamp: m.timestamp ? new Date(m.timestamp).getTime() : Date.now(),
+          replyToId: m.reply_to ? String(m.reply_to) : null,
+          isBot: !!m.is_self,
+          rawJson: JSON.stringify(m),
+        })).filter(x => x.messageId && x.senderId);
+        if (dbBatch.length > 0) {
+          tauri.chatHistoryInsertBatch(dbBatch).catch(e => {
+            addLog('warn', `chat_history insert failed: ${e.message || e}`, null, target);
+          });
+        }
+      }
       // 排除 bot 所有自发消息，不算作"新活动"（防止自己的回复触发表情包冷却重置）
       const effectiveAdded = added - Math.min(newSelfCount, added);
 
@@ -3443,6 +3506,19 @@ export function stopSocialLoop() {
  * @param {string} target - 群号/QQ号
  * @param {'normal'|'semi-lurk'|'full-lurk'} mode
  */
+/**
+ * 热更新指定 target 的用户自定义规则（立即生效，下轮 Intent eval 即注入）
+ */
+export function setCustomGroupRule(target, rules) {
+  if (!target) return;
+  if (rules && rules.trim()) {
+    customGroupRulesMap.set(target, rules.trim());
+  } else {
+    customGroupRulesMap.delete(target);
+  }
+  addLog('info', `Custom rules updated for ${target} (${rules ? rules.trim().length + '字' : 'cleared'})`, null, target);
+}
+
 export function setLurkMode(target, mode) {
   if (!target || !['normal', 'semi-lurk', 'full-lurk'].includes(mode)) return;
   const prev = lurkModes.get(target) || 'normal';
