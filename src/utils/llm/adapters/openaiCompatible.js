@@ -165,6 +165,8 @@ export const convertMessages = async (messages) => {
  * @param {Object} config.options
  * @param {Array} config.options.tools - OpenAI 格式的工具数组 (可选)
  * @param {string} config.options.tool_choice - 工具选择策略: 'auto' | 'none' | 'required' (可选)
+ * @param {boolean} [config.options.explicitCache] - 传 true 时注入 prompt_cache_key + prompt_cache_retention (可选)
+ * @param {string} [config.options.cacheKey] - prompt_cache_key 值，由上游 buildCacheKey 生成 (可选)
  */
 export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl, options = {} }) => {
   const url = getApiUrl(apiFormat, baseUrl);
