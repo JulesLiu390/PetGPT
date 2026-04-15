@@ -6,6 +6,7 @@
  */
 
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
+import { buildCacheKey, shouldUseExplicitCache, formatUsageLogMessage } from './promptCache';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
 import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition } from './workspace/socialToolExecutor';
@@ -128,6 +129,23 @@ function addLog(level, message, details = null, target = undefined) {
   } else {
     console.log(prefix, message, details || '');
   }
+}
+
+/**
+ * 将 callLLMWithTools / 直调 callLLM 产生的 usage record 输出为一条
+ * addLog('usage') 行，供 SocialPage 日志面板和 PromptCachePanel 消费。
+ */
+function logUsageRecord(record) {
+  if (!record) return;
+  const message = formatUsageLogMessage({
+    label: record.label,
+    model: record.model,
+    inputTokens: record.inputTokens,
+    outputTokens: record.outputTokens,
+    cachedTokens: record.cachedTokens,
+    durationMs: record.durationMs,
+  });
+  addLog('usage', message, record, record.target || undefined);
 }
 
 /**
@@ -640,6 +658,7 @@ async function pollTarget({
   visionLLMConfig = null,
   botName = '',
   fullBufferMessages = null,  // Observer 用：完整 buffer（供 buffer_search 搜索）
+  socialConfig = null,  // NEW: for prompt cache opts
 }) {
   const groupName = gName || target;
   const compressedSummary = compSummary;
@@ -1071,13 +1090,18 @@ async function pollTarget({
       model: llmConfig.modelName,
       baseUrl: llmConfig.baseUrl,
       mcpTools,
-      options: { temperature: 0.7 },
+      options: {
+        temperature: 0.7,
+        explicitCache: shouldUseExplicitCache(socialConfig, llmConfig.apiFormat),
+        cacheKey: buildCacheKey(petId, target, role === 'observer' ? 'Observer' : 'Reply'),
+      },
       builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache, bufferMessages: fullBufferMessages || undefined, subagentRegistry },
       maxIterations: role === 'observer' ? 25 : undefined,
       stopAfterTool: role === 'reply' ? (name) => name.includes('send_message') : undefined,
       usageLabel: role === 'observer' ? 'Observer' : 'Reply',
       usageTarget: target,
       usagePetId: petId,
+      onUsageLogged: logUsageRecord,
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -1370,7 +1394,7 @@ function parseBufferByDate(content) {
  * 执行每日压缩
  * 读取所有群缓冲文件 → 按天分组 → 逐天 LLM 压缩 → 写入 DAILY → 清空已压缩内容
  */
-async function runDailyCompress(petId, llmConfig, targetSet) {
+async function runDailyCompress(petId, llmConfig, targetSet, socialConfig = null) {
   addLog('info', '📦 Starting daily compression...');
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
@@ -1429,10 +1453,15 @@ ${groupContent}`;
           model: llmConfig.modelName,
           baseUrl: llmConfig.baseUrl,
           mcpTools: [],
-          options: { temperature: 0.3 },
+          options: {
+            temperature: 0.3,
+            explicitCache: shouldUseExplicitCache(socialConfig, llmConfig.apiFormat),
+            cacheKey: buildCacheKey(petId, target, 'Compress:daily'),
+          },
           usageLabel: 'Compress:daily',
           usageTarget: target,
           usagePetId: petId,
+          onUsageLogged: logUsageRecord,
         }), { label: `DailyCompress:${target}` });
 
         const summary = result.content || '（压缩失败）';
@@ -1476,10 +1505,15 @@ ${globalInput}`;
         model: llmConfig.modelName,
         baseUrl: llmConfig.baseUrl,
         mcpTools: [],
-        options: { temperature: 0.3 },
+        options: {
+          temperature: 0.3,
+          explicitCache: shouldUseExplicitCache(socialConfig, llmConfig.apiFormat),
+          cacheKey: buildCacheKey(petId, '', 'Compress:global'),
+        },
         usageLabel: 'Compress:global',
         usageTarget: '',
         usagePetId: petId,
+        onUsageLogged: logUsageRecord,
       }), { label: 'DailyCompressGlobal' });
 
       const dailyContent = `# ${dateStr} 社交日报\n\n${globalResult.content || '（压缩失败）'}\n`;
@@ -2262,11 +2296,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           model: intentLLMConfig.modelName,
           baseUrl: intentLLMConfig.baseUrl,
           mcpTools: tools,
-          options: { temperature: 0.2 },
+          options: {
+            temperature: 0.2,
+            explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
+            cacheKey: buildCacheKey(config.petId, '', 'MdOrganizer'),
+          },
           builtinToolContext: { petId: config.petId },
           maxIterations: 10,
           usageLabel: 'MdOrganizer',
           usagePetId: config.petId,
+          onUsageLogged: logUsageRecord,
         });
         addLog('info', `📝 md_organize done: ${file}`, null);
       } catch (e) {
@@ -2721,12 +2760,15 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               mcpTools: intentMcpTools,
               options: {
                 temperature: 0.4,
+                explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
+                cacheKey: buildCacheKey(config.petId, target, 'Intent:msg'),
               },
               builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig },
               stopAfterTool: 'write_intent_plan',
               usageLabel: 'Intent:msg',
               usageTarget: target,
               usagePetId: config.petId,
+              onUsageLogged: logUsageRecord,
               onToolCall: (name, args) => {
                 if (name === 'write_intent_plan') {
                   capturedPlan = { actions: args.actions || [] };
@@ -3128,6 +3170,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           visionLLMConfig,
           botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
           fullBufferMessages: allMsgs,
+          socialConfig: config,
         }).then(result => {
           // 无论成功失败都更新冷却时间，防止错误时 2s 重试风暴
           lastObserveTime.set(target, Date.now());
@@ -3316,6 +3359,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               imageDescMode: config.imageDescMode || 'off',
               visionLLMConfig,
               botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
+              socialConfig: config,
             });
 
             if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
@@ -3382,7 +3426,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       
       // 检查是否有过去日期的群缓冲需要压缩
       if (knownTargets.size > 0) {
-        await runDailyCompress(config.petId, compressLLMConfig, knownTargets);
+        await runDailyCompress(config.petId, compressLLMConfig, knownTargets, config);
       }
     } catch (e) {
       addLog('warn', 'Startup compression check failed', e.message);
@@ -3414,7 +3458,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       if (!activeLoop || activeLoop._generation !== loopGeneration) return;
       addLog('info', '⏰ 23:55 daily compression triggered');
       try {
-        await runDailyCompress(config.petId, compressLLMConfig, knownTargets);
+        await runDailyCompress(config.petId, compressLLMConfig, knownTargets, config);
       } catch (e) {
         addLog('error', 'Daily compression timer failed', e.message);
       }
