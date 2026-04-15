@@ -1566,7 +1566,10 @@ ${globalInput}`;
 export async function startSocialLoop(config, onStatusChange) {
   // 先停止现有循环
   stopSocialLoop();
-  
+
+  // 通知 SocialPage 重置 PromptCachePanel 的会话累计
+  tauri.emitToLabels(['social', 'management'], 'social-cache-stats-reset', { petId: config.petId });
+
   addLog('info', `Starting social loop for pet: ${config.petId}`);
   
   // 恢复持久化的 lurk modes
