@@ -182,7 +182,14 @@ export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl
     body.tools = options.tools;
     body.tool_choice = options.tool_choice || 'auto';
   }
-  
+
+  // 显式 prompt caching（仅 OpenAI 官方识别；兼容网关如不识别可能报错）
+  // 由上游 socialAgent 通过 options.explicitCache + options.cacheKey 控制。
+  if (options.explicitCache && options.cacheKey) {
+    body.prompt_cache_key = options.cacheKey;
+    body.prompt_cache_retention = '24h';
+  }
+
   return {
     endpoint: `${url}/chat/completions`,
     headers: {
