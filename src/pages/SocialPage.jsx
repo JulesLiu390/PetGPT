@@ -1720,16 +1720,7 @@ export default function SocialPage() {
                   ) : log.level === 'reflect' ? (
                     <ReflectLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'usage' ? (
-                    <div key={log.id ?? log.timestamp} className="py-0.5 text-slate-600">
-                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
-                      {' '}
-                      <span className="font-semibold text-emerald-600">[usage]</span>
-                      {log.target && logFilter === 'all' && (
-                        <span className="text-cyan-500 ml-1">[{log.target}]</span>
-                      )}
-                      {' '}
-                      <span className="font-mono">{log.message}</span>
-                    </div>
+                    <UsageLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
@@ -1896,6 +1887,21 @@ function IntentLogEntry({ log, logFilter }) {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+function UsageLogEntry({ log, logFilter }) {
+  return (
+    <div className="py-0.5 text-slate-600">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold text-emerald-600">[usage]</span>
+      {log.target && logFilter === 'all' && (
+        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+      )}
+      {' '}
+      <span className="font-mono">{log.message}</span>
     </div>
   );
 }
