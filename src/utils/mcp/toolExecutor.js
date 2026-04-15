@@ -529,9 +529,10 @@ export const callLLMWithTools = async ({
   const _writeUsage = (record) => {
     const _petId = usagePetId || builtinToolContext?.petId;
     if (!_petId || !usageLabel) return;
-    try { appendUsageLog(_petId, record); } catch (_) { /* ignore */ }
+    // appendUsageLog is async fire-and-forget; it swallows its own errors internally.
+    appendUsageLog(_petId, record);
     if (typeof onUsageLogged === 'function') {
-      try { onUsageLogged(record); } catch (_) { /* ignore */ }
+      try { onUsageLogged(record); } catch (_) { /* ignore callback errors */ }
     }
   };
 
