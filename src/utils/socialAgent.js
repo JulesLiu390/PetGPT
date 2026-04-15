@@ -344,7 +344,7 @@ async function convertGifToPng(base64Data) {
   return { data: result.data, mimeType: result.mime_type };
 }
 
-async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig, petId, socialConfig = null) {
+async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig, petId) {
   // GIF → PNG 转码（Gemini 不支持 image/gif）
   if (resolvedImage.mimeType === 'image/gif' || resolvedImage.data?.includes('data:image/gif')) {
     try {
@@ -392,17 +392,16 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
   ];
 
   const _visionStart = Date.now();
+  // Vision 走 callLLM → Rust 后端，Rust 不转发 explicitCache/cacheKey，
+  // 而且 Vision 通常用 Gemini（隐式缓存），因此此处不传显式缓存参数。
+  // usage 日志行仍然通过 logUsageRecord 发出，面板能看到 Vision 的 cached tokens。
   const result = await callLLM({
     messages,
     apiFormat: visionLLMConfig.apiFormat,
     apiKey: visionLLMConfig.apiKey,
     model: visionLLMConfig.modelName,
     baseUrl: visionLLMConfig.baseUrl,
-    options: {
-      temperature: 0.2,
-      explicitCache: shouldUseExplicitCache(socialConfig, visionLLMConfig.apiFormat),
-      cacheKey: buildCacheKey(petId, '', 'Vision'),
-    },
+    options: { temperature: 0.2 },
     conversationId: `vision-desc-${Date.now()}`,
   });
 
@@ -737,7 +736,7 @@ async function pollTarget({
           const imgData = img.data || '';
           const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
           const wrappedDescribe = () => {
-            const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId, socialConfig);
+            const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId);
             imageDescInflight.set(cacheKey, p);
             return p;
           };
@@ -2454,7 +2453,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         const imgData = img.data || '';
         const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
         const wrappedDescribe = () => {
-          const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId, config);
+          const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId);
           imageDescInflight.set(cacheKey, p);
           return p;
         };
