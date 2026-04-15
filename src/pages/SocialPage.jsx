@@ -179,7 +179,6 @@ export default function SocialPage() {
   const [showUsage, setShowUsage] = useState(true);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   const [cacheResetAt, setCacheResetAt] = useState(0);
-  const [cacheResetCounter, setCacheResetCounter] = useState(0);
 
   // ── Load assistants + providers ──
   useEffect(() => {
@@ -360,7 +359,6 @@ export default function SocialPage() {
     (async () => {
       unlisten = await listen('social-cache-stats-reset', () => {
         setCacheResetAt(Date.now());
-        setCacheResetCounter(c => c + 1);
       });
     })();
     return () => { if (unlisten) unlisten(); };
@@ -657,7 +655,11 @@ export default function SocialPage() {
 
   // Usage logs after the most recent agent start (for PromptCachePanel)
   const usageLogsAfterReset = useMemo(
-    () => sortedLogs.filter(l => l.level === 'usage' && new Date(l.timestamp).getTime() >= cacheResetAt),
+    () => sortedLogs.filter(l => {
+      if (l.level !== 'usage') return false;
+      const t = typeof l.timestamp === 'number' ? l.timestamp : new Date(l.timestamp).getTime();
+      return t >= cacheResetAt;
+    }),
     [sortedLogs, cacheResetAt],
   );
 
@@ -1721,7 +1723,7 @@ export default function SocialPage() {
               );
             })()}
 
-            <PromptCachePanel logs={usageLogsAfterReset} resetCounter={cacheResetCounter} />
+            <PromptCachePanel logs={usageLogsAfterReset} />
 
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
@@ -1928,7 +1930,7 @@ function UsageLogEntry({ log, logFilter }) {
   );
 }
 
-function PromptCachePanel({ logs, resetCounter }) {
+function PromptCachePanel({ logs }) {
   const stats = useMemo(() => {
     const map = new Map();
     for (const log of logs) {
@@ -1944,16 +1946,9 @@ function PromptCachePanel({ logs, resetCounter }) {
       map.set(label, cur);
     }
     return Array.from(map.values()).sort((a, b) => b.calls - a.calls);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logs, resetCounter]);
+  }, [logs]);
 
-  if (stats.length === 0) {
-    return (
-      <div className="text-xs text-slate-400 px-3 py-1.5 border-b border-slate-100">
-        Prompt Cache：本次会话暂无数据
-      </div>
-    );
-  }
+  if (stats.length === 0) return null;
   return (
     <div className="border-b border-slate-100 px-3 py-1.5 bg-slate-50/50 text-xs font-mono">
       <div className="font-semibold text-slate-700 mb-1">Prompt Cache（本次会话）</div>
