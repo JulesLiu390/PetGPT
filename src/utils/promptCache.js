@@ -53,7 +53,8 @@ export function formatUsageLogMessage({ label, model, inputTokens, outputTokens,
   const cached = cachedTokens ?? 0;
   const sec = ((durationMs ?? 0) / 1000).toFixed(1);
   const cachedPart = cached > 0
-    ? `(cached ${cached}, ${Math.round((cached / Math.max(inTok, 1)) * 100)}%)`
+    ? `(cached ${cached}, ${Math.min(100, Math.round((cached / Math.max(inTok, 1)) * 100))}%)`
     : `(cached 0)`;
-  return `${label}  in=${inTok} ${cachedPart} out=${outTok}  ${sec}s  ${model || ''}`.trim();
+  const labelStr = label ?? '(unknown)';
+  return `${labelStr}  in=${inTok} ${cachedPart} out=${outTok}  ${sec}s  ${model || ''}`.trim();
 }
