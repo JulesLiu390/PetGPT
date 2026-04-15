@@ -22,15 +22,21 @@ import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeH
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
- * Gemini: { promptTokenCount, candidatesTokenCount, cachedContentTokenCount }
- * OpenAI: { prompt_tokens, completion_tokens, total_tokens }
+ * Gemini:    { promptTokenCount, candidatesTokenCount, cachedContentTokenCount }
+ * OpenAI:    { prompt_tokens, completion_tokens, prompt_tokens_details?: { cached_tokens } }
+ * Anthropic: { prompt_tokens, completion_tokens, cache_read_input_tokens,
+ *              prompt_tokens_details?: { cached_tokens } } (adapter shim)
  */
 export const normalizeUsage = (usage) => {
   if (!usage) return { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   return {
     inputTokens: usage.promptTokenCount ?? usage.prompt_tokens ?? 0,
     outputTokens: usage.candidatesTokenCount ?? usage.completion_tokens ?? 0,
-    cachedTokens: usage.cachedContentTokenCount ?? 0,
+    cachedTokens:
+      usage.cachedContentTokenCount                // Gemini
+      ?? usage.prompt_tokens_details?.cached_tokens // OpenAI + Anthropic-via-shim
+      ?? usage.cache_read_input_tokens             // Anthropic raw
+      ?? 0,
   };
 };
 
