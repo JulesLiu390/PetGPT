@@ -14,6 +14,58 @@ import * as tauri from './tauri';
 
 /** 默认 .md 内容（代码自带，随版本更新） */
 export const DEFAULT_TOOL_DOCS = {
+  voice_send: `# voice_send 完整指南
+
+## 签名
+voice_send(text: string)
+
+## 参数
+- text — 要朗读的文字。硬限 50 字（含标点和空格），超 1 字都会被系统拒绝。**实际请控制在 30-40 字以内**给自己留容错。
+
+## 核心定位
+voice ≠ reply 的语音版。voice 是氛围 / 情绪 / 卖萌的副通道，不用来传递信息。
+- 所有"内容 / 观点 / 解释 / 回答"必须走 reply 文字
+- 语音只承载短促的情绪表达
+
+## 调用方式
+voice_send 是即时调用，不要写进 write_intent_plan.actions。
+直接在 Intent 这一轮里 call 这个 tool 即可，发送会立刻完成。
+与 webshot_send / sticker_send 同类（都是"即时副通道"工具）。
+
+## voice 和 reply 可以并行
+想"发语音 + 发干货回复"时：
+1. 先 voice_send 一句短的（"早呀～" / "嘿嘿来啦"）
+2. 然后在 plan 里照常写 reply action 发文字
+
+不要把所有想说的话都塞进 voice 然后省略 reply！长内容用 voice 会丢信息。
+
+## 每轮限制
+每轮 Intent 最多 voice_send 一次。已经发过别再发。
+
+## 适合场景
+- 群友明确说"发个语音听听" → voice_send 一句简短问候或卖萌（≤30 字），同时 reply 发完整回答
+- 适合配音的短句：打招呼、撒娇、惊呼、感叹、自嘲
+  - 例："啊啊啊我懂了" / "嘿嘿被发现了" / "早呀～" / "我来啦"
+
+## 不适合场景
+- 解释概念 → 走 reply
+- 引用 URL → 走 reply（语音读 URL 是灾难）
+- 回答技术问题 → 走 reply
+- @多人 → 走 reply
+- 长篇叙述 → 走 reply
+
+## 字数控制技巧
+写 voice text 之前先数一遍字数。超过 40 就立刻砍短或重写：
+- 去掉描述性形容词
+- 去掉补充说明（括号内容）
+- 合并同义短句
+
+## 反模式
+- ❌ 把 reply 的内容塞进 voice："关于这个问题我觉得呢，主要是..."（直接爆字数）
+- ❌ 每轮都发一个 voice（刷屏）
+- ❌ voice 里放 URL / 代码 / 英文长词（TTS 朗读会很奇怪）
+- ❌ 把 voice 当成 reply 的替代品，不发 reply 只发 voice → 错过信息传递
+`,
   dispatch_subagent: `# dispatch_subagent 完整指南
 
 ## 签名
