@@ -140,6 +140,31 @@ function logUsageRecord(record) {
   addLog('usage', formatUsageLogMessage(record), record, record.target || undefined);
 }
 
+/** 保留最近多少条 Intent 行动记录（防漂移的客观历史） */
+const INTENT_HISTORY_LIMIT = 5;
+
+/**
+ * 追加一条 Intent 行动记录到 scratch/intent_history.jsonl，
+ * 并保证文件只保留最近 INTENT_HISTORY_LIMIT 条。
+ *
+ * entry 形状:
+ *   { ts, actions: [{type, ...}], briefDigest }
+ */
+async function appendIntentHistory(petId, targetId, targetType, entry) {
+  if (!petId || !targetId || !entry) return;
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const path = `social/${dir}/scratch_${targetId}/intent_history.jsonl`;
+  let existing = '';
+  try { existing = await tauri.workspaceRead(petId, path); } catch { /* file may not exist */ }
+  const prev = (existing || '').split('\n').filter(line => line.trim());
+  const next = [...prev, JSON.stringify(entry)].slice(-INTENT_HISTORY_LIMIT);
+  try {
+    await tauri.workspaceWrite(petId, path, next.join('\n') + '\n');
+  } catch (e) {
+    console.warn('[IntentHistory] write failed:', e);
+  }
+}
+
 /**
  * 获取社交日志
  * @returns {Array} 日志条目数组
@@ -2808,6 +2833,26 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             capturedPlan.state = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`) || '';
           } catch { capturedPlan.state = ''; }
           state.lastPlan = capturedPlan;
+
+          // 保留最近 N 次 Intent 行动记录（客观历史，防漂移）
+          try {
+            const planActions = capturedPlan.actions || [];
+            let briefDigest = '';
+            if (planActions.some(a => a.type === 'reply')) {
+              const brief = await tauri.workspaceRead(
+                config.petId,
+                `social/${intentDir}/scratch_${target}/reply_brief.md`,
+              ).catch(() => '');
+              briefDigest = (brief || '').replace(/\s+/g, ' ').trim().slice(0, 200);
+            }
+            await appendIntentHistory(config.petId, target, targetType, {
+              ts: new Date().toISOString(),
+              actions: planActions,
+              briefDigest,
+            });
+          } catch (e) {
+            addLog('warn', `Intent history append failed: ${e.message || e}`, null, target);
+          }
         }
         const actions = capturedPlan?.actions || [];
         const replyAction = actions.find(a => a.type === 'reply');

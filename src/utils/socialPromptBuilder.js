@@ -107,6 +107,64 @@ export async function readPeopleCacheFile(petId, targetId, targetType = 'group')
 }
 
 /**
+ * 安全读取最近 N 次 Intent 行动历史（客观去情绪，防漂移）
+ * 由 socialAgent 在每次 Intent 决策写入 intent_history.jsonl。
+ *
+ * @returns {Array<{ts, actions, briefDigest}>} 最多 N 条，时间升序
+ */
+export async function readIntentHistoryFile(petId, targetId, targetType = 'group', limit = 5) {
+  if (!targetId) return [];
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  try {
+    const raw = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/intent_history.jsonl`);
+    if (!raw || !raw.trim()) return [];
+    const lines = raw.split('\n').filter(l => l.trim()).slice(-limit);
+    return lines
+      .map(line => { try { return JSON.parse(line); } catch { return null; } })
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 把 Intent 历史条目渲染成 prompt 段。
+ * 风格：客观时间 + 动作结构化 + 内容摘要（截断、去情绪尽力）。
+ */
+export function formatIntentHistoryForPrompt(entries) {
+  if (!entries || entries.length === 0) return '';
+  const lines = ['# 最近 Intent 行动记录（客观历史，仅供防重复参考）'];
+  for (const e of entries) {
+    const hhmm = (() => {
+      try {
+        const d = new Date(e.ts);
+        return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      } catch { return '--:--'; }
+    })();
+    const actionParts = (e.actions || []).map(a => {
+      if (a.type === 'reply') {
+        const bits = ['reply'];
+        if (a.atTarget) bits.push(`@${a.atTarget}`);
+        if (a.replyTo) bits.push(`引用${a.replyTo}`);
+        if (a.numChunks) bits.push(`chunks=${a.numChunks}`);
+        return bits.join(' ');
+      }
+      if (a.type === 'sticker') return `sticker#${a.id ?? '?'}`;
+      if (a.type === 'image') return `image(${a.file || '?'})`;
+      if (a.type === 'wait' || !a.type) return 'wait';
+      return a.type;
+    });
+    const actionStr = actionParts.length > 0 ? actionParts.join(' + ') : 'wait';
+    lines.push(`[${hhmm}] ${actionStr}`);
+    if (e.briefDigest) {
+      lines.push(`  摘要: ${e.briefDigest}`);
+    }
+  }
+  lines.push('（以上是你过去几轮实际做过的事，不要重复已表达的观点或已发的表情/图片。）');
+  return lines.join('\n');
+}
+
+/**
  * 安全读取 Reply 交接文件（Intent 写入，Reply 注入）
  */
 export async function readReplyBriefFile(petId, targetId, targetType = 'group') {
@@ -701,7 +759,8 @@ export async function buildIntentSystemPrompt({
   const [
     soulContent, userContent, memoryContent, groupRuleContent,
     contactsContent, peopleCacheContent, socialMemoryContent,
-    intentStateContent, scratchNotes, lessonsContent, principlesContent
+    intentStateContent, scratchNotes, lessonsContent, principlesContent,
+    intentHistory,
   ] = await Promise.all([
     cachedRead(() => readSoulFile(petId), `soul_${petId}`),
     cachedRead(() => readUserFile(petId), `user_${petId}`),
@@ -731,6 +790,8 @@ export async function buildIntentSystemPrompt({
       const dir = targetType === 'friend' ? 'friend' : 'group';
       try { return await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/principles.md`); } catch { return null; }
     }, `principles_${petId}_${targetId}`),
+    // Intent 历史不缓存（每轮都变）—— 直接读文件
+    readIntentHistoryFile(petId, targetId, targetType),
   ]);
 
   // === 人格（SOUL.md） ===
@@ -835,6 +896,12 @@ export async function buildIntentSystemPrompt({
   // === 当前状态感知（来自 Intent 自维护文件） ===
   sections.push('# 当前状态感知');
   sections.push(intentStateContent || '（本次会话开始，尚无记录）');
+
+  // === 最近 Intent 行动记录（客观历史，防漂移；先看 INTENT.md 叙述版，再对比本段实际记录） ===
+  const intentHistoryBlock = formatIntentHistoryForPrompt(intentHistory);
+  if (intentHistoryBlock) {
+    sections.push(intentHistoryBlock);
+  }
 
   // === 笔记（ground truth 简写索引，来自 scratch/notes.md） ===
   if (scratchNotes) {
