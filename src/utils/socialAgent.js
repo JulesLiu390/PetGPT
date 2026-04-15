@@ -7,6 +7,7 @@
 
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { buildCacheKey, shouldUseExplicitCache, formatUsageLogMessage } from './promptCache';
+import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
 import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition } from './workspace/socialToolExecutor';
@@ -1593,6 +1594,9 @@ export async function startSocialLoop(config, onStatusChange) {
 
   // 通知 SocialPage 重置 PromptCachePanel 的会话累计
   tauri.emitToLabels(['social', 'management'], 'social-cache-stats-reset', { petId: config.petId });
+
+  // Seed 工具详细说明 .md 文件（仅当不存在时写入默认版本）
+  try { await seedToolDocs(config.petId); } catch (e) { console.warn('[seedToolDocs] failed:', e); }
 
   addLog('info', `Starting social loop for pet: ${config.petId}`);
   

@@ -994,23 +994,17 @@ ${voiceEnabled ? `
 外部搜索工具（如果已配置）：
 - 你可能还有 tavily_search、fetch 等外部搜索工具可用。当群友在辩论中引用了事实、数据或信息源，而你不确定真假时，用这些工具核实后再下判断
 
-后台研究工具（也叫 CC / Claude Code，需要深入调研或用户明确要求"用CC查"时使用）：
-- cc_history()：查看 CC 任务历史（正在执行 + 已完成 + 失败）。两种场景下使用：
-  (1) 需要引用事实、数据或调研结果时，先查 cc_history 看是否已有相关研究可以复用（用 cc_read 读取结果文件）
-  (2) 准备 dispatch 新任务前，查 cc_history 避免重复研究已有结果
-  只有历史中没有相关结果、或结果明显过时（比如几天前查的时效性信息），才 dispatch 新任务。
-- cc_read(file)：读取 CC 研究结果文件。file 参数为 cc_history 返回的文件名（cc_ 开头）。
-- dispatch_subagent(task, maxLen=500)：发起一个 CC 后台研究任务。task 写明确的指令，CC 会在独立沙箱中自主完成（可用 web search 等工具），比普通搜索更深入全面。结果异步写入，完成后用 cc_read 读取。当有人说"用CC搜/查"时，就是指这个工具。
-
-  ⚠️ **dispatch 前必须 tavily_search 预检**（除非话题与最新进展完全无关）：
-  - 涉及 AI 模型、产品、公司、新闻等时效性强的话题时，**必须先用 tavily_search 做一次轻量预检**，确认你脑中的版本号 / 事实方向 / 关键人物是现行有效的
-  - 例子：想 dispatch "查 Gemini Pro 架构" 之前，先 tavily_search("latest Gemini model 2026") 看最新版本是哪个（不是你训练数据里那个）
-  - 预检发现你脑中信息过时 → 调整 dispatch 的 task 指令，告诉 CC "注意当前最新版本是 X，不要只查旧版"
-  - 不预检就 dispatch，很容易让 CC 基于错误前提深挖，结论精美但**过时** → 发群里尴尬得要命
-  - 轻量预检 ≠ 替代 CC。预检只是校准方向（关键词/版本号/时间锚点），真正的深度研究仍然由 CC 完成
-
-  ⚠️ 派出 CC 搜索任务后：(1) 不要再用 tavily_search 搜索相同内容，CC 会搜得更全面；(2) 在状态感知里写明"已派CC查 XXX，等结果再给结论"；(3) 不要在没有CC结果前就对搜索主题下结论——可以正常回复对话（比如"让我查查"），但不要编造搜索结果。等 CC 结果返回后再给出有依据的结论。
-  注意：非搜索类任务（如内容生成、分析等）不受此限制，你仍然可以自由使用 tavily_search。
+后台研究工具（CC / Claude Code — 深度调研）：
+- cc_history() / cc_read(file) / dispatch_subagent(task, maxLen=500)
+  何时用：
+    • 群友明确说"用 CC 查 / 帮我搜"
+    • 需要引用最新事实/数据/新闻，且 cc_history 没有现成结果
+    • 需要深度调研（不是轻量搜索）
+  ⚠️ 硬规则（必须遵守）：
+    • 涉及 AI 模型 / 公司 / 人物 / 产品 / 时事话题，dispatch 前必须 tavily_search 预检
+    • 派出后状态感知里写"已派 CC 查 XXX，等结果"，不重复 dispatch、不编造结果
+    • dispatch 后不再用 tavily_search 搜同一话题
+  完整用法（参数、反模式、任务例子） → social_read("social/tools/dispatch_subagent.md")
 
 ⚠️ 历史查询和搜索工具只在这些情况下使用：(1) 聊天中出现你不了解的背景信息；(2) 有人用事实论据反驳你，你需要核实真伪。`);
 
