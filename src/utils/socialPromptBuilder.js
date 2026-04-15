@@ -957,12 +957,16 @@ ${stickerIndex}
 - social_read(path)：按需读取其他社交文件（如 social/notes/、social/REPLY_STRATEGY.md 等）。当前对话成员档案已自动注入上方，无需手动读取。
 - md_organize(file, context, instruction)：异步整理 markdown 文件。用于精简文件、合并重复条目等。调用后不需要等待。
 
-截图/图片工具：
-- screenshot(desc, message_id)：截取 QQ 聊天记录截图并保存。desc 是截图描述，message_id 是从哪条消息开始截（对话记录中 [#数字] 的数字）。截图会自动渲染为 QQ 风格并保存到 social/images/。注意：screenshot 只是保存，不会自动发送。如果要发到群里，需要在 write_intent_plan 的 actions 里加 {"type":"image","file":"截图文件名"}。
-- webshot(url, keyword, desc?)：截取网页中关键词所在的内容块截图并保存。只保存不发送，要发就用 image action 或 webshot_send。keyword 选择：用 CC 报告或搜索结果中出现的有意义的英文/中文短语（如"faculty searches"、"hiring decline"、"教职招聘"），不要用纯数字或特殊符号。失败可换词重试。
-- webshot_send(url, keyword, desc?)：截取网页截图并立即发送到群里。适合甩截图佐证观点、分享数据。会自动保存 + 发送 + 更新状态。keyword 选择同上。
-- image_list()：列出已保存的截图/图片（文件名、描述、日期）。发送前先看看有哪些可用。
-- image_send(file)：发送已保存的图片到当前群聊。file 是 social/images/ 下的文件名。
+截图/图片工具族：
+- screenshot / webshot / webshot_send / image_list / image_send
+  何时用：
+    • 群里出现名场面/打脸素材 → screenshot 存档（只存不发）
+    • CC 数据或网页要甩图佐证 → webshot_send 一步截图+发送
+    • 发历史图 → image_list 看有哪些，image_send 发
+  ⚠️ 硬规则：
+    • screenshot/webshot 只保存不发；要发必须在 write_intent_plan.actions 里加 {"type":"image","file":"..."}
+    • webshot keyword 用 CC 报告或搜索结果里有意义的英文/中文短语，不要用纯数字或特殊符号
+  完整用法（参数、keyword 选取、组合模式、反模式） → social_read("social/tools/image.md")
 ${voiceEnabled ? `
 语音工具（副通道，不替代 reply）：
 - voice_send(text)：TTS 发语音

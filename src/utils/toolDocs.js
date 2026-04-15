@@ -14,6 +14,77 @@ import * as tauri from './tauri';
 
 /** 默认 .md 内容（代码自带，随版本更新） */
 export const DEFAULT_TOOL_DOCS = {
+  image: `# 图片工具族完整指南（screenshot / webshot / webshot_send / image_list / image_send）
+
+## 工具总览与差异
+| 工具 | 作用 | 是否立即发送 |
+|---|---|:---:|
+| screenshot | 截 QQ 聊天记录图 → 保存 | ❌ |
+| webshot | 截网页内容块图 → 保存 | ❌ |
+| webshot_send | 截网页图 → 保存 + 立即发群 | ✅ |
+| image_list | 列出已保存的图片 | — |
+| image_send | 发送已保存的图片到当前群 | ✅ |
+
+## screenshot(desc, message_id)
+- desc — 截图描述（自己日后认图用）
+- message_id — 对话记录中 [#数字] 的数字，决定从哪条消息开始截
+
+截图会自动渲染为 QQ 风格并保存到 \`social/images/\`。
+仅保存，不会自动发送；要发到群里，需要在 write_intent_plan 的 actions 里加：
+\`\`\`json
+{"type": "image", "file": "截图文件名"}
+\`\`\`
+
+## webshot(url, keyword, desc?)
+- url — 网页完整 URL
+- keyword — 要截取的关键词所在内容块
+- desc — 可选描述
+
+### keyword 选择规则
+用 CC 报告或搜索结果中出现的**有意义的英文/中文短语**：
+- ✅ 好：\`"faculty searches"\` / \`"hiring decline"\` / \`"教职招聘"\` / \`"Gemini benchmark"\`
+- ❌ 烂：纯数字、特殊符号、太短（<3 字）、太宽泛（如 "the"、"中国"）
+
+失败可换词重试；关键词没命中会返回错误。
+
+## webshot_send(url, keyword, desc?)
+和 webshot 一致，但截完立即发送到群里。适合：
+- 辩论中甩数据打脸
+- 分享 CC 研究引用来源
+- 佐证观点（"看这里原文..."）
+
+会自动：保存 → 发送 → 更新状态（不用额外 image_send）。
+
+## image_list()
+返回所有已保存图片的 {file, desc, date} 列表。
+发送前先看有哪些可用，尤其是想翻旧截图打脸时。
+
+## image_send(file)
+- file — social/images/ 下的文件名（不含路径前缀）
+
+发送指定图片到当前群聊。
+
+## 组合模式
+### 模式 A：截图存档 → 事后使用
+1. 当下：screenshot(desc="群友否认说过XX", message_id=12345)
+2. 几轮后他否认：image_list() 找那张
+3. image_send(file="screenshot_xxx.png")
+
+### 模式 B：网页数据佐证（一步到位）
+- 直接 webshot_send(url, keyword)
+
+### 模式 C：网页数据保留后多次用
+1. webshot(url, keyword) → 保存
+2. 第一次发：actions 里 {"type":"image", "file":"..."}
+3. 第二次发：image_send(file)
+
+## 反模式
+- ❌ 用 screenshot 后忘记加 image action → 图片没发出去
+- ❌ webshot 后又调 image_send 发同一张（重复步骤，直接用 webshot_send）
+- ❌ keyword 用纯数字或超短词 → 截图失败
+- ❌ 一次发很多张（5+）刷屏
+- ❌ 每次回答都配图（图片应该有信息量）
+`,
   voice_send: `# voice_send 完整指南
 
 ## 签名
