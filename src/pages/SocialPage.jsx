@@ -178,6 +178,8 @@ export default function SocialPage() {
   const [showReflect, setShowReflect] = useState(true);
   const [showUsage, setShowUsage] = useState(true);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+  const [cacheResetAt, setCacheResetAt] = useState(0);
+  const [cacheResetCounter, setCacheResetCounter] = useState(0);
 
   // ── Load assistants + providers ──
   useEffect(() => {
@@ -350,6 +352,18 @@ export default function SocialPage() {
     };
     setup();
     return () => { unlisten?.(); };
+  }, []);
+
+  // ── Listen for cache stats reset (agent start) ──
+  useEffect(() => {
+    let unlisten = null;
+    (async () => {
+      unlisten = await listen('social-cache-stats-reset', () => {
+        setCacheResetAt(Date.now());
+        setCacheResetCounter(c => c + 1);
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   // ── Listen for target names ──
@@ -640,6 +654,12 @@ export default function SocialPage() {
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
+
+  // Usage logs after the most recent agent start (for PromptCachePanel)
+  const usageLogsAfterReset = useMemo(
+    () => sortedLogs.filter(l => l.level === 'usage' && new Date(l.timestamp).getTime() >= cacheResetAt),
+    [sortedLogs, cacheResetAt],
+  );
 
   // ── Close handler ──
   const handleClose = () => {
@@ -1701,6 +1721,8 @@ export default function SocialPage() {
               );
             })()}
 
+            <PromptCachePanel logs={usageLogsAfterReset} resetCounter={cacheResetCounter} />
+
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
               {reversedFilteredLogs.length === 0 ? (
@@ -1902,6 +1924,57 @@ function UsageLogEntry({ log, logFilter }) {
       )}
       {' '}
       <span className="font-mono">{log.message}</span>
+    </div>
+  );
+}
+
+function PromptCachePanel({ logs, resetCounter }) {
+  const stats = useMemo(() => {
+    const map = new Map();
+    for (const log of logs) {
+      if (log.level !== 'usage' || !log.details) continue;
+      const d = log.details;
+      const label = d.label;
+      if (!label) continue;
+      const cur = map.get(label) || { label, calls: 0, totalIn: 0, totalCached: 0, totalOut: 0 };
+      cur.calls += 1;
+      cur.totalIn += d.inputTokens || 0;
+      cur.totalCached += d.cachedTokens || 0;
+      cur.totalOut += d.outputTokens || 0;
+      map.set(label, cur);
+    }
+    return Array.from(map.values()).sort((a, b) => b.calls - a.calls);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [logs, resetCounter]);
+
+  if (stats.length === 0) {
+    return (
+      <div className="text-xs text-slate-400 px-3 py-1.5 border-b border-slate-100">
+        Prompt Cache：本次会话暂无数据
+      </div>
+    );
+  }
+  return (
+    <div className="border-b border-slate-100 px-3 py-1.5 bg-slate-50/50 text-xs font-mono">
+      <div className="font-semibold text-slate-700 mb-1">Prompt Cache（本次会话）</div>
+      <table className="w-full">
+        <tbody>
+          {stats.map(s => {
+            const rate = s.totalIn > 0
+              ? Math.min(100, Math.round((s.totalCached / s.totalIn) * 100)) + '%'
+              : '—';
+            const inK = s.totalIn >= 1000 ? Math.round(s.totalIn / 1000) + 'k' : String(s.totalIn);
+            return (
+              <tr key={s.label}>
+                <td className="pr-3">{s.label}</td>
+                <td className="pr-3 text-slate-500">{s.calls} calls</td>
+                <td className="pr-3 text-slate-500">{inK} in</td>
+                <td className="text-emerald-600">{rate} cached</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }
