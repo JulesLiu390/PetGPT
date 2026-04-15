@@ -344,7 +344,7 @@ async function convertGifToPng(base64Data) {
   return { data: result.data, mimeType: result.mime_type };
 }
 
-async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig, petId) {
+async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig, petId, socialConfig = null) {
   // GIF → PNG 转码（Gemini 不支持 image/gif）
   if (resolvedImage.mimeType === 'image/gif' || resolvedImage.data?.includes('data:image/gif')) {
     try {
@@ -398,7 +398,11 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
     apiKey: visionLLMConfig.apiKey,
     model: visionLLMConfig.modelName,
     baseUrl: visionLLMConfig.baseUrl,
-    options: { temperature: 0.2 },
+    options: {
+      temperature: 0.2,
+      explicitCache: shouldUseExplicitCache(socialConfig, visionLLMConfig.apiFormat),
+      cacheKey: buildCacheKey(petId, '', 'Vision'),
+    },
     conversationId: `vision-desc-${Date.now()}`,
   });
 
@@ -406,12 +410,14 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
   if (petId) {
     const { normalizeUsage, appendUsageLog } = await import('./mcp/toolExecutor.js');
     const u = normalizeUsage(result.usage);
-    appendUsageLog(petId, {
+    const record = {
       ts: new Date().toISOString(), label: 'Vision', target: '',
       model: visionLLMConfig.modelName || '', apiFormat: visionLLMConfig.apiFormat || '',
       inputTokens: u.inputTokens, outputTokens: u.outputTokens, cachedTokens: u.cachedTokens,
       toolCalls: 0, iterations: 1, durationMs: Date.now() - _visionStart,
-    });
+    };
+    appendUsageLog(petId, record);
+    logUsageRecord(record);
   }
 
   if (result.error) {
@@ -731,7 +737,7 @@ async function pollTarget({
           const imgData = img.data || '';
           const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
           const wrappedDescribe = () => {
-            const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId);
+            const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, petId, socialConfig);
             imageDescInflight.set(cacheKey, p);
             return p;
           };
@@ -2445,7 +2451,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         const imgData = img.data || '';
         const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
         const wrappedDescribe = () => {
-          const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId);
+          const p = describeImage(img, ctxBefore, ctxAfter, sender, botName, visionLLMConfig, config.petId, config);
           imageDescInflight.set(cacheKey, p);
           return p;
         };
