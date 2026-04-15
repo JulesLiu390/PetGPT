@@ -14,6 +14,72 @@ import * as tauri from './tauri';
 
 /** 默认 .md 内容（代码自带，随版本更新） */
 export const DEFAULT_TOOL_DOCS = {
+  chat_search: `# chat_search / chat_context 完整指南
+
+## 工具
+- chat_search(keywords, sender?, start?, end?, sort?, limit?) — 关键词全文搜索（FTS5 索引）
+- chat_context(message_id, before?, after?) — 基于消息 ID 取前后 N 条同群消息
+
+## chat_search 参数详解
+- **keywords**（必填，字符串）— 搜索语法：
+  - \`"Claude"\` — 单词
+  - \`"Claude benchmark"\` — 多词，AND 关系（必须都出现）
+  - \`"Claude OR GPT"\` — OR 关系
+  - \`'"精确短语"'\` — 双引号包住的精确短语匹配
+  - \`"Claude*"\` — 前缀通配
+- **sender**（可选）— 必须传 QQ 号（纯数字），不接受昵称
+- **start / end**（可选）— 相对时间（\`"7d"\`/\`"1h"\`/\`"30m"\`）或绝对时间（\`"2026-04-05"\`）。同时传 = 时间区间；只传 start = "至今"；只传 end = "至那时"
+- **sort**（可选）— \`relevance\`（默认）/ \`newest\` / \`oldest\`
+- **limit**（可选）— 返回条数上限，默认 20
+
+## chat_context 参数
+- **message_id**（必填）— 对话记录 [#数字] 里的 ID
+- **before / after**（可选，默认各 5）— 取该消息前后多少条
+
+## 典型组合：先 search 定位，再 context 看上下文
+1. chat_search(keywords="Gemini 3", sender="12345", start="7d") → 拿到消息 ID
+2. chat_context(message_id=98765, before=5, after=10) → 看这条消息前后的完整对话
+
+## 使用场景
+### 场景 1：有人否认说过某话
+chat_search(keywords='"我从来没说过"', sender="<他QQ>", start="30d")
+→ 搜原文反驳
+
+### 场景 2：回顾某人对某话题的态度
+chat_search(keywords="AI 炒作", sender="<他QQ>", sort="oldest")
+→ 看他从什么时候开始这么说、态度有没有变
+
+### 场景 3：想重提几天前某个话题
+chat_search(keywords="那个架构的讨论", start="3d", end="2d")
+→ 找到那次对话
+
+### 场景 4：buffer(64 条)之外的旧对话
+buffer 里只有最近 64 条，更早的必须靠 chat_search。
+
+## sender 参数坑
+sender 必须是纯数字 QQ 号。常见错误：
+- ❌ sender="LittleOrange" → 报错
+- ❌ sender="@某某" → 报错
+- ✅ sender="3825478002"
+
+找不到 QQ 号时，先不传 sender，关键词里带上对方名字的一部分作为近似过滤。
+
+## 时间参数坑
+- \`"7d"\` = 过去 7 天（从现在往回数）
+- \`"2026-04-05"\` = 从该日期 00:00:00 起
+- 同时传 start 和 end：区间过滤
+- 错误 \`"7天"\` / \`"一周"\` → 无法解析
+
+## 反模式
+- ❌ keywords 为空 → 必填，报错
+- ❌ 用 keywords 搜 emoji → FTS5 对 emoji 支持有限
+- ❌ 只用 chat_search 不用 chat_context → 看到单条消息不懂上下文
+- ❌ 搜整个历史不加时间/发送者过滤 → 返回太多，噪音大
+- ❌ 搜到一条就下结论，不看 context 就回复群里 → 容易误判
+
+## 旧 MCP 工具提示
+history_read / daily_read / daily_list 是旧的 QQ MCP 历史查询，慢且不全。**优先用 chat_search**。
+`,
   image: `# 图片工具族完整指南（screenshot / webshot / webshot_send / image_list / image_send）
 
 ## 工具总览与差异

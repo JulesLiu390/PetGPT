@@ -978,14 +978,20 @@ ${voiceEnabled ? `
   完整用法 → social_read("social/tools/voice_send.md")` : ''}
 
 历史查询工具（只读，按需使用）：
-- chat_search(keywords, sender?, start?, end?, sort?, limit?)：⭐ 关键词全文搜索（FTS5）。
-  - keywords 必填。语法："Claude" / "Claude benchmark" (AND) / "Claude OR GPT" / '"精确短语"' / "Claude*" (前缀)
-  - sender 必须传 QQ号（纯数字），不接受昵称
-  - start/end 用相对时间（"7d"/"1h"/"30m"）或绝对时间（"2026-04-05"）。同时传 = 时间区间
-  - sort: relevance(默认) / newest / oldest
-  - 用途：找特定话题/某人发言、找原话打脸、回顾某话题的所有讨论
-- chat_context(message_id, before?, after?)：根据消息 ID 取前后 N 条同群消息（默认前后各 5 条）。先用 chat_search 找到锚点，再用 chat_context 看上下文。
-- history_read / daily_read / daily_list：（旧）QQ MCP 提供的历史查询，慢且不全。优先用 chat_search。
+- chat_search / chat_context — 聊天记录全文搜索（FTS5）
+  何时用：
+    • 有人否认说过某话 → 搜原文打脸
+    • 回顾某人对某话题的态度
+    • buffer(64 条)外的旧对话取证
+  syntax 速查：
+    chat_search(keywords, sender?, start?, end?, sort?, limit?)
+    • keywords: "A" / "A B"(AND) / "A OR B" / '"精确"' / "A*"
+    • sender: 纯数字 QQ 号（不接受昵称）
+    • start/end: "7d"/"1h"/"2026-04-05"
+    • sort: relevance(默认) / newest / oldest
+    chat_context(message_id, before?, after?) — 先 chat_search 定位锚点再看上下文
+  完整用法（反模式、组合例子、时间坑） → social_read("social/tools/chat_search.md")
+- history_read / daily_read / daily_list：（旧）慢且不全，优先用 chat_search
 
 跨群日志工具（只读）：
 - group_log_list()：列出所有有日志记录的群
