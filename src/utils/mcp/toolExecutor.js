@@ -500,6 +500,7 @@ export const callLLMWithTools = async ({
   usageTarget,      // optional string target id for usage logging
   usagePetId,       // optional petId for usage logging (falls back to builtinToolContext.petId)
   maxIterations,    // optional max iterations override (default 100)
+  onUsageLogged,    // optional (record) => void — fires after appendUsageLog with the same record
 }) => {
   const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
@@ -524,6 +525,15 @@ export const callLLMWithTools = async ({
   let totalIterations = 0;
   const MAX_TOTAL_ITERATIONS = maxIterations ?? 100;
   let stopEarly = false; // set by stopAfterTool
+
+  const _writeUsage = (record) => {
+    const _petId = usagePetId || builtinToolContext?.petId;
+    if (!_petId || !usageLabel) return;
+    try { appendUsageLog(_petId, record); } catch (_) { /* ignore */ }
+    if (typeof onUsageLogged === 'function') {
+      try { onUsageLogged(record); } catch (_) { /* ignore */ }
+    }
+  };
 
   while (totalIterations < MAX_TOTAL_ITERATIONS) {
     totalIterations++;
@@ -587,22 +597,19 @@ export const callLLMWithTools = async ({
     // 如果没有工具调用，返回结果
     if (!result.toolCalls || result.toolCalls.length === 0) {
       // Write usage log
-      const _petId = usagePetId || builtinToolContext?.petId;
-      if (usageLabel && _petId) {
-        appendUsageLog(_petId, {
-          ts: new Date().toISOString(),
-          label: usageLabel,
-          target: usageTarget || '',
-          model: model || '',
-          apiFormat: apiFormat || '',
-          inputTokens: totalUsage.inputTokens,
-          outputTokens: totalUsage.outputTokens,
-          cachedTokens: totalUsage.cachedTokens,
-          toolCalls: toolCallHistory.length,
-          iterations: totalIterations,
-          durationMs: Date.now() - usageStartTime,
-        });
-      }
+      _writeUsage({
+        ts: new Date().toISOString(),
+        label: usageLabel,
+        target: usageTarget || '',
+        model: model || '',
+        apiFormat: apiFormat || '',
+        inputTokens: totalUsage.inputTokens,
+        outputTokens: totalUsage.outputTokens,
+        cachedTokens: totalUsage.cachedTokens,
+        toolCalls: toolCallHistory.length,
+        iterations: totalIterations,
+        durationMs: Date.now() - usageStartTime,
+      });
       return {
         content: result.content,
         reasoningContent: result.reasoningContent,
@@ -737,15 +744,12 @@ export const callLLMWithTools = async ({
 
     // 如果所有工具调用都被跳过（达到限制），返回
     if (reachedLimit && toolCallHistory.length === 0) {
-      const _petId = usagePetId || builtinToolContext?.petId;
-      if (usageLabel && _petId) {
-        appendUsageLog(_petId, {
-          ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
-          model: model || '', apiFormat: apiFormat || '',
-          inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
-          toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
-        });
-      }
+      _writeUsage({
+        ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+        model: model || '', apiFormat: apiFormat || '',
+        inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+        toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+      });
       return {
         content: `[${limitMessage}]`,
         toolCallHistory,
@@ -805,30 +809,24 @@ export const callLLMWithTools = async ({
 
     // stopAfterTool was triggered — exit loop after adding tool results to history
     if (stopEarly) {
-      const _petId = usagePetId || builtinToolContext?.petId;
-      if (usageLabel && _petId) {
-        appendUsageLog(_petId, {
-          ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
-          model: model || '', apiFormat: apiFormat || '',
-          inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
-          toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
-        });
-      }
+      _writeUsage({
+        ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+        model: model || '', apiFormat: apiFormat || '',
+        inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+        toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+      });
       return { content: result.content || '', toolCallHistory, usage: totalUsage };
     }
   }
 
   // 达到最大轮次
   console.warn('[MCP] Max total iterations reached');
-  const _petId = usagePetId || builtinToolContext?.petId;
-  if (usageLabel && _petId) {
-    appendUsageLog(_petId, {
-      ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
-      model: model || '', apiFormat: apiFormat || '',
-      inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
-      toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
-    });
-  }
+  _writeUsage({
+    ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+    model: model || '', apiFormat: apiFormat || '',
+    inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+    toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+  });
   return {
     content: '[Maximum tool call iterations reached]',
     toolCallHistory,
