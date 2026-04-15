@@ -282,8 +282,7 @@ export async function buildSocialPrompt({
   // === 格式硬约束（首） ===
   sections.push('⚠️ 【格式铁律】严禁在回复中使用任何 Markdown 格式（包括但不限于 **加粗**、*斜体*、# 标题、- 列表、> 引用、```代码块```）。只输出纯文本。');
 
-  // === 时间上下文 ===
-  sections.push(`当前时间：${formatCurrentTime()}`);
+  // 时间上下文留到社交/观察模式说明之后再注入（见下方），以保留前段 prompt prefix 缓存。
 
   // Parallel cached file reads
   const [
@@ -406,6 +405,9 @@ export async function buildSocialPrompt({
       sections.push('⚠️ 你当前处于半潜水模式——只在被 @ 时才回复。本次回复是因为你被 @ 了。请直接回应提问者的问题或意图，不需要主动延伸话题或试图带动群聊气氛。');
     }
   }
+
+  // === 时间上下文（放在稳定段之后，避免破坏 prompt prefix 缓存） ===
+  sections.push(`当前时间：${formatCurrentTime()}`);
 
   // === Intent 交接 —— 仅 Reply 模式 ===
   if (role === 'reply') {
@@ -693,8 +695,7 @@ export async function buildIntentSystemPrompt({
     sections.push(`你是一个意图分析模块。角色当前处于**自由模式**——看到感兴趣或相关的话题会主动参与。根据角色的人格设定和${groupLabel}最近的聊天内容，分析角色对这个群当前的想法和行为倾向。`);
   }
 
-  // === 时间上下文 ===
-  sections.push(`当前时间：${formatCurrentTime()}`);
+  // 时间上下文留到稳定段之后再注入（见下面"# 当前对话成员档案"之前），以保留前段 prompt prefix 缓存。
 
   // Parallel cached file reads
   const [
@@ -777,6 +778,9 @@ export async function buildIntentSystemPrompt({
     sections.push('（空）');
   }
   sections.push('（以上联系人索引为只读参考）');
+
+  // === 时间上下文（放在稳定段之后，避免破坏 prompt prefix 缓存） ===
+  sections.push(`当前时间：${formatCurrentTime()}`);
 
   // === 当前对话成员档案（由上次 eval 后并行预取，只读） ===
   if (peopleCacheContent) {
