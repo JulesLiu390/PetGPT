@@ -176,6 +176,7 @@ export default function SocialPage() {
   const [showIntent, setShowIntent] = useState(true);
   const [showSubagent, setShowSubagent] = useState(true);
   const [showReflect, setShowReflect] = useState(true);
+  const [showUsage, setShowUsage] = useState(true);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
 
   // ── Load assistants + providers ──
@@ -629,12 +630,13 @@ export default function SocialPage() {
     if (log.level === 'intent' || log.level === 'send') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (log.level === 'subagent') return showSubagent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (log.level === 'reflect') return showReflect && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'usage') return showUsage && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent, showReflect]);
+  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent, showReflect, showUsage]);
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
@@ -1563,6 +1565,7 @@ export default function SocialPage() {
               <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
               <ToggleBtn active={showSubagent} onClick={() => setShowSubagent(!showSubagent)} icon="🤖" label="Subagent" />
               <ToggleBtn active={showReflect} onClick={() => setShowReflect(!showReflect)} icon="🪞" label="Reflect" />
+              <ToggleBtn active={showUsage} onClick={() => setShowUsage(!showUsage)} icon="💾" label="Usage" />
               {/* Lurk mode buttons for selected target */}
               {selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
@@ -1716,6 +1719,17 @@ export default function SocialPage() {
                     <SubagentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'reflect' ? (
                     <ReflectLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'usage' ? (
+                    <div key={log.id ?? log.timestamp} className="py-0.5 text-slate-600">
+                      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+                      {' '}
+                      <span className="font-semibold text-emerald-600">[usage]</span>
+                      {log.target && logFilter === 'all' && (
+                        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+                      )}
+                      {' '}
+                      <span className="font-mono">{log.message}</span>
+                    </div>
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
