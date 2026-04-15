@@ -179,6 +179,7 @@ export default function SocialPage() {
   const [showUsage, setShowUsage] = useState(true);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   const [cacheResetAt, setCacheResetAt] = useState(0);
+  const [logViewMode, setLogViewMode] = useState('main'); // 'main' | 'usage'
 
   // ── Load assistants + providers ──
   useEffect(() => {
@@ -663,6 +664,14 @@ export default function SocialPage() {
     [sortedLogs, cacheResetAt],
   );
 
+  // Logs to display in the log pane, depending on which tab is active.
+  const displayLogs = useMemo(
+    () => (logViewMode === 'usage'
+      ? [...usageLogsAfterReset].reverse()
+      : reversedFilteredLogs),
+    [logViewMode, usageLogsAfterReset, reversedFilteredLogs],
+  );
+
   // ── Close handler ──
   const handleClose = () => {
     tauri.hideSocialWindow();
@@ -800,13 +809,17 @@ export default function SocialPage() {
                     checked={config.enableImages !== false}
                     onChange={(v) => handleConfigChange('enableImages', v)}
                   />
-                  <ToggleRow
-                    label="启用显式 Prompt Cache（OpenAI 类 API）"
-                    hint="向 OpenAI 类 API 附加 prompt_cache_key + 24h 保留，提升多轮缓存命中率。Anthropic 始终启用，Gemini 依赖服务端自动缓存。如果你用的兼容网关对未知字段报错，请关闭此开关。"
-                    checked={config.explicitPromptCache !== false}
-                    onChange={(v) => handleConfigChange('explicitPromptCache', v)}
-                  />
                 </div>
+              </Card>
+
+              {/* Prompt Cache — performance setting for OpenAI-type APIs */}
+              <Card title="Prompt Cache" description="显式缓存参数（仅影响 OpenAI 类 API；Anthropic 始终启用，Gemini 走隐式缓存）">
+                <ToggleRow
+                  label="启用显式 Prompt Cache（OpenAI 类 API）"
+                  hint="向 OpenAI 类 API 附加 prompt_cache_key + 24h 保留，提升多轮缓存命中率。如果你用的兼容网关对未知字段报错，请关闭此开关。"
+                  checked={config.explicitPromptCache !== false}
+                  onChange={(v) => handleConfigChange('explicitPromptCache', v)}
+                />
               </Card>
 
               {/* MCP Server — all per-server settings nested below */}
@@ -1577,7 +1590,31 @@ export default function SocialPage() {
 
           {/* ── Right: toolbar + log content ── */}
           <div className="flex-1 min-w-0 flex flex-col">
-            {/* Content Toggle Bar + Lurk indicator */}
+            {/* Tab switcher: Main log / Usage log */}
+            <div className="flex items-center gap-0 px-3 pt-2 border-b border-slate-100 bg-white/60 shrink-0">
+              <button
+                onClick={() => setLogViewMode('main')}
+                className={`px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+                  logViewMode === 'main'
+                    ? 'border-cyan-500 text-cyan-700'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                主日志
+              </button>
+              <button
+                onClick={() => setLogViewMode('usage')}
+                className={`px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+                  logViewMode === 'usage'
+                    ? 'border-emerald-500 text-emerald-700'
+                    : 'border-transparent text-slate-400 hover:text-slate-600'
+                }`}
+              >
+                💾 用量 {usageLogsAfterReset.length > 0 ? `(${usageLogsAfterReset.length})` : ''}
+              </button>
+            </div>
+            {/* Content Toggle Bar + Lurk indicator — only show in main log mode */}
+            {logViewMode === 'main' && (
             <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 bg-white/60 shrink-0">
               <span className="text-xs text-slate-400 mr-0.5 shrink-0">Show:</span>
               <ToggleBtn active={showChat} onClick={() => setShowChat(!showChat)} icon="💬" label="Chat" />
@@ -1633,6 +1670,7 @@ export default function SocialPage() {
                 );
               })()}
             </div>
+            )}
 
             {/* Custom Group Rules — editable per target */}
             {selectedTarget && (
@@ -1727,10 +1765,12 @@ export default function SocialPage() {
 
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
-              {reversedFilteredLogs.length === 0 ? (
-                <div className="text-slate-400 text-center py-8">No logs yet</div>
+              {displayLogs.length === 0 ? (
+                <div className="text-slate-400 text-center py-8">
+                  {logViewMode === 'usage' ? '本次会话暂无用量记录' : 'No logs yet'}
+                </div>
               ) : (
-                reversedFilteredLogs.map((log) => (
+                displayLogs.map((log) => (
                   log.level === 'poll' ? (
                     <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
                   ) : log.level === 'intent' ? (
