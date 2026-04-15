@@ -777,8 +777,8 @@ export default function SocialPage() {
                     onChange={(v) => handleConfigChange('enableImages', v)}
                   />
                   <ToggleRow
-                    label="显式 Prompt Cache (OpenAI)"
-                    hint="对 OpenAI 兼容 API 附加 prompt_cache_key + 24h 保留，提升多轮缓存命中率。Anthropic 始终启用，Gemini 依赖服务端自动缓存。若兼容网关拒收未知字段请关闭。"
+                    label="启用显式 Prompt Cache（OpenAI 类 API）"
+                    hint="向 OpenAI 类 API 附加 prompt_cache_key + 24h 保留，提升多轮缓存命中率。Anthropic 始终启用，Gemini 依赖服务端自动缓存。如果你用的兼容网关对未知字段报错，请关闭此开关。"
                     checked={config.explicitPromptCache !== false}
                     onChange={(v) => handleConfigChange('explicitPromptCache', v)}
                   />
