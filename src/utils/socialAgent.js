@@ -137,15 +137,7 @@ function addLog(level, message, details = null, target = undefined) {
  */
 function logUsageRecord(record) {
   if (!record) return;
-  const message = formatUsageLogMessage({
-    label: record.label,
-    model: record.model,
-    inputTokens: record.inputTokens,
-    outputTokens: record.outputTokens,
-    cachedTokens: record.cachedTokens,
-    durationMs: record.durationMs,
-  });
-  addLog('usage', message, record, record.target || undefined);
+  addLog('usage', formatUsageLogMessage(record), record, record.target || undefined);
 }
 
 /**
@@ -658,7 +650,7 @@ async function pollTarget({
   visionLLMConfig = null,
   botName = '',
   fullBufferMessages = null,  // Observer 用：完整 buffer（供 buffer_search 搜索）
-  socialConfig = null,  // NEW: for prompt cache opts
+  socialConfig = null,  // per-pet social config; used for explicit prompt cache opt-in
 }) {
   const groupName = gName || target;
   const compressedSummary = compSummary;
