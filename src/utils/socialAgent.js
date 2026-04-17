@@ -7,6 +7,7 @@
 
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { buildCacheKey, shouldUseExplicitCache, formatUsageLogMessage } from './promptCache';
+import { writeIntentTrace } from './intentTraining';
 import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
@@ -45,6 +46,12 @@ const imageDescCache = new Map();
 
 /** 图片描述进行中 Map<cacheKey, Promise<string>> —— Observer/Reply 并发去重 */
 const imageDescInflight = new Map();
+
+/** target → boolean; opt-in whitelist for training data collection */
+const trainingTargetsMap = new Map();
+
+/** Unlisten callback for the social-set-training-enabled event (one active loop at a time) */
+let _unlistenTraining = null;
 
 /** LLM 调用指数重试 delays: 5s → 25s → 125s */
 const LLM_RETRY_DELAYS = [5000, 25000, 125000];
@@ -1625,6 +1632,14 @@ export async function startSocialLoop(config, onStatusChange) {
     }
   }
 
+  // 初始化训练数据采集白名单（从 config 加载）
+  trainingTargetsMap.clear();
+  if (config.trainingTargets && typeof config.trainingTargets === 'object') {
+    for (const [tid, enabled] of Object.entries(config.trainingTargets)) {
+      trainingTargetsMap.set(String(tid), !!enabled);
+    }
+  }
+
   // 注册所有已知 target（用于持久化 enabled 状态）
   const allTargetIds = [
     ...(config.watchedGroups || []).map(g => g.trim()).filter(Boolean),
@@ -2775,6 +2790,20 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             intentInterceptCounts.set(target, 0);
           }
 
+          const _targetStr = String(target);
+          const _shouldCollectTraining =
+            !!config.trainingCollectionEnabled && !!trainingTargetsMap.get(_targetStr);
+          const _onTraceFn = _shouldCollectTraining
+            ? (trace) => writeIntentTrace(config.petId, {
+                target_id: _targetStr,
+                target_type: targetType,
+                label: state.lastPlan === null ? 'Intent:idle' : 'Intent:msg',
+                provider: intentLLMConfig.apiFormat,
+                model: intentLLMConfig.modelName,
+                pet_id: config.petId,
+              }, trace)
+            : undefined;
+
           try {
             const raw = await callLLMWithTools({
               messages: [
@@ -2798,6 +2827,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               usageTarget: target,
               usagePetId: config.petId,
               onUsageLogged: logUsageRecord,
+              onTrace: _onTraceFn,
               onToolCall: (name, args) => {
                 if (name === 'write_intent_plan') {
                   capturedPlan = { actions: args.actions || [] };
@@ -3536,6 +3566,15 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     }
   }
 
+  // Setup training collection whitelist listener
+  if (_unlistenTraining) { _unlistenTraining(); _unlistenTraining = null; }
+  _unlistenTraining = await tauri.listen('social-set-training-enabled', (e) => {
+    const { target, enabled } = e.payload || {};
+    if (target == null) return;
+    trainingTargetsMap.set(String(target), !!enabled);
+    addLog('info', `Training collection ${enabled ? 'enabled' : 'disabled'} for ${target}`, null, target);
+  });
+
   // 启动层 1: Fetcher 循环（每 1s batch 拉取）
   fetcherLoop();
   
@@ -3582,6 +3621,7 @@ export function stopSocialLoop() {
     }
     killBySource('social');
     destroySubagentListeners();
+    if (_unlistenTraining) { _unlistenTraining(); _unlistenTraining = null; }
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
     sentMessagesCache.clear();
@@ -3589,6 +3629,7 @@ export function stopSocialLoop() {
     imageDescInflight.clear();
     lurkModes.clear();
     pausedTargets.clear();
+    trainingTargetsMap.clear();
     knownTargets.clear();
     targetNamesCache.clear();
   }
