@@ -109,6 +109,7 @@ const DEFAULT_SETTINGS = {
   ],
   defaultScreenshotPrompt: null, // null = 显示选择器, 'id' = 直接使用该 prompt
   trainingCollectionEnabled: false,
+  trainingTargets: {},
 };
 
 export const getSettings = async () => {

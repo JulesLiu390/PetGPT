@@ -213,10 +213,11 @@ export default function SocialPage() {
     return () => { if (unlisten) unlisten(); };
   }, []);
 
-  // ── Load trainingCollectionEnabled from persisted settings ──
+  // ── Load trainingCollectionEnabled and trainingTargets from persisted settings ──
   useEffect(() => {
     tauri.getSettings().then(s => {
-      setTrainingCollectionEnabled(!!s?.trainingCollectionEnabled);
+      if (s?.trainingCollectionEnabled != null) setTrainingCollectionEnabled(!!s.trainingCollectionEnabled);
+      if (s?.trainingTargets && typeof s.trainingTargets === 'object') setTrainingTargets(s.trainingTargets);
     }).catch(() => {});
   }, []);
 
@@ -691,10 +692,13 @@ export default function SocialPage() {
   const setTargetLurkMode = (target, mode) => {
     emit('social-set-lurk-mode', { target, mode });
   };
-  // eslint-disable-next-line no-unused-vars
   const setTargetTrainingEnabled = (target, enabled) => {
     emit('social-set-training-enabled', { target, enabled });
-    setTrainingTargets(prev => ({ ...prev, [target]: enabled }));
+    setTrainingTargets(prev => {
+      const next = { ...prev, [target]: enabled };
+      tauri.updateSettings({ trainingTargets: next }).catch(() => {});
+      return next;
+    });
   };
   const toggleTargetPaused = (target) => {
     const isPaused = pausedTargets[target] || false;
@@ -1568,6 +1572,7 @@ export default function SocialPage() {
                 const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
                 const displayName = targetNames[t.id] || t.id;
                 const isPaused = pausedTargets[t.id] || false;
+                const isTrainingEnabled = trainingTargets[t.id] || false;
                 return (
                   <SidebarItem
                     key={t.id}
@@ -1582,6 +1587,8 @@ export default function SocialPage() {
                     } : null}
                     paused={isPaused}
                     onPauseClick={() => toggleTargetPaused(t.id)}
+                    trainingEnabled={trainingCollectionEnabled ? isTrainingEnabled : undefined}
+                    onTrainingClick={trainingCollectionEnabled ? () => setTargetTrainingEnabled(t.id, !isTrainingEnabled) : null}
                   />
                 );
               })}
@@ -2346,7 +2353,7 @@ function ToggleRow({ label, hint, checked, onChange }) {
   );
 }
 
-function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick }) {
+function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick, trainingEnabled, onTrainingClick }) {
   return (
     <div
       onClick={onClick}
@@ -2373,6 +2380,15 @@ function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, pau
           title="Click to cycle lurk mode"
         >
           {lurkIcon}
+        </button>
+      )}
+      {onTrainingClick && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onTrainingClick(); }}
+          className="shrink-0 hover:scale-125 transition-transform text-sm leading-none"
+          title={trainingEnabled ? 'Training: ON' : 'Training: OFF'}
+        >
+          {trainingEnabled ? '📊' : '📋'}
         </button>
       )}
       <span className="truncate flex-1 font-medium">{label}</span>
