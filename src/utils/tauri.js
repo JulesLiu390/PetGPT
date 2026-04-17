@@ -108,6 +108,7 @@ const DEFAULT_SETTINGS = {
     { id: 'translate', name: '翻译文字', prompt: '请翻译图片中的文字为中文', icon: '🌐' },
   ],
   defaultScreenshotPrompt: null, // null = 显示选择器, 'id' = 直接使用该 prompt
+  trainingCollectionEnabled: false,
 };
 
 export const getSettings = async () => {

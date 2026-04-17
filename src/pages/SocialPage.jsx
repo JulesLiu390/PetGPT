@@ -62,6 +62,7 @@ export default function SocialPage() {
   const [showConfig, setShowConfig] = useState(false);
   const [showAdvancedLLM, setShowAdvancedLLM] = useState(false);
   const [lurkModes, setLurkModes] = useState({}); // { [target]: 'normal'|'semi-lurk'|'full-lurk' }
+  const [trainingTargets, setTrainingTargets] = useState({}); // { [target]: true }
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
   const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
@@ -579,7 +580,12 @@ export default function SocialPage() {
       const configToStart = buildConfigToSave();
       await saveSocialConfig(selectedPetId, configToStart);
       setConfig(configToStart);
-      emit('social-start', configToStart);
+      const appSettings = await tauri.getSettings().catch(() => ({}));
+      emit('social-start', {
+        ...configToStart,
+        trainingCollectionEnabled: appSettings?.trainingCollectionEnabled || false,
+        trainingTargets,
+      });
     }
   };
 
@@ -676,6 +682,11 @@ export default function SocialPage() {
   ];
   const setTargetLurkMode = (target, mode) => {
     emit('social-set-lurk-mode', { target, mode });
+  };
+  // eslint-disable-next-line no-unused-vars
+  const setTargetTrainingEnabled = (target, enabled) => {
+    emit('social-set-training-enabled', { target, enabled });
+    setTrainingTargets(prev => ({ ...prev, [target]: enabled }));
   };
   const toggleTargetPaused = (target) => {
     const isPaused = pausedTargets[target] || false;
