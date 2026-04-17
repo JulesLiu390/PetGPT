@@ -2823,6 +2823,7 @@ pub fn run() {
             subagent::subagent_kill,
             subagent::subagent_set_max_concurrent,
             commands::training_export::run_training_export,
+            commands::training_export::get_home_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

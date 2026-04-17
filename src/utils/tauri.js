@@ -859,6 +859,8 @@ export const runTrainingExport = async (options) => {
   return invoke('run_training_export', { options });
 };
 
+export const getHomeDir = () => invoke('get_home_dir');
+
 // Model Configs (alias to pets with model type)
 export const getModelConfigs = async () => {
   const pets = await getPets();
@@ -1151,6 +1153,7 @@ const tauri = {
   workspaceOpenSubfolder,
   workspaceOpenFile,
   runTrainingExport,
+  getHomeDir,
 
   // TTS
   elevenlabsTts,

@@ -697,24 +697,10 @@ export default function SocialPage() {
     setExportResult(null);
     try {
       const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-      // Use the workspace path as base for output; fall back to a relative path
       let outputPath;
       try {
-        // Try to get the workspace path, then use its parent as a base dir
-        const workspacePath = await tauri.invoke('workspace_get_path', {
-          petId: selectedPetId,
-          path: '.',
-          ensureExists: false,
-        });
-        // workspacePath is something like ~/Library/.../workspace/<petId>
-        // We want ~/Downloads — derive home from the path (walk up from ~/Library/...)
-        const parts = workspacePath.split('/');
-        // Find 'Library' or 'AppData' segment and take everything before it
-        const libIdx = parts.findIndex(p => p === 'Library' || p === 'AppData');
-        const homeDir = libIdx > 0 ? parts.slice(0, libIdx).join('/') : null;
-        outputPath = homeDir
-          ? `${homeDir}/Downloads/qwen_intent_${timestamp}.jsonl`
-          : `./qwen_intent_${timestamp}.jsonl`;
+        const homeDir = await tauri.getHomeDir();
+        outputPath = `${homeDir}/Downloads/qwen_intent_${timestamp}.jsonl`;
       } catch {
         outputPath = `./qwen_intent_${timestamp}.jsonl`;
       }

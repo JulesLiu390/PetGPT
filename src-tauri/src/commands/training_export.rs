@@ -89,3 +89,10 @@ pub async fn run_training_export(
         success: output.status.success(),
     })
 }
+
+#[tauri::command]
+pub fn get_home_dir() -> Result<String, String> {
+    std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .map_err(|e| e.to_string())
+}
