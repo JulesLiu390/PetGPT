@@ -2797,7 +2797,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             ? (trace) => writeIntentTrace(config.petId, {
                 target_id: _targetStr,
                 target_type: targetType,
-                label: state.lastPlan === null ? 'Intent:idle' : 'Intent:msg',
+                label: (wasForceEval === 'newmsg' || (!wasForceEval && intentLurkMode === 'normal')) ? 'Intent:msg' : 'Intent:idle',
                 provider: intentLLMConfig.apiFormat,
                 model: intentLLMConfig.modelName,
                 pet_id: config.petId,

@@ -172,7 +172,7 @@ Provider-neutral JSONL，每行一条 Intent eval 完整记录：
 | `id` | `itr_` 前缀 + nanoid，便于去重 |
 | `ts` | ISO 8601，eval 开始时间 |
 | `duration_ms` | 从 Intent loop 启动到 onTrace 触发的毫秒数 |
-| `target_id/type` | 群号/好友号 + `"group"` / `"friend"` |
+| `target_id/type` | 群号/好友号 + `"group"` / `"private"` (matches socialAgent.js convention: friends are tagged `'private'`) |
 | `pet_id` | 当前 Pet 的 ID（workspace 隔离的主键） |
 | `provider` | `apiFormat`：`"openai_compatible"` / `"anthropic"` / `"gemini_official"` 等 |
 | `model` | 具体模型名 |
