@@ -1756,15 +1756,19 @@ export default function SocialPage() {
             <PromptCachePanel logs={usageLogsAfterReset} />
 
             <TrainingDataCard
+              petId={selectedPetId}
               trainingCollectionEnabled={trainingCollectionEnabled}
               trainingTargets={trainingTargets}
               onToggleGlobal={async (v) => {
                 setTrainingCollectionEnabled(v);
                 await tauri.updateSettings({ trainingCollectionEnabled: v }).catch(() => {});
               }}
-              onOpenFolder={() => {
-                // TODO(Task 8): replace with openTrainingFolder(petId)
-                alert('Open folder — coming in Task 8');
+              onOpenFolder={async () => {
+                try {
+                  await tauri.workspaceOpenSubfolder(selectedPetId, 'social/training/intent');
+                } catch (e) {
+                  console.error('[TrainingData] open folder failed:', e);
+                }
               }}
               onExport={() => {
                 // TODO(Task 13): replace with openExportModal()
@@ -2021,10 +2025,29 @@ function PromptCachePanel({ logs }) {
   );
 }
 
-function TrainingDataCard({ trainingCollectionEnabled, trainingTargets, onToggleGlobal, onOpenFolder, onExport }) {
+function useTrainingStats(petId, globalEnabled) {
+  const [stats, setStats] = useState({ count: 0, bytes: 0 });
+
+  useEffect(() => {
+    if (!globalEnabled || !petId) return;
+    const date = new Date().toISOString().slice(0, 10);
+    const path = `social/training/intent/${date}.jsonl`;
+    tauri.workspaceRead(petId, path).then(text => {
+      if (!text) return;
+      const lines = text.split('\n').filter(Boolean);
+      setStats({ count: lines.length, bytes: new Blob([text]).size });
+    }).catch(() => { /* file not yet created */ });
+  }, [petId, globalEnabled]);
+
+  return stats;
+}
+
+function TrainingDataCard({ petId, trainingCollectionEnabled, trainingTargets, onToggleGlobal, onOpenFolder, onExport }) {
   const enabledTargets = Object.entries(trainingTargets || {})
     .filter(([, v]) => v)
     .map(([id]) => id);
+
+  const stats = useTrainingStats(petId, trainingCollectionEnabled);
 
   return (
     <div className="border-b border-slate-100 px-3 py-1.5 bg-slate-50/50 text-xs font-mono">
@@ -2054,6 +2077,10 @@ function TrainingDataCard({ trainingCollectionEnabled, trainingTargets, onToggle
                 {enabledTargets.map(id => (<li key={id}>· {id}</li>))}
               </ul>
             )}
+          </div>
+
+          <div className="text-xs text-gray-500 mt-2">
+            Today: {stats.count} traces · {(stats.bytes / 1024).toFixed(1)} KB
           </div>
 
           <div className="mt-2 flex gap-2">

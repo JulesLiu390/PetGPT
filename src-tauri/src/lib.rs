@@ -2816,6 +2816,7 @@ pub fn run() {
             workspace::workspace_get_path,
             workspace::workspace_delete_folder,
             workspace::workspace_open_folder,
+            workspace::workspace_open_subfolder,
             workspace::workspace_open_file,
             subagent::subagent_spawn,
             subagent::subagent_kill,

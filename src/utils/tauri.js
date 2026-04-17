@@ -847,6 +847,10 @@ export const workspaceOpenFolder = async (petId) => {
   return invoke('workspace_open_folder', { petId });
 };
 
+export const workspaceOpenSubfolder = async (petId, path) => {
+  return invoke('workspace_open_subfolder', { petId, path });
+};
+
 export const workspaceOpenFile = async (petId, path, defaultContent = '') => {
   return invoke('workspace_open_file', { petId, path, defaultContent });
 };
@@ -1140,6 +1144,7 @@ const tauri = {
   workspaceGetPath,
   workspaceDeleteFolder,
   workspaceOpenFolder,
+  workspaceOpenSubfolder,
   workspaceOpenFile,
 
   // TTS
