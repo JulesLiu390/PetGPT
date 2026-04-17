@@ -820,7 +820,10 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
   const [autoDetectProgress, setAutoDetectProgress] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
-  
+  const [manualModelName, setManualModelName] = useState('');
+  const [manualTestResult, setManualTestResult] = useState(null);
+  const [isManualTesting, setIsManualTesting] = useState(false);
+
   // 当 API Key 改变时，尝试检测服务商并自动填充
   useEffect(() => {
     const detected = detectProviderFromKey(formData.apiKey);
@@ -944,6 +947,45 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     }
   };
   
+  // Test a specific model name supplied by the user.
+  // Used when /models endpoint is unavailable.
+  const handleTestManualModel = async () => {
+    const trimmed = manualModelName.trim();
+    const key = firstApiKey(formData.apiKey);
+    if (!trimmed || !formData.baseUrl || !key) {
+      setManualTestResult({ ok: false, msg: 'Fill Base URL, API Key, and model name first' });
+      return;
+    }
+
+    setIsManualTesting(true);
+    setManualTestResult(null);
+
+    try {
+      const response = await callOpenAILib({
+        apiKey: key,
+        baseUrl: formData.baseUrl,
+        apiFormat: formData.apiFormat,
+        model: trimmed,
+        messages: [{ role: 'user', content: 'hi' }],
+        maxTokens: 1,
+      });
+
+      if (response) {
+        // Append to fetchedModels (dedup)
+        setFetchedModels(prev => prev.includes(trimmed) ? prev : [...prev, trimmed]);
+        setManualTestResult({ ok: true, msg: `✓ Model '${trimmed}' works. Added to list — save to keep it.` });
+        setManualModelName('');  // clear input for next add
+      } else {
+        setManualTestResult({ ok: false, msg: '✗ No response from model (empty result)' });
+      }
+    } catch (error) {
+      const msg = (error?.message || String(error));
+      setManualTestResult({ ok: false, msg: `✗ ${msg.length > 200 ? msg.substring(0, 200) + '...' : msg}` });
+    } finally {
+      setIsManualTesting(false);
+    }
+  };
+
   // Auto-detect endpoint by trying known provider URLs (uses first key)
   const handleAutoDetect = async () => {
     const key = firstApiKey(formData.apiKey);
@@ -1230,6 +1272,42 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
         </div>
       )}
       
+      {/* Manual model entry — shown when fetch didn't find models */}
+      {fetchedModels.length === 0 && testResult && !isFetchingModels && !testing && (
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+          <div className="text-sm font-medium text-amber-900">
+            Provider's /models endpoint unavailable?
+          </div>
+          <div className="text-xs text-amber-700">
+            Some providers don't expose a model list. Enter a model name manually and test it.
+          </div>
+          <div className="flex gap-2">
+            <Input
+              type="text"
+              value={manualModelName}
+              onChange={(e) => setManualModelName(e.target.value)}
+              placeholder="e.g. Qwen3-32B-thinking"
+              className="flex-1 font-mono text-xs"
+              disabled={isManualTesting}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleTestManualModel}
+              disabled={isManualTesting || !manualModelName.trim() || !formData.baseUrl || !firstApiKey(formData.apiKey)}
+            >
+              {isManualTesting ? <FaSpinner className="w-4 h-4 animate-spin" /> : <FaCheck className="w-4 h-4" />}
+              Test this model
+            </Button>
+          </div>
+          {manualTestResult && (
+            <div className={`text-xs ${manualTestResult.ok ? 'text-green-700' : 'text-red-700'} whitespace-pre-line`}>
+              {manualTestResult.msg}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Actions */}
       <div className="flex items-center gap-2 pt-2">
         <Button
