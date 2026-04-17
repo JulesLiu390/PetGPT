@@ -1272,8 +1272,8 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
         </div>
       )}
       
-      {/* Manual model entry — shown when fetch didn't find models */}
-      {fetchedModels.length === 0 && testResult && !isFetchingModels && !testing && (
+      {/* Manual model entry — shown when fetch failed; stays visible so user can add multiple */}
+      {testResult && !testSuccess && !isFetchingModels && !testing && (
         <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
           <div className="text-sm font-medium text-amber-900">
             Provider's /models endpoint unavailable?
