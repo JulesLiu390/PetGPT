@@ -8,6 +8,7 @@
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
+import { createHash } from 'node:crypto';
 
 export function parseArgs(argv) {
   const args = {
@@ -56,6 +57,47 @@ export async function loadRecords(inputDir) {
   return records;
 }
 
+function shortHash(s, len = 8) {
+  return createHash('sha256').update(String(s)).digest('hex').slice(0, len);
+}
+
+/**
+ * Redact QQ numbers (5-12 digits) in a string using a stable mapping.
+ * Updates `mapping.qq` in place; returns redacted string.
+ */
+export function redactString(s, mapping) {
+  if (typeof s !== 'string') return s;
+  return s.replace(/\b(\d{5,12})\b/g, (_, qq) => {
+    if (!mapping.qq[qq]) mapping.qq[qq] = `U_${shortHash(qq, 8)}`;
+    return mapping.qq[qq];
+  });
+}
+
+/**
+ * Apply redaction to all string fields in a record (deep-copied).
+ * Updates `mapping` (shared across calls for cross-record stability).
+ */
+export function redactRecord(record, mapping) {
+  const copy = JSON.parse(JSON.stringify(record));
+  copy.target_id = redactString(copy.target_id, mapping);
+  copy.system = redactString(copy.system, mapping);
+  for (const m of copy.messages || []) {
+    if (typeof m.content === 'string') {
+      m.content = redactString(m.content, mapping);
+    }
+    for (const tc of m.tool_calls || []) {
+      if (typeof tc.function?.arguments === 'string') {
+        tc.function.arguments = redactString(tc.function.arguments, mapping);
+      }
+    }
+  }
+  return copy;
+}
+
+export function createRedactionMapping() {
+  return { qq: {}, nick: {}, group: {} };
+}
+
 export function applyFilters(records, args) {
   return records.filter(r => {
     if (args.status && r.status !== args.status) return false;
@@ -78,13 +120,18 @@ export async function main(argv) {
   const records = await loadRecords(args.input);
   const filtered = applyFilters(records, args);
 
+  const mapping = createRedactionMapping();
+  const filteredAndRedacted = args.redact
+    ? filtered.map(r => redactRecord(r, mapping))
+    : filtered;
+
   if (!existsSync(dirname(args.output))) {
     await mkdir(dirname(args.output), { recursive: true });
   }
 
   const outputLines = [];
   let droppedInvalid = 0;
-  for (const r of filtered) {
+  for (const r of filteredAndRedacted) {
     try {
       const hf = args.template === 'raw' ? r : convertToHFMessages(r);
       outputLines.push(JSON.stringify(hf));
@@ -94,6 +141,12 @@ export async function main(argv) {
   }
 
   await writeFile(args.output, outputLines.join('\n') + (outputLines.length ? '\n' : ''));
+
+  if (args.redact) {
+    const mapPath = join(dirname(args.output), 'redaction_map.json');
+    await writeFile(mapPath, JSON.stringify(mapping, null, 2));
+    console.log(`Redaction map: ${mapPath}  (KEEP LOCAL, add to .gitignore)`);
+  }
 
   console.log(`Input records: ${records.length}`);
   console.log(`After filter:  ${filtered.length}`);
