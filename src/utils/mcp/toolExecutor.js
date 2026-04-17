@@ -507,6 +507,7 @@ export const callLLMWithTools = async ({
   usagePetId,       // optional petId for usage logging (falls back to builtinToolContext.petId)
   maxIterations,    // optional max iterations override (default 100)
   onUsageLogged,    // optional (record) => void — fires after appendUsageLog with the same record
+  onTrace,          // optional (trace) => void — full trajectory, fires once on exit
 }) => {
   const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
@@ -525,6 +526,37 @@ export const callLLMWithTools = async ({
   const totalUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   const usageStartTime = Date.now();
 
+  // ── Trace collection (only when onTrace is set) ──
+  const _trace = onTrace ? {
+    systemPrompt: null,
+    tools: null,
+    initialUserMessage: null,
+    iterations: [],
+    toolResults: [],
+    status: 'partial',          // overwritten before onTrace fires
+    termination: 'unknown',
+    error: null,
+    durationMs: 0,
+  } : null;
+
+  if (_trace) {
+    // Capture system + tools + initial user from initialMessages
+    const sys = initialMessages.find(m => m.role === 'system');
+    _trace.systemPrompt = sys ? (typeof sys.content === 'string' ? sys.content : JSON.stringify(sys.content)) : '';
+    _trace.tools = mcpTools;   // raw provider-neutral tool schemas passed in
+    const lastUser = [...initialMessages].reverse().find(m => m.role === 'user');
+    _trace.initialUserMessage = lastUser ? (typeof lastUser.content === 'string' ? lastUser.content : JSON.stringify(lastUser.content)) : '';
+  }
+
+  const _fireTrace = (status, termination, error) => {
+    if (!_trace || !onTrace) return;
+    _trace.status = status;
+    _trace.termination = termination;
+    if (error) _trace.error = typeof error === 'string' ? error : (error?.message || String(error));
+    _trace.durationMs = Date.now() - usageStartTime;
+    try { onTrace(_trace); } catch { /* ignore */ }
+  };
+
   // 跟踪每个服务器的迭代次数
   const serverIterations = new Map();
   // 总迭代次数（防止无限循环的保险）
@@ -542,6 +574,7 @@ export const callLLMWithTools = async ({
     }
   };
 
+  try {
   while (totalIterations < MAX_TOTAL_ITERATIONS) {
     totalIterations++;
     console.log(`[MCP] Tool loop iteration ${totalIterations}`);
@@ -600,7 +633,28 @@ export const callLLMWithTools = async ({
         toolNames,
       });
     }
-    
+
+    if (_trace) {
+      // assistant turn for this iteration
+      const toolCallsForTrace = (result.toolCalls || []).map(tc => ({
+        id: tc.id,
+        type: 'function',
+        function: {
+          name: tc.name,
+          // Keep args as JSON string for schema consistency (OpenAI-native shape).
+          // Export script parses to object.
+          arguments: typeof tc.arguments === 'string'
+            ? tc.arguments
+            : JSON.stringify(tc.arguments || {}),
+        },
+      }));
+      _trace.iterations.push({
+        content: result.content || null,
+        reasoning_content: result.reasoningContent || undefined,
+        tool_calls: toolCallsForTrace,
+      });
+    }
+
     // 如果没有工具调用，返回结果
     if (!result.toolCalls || result.toolCalls.length === 0) {
       // Write usage log
@@ -617,6 +671,7 @@ export const callLLMWithTools = async ({
         iterations: totalIterations,
         durationMs: Date.now() - usageStartTime,
       });
+      _fireTrace('success', 'end_turn', null);
       return {
         content: result.content,
         reasoningContent: result.reasoningContent,
@@ -727,7 +782,7 @@ export const callLLMWithTools = async ({
       const formattedResult = formatToolResult(toolResult);
       const { images: rawImages } = extractMediaFromToolResult(toolResult);
       const toolImages = await resolveImageUrls(rawImages);
-      
+
       toolCallHistory.push({
         id: toolCallId,
         name: call.name,
@@ -735,6 +790,16 @@ export const callLLMWithTools = async ({
         result: formattedResult,
         images: toolImages
       });
+
+      if (_trace) {
+        _trace.toolResults.push({
+          tool_call_id: toolCallId,
+          name: call.name,
+          content: typeof formattedResult === 'string'
+            ? formattedResult
+            : JSON.stringify(formattedResult),
+        });
+      }
 
       if (onToolResult) {
         onToolResult(call.name, formattedResult, toolCallId, isError);
@@ -757,6 +822,7 @@ export const callLLMWithTools = async ({
         inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
         toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
       });
+      _fireTrace('partial', 'server_iteration_limit', null);
       return {
         content: `[${limitMessage}]`,
         toolCallHistory,
@@ -822,6 +888,7 @@ export const callLLMWithTools = async ({
         inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
         toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
       });
+      _fireTrace('success', typeof stopAfterTool === 'string' ? stopAfterTool : 'stopAfterTool', null);
       return { content: result.content || '', toolCallHistory, usage: totalUsage };
     }
   }
@@ -834,11 +901,16 @@ export const callLLMWithTools = async ({
     inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
     toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
   });
+  _fireTrace('partial', 'max_iterations', null);
   return {
     content: '[Maximum tool call iterations reached]',
     toolCallHistory,
     usage: totalUsage,
   };
+  } catch (err) {
+    _fireTrace('failed', 'error', err);
+    throw err;
+  }
 };
 
 /**
