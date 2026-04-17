@@ -2756,6 +2756,17 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         let intentResult;
         let capturedPlan = null;
         let intentStickerSent = false; // 追踪 Intent 是否通过工具调用发送了表情包
+
+        // Training trace: compute once per eval (not per retry attempt)
+        const _targetStr = String(target);
+        const _shouldCollectTraining =
+          !!_currentTrainingCollectionEnabled && !!trainingTargetsMap.get(_targetStr);
+        // "Last trace wins" — each attempt overwrites; we write to disk once after the loop
+        let _latestTrace = null;
+        const _onTraceFn = _shouldCollectTraining
+          ? (trace) => { _latestTrace = trace; }
+          : undefined;
+
         for (let attempt = 0; ; attempt++) {
           // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
           capturedPlan = null;
@@ -2797,20 +2808,6 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             intentInjectionWatermarks.set(target, lastInitMsg?.message_id || '');
             intentInterceptCounts.set(target, 0);
           }
-
-          const _targetStr = String(target);
-          const _shouldCollectTraining =
-            !!_currentTrainingCollectionEnabled && !!trainingTargetsMap.get(_targetStr);
-          const _onTraceFn = _shouldCollectTraining
-            ? (trace) => writeIntentTrace(config.petId, {
-                target_id: _targetStr,
-                target_type: targetType,
-                label: (wasForceEval === 'newmsg' || (!wasForceEval && intentLurkMode === 'normal')) ? 'Intent:msg' : 'Intent:idle',
-                provider: intentLLMConfig.apiFormat,
-                model: intentLLMConfig.modelName,
-                pet_id: config.petId,
-              }, trace)
-            : undefined;
 
           try {
             const raw = await callLLMWithTools({
@@ -2855,6 +2852,18 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             }
             intentResult = { content: e.message || e, error: true };
           }
+        }
+
+        // Write training trace exactly once per eval (final attempt outcome only)
+        if (_shouldCollectTraining && _latestTrace) {
+          writeIntentTrace(config.petId, {
+            target_id: _targetStr,
+            target_type: targetType,
+            label: (wasForceEval === 'newmsg' || (!wasForceEval && intentLurkMode === 'normal')) ? 'Intent:msg' : 'Intent:idle',
+            provider: intentLLMConfig.apiFormat,
+            model: intentLLMConfig.modelName,
+            pet_id: config.petId,
+          }, _latestTrace);
         }
 
         // 清理本次 eval 的注入水位线
