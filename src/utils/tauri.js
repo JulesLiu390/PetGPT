@@ -855,6 +855,10 @@ export const workspaceOpenFile = async (petId, path, defaultContent = '') => {
   return invoke('workspace_open_file', { petId, path, defaultContent });
 };
 
+export const runTrainingExport = async (options) => {
+  return invoke('run_training_export', { options });
+};
+
 // Model Configs (alias to pets with model type)
 export const getModelConfigs = async () => {
   const pets = await getPets();
@@ -1146,6 +1150,7 @@ const tauri = {
   workspaceOpenFolder,
   workspaceOpenSubfolder,
   workspaceOpenFile,
+  runTrainingExport,
 
   // TTS
   elevenlabsTts,

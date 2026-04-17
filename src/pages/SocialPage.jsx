@@ -64,6 +64,14 @@ export default function SocialPage() {
   const [lurkModes, setLurkModes] = useState({}); // { [target]: 'normal'|'semi-lurk'|'full-lurk' }
   const [trainingTargets, setTrainingTargets] = useState({}); // { [target]: true }
   const [trainingCollectionEnabled, setTrainingCollectionEnabled] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [exportOptions, setExportOptions] = useState({
+    redact: true,
+    statusSuccessOnly: true,
+    terminationStrict: true,
+  });
+  const [exportResult, setExportResult] = useState(null);
+  const [exportRunning, setExportRunning] = useState(false);
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
   const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
@@ -683,6 +691,49 @@ export default function SocialPage() {
     tauri.hideSocialWindow();
   };
 
+  // ── Training Export ──
+  const runExport = async () => {
+    setExportRunning(true);
+    setExportResult(null);
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      // Use the workspace path as base for output; fall back to a relative path
+      let outputPath;
+      try {
+        // Try to get the workspace path, then use its parent as a base dir
+        const workspacePath = await tauri.invoke('workspace_get_path', {
+          petId: selectedPetId,
+          path: '.',
+          ensureExists: false,
+        });
+        // workspacePath is something like ~/Library/.../workspace/<petId>
+        // We want ~/Downloads — derive home from the path (walk up from ~/Library/...)
+        const parts = workspacePath.split('/');
+        // Find 'Library' or 'AppData' segment and take everything before it
+        const libIdx = parts.findIndex(p => p === 'Library' || p === 'AppData');
+        const homeDir = libIdx > 0 ? parts.slice(0, libIdx).join('/') : null;
+        outputPath = homeDir
+          ? `${homeDir}/Downloads/qwen_intent_${timestamp}.jsonl`
+          : `./qwen_intent_${timestamp}.jsonl`;
+      } catch {
+        outputPath = `./qwen_intent_${timestamp}.jsonl`;
+      }
+
+      const result = await tauri.runTrainingExport({
+        pet_id: selectedPetId,
+        output_path: outputPath,
+        redact: exportOptions.redact,
+        status: exportOptions.statusSuccessOnly ? 'success' : null,
+        termination: exportOptions.terminationStrict ? 'write_intent_plan' : null,
+      });
+      setExportResult({ ...result, outputPath });
+    } catch (e) {
+      setExportResult({ stdout: '', stderr: String(e?.message || e), success: false, outputPath: '' });
+    } finally {
+      setExportRunning(false);
+    }
+  };
+
   // ── Per-target lurk mode ──
   const LURK_OPTIONS = [
     { mode: 'normal',    icon: '💬', label: 'Normal',    cls: 'bg-cyan-50 text-cyan-700 border-cyan-300',    activeCls: 'bg-cyan-500 text-white border-cyan-500' },
@@ -716,6 +767,7 @@ export default function SocialPage() {
   const selectedTarget = logFilter !== 'all' && logFilter !== 'system' ? logFilter : null;
 
   return (
+    <>
     <div className="h-screen flex flex-col bg-white/95 backdrop-blur-xl rounded-2xl overflow-hidden border border-slate-200/80 shadow-xl">
       {/* Title Bar */}
       <TitleBar
@@ -1770,10 +1822,7 @@ export default function SocialPage() {
                   console.error('[TrainingData] open folder failed:', e);
                 }
               }}
-              onExport={() => {
-                // TODO(Task 13): replace with openExportModal()
-                alert('Export for Qwen — coming in Task 13');
-              }}
+              onExport={() => setExportModalOpen(true)}
             />
 
             {/* Log Content */}
@@ -1823,6 +1872,74 @@ export default function SocialPage() {
         </div>
       </div>
     </div>
+
+    {/* Export Intent Training Data Modal */}
+    {exportModalOpen && (
+      <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <h3 className="font-semibold mb-3">Export Intent Training Data</h3>
+
+          <label className="flex items-center gap-2 text-sm mt-2">
+            <input
+              type="checkbox"
+              checked={exportOptions.redact}
+              onChange={(e) => setExportOptions({ ...exportOptions, redact: e.target.checked })}
+              disabled={exportRunning}
+            />
+            Redact QQ numbers (recommended)
+          </label>
+          <label className="flex items-center gap-2 text-sm mt-2">
+            <input
+              type="checkbox"
+              checked={exportOptions.statusSuccessOnly}
+              onChange={(e) => setExportOptions({ ...exportOptions, statusSuccessOnly: e.target.checked })}
+              disabled={exportRunning}
+            />
+            Only successful evals
+          </label>
+          <label className="flex items-center gap-2 text-sm mt-2">
+            <input
+              type="checkbox"
+              checked={exportOptions.terminationStrict}
+              onChange={(e) => setExportOptions({ ...exportOptions, terminationStrict: e.target.checked })}
+              disabled={exportRunning}
+            />
+            Only evals that reached write_intent_plan
+          </label>
+
+          {exportRunning && (
+            <div className="mt-3 text-xs text-gray-500">Running export…</div>
+          )}
+
+          {exportResult && (
+            <pre className="mt-3 text-xs bg-gray-100 p-2 rounded overflow-auto max-h-40 whitespace-pre-wrap">
+              {exportResult.success ? '✓ Success' : '✗ Failed'}
+              {exportResult.outputPath && `\nOutput: ${exportResult.outputPath}`}
+              {exportResult.stdout && `\n\n${exportResult.stdout}`}
+              {exportResult.stderr && `\n\nErrors:\n${exportResult.stderr}`}
+            </pre>
+          )}
+
+          <div className="flex gap-2 mt-4">
+            <button
+              onClick={runExport}
+              disabled={exportRunning}
+              className="px-3 py-1 bg-blue-500 text-white rounded text-sm disabled:opacity-50"
+            >
+              {exportRunning ? 'Running…' : 'Run'}
+            </button>
+            <button
+              onClick={() => { setExportModalOpen(false); setExportResult(null); }}
+              disabled={exportRunning}
+              className="px-3 py-1 border rounded text-sm"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 

@@ -7,6 +7,7 @@ mod workspace;
 mod subagent;
 mod platform;
 mod window_layout;
+mod commands;
 #[cfg(target_os = "linux")]
 mod linux_shortcuts;
 
@@ -2821,6 +2822,7 @@ pub fn run() {
             subagent::subagent_spawn,
             subagent::subagent_kill,
             subagent::subagent_set_max_concurrent,
+            commands::training_export::run_training_export,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

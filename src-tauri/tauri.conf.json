@@ -104,7 +104,8 @@
     "active": true,
     "targets": ["app"],
     "resources": [
-      "assets/*"
+      "assets/*",
+      "../scripts/**/*"
     ],
     "icon": [
       "icons/32x32.png",
