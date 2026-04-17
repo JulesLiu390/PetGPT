@@ -183,6 +183,39 @@ export function convertToHFMessages(record) {
   return { messages, tools };
 }
 
+/**
+ * Validate an HF messages record per Unsloth convention.
+ * Returns { valid: boolean, reason?: string }.
+ *
+ * Rules:
+ *   - Every tool message has a matching earlier assistant tool_call with same id
+ *   - Every assistant with tool_calls must have non-empty <think> block (per Unsloth FunctionGemma convention)
+ *   - All tool_calls[].function.arguments must be parsed objects (not strings)
+ */
+export function validateHFRecord(hf) {
+  const toolCallIds = new Set();
+  for (const m of hf.messages) {
+    if (m.role === 'assistant') {
+      if (m.tool_calls && m.tool_calls.length > 0) {
+        if (!/<think>[\s\S]*?<\/think>/.test(m.content || '')) {
+          return { valid: false, reason: 'assistant_with_tool_calls_missing_think' };
+        }
+        for (const tc of m.tool_calls) {
+          if (typeof tc.function?.arguments !== 'object') {
+            return { valid: false, reason: 'tool_call_arguments_not_object' };
+          }
+          toolCallIds.add(tc.id);
+        }
+      }
+    } else if (m.role === 'tool') {
+      if (!toolCallIds.has(m.tool_call_id)) {
+        return { valid: false, reason: 'tool_message_without_matching_call' };
+      }
+    }
+  }
+  return { valid: true };
+}
+
 export async function main(argv) {
   const args = parseArgs(argv);
   const records = await loadRecords(args.input);
@@ -197,15 +230,24 @@ export async function main(argv) {
     await mkdir(dirname(args.output), { recursive: true });
   }
 
+  const droppedReasons = {};
   const outputLines = [];
-  let droppedInvalid = 0;
   for (const r of filteredAndRedacted) {
+    let hf;
     try {
-      const hf = args.template === 'raw' ? r : convertToHFMessages(r);
-      outputLines.push(JSON.stringify(hf));
+      hf = args.template === 'raw' ? r : convertToHFMessages(r);
     } catch (e) {
-      droppedInvalid++;
+      droppedReasons.conversion_error = (droppedReasons.conversion_error || 0) + 1;
+      continue;
     }
+    if (args.template !== 'raw') {
+      const v = validateHFRecord(hf);
+      if (!v.valid) {
+        droppedReasons[v.reason] = (droppedReasons[v.reason] || 0) + 1;
+        continue;
+      }
+    }
+    outputLines.push(JSON.stringify(hf));
   }
 
   await writeFile(args.output, outputLines.join('\n') + (outputLines.length ? '\n' : ''));
@@ -216,9 +258,15 @@ export async function main(argv) {
     console.log(`Redaction map: ${mapPath}  (KEEP LOCAL, add to .gitignore)`);
   }
 
-  console.log(`Input records: ${records.length}`);
-  console.log(`After filter:  ${filtered.length}`);
-  console.log(`Output:        ${outputLines.length}  (dropped ${droppedInvalid} invalid)`);
+  console.log(`Input records:  ${records.length}`);
+  console.log(`After filter:   ${filtered.length}`);
+  console.log(`Output:         ${outputLines.length}`);
+  if (Object.keys(droppedReasons).length) {
+    console.log('Dropped:');
+    for (const [r, n] of Object.entries(droppedReasons)) {
+      console.log(`  ${r}: ${n}`);
+    }
+  }
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

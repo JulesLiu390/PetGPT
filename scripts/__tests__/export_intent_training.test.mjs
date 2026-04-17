@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, loadRecords, applyFilters, redactString, redactRecord, createRedactionMapping, convertToHFMessages } from '../export_intent_training.mjs';
+import { parseArgs, loadRecords, applyFilters, redactString, redactRecord, createRedactionMapping, convertToHFMessages, validateHFRecord } from '../export_intent_training.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -111,4 +111,43 @@ test('convertToHFMessages handles record without assistant reasoning', async () 
   const assistant = hf.messages.find(m => m.role === 'assistant');
   assert.equal(assistant.content, 'reply directly');
   assert.equal(assistant.content.includes('<think>'), false);
+});
+
+test('validateHFRecord rejects assistant with tool_calls but no <think>', () => {
+  const v = validateHFRecord({
+    messages: [
+      { role: 'user', content: 'x' },
+      { role: 'assistant', content: 'no think here',
+        tool_calls: [{ id: 'a', type: 'function', function: { name: 'f', arguments: {} } }] },
+    ],
+    tools: [],
+  });
+  assert.equal(v.valid, false);
+  assert.equal(v.reason, 'assistant_with_tool_calls_missing_think');
+});
+
+test('validateHFRecord rejects tool message without matching call', () => {
+  const v = validateHFRecord({
+    messages: [
+      { role: 'user', content: 'x' },
+      { role: 'tool', tool_call_id: 'missing', name: 'f', content: 'r' },
+    ],
+    tools: [],
+  });
+  assert.equal(v.valid, false);
+  assert.equal(v.reason, 'tool_message_without_matching_call');
+});
+
+test('validateHFRecord accepts well-formed record', () => {
+  const v = validateHFRecord({
+    messages: [
+      { role: 'user', content: 'x' },
+      { role: 'assistant',
+        content: '<think>\nplan\n</think>',
+        tool_calls: [{ id: 'a', type: 'function', function: { name: 'f', arguments: { x: 1 } } }] },
+      { role: 'tool', tool_call_id: 'a', name: 'f', content: 'r' },
+    ],
+    tools: [],
+  });
+  assert.equal(v.valid, true);
 });
