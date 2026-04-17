@@ -1800,6 +1800,7 @@ export default function SocialPage() {
               onToggleGlobal={async (v) => {
                 setTrainingCollectionEnabled(v);
                 await tauri.updateSettings({ trainingCollectionEnabled: v }).catch(() => {});
+                emit('social-set-training-collection-enabled', { enabled: v });
               }}
               onOpenFolder={async () => {
                 try {

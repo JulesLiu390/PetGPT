@@ -50,8 +50,14 @@ const imageDescInflight = new Map();
 /** target → boolean; opt-in whitelist for training data collection */
 const trainingTargetsMap = new Map();
 
+/** Global training collection enabled flag — updated by event so running loop sees it */
+let _currentTrainingCollectionEnabled = false;
+
 /** Unlisten callback for the social-set-training-enabled event (one active loop at a time) */
 let _unlistenTraining = null;
+
+/** Unlisten callback for the social-set-training-collection-enabled event (global toggle) */
+let _unlistenTrainingGlobal = null;
 
 /** LLM 调用指数重试 delays: 5s → 25s → 125s */
 const LLM_RETRY_DELAYS = [5000, 25000, 125000];
@@ -1639,6 +1645,8 @@ export async function startSocialLoop(config, onStatusChange) {
       trainingTargetsMap.set(String(tid), !!enabled);
     }
   }
+  // Seed the global toggle from config so the running loop starts with the right value
+  _currentTrainingCollectionEnabled = !!config.trainingCollectionEnabled;
 
   // 注册所有已知 target（用于持久化 enabled 状态）
   const allTargetIds = [
@@ -2792,7 +2800,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
           const _targetStr = String(target);
           const _shouldCollectTraining =
-            !!config.trainingCollectionEnabled && !!trainingTargetsMap.get(_targetStr);
+            !!_currentTrainingCollectionEnabled && !!trainingTargetsMap.get(_targetStr);
           const _onTraceFn = _shouldCollectTraining
             ? (trace) => writeIntentTrace(config.petId, {
                 target_id: _targetStr,
@@ -3575,6 +3583,14 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     addLog('info', `Training collection ${enabled ? 'enabled' : 'disabled'} for ${target}`, null, target);
   });
 
+  // Setup global training collection toggle listener
+  if (_unlistenTrainingGlobal) { _unlistenTrainingGlobal(); _unlistenTrainingGlobal = null; }
+  _unlistenTrainingGlobal = await tauri.listen('social-set-training-collection-enabled', (e) => {
+    const { enabled } = e.payload || {};
+    _currentTrainingCollectionEnabled = !!enabled;
+    addLog('info', `Training collection global switch ${enabled ? 'enabled' : 'disabled'}`);
+  });
+
   // 启动层 1: Fetcher 循环（每 1s batch 拉取）
   fetcherLoop();
   
@@ -3622,6 +3638,7 @@ export function stopSocialLoop() {
     killBySource('social');
     destroySubagentListeners();
     if (_unlistenTraining) { _unlistenTraining(); _unlistenTraining = null; }
+    if (_unlistenTrainingGlobal) { _unlistenTrainingGlobal(); _unlistenTrainingGlobal = null; }
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
     sentMessagesCache.clear();
