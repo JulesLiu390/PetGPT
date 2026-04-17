@@ -399,11 +399,14 @@ export const buildRequest = async ({ apiKey, model, baseUrl, messages, options =
 export const parseResponse = (data) => {
   const blocks = data?.content || [];
   let textContent = '';
+  let thinkingContent = '';
   const toolCalls = [];
 
   for (const block of blocks) {
     if (block.type === 'text') {
       textContent += block.text || '';
+    } else if (block.type === 'thinking') {
+      thinkingContent += block.thinking || '';
     } else if (block.type === 'tool_use') {
       toolCalls.push({
         id: block.id,
@@ -430,6 +433,7 @@ export const parseResponse = (data) => {
 
   return {
     content: textContent,
+    reasoningContent: thinkingContent || undefined,
     toolCalls: toolCalls.length > 0 ? toolCalls : null,
     finishReason: data?.stop_reason || null,
     usage,
