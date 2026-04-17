@@ -5,6 +5,52 @@ use tauri::Manager;
 use crate::workspace::WorkspaceEngine;
 use std::sync::Arc;
 
+/// Resolve the `node` binary path for use in both dev mode and macOS .app bundles.
+///
+/// macOS apps launched from Finder/Dock have a minimal PATH that excludes
+/// `/usr/local/bin`, `/opt/homebrew/bin`, and NVM paths. This helper probes
+/// known locations so the export command works in production bundles.
+fn resolve_node_binary() -> Result<PathBuf, String> {
+    // 1. Check if "node" is already on PATH (covers dev mode and Linux)
+    if let Ok(output) = Command::new("which").arg("node").output() {
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !s.is_empty() {
+                return Ok(PathBuf::from(s));
+            }
+        }
+    }
+    // 2. Probe common macOS/Linux install locations
+    for candidate in &[
+        "/usr/local/bin/node",
+        "/opt/homebrew/bin/node",
+        "/usr/bin/node",
+    ] {
+        let p = PathBuf::from(candidate);
+        if p.exists() {
+            return Ok(p);
+        }
+    }
+    // 3. Scan NVM versions directory if HOME is known
+    if let Ok(home) = std::env::var("HOME") {
+        let nvm_dir = PathBuf::from(&home).join(".nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(&nvm_dir) {
+            // Pick the newest version (last in sorted order)
+            let mut versions: Vec<PathBuf> = entries
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .collect();
+            versions.sort();
+            if let Some(latest) = versions.last() {
+                let candidate = latest.join("bin/node");
+                if candidate.exists() {
+                    return Ok(candidate);
+                }
+            }
+        }
+    }
+    Err("node binary not found; install Node.js or add it to PATH".to_string())
+}
+
 #[derive(Deserialize)]
 pub struct ExportOptions {
     pub pet_id: String,
@@ -66,7 +112,8 @@ pub async fn run_training_export(
         return Err(format!("export script not found (tried: {})", script.display()));
     }
 
-    let mut cmd = Command::new("node");
+    let node_binary = resolve_node_binary()?;
+    let mut cmd = Command::new(&node_binary);
     cmd.arg(&script)
         .arg("--input").arg(&input_dir)
         .arg("--output").arg(&options.output_path);
