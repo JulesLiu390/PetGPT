@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { parseArgs, loadRecords, applyFilters, redactString, redactRecord, createRedactionMapping } from '../export_intent_training.mjs';
+import { parseArgs, loadRecords, applyFilters, redactString, redactRecord, createRedactionMapping, convertToHFMessages } from '../export_intent_training.mjs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -70,4 +70,45 @@ test('redactRecord removes raw QQ from all fields', async () => {
   const redacted = redactRecord(r, mapping);
   const serialized = JSON.stringify(redacted);
   assert.equal(serialized.includes('123456789'), false);
+});
+
+test('convertToHFMessages wraps reasoning in <think> and parses arguments', async () => {
+  const records = await loadRecords(FIXTURE_DIR);
+  const r = records.find(r => r.id === 'itr_a');
+  const hf = convertToHFMessages(r);
+
+  // system present
+  assert.equal(hf.messages[0].role, 'system');
+  // user
+  assert.equal(hf.messages[1].role, 'user');
+  // first assistant has <think>
+  const firstA = hf.messages[2];
+  assert.equal(firstA.role, 'assistant');
+  assert.match(firstA.content, /<think>[\s\S]*<\/think>/);
+  // arguments parsed to object
+  assert.equal(typeof firstA.tool_calls[0].function.arguments, 'object');
+  assert.equal(firstA.tool_calls[0].function.arguments.path, 'a.md');
+  // tool role has name filled
+  const toolMsg = hf.messages[3];
+  assert.equal(toolMsg.role, 'tool');
+  assert.equal(toolMsg.name, 'social_read');
+  assert.equal(toolMsg.tool_call_id, 'c1');
+});
+
+test('convertToHFMessages normalizes tools schema to HF shape', async () => {
+  const records = await loadRecords(FIXTURE_DIR);
+  const r = records.find(r => r.id === 'itr_a');
+  const hf = convertToHFMessages(r);
+  assert.equal(hf.tools[0].type, 'function');
+  assert.equal(hf.tools[0].function.name, 'social_read');
+  assert.ok(hf.tools[0].function.parameters);
+});
+
+test('convertToHFMessages handles record without assistant reasoning', async () => {
+  const records = await loadRecords(FIXTURE_DIR);
+  const r = records.find(r => r.id === 'itr_c'); // has plain assistant content, no reasoning
+  const hf = convertToHFMessages(r);
+  const assistant = hf.messages.find(m => m.role === 'assistant');
+  assert.equal(assistant.content, 'reply directly');
+  assert.equal(assistant.content.includes('<think>'), false);
 });

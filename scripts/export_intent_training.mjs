@@ -110,9 +110,77 @@ export function applyFilters(records, args) {
   });
 }
 
-// Placeholder — implemented in Task 11
 export function convertToHFMessages(record) {
-  throw new Error('convertToHFMessages not yet implemented');
+  const messages = [];
+
+  // 1. System
+  if (record.system) {
+    messages.push({ role: 'system', content: record.system });
+  }
+
+  // 2. Build tool_call_id → name map (for tool role 'name' inference)
+  const idToName = {};
+  for (const m of record.messages || []) {
+    for (const tc of m.tool_calls || []) {
+      const id = tc.id || tc.tool_call_id;
+      const name = tc.function?.name;
+      if (id && name) idToName[id] = name;
+    }
+  }
+
+  // 3. Walk original messages
+  for (const m of record.messages || []) {
+    if (m.role === 'user') {
+      messages.push({ role: 'user', content: m.content ?? '' });
+    } else if (m.role === 'assistant') {
+      // Merge reasoning_content into content as <think> block
+      const think = m.reasoning_content
+        ? `<think>\n${m.reasoning_content}\n</think>`
+        : '';
+      const body = m.content ?? '';
+      const content = think && body ? `${think}\n${body}` : (think || body);
+
+      // Normalize tool_calls: arguments must be object
+      const toolCalls = (m.tool_calls || []).map(tc => {
+        const argsRaw = tc.function?.arguments;
+        let args = argsRaw;
+        if (typeof argsRaw === 'string') {
+          args = JSON.parse(argsRaw);  // throws on bad JSON → caller drops record
+        }
+        return {
+          id: tc.id,
+          type: 'function',
+          function: { name: tc.function.name, arguments: args },
+        };
+      });
+
+      const msg = { role: 'assistant', content };
+      if (toolCalls.length) msg.tool_calls = toolCalls;
+      messages.push(msg);
+    } else if (m.role === 'tool') {
+      messages.push({
+        role: 'tool',
+        tool_call_id: m.tool_call_id,
+        name: idToName[m.tool_call_id] || 'unknown_tool',
+        content: m.content ?? '',
+      });
+    }
+  }
+
+  // 4. Tools schema → HF shape
+  const tools = (record.tools || []).map(t => {
+    if (t.type === 'function' && t.function) return t;
+    return {
+      type: 'function',
+      function: {
+        name: t.name || '',
+        description: t.description || '',
+        parameters: t.parameters || { type: 'object', properties: {} },
+      },
+    };
+  });
+
+  return { messages, tools };
 }
 
 export async function main(argv) {
