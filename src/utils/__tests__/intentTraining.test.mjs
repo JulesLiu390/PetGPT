@@ -69,7 +69,7 @@ test('buildRecord omits reasoning_content when absent', async () => {
   const { buildRecord } = await import('../intentTraining.js');
 
   const record = buildRecord(
-    { target_id: 'x', target_type: 'friend', pet_id: 'p', provider: 'o', model: 'm', label: 'Intent:idle' },
+    { target_id: 'x', target_type: 'private', pet_id: 'p', provider: 'o', model: 'm', label: 'Intent:idle' },
     {
       systemPrompt: 's',
       tools: [],
