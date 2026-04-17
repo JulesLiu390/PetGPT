@@ -2133,14 +2133,22 @@ function useTrainingStats(petId, globalEnabled) {
   const [stats, setStats] = useState({ count: 0, bytes: 0 });
 
   useEffect(() => {
-    if (!globalEnabled || !petId) return;
-    const date = new Date().toISOString().slice(0, 10);
-    const path = `social/training/intent/${date}.jsonl`;
-    tauri.workspaceRead(petId, path).then(text => {
-      if (!text) return;
-      const lines = text.split('\n').filter(Boolean);
-      setStats({ count: lines.length, bytes: new Blob([text]).size });
-    }).catch(() => { /* file not yet created */ });
+    if (!globalEnabled || !petId) {
+      setStats({ count: 0, bytes: 0 });
+      return;
+    }
+    const refresh = () => {
+      const date = new Date().toISOString().slice(0, 10);
+      const path = `social/training/intent/${date}.jsonl`;
+      tauri.workspaceRead(petId, path).then(text => {
+        if (!text) { setStats({ count: 0, bytes: 0 }); return; }
+        const lines = text.split('\n').filter(Boolean);
+        setStats({ count: lines.length, bytes: new Blob([text]).size });
+      }).catch(() => setStats({ count: 0, bytes: 0 }));
+    };
+    refresh();
+    const iv = setInterval(refresh, 5000);
+    return () => clearInterval(iv);
   }, [petId, globalEnabled]);
 
   return stats;
