@@ -113,7 +113,7 @@ test('convertToHFMessages handles record without assistant reasoning', async () 
   assert.equal(assistant.content.includes('<think>'), false);
 });
 
-test('validateHFRecord rejects assistant with tool_calls but no <think>', () => {
+test('validateHFRecord accepts missing <think> by default (permissive)', () => {
   const v = validateHFRecord({
     messages: [
       { role: 'user', content: 'x' },
@@ -122,6 +122,18 @@ test('validateHFRecord rejects assistant with tool_calls but no <think>', () => 
     ],
     tools: [],
   });
+  assert.equal(v.valid, true);
+});
+
+test('validateHFRecord rejects missing <think> when requireThink=true', () => {
+  const v = validateHFRecord({
+    messages: [
+      { role: 'user', content: 'x' },
+      { role: 'assistant', content: 'no think here',
+        tool_calls: [{ id: 'a', type: 'function', function: { name: 'f', arguments: {} } }] },
+    ],
+    tools: [],
+  }, { requireThink: true });
   assert.equal(v.valid, false);
   assert.equal(v.reason, 'assistant_with_tool_calls_missing_think');
 });

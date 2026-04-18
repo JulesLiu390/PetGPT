@@ -18,6 +18,7 @@ export function parseArgs(argv) {
     from: null, to: null,
     includeTargets: null, excludeTargets: null,
     template: 'hf-messages',
+    requireThink: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -32,6 +33,7 @@ export function parseArgs(argv) {
       case '--include-targets': args.includeTargets = argv[++i].split(','); break;
       case '--exclude-targets': args.excludeTargets = argv[++i].split(','); break;
       case '--template': args.template = argv[++i]; break;
+      case '--require-think': args.requireThink = true; break;
       default: if (a.startsWith('--')) throw new Error(`Unknown flag: ${a}`);
     }
   }
@@ -189,15 +191,15 @@ export function convertToHFMessages(record) {
  *
  * Rules:
  *   - Every tool message has a matching earlier assistant tool_call with same id
- *   - Every assistant with tool_calls must have non-empty <think> block (per Unsloth FunctionGemma convention)
+ *   - Every assistant with tool_calls must have non-empty <think> block (only when requireThink=true)
  *   - All tool_calls[].function.arguments must be parsed objects (not strings)
  */
-export function validateHFRecord(hf) {
+export function validateHFRecord(hf, { requireThink = false } = {}) {
   const toolCallIds = new Set();
   for (const m of hf.messages) {
     if (m.role === 'assistant') {
       if (m.tool_calls && m.tool_calls.length > 0) {
-        if (!/<think>[\s\S]*?<\/think>/.test(m.content || '')) {
+        if (requireThink && !/<think>[\s\S]*?<\/think>/.test(m.content || '')) {
           return { valid: false, reason: 'assistant_with_tool_calls_missing_think' };
         }
         for (const tc of m.tool_calls) {
@@ -241,7 +243,7 @@ export async function main(argv) {
       continue;
     }
     if (args.template !== 'raw') {
-      const v = validateHFRecord(hf);
+      const v = validateHFRecord(hf, { requireThink: args.requireThink });
       if (!v.valid) {
         droppedReasons[v.reason] = (droppedReasons[v.reason] || 0) + 1;
         continue;
