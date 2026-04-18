@@ -6,7 +6,7 @@ import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/
 import * as tauri from "../utils/tauri";
 import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
 import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/subagentManager";
-import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
+import { REPLY_PROFILE_FILE_SPECS } from "../utils/socialPromptBuilder";
 import { listen, emit } from "@tauri-apps/api/event";
 
 // ==================== SocialPage ====================
@@ -28,7 +28,6 @@ export default function SocialPage() {
     watchedGroups: [],
     watchedFriends: [],
     socialPersonaPrompt: '',
-    replyStrategyPrompt: '',
     agentCanEditStrategy: false,
     atMustReply: true,
     enableImages: true,
@@ -815,7 +814,7 @@ export default function SocialPage() {
               </Card>
 
               {/* Prompt Configuration (bot-level, shared across all MCP servers) */}
-              <Card title="Prompts" description="Customize social behavior and reply strategy (shared across all servers)">
+              <Card title="Prompts" description="Customize social behavior and reply profiles (shared across all servers)">
                 <div className="space-y-3">
                   <FormGroup label="Social Persona" hint="Additional persona instructions for social context">
                     <Textarea
@@ -825,22 +824,25 @@ export default function SocialPage() {
                       placeholder="e.g. You're an active group member who loves using emoji..."
                     />
                   </FormGroup>
-                  <FormGroup label="Reply Strategy" hint="Rules for when to reply vs stay silent (stored in social/REPLY_STRATEGY.md)">
-                    <div className="flex gap-2">
-                      <Button
-                        variant="secondary"
-                        className="flex-1"
-                        onClick={async () => {
-                          if (!selectedPetId) return;
-                          try {
-                            await tauri.workspaceOpenFile(selectedPetId, 'social/REPLY_STRATEGY.md', DEFAULT_REPLY_STRATEGY);
-                          } catch (e) {
-                            console.error('Failed to open reply strategy file:', e);
-                          }
-                        }}
-                      >
-                        Edit Reply Strategy
-                      </Button>
+                  <FormGroup label="Reply Profiles" hint="Separate intent/strategy files for group and friend chats (stored in social/reply_strategy/)">
+                    <div className="grid grid-cols-2 gap-2">
+                      {REPLY_PROFILE_FILE_SPECS.map((file) => (
+                        <Button
+                          key={file.key}
+                          variant="secondary"
+                          className="w-full"
+                          onClick={async () => {
+                            if (!selectedPetId) return;
+                            try {
+                              await tauri.workspaceOpenFile(selectedPetId, file.path, file.defaultContent);
+                            } catch (e) {
+                              console.error(`Failed to open reply profile file ${file.path}:`, e);
+                            }
+                          }}
+                        >
+                          Edit {file.label}
+                        </Button>
+                      ))}
                     </div>
                   </FormGroup>
                   <ToggleRow

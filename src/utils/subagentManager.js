@@ -210,7 +210,7 @@ async function _cleanupWorkspace(petId, taskId) {
 async function _appendIndex(petId, entry, extra) {
   if (!entry.target || entry.target === 'chat') return;
   try {
-    const dir = entry.targetType === 'friend' ? 'friend' : 'group';
+    const dir = (entry.targetType === 'friend' || entry.targetType === 'private') ? 'friend' : 'group';
     const indexPath = `social/${dir}/scratch_${entry.target}/cc_index.jsonl`;
     // Find taskId from registry
     let taskId = '';

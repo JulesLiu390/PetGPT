@@ -157,6 +157,27 @@ function logUsageRecord(record) {
 /** 保留最近多少条 Intent 行动记录（防漂移的客观历史） */
 const INTENT_HISTORY_LIMIT = 5;
 
+function sanitizeSocialConfig(config) {
+  if (!config || typeof config !== 'object' || Array.isArray(config)) return config;
+
+  const { replyStrategyPrompt, ...rest } = config;
+  const next = { ...rest };
+
+  if (next.configByServer && typeof next.configByServer === 'object' && !Array.isArray(next.configByServer)) {
+    next.configByServer = Object.fromEntries(
+      Object.entries(next.configByServer).map(([serverName, serverConfig]) => {
+        if (!serverConfig || typeof serverConfig !== 'object' || Array.isArray(serverConfig)) {
+          return [serverName, serverConfig];
+        }
+        const { replyStrategyPrompt: _legacyReplyStrategyPrompt, ...cleanServerConfig } = serverConfig;
+        return [serverName, cleanServerConfig];
+      })
+    );
+  }
+
+  return next;
+}
+
 /**
  * 追加一条 Intent 行动记录到 scratch/intent_history.jsonl，
  * 并保证文件只保留最近 INTENT_HISTORY_LIMIT 条。
@@ -166,7 +187,7 @@ const INTENT_HISTORY_LIMIT = 5;
  */
 async function appendIntentHistory(petId, targetId, targetType, entry) {
   if (!petId || !targetId || !entry) return;
-  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const dir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
   const path = `social/${dir}/scratch_${targetId}/intent_history.jsonl`;
   let existing = '';
   try { existing = await tauri.workspaceRead(petId, path); } catch { /* file may not exist */ }
@@ -210,7 +231,8 @@ export async function loadSocialConfig(petId) {
     const allSettings = await tauri.getSettings();
     const raw = allSettings[`social_config_${petId}`];
     if (!raw) return null;
-    return typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const parsed = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    return sanitizeSocialConfig(parsed);
   } catch (e) {
     console.warn('[Social] Failed to load config for', petId, e);
     return null;
@@ -223,8 +245,9 @@ export async function loadSocialConfig(petId) {
  * @param {Object} config
  */
 export async function saveSocialConfig(petId, config) {
+  const sanitizedConfig = sanitizeSocialConfig(config);
   await tauri.updateSettings({
-    [`social_config_${petId}`]: JSON.stringify(config)
+    [`social_config_${petId}`]: JSON.stringify(sanitizedConfig)
   });
 }
 
@@ -1655,6 +1678,53 @@ export async function startSocialLoop(config, onStatusChange) {
   ];
   for (const t of allTargetIds) knownTargets.add(t);
 
+  // 兼容旧版本把私聊长期文件写进 social/group/ 的情况：
+  // 在重置/清理前，尽量把仍有价值的长期文件复制到 social/friend/。
+  try {
+    const watchedGroupSet = new Set((config.watchedGroups || []).map(g => g.trim()).filter(Boolean));
+    for (const t of (config.watchedFriends || []).map(f => f.trim()).filter(Boolean)) {
+      if (watchedGroupSet.has(t)) {
+        addLog('warn', `Skip migrating private-history for ${t}: target id also exists in watchedGroups`, null, t);
+        continue;
+      }
+
+      const filesToCopy = [
+        {
+          oldPaths: [`social/private/PEOPLE_CACHE_${t}.md`, `social/group/PEOPLE_CACHE_${t}.md`],
+          newPath: `social/friend/PEOPLE_CACHE_${t}.md`,
+        },
+        {
+          oldPaths: [`social/private/scratch_${t}/lessons.json`, `social/group/scratch_${t}/lessons.json`],
+          newPath: `social/friend/scratch_${t}/lessons.json`,
+        },
+        {
+          oldPaths: [`social/private/scratch_${t}/principles.md`, `social/group/scratch_${t}/principles.md`],
+          newPath: `social/friend/scratch_${t}/principles.md`,
+        },
+      ];
+
+      for (const { oldPaths, newPath } of filesToCopy) {
+        try {
+          const existing = await tauri.workspaceRead(config.petId, newPath);
+          if (existing && existing.trim()) continue;
+        } catch { /* 目标不存在，继续 */ }
+
+        for (const oldPath of oldPaths) {
+          try {
+            const legacy = await tauri.workspaceRead(config.petId, oldPath);
+            if (legacy && legacy.trim()) {
+              await tauri.workspaceWrite(config.petId, newPath, legacy);
+              addLog('info', `Migrated legacy private file: ${oldPath} -> ${newPath}`, null, t);
+              break;
+            }
+          } catch { /* 源不存在，忽略 */ }
+        }
+      }
+    }
+  } catch (e) {
+    addLog('warn', 'Failed to migrate legacy private files', e.message);
+  }
+
   // 重置每个 target 的 Intent 状态感知文件，并清空 scratch 临时工作目录（不跨会话持久化）
   try {
     const INTENT_INITIAL = '# 当前状态感知\n\n（本次会话开始，尚无记录）\n';
@@ -1910,7 +1980,7 @@ export async function startSocialLoop(config, onStatusChange) {
    */
   const snapshotForReview = async (target, targetType) => {
     try {
-      const intentDir = targetType === 'friend' ? 'friend' : 'group';
+      const intentDir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
       const intentContent = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`).catch(() => '');
       const buf = dataBuffer.get(target);
       const messages = buf ? buf.messages.slice(-30) : []; // 最近 30 条作为上下文
@@ -1955,7 +2025,7 @@ export async function startSocialLoop(config, onStatusChange) {
     const timerId = lessonsReviewTimers.get(target);
     if (timerId) { clearTimeout(timerId); lessonsReviewTimers.delete(target); }
 
-    const dir = targetType === 'friend' ? 'friend' : 'group';
+    const dir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
     const taskId = `lr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
     try {
@@ -2386,7 +2456,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     }));
     const combined = profiles.filter(Boolean).join('\n\n');
     if (!combined) return;
-    const dir = targetType === 'friend' ? 'friend' : 'group';
+    const dir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
     await tauri.workspaceWrite(config.petId, `social/${dir}/PEOPLE_CACHE_${target}.md`, combined);
   };
 
@@ -2697,7 +2767,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
           if (!hasSentAfterPlan) {
             try {
-              const intentDir = targetType === 'friend' ? 'friend' : 'group';
+              const intentDir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
               const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`).catch(() => '');
               if (brief && brief.trim()) {
                 pendingReplyBrief = `\n\n【以下内容已经发送或正在发送，视为已表达】\n${brief.trim()}\n\n🚫 以上观点已经表达完毕。严禁再次表达相同或相似的内容，包括：\n- 换个说法重复同样的结论\n- 把长内容拆开再发一遍`;
@@ -2879,7 +2949,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // ── 处理 Intent 计划（并发执行动作） ──
         if (capturedPlan) {
           // 读取 LLM 已通过 social_edit 更新的 INTENT 文件，作为 state 供 Reply 读取
-          const intentDir = targetType === 'friend' ? 'friend' : 'group';
+          const intentDir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
           try {
             capturedPlan.state = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`) || '';
           } catch { capturedPlan.state = ''; }
@@ -2951,7 +3021,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         if (dispatchPromises.length > 0) {
           await Promise.all(dispatchPromises);
           // 发完 sticker 后立刻回写 INTENT 文件的【我刚做了】，防止下次 eval 不知道刚发过表情包
-          const intentDir = targetType === 'friend' ? 'friend' : 'group';
+          const intentDir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
           const intentPath = `social/${intentDir}/INTENT_${target}.md`;
           try {
             const current = await tauri.workspaceRead(config.petId, intentPath) || '';
@@ -2985,7 +3055,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           });
           await Promise.all(imagePromises);
           // 发完图片后回写 INTENT 文件的【我刚做了】
-          const intentDir2 = targetType === 'friend' ? 'friend' : 'group';
+          const intentDir2 = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
           const intentPath2 = `social/${intentDir2}/INTENT_${target}.md`;
           try {
             const current2 = await tauri.workspaceRead(config.petId, intentPath2) || '';
@@ -3079,7 +3149,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
       // ─── 写入 SQLite chat_history（fire-and-forget，不阻塞主流程）───
       if (trulyNewMsgs.length > 0) {
-        const targetTypeForDb = targetData.target_type || (targetData.friend_name ? 'friend' : 'group');
+        const targetTypeForDb = targetData.target_type || (targetData.friend_name ? 'private' : 'group');
         const dbBatch = trulyNewMsgs.map(m => ({
           messageId: String(m.message_id),
           targetId: String(target),

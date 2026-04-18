@@ -1249,7 +1249,7 @@ async function executeStickerSend(petId, args, context) {
   // 3. 通过 MCP send_image 发送
   const sendArgs = {
     target: targetId,
-    target_type: targetType || 'group',
+    target_type: targetType,
     image: base64Data, // base64 without prefix
   };
   try {
@@ -1538,7 +1538,7 @@ export async function executeSubagentTool(toolName, args, context) {
 
   const taskId = `sa_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
   const source = targetId ? 'social' : 'chat';
-  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const dir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
 
   const nowDate = new Date().toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long' });
   const claudeMd = `# Task
@@ -1606,7 +1606,7 @@ async function executeCcHistory(context) {
   const { petId, targetId, targetType, subagentRegistry } = context;
   if (!petId) return { error: '缺少 petId' };
 
-  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const dir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
   const lines = [];
 
   // 1. 正在执行的任务（从 live registry）
@@ -1654,7 +1654,7 @@ async function executeCcRead(args, context) {
   if (!file || typeof file !== 'string') return { error: '缺少 file 参数' };
   if (!file.startsWith('cc_')) return { error: '只能读取 cc_ 开头的文件（CC 结果文件）' };
 
-  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const dir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
   const fullPath = `social/${dir}/scratch_${targetId}/${file}`;
 
   try {
@@ -1697,7 +1697,7 @@ async function executeScreenshot(args, context) {
     const result = await tauri.mcp.callToolByName(screenshotToolName, {
       target: targetId,
       message_id: String(message_id),
-      target_type: targetType || 'group',
+      target_type: targetType,
     });
 
     // 解析结果
@@ -1794,7 +1794,7 @@ async function executeImageSend(args, context) {
     const sendToolName = `${mcpServerName}__send_image`;
     await tauri.mcp.callToolByName(sendToolName, {
       target: targetId,
-      target_type: targetType || 'group',
+      target_type: targetType,
       image: base64Data,
     });
 
@@ -2090,12 +2090,12 @@ async function executeWebshotSend(args, context) {
     const sendToolName = `${mcpServerName}__send_image`;
     await tauri.mcp.callToolByName(sendToolName, {
       target: targetId,
-      target_type: targetType || 'group',
+      target_type: targetType,
       image: base64Data,
     });
 
     // INTENT 回写
-    const intentDir = targetType === 'friend' ? 'friend' : 'group';
+    const intentDir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
     const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
     try {
       const current = await tauri.workspaceRead(petId, intentPath) || '';
@@ -2140,7 +2140,7 @@ export function getVoiceSendToolDefinition() {
 
 /** 把成功/失败信息回写到 INTENT 文件的【我刚做了】行 */
 async function _writeVoiceIntent(petId, targetId, targetType, line) {
-  const intentDir = targetType === 'friend' ? 'friend' : 'group';
+  const intentDir = (targetType === 'friend' || targetType === 'private') ? 'friend' : 'group';
   const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
   try {
     const current = (await tauri.workspaceRead(petId, intentPath)) || '';
@@ -2213,7 +2213,7 @@ async function executeVoiceSend(args, context) {
     const sendToolName = `${mcpServerName}__send_voice`;
     sendResult = await tauri.mcp.callToolByName(sendToolName, {
       target: targetId,
-      target_type: targetType || 'group',
+      target_type: targetType,
       audio: base64Audio, // 不带 base64:// 前缀
     });
   } catch (e) {
