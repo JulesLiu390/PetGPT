@@ -1,9 +1,93 @@
 /**
  * MCP Tool Converter
- * 
+ *
  * 将 MCP 工具格式转换为 LLM 提供商的函数调用格式
  * MCP 工具使用 JSON Schema，需要转换为各 LLM 的工具格式
  */
+
+/**
+ * Recursively flatten `anyOf: [X, null]` patterns into `{...X, nullable: true}`,
+ * so Gemini (which lacks anyOf support) can accept schemas emitted by Pydantic v2
+ * tools using Optional[X].
+ *
+ * Safe for other providers: nullable is OpenAPI 3.0 standard; other LLMs ignore it.
+ *
+ * Rules:
+ * - anyOf: [X, null] or [null, X] → flatten into X with nullable: true, preserve description/default
+ * - anyOf: [X, Y] (no null branch) → pick first branch, warn via console.warn, lose the other
+ * - oneOf / allOf: same treatment as anyOf (same composition unsupported by Gemini)
+ * - Recurse into properties (for objects) and items (for arrays and nested)
+ * - Preserve all other fields: type, enum, required, description, default, minimum/maximum, etc.
+ * - Handle null-ish input: return input as-is if not a plain object
+ * - Pure function: do not mutate input (deep-copy if needed)
+ *
+ * @param {*} schema - JSON Schema object
+ * @returns {*} sanitized schema (new object, input not mutated)
+ */
+export function sanitizeSchemaForGeminiCompat(schema) {
+  if (schema === null || schema === undefined) return schema;
+  if (typeof schema !== 'object' || Array.isArray(schema)) return schema;
+
+  // Work on a shallow copy first, then override fields as needed
+  let result = { ...schema };
+
+  // Handle anyOf / oneOf / allOf
+  const compositeKey = ['anyOf', 'oneOf', 'allOf'].find(k => Array.isArray(result[k]));
+  if (compositeKey) {
+    const branches = result[compositeKey];
+    // Remove the composite key from result — we'll flatten into it
+    const { [compositeKey]: _removed, ...rest } = result;
+    result = rest;
+
+    const nullBranch = branches.find(b => b && b.type === 'null');
+    const nonNullBranches = branches.filter(b => !(b && b.type === 'null'));
+
+    if (nonNullBranches.length === 0) {
+      // All branches were null — leave as-is (degenerate case)
+      result = { ...result, type: 'null' };
+    } else {
+      let pickedBranch = nonNullBranches[0];
+
+      if (nonNullBranches.length > 1) {
+        console.warn(
+          `[sanitizeSchemaForGeminiCompat] ${compositeKey} with multiple non-null branches; ` +
+          `picking first branch and dropping others. Branches: ${JSON.stringify(nonNullBranches)}`
+        );
+      }
+
+      // Merge: branch fields win for type/enum/format/etc; parent's description/default preserved
+      // Strategy: start with rest (parent minus compositeKey), then overlay branch fields,
+      // but keep parent's description/default (they survive from rest already since branch
+      // typically doesn't carry them).
+      const merged = {
+        ...rest,        // parent's description, default, required, etc.
+        ...pickedBranch // branch's type, enum, format, etc. overwrite
+      };
+
+      if (nullBranch) {
+        merged.nullable = true;
+      }
+
+      result = merged;
+    }
+  }
+
+  // Recurse into properties
+  if (result.properties && typeof result.properties === 'object') {
+    const sanitizedProps = {};
+    for (const [key, value] of Object.entries(result.properties)) {
+      sanitizedProps[key] = sanitizeSchemaForGeminiCompat(value);
+    }
+    result = { ...result, properties: sanitizedProps };
+  }
+
+  // Recurse into items
+  if (result.items && typeof result.items === 'object' && !Array.isArray(result.items)) {
+    result = { ...result, items: sanitizeSchemaForGeminiCompat(result.items) };
+  }
+
+  return result;
+}
 
 /**
  * 将 MCP 工具转换为 OpenAI 函数调用格式
@@ -38,7 +122,7 @@ export const convertToOpenAITools = (mcpTools) => {
     function: {
       name: tool.name,
       description: tool.description || `Tool: ${tool.name}`,
-      parameters: tool.inputSchema || { type: "object", properties: {} }
+      parameters: sanitizeSchemaForGeminiCompat(tool.inputSchema || { type: "object", properties: {} })
     }
   }));
 };
@@ -66,7 +150,7 @@ export const convertToGeminiTools = (mcpTools) => {
   }
   
   return mcpTools.map(tool => {
-    const schema = tool.inputSchema || { type: "object", properties: {} };
+    const schema = sanitizeSchemaForGeminiCompat(tool.inputSchema || { type: "object", properties: {} });
     
     // Gemini 需要大写的类型名
     const convertType = (jsonSchemaType) => {
@@ -239,6 +323,7 @@ export const getConverterForFormat = (apiFormat) => {
 };
 
 export default {
+  sanitizeSchemaForGeminiCompat,
   convertToOpenAITools,
   convertToGeminiTools,
   parseOpenAIToolCalls,
