@@ -10,18 +10,6 @@ import { formatCurrentTime } from './timeInjection';
 import * as tauri from './tauri';
 import { SOCIAL_FILE_MAX_CHARS } from './workspace/socialToolExecutor';
 
-// ── Prompt file cache (30s TTL) ──
-const _fileCache = new Map();
-const _FILE_CACHE_TTL = 30000;
-
-async function cachedRead(readFn, cacheKey) {
-  const entry = _fileCache.get(cacheKey);
-  if (entry && Date.now() - entry.ts < _FILE_CACHE_TTL) return entry.content;
-  const content = await readFn();
-  _fileCache.set(cacheKey, { content, ts: Date.now() });
-  return content;
-}
-
 /**
  * Build subagent status section for Intent prompt injection
  */
@@ -52,13 +40,6 @@ export function buildSubagentStatusSection(subagentRegistry, targetId) {
 
   if (lines.length === 0) return '';
   return `## 后台任务状态\n${lines.join('\n')}`;
-}
-
-export function invalidatePromptFileCache(pathFragment) {
-  if (!pathFragment) return;
-  for (const key of _fileCache.keys()) {
-    if (key.includes(pathFragment)) _fileCache.delete(key);
-  }
 }
 
 /** 表情包索引路径 */
@@ -342,17 +323,17 @@ export async function buildSocialPrompt({
 
   // 时间上下文留到社交/观察模式说明之后再注入（见下方），以保留前段 prompt prefix 缓存。
 
-  // Parallel cached file reads
+  // Parallel file reads
   const [
     soulContent, userContent, memoryContent, groupRuleContent,
     contactsContent, socialMemoryContent
   ] = await Promise.all([
-    cachedRead(() => readSoulFile(petId), `soul_${petId}`),
-    cachedRead(() => readUserFile(petId), `user_${petId}`),
-    cachedRead(() => readMemoryFile(petId), `memory_${petId}`),
-    cachedRead(() => readGroupRuleFile(petId, targetId), `rule_${petId}_${targetId}`),
-    cachedRead(() => readContactsFile(petId), `contacts_${petId}`),
-    cachedRead(() => readSocialMemoryFile(petId), `socmem_${petId}`),
+    readSoulFile(petId),
+    readUserFile(petId),
+    readMemoryFile(petId),
+    readGroupRuleFile(petId, targetId),
+    readContactsFile(petId),
+    readSocialMemoryFile(petId),
   ]);
 
   // === 人格（从 SOUL.md 读取） ===
@@ -755,23 +736,23 @@ export async function buildIntentSystemPrompt({
 
   // 时间上下文留到稳定段之后再注入（见下面"# 当前对话成员档案"之前），以保留前段 prompt prefix 缓存。
 
-  // Parallel cached file reads
+  // Parallel file reads
   const [
     soulContent, userContent, memoryContent, groupRuleContent,
     contactsContent, peopleCacheContent, socialMemoryContent,
     intentStateContent, scratchNotes, lessonsContent, principlesContent,
     intentHistory,
   ] = await Promise.all([
-    cachedRead(() => readSoulFile(petId), `soul_${petId}`),
-    cachedRead(() => readUserFile(petId), `user_${petId}`),
-    cachedRead(() => readMemoryFile(petId), `memory_${petId}`),
-    cachedRead(() => readGroupRuleFile(petId, targetId), `rule_${petId}_${targetId}`),
-    cachedRead(() => readContactsFile(petId), `contacts_${petId}`),
-    cachedRead(() => readPeopleCacheFile(petId, targetId, targetType), `people_${petId}_${targetId}`),
-    cachedRead(() => readSocialMemoryFile(petId), `socmem_${petId}`),
-    cachedRead(() => readIntentStateFile(petId, targetId, targetType), `intent_${petId}_${targetId}`),
-    cachedRead(() => readScratchNotesFile(petId, targetId, targetType), `scratch_${petId}_${targetId}`),
-    cachedRead(async () => {
+    readSoulFile(petId),
+    readUserFile(petId),
+    readMemoryFile(petId),
+    readGroupRuleFile(petId, targetId),
+    readContactsFile(petId),
+    readPeopleCacheFile(petId, targetId, targetType),
+    readSocialMemoryFile(petId),
+    readIntentStateFile(petId, targetId, targetType),
+    readScratchNotesFile(petId, targetId, targetType),
+    (async () => {
       const dir = targetType === 'friend' ? 'friend' : 'group';
       try {
         const raw = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/lessons.json`);
@@ -785,12 +766,11 @@ export async function buildIntentSystemPrompt({
           : `- (${l.count}次) ${l.lesson || ''}`
         ).join('\n');
       } catch { return null; }
-    }, `lessons_${petId}_${targetId}`),
-    cachedRead(async () => {
+    })(),
+    (async () => {
       const dir = targetType === 'friend' ? 'friend' : 'group';
       try { return await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/principles.md`); } catch { return null; }
-    }, `principles_${petId}_${targetId}`),
-    // Intent 历史不缓存（每轮都变）—— 直接读文件
+    })(),
     readIntentHistoryFile(petId, targetId, targetType),
   ]);
 
