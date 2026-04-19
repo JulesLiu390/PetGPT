@@ -1894,8 +1894,9 @@ export async function startSocialLoop(config, onStatusChange) {
   const INTENT_EVAL_COOLDOWN_MS = 60 * 1000;  // semi-lurk / full-lurk 模式的评估冷却
   const INTENT_MIN_INTERVAL_MS = 0;            // 无冷却，新消息立刻触发 eval
   const INTENT_IDLE_SLEEP_MS = 3 * 60 * 1000;    // 3 分钟无新消息 → 休眠
-  const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次，指数退避 5s/25s/125s
-  const INTENT_RETRY_DELAYS = [5000, 25000, 125000];
+  const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次
+  const INTENT_RETRY_DELAYS = [5000, 25000, 125000];           // 默认退避 5s/25s/125s
+  const INTENT_RETRY_DELAYS_OVERLOAD = [32000, 64000, 128000]; // 上游 503/UNAVAILABLE 时用更长退避
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
   const replyWakeFlag = new Map();                // target → true（Intent 评出 ≥3 时置位，Reply 消费后清除）
   const replyWakeResolvers = new Map();           // target → resolve 回调（用于中断 Reply loop 的 sleep）
@@ -2845,8 +2846,12 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             break;
           } catch (e) {
             if (attempt < INTENT_LLM_MAX_RETRIES) {
-              const retryDelay = INTENT_RETRY_DELAYS[attempt] || 5000;
-              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in ${retryDelay / 1000}s): ${e.message || e}`, e._debugBody || null, target);
+              // 上游 503/UNAVAILABLE（Gemini high demand 等）用更长退避让上游恢复
+              const errStr = String(e.message || e);
+              const isOverload = errStr.includes('503') || errStr.includes('UNAVAILABLE') || errStr.includes('high demand');
+              const delays = isOverload ? INTENT_RETRY_DELAYS_OVERLOAD : INTENT_RETRY_DELAYS;
+              const retryDelay = delays[attempt] || 5000;
+              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in ${retryDelay / 1000}s${isOverload ? ', overload backoff' : ''}): ${e.message || e}`, e._debugBody || null, target);
               await sleepInterruptible(state, retryDelay);
               continue;
             }
