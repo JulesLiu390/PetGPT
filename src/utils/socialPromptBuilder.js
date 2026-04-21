@@ -940,11 +940,16 @@ ${stickerIndex}
 截图/图片工具族：
 - screenshot / webshot / webshot_send / image_list / image_send
   何时用：
-    • 群里出现名场面/打脸素材 → screenshot 存档（只存不发）
+    • 群里出现名场面/打脸素材/好笑发言 → screenshot 截图（可只存档，也可立即发出来配评论）
+    • 群友要求"截个图/发张图/截给我看" → screenshot，然后加 image action 发出去
     • CC 数据或网页要甩图佐证 → webshot_send 一步截图+发送
     • 发历史图 → image_list 看有哪些，image_send 发
+  发送路径：
+    • screenshot + image action： 先 screenshot 截图存档 → 再在 write_intent_plan.actions 里加 {"type":"image","file":"截图文件名"} → 同一轮就发出去
+    • webshot_send：一步截图+发送，不需要 image action
+    • image_send：发已存在的旧图（翻打脸素材）
   ⚠️ 硬规则：
-    • screenshot/webshot 只保存不发；要发必须在 write_intent_plan.actions 里加 {"type":"image","file":"..."}
+    • screenshot/webshot 本身不直接发送；要发必须在 write_intent_plan.actions 里加 {"type":"image","file":"..."}（screenshot 文件名就是工具返回的那个）
     • webshot keyword 用 CC 报告或搜索结果里有意义的英文/中文短语，不要用纯数字或特殊符号
   完整用法（参数、keyword 选取、组合模式、反模式） → social_read("social/tools/image.md")
 ${voiceEnabled ? `
@@ -1072,13 +1077,20 @@ ${voiceEnabled ? `
 
 **分析 3.5：值得截图吗？有图可以打脸吗？**（快速过一遍，不需要就跳过）
 
-截图存档：
-- 刚才有没有特别好笑/离谱/名场面的发言？→ screenshot，然后想想：这张截图本身就够搞笑/经典吗？够的话加 image action 发出来配一句评论
-- 有人说了以后可能会否认的话？→ screenshot 留证据
+截图 + 立即发出去（screenshot + image action 组合，同一轮完成）：
+- 群友明确要求"截个图/发张图看看/发给我看"？→ screenshot 对应消息，加 image action 发
+- 刚才有特别好笑/离谱/名场面的发言，且发出来大家会乐？→ screenshot + image action 发出来配一句短评
+- 辩论中需要网页数据打脸？→ webshot_send 一步截图+发送（比 screenshot 快一步）
+- CC 调研拿到的关键数据网页？→ webshot_send 截取关键段落直接甩图
+
+截图只存档（不发，留作以后用）：
+- 有人说了以后可能会否认的话？→ screenshot 留证据，当下不发
 - 有值得记录的技术共识或结论？→ screenshot 存档
-- CC 调研拿到了关键数据的网页来源？→ webshot/webshot_send 截取关键段落
-- 辩论中需要网页数据打脸？→ webshot_send 一步截图+发送
-- 截图是随手的事。截完再想一步：这张图发出来大家会乐/会有反应吗？会就发，不会就留着
+- 想截但判断"发出来没人会乐/没人会有反应"？→ 只存不发
+
+判断流：截图是随手的事。截完再决定这轮发不发——
+- 有人点名要 / 本身就足够搞笑或经典 / 能当场打脸 → 当场发
+- 留给未来用 / 现在发反而尬 → 只存，不加 image action
 
 打脸直觉（主动翻旧图）：
 - 有人在否认自己说过的话？→ image_list 看看有没有截过 ta 当时的发言
