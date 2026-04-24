@@ -2715,6 +2715,39 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           }
         }
 
+        // ── 构造 "最近动作" 提示块 (always-on; 用于 LLM 填充【我刚做了】字段，防止抽象摘要) ──
+        // 包含: 最近 3 条 sentCache 原文 + (若 Reply 仍在生成) reply_brief 内容
+        let priorActivityBlock = '';
+        {
+          const cached = sentMessagesCache.get(target) || [];
+          const recent = cached.slice(-3);
+          const lines = [];
+          if (recent.length > 0) {
+            lines.push('【最近你发送的原文】（写 INTENT 的【我刚做了】字段时，必须保留这些具体内容，不要只写抽象摘要）');
+            for (const m of recent) {
+              const ts = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+              const content = (m.content || '').slice(0, 200);
+              lines.push(`- ${ts}: ${content}`);
+            }
+          }
+          // 若上轮 plan 有 reply 且还未发出（Reply 层生成中） → 注入 brief 作"在途"信号
+          if (state.lastPlan?.actions?.some(a => a.type === 'reply')) {
+            const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
+            if (!hasSentAfterPlan) {
+              try {
+                const intentDir = targetType === 'friend' ? 'friend' : 'group';
+                const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`).catch(() => '');
+                if (brief && brief.trim()) {
+                  lines.push(lines.length > 0 ? '' : '');
+                  lines.push('【正在发送中的 Reply brief】（Reply 层正在基于以下 brief 生成内容，本轮 plan 的 reply 必须避开这些已表达的点）');
+                  lines.push(brief.trim());
+                }
+              } catch { /* ignore */ }
+            }
+          }
+          priorActivityBlock = lines.length > 0 ? '\n\n' + lines.join('\n') : '';
+        }
+
         let intentEvalPrompt;
         if (wasForceEval === 'reply') {
           intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}${recentSentImages}\n\n⚠️ 以上是你刚才发出的内容。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 已经发过的图片不要再发\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
@@ -2727,6 +2760,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         } else {
           intentEvalPrompt = `请分析当前想法和行为倾向，先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。${newMsgHint}`;
         }
+
+        intentEvalPrompt += priorActivityBlock;
 
         // 追加 pending reply brief（Reply 正在执行但尚未发出的内容）
         if (pendingReplyBrief) {
