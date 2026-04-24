@@ -1242,7 +1242,7 @@ async function pollTarget({
         const sendToolName = `${mcpServerName}__send_message`;
         for (let autoAttempt = 0; autoAttempt < 2; autoAttempt++) {
           try {
-            const autoSendResult = await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType, num_chunks: 1 }, { timeout: 10000 });
+            const autoSendResult = await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType }, { timeout: 10000 });
             sendMessageSuccess = true;
             if (newWatermarkId) watermarks.set(target, newWatermarkId);
             let autoMsgId = null;
