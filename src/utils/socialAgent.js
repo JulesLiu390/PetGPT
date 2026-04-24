@@ -1031,10 +1031,24 @@ async function pollTarget({
     try {
       const allTools = await getMcpTools();
       const extraServers = new Set(promptConfig.enabledMcpServers || []);
-      mcpTools = allTools.filter(t => 
+      mcpTools = allTools.filter(t =>
         (t.serverName === mcpServerName && t.name === 'send_message') ||
         (extraServers.has(t.serverName) && t.serverName !== mcpServerName)
       );
+      // 从 send_message schema 剥离 num_chunks / split_content —— 分段统一走 </分段> 标签
+      mcpTools = mcpTools.map(t => {
+        if (t.name !== 'send_message' || !t.inputSchema?.properties) return t;
+        const { num_chunks, split_content, ...rest } = t.inputSchema.properties;
+        const prevRequired = t.inputSchema.required || [];
+        return {
+          ...t,
+          inputSchema: {
+            ...t.inputSchema,
+            properties: rest,
+            required: prevRequired.filter(k => k !== 'num_chunks' && k !== 'split_content'),
+          },
+        };
+      });
     } catch (e) {
       addLog('warn', 'Failed to get MCP tools, proceeding without tools', e.message, target);
     }
