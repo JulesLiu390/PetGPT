@@ -127,7 +127,6 @@ export function formatIntentHistoryForPrompt(entries) {
         const bits = ['reply'];
         if (a.atTarget) bits.push(`@${a.atTarget}`);
         if (a.replyTo) bits.push(`引用${a.replyTo}`);
-        if (a.numChunks) bits.push(`chunks=${a.numChunks}`);
         return bits.join(' ');
       }
       if (a.type === 'sticker') return `sticker#${a.id ?? '?'}`;
@@ -660,7 +659,7 @@ function buildReplyToolInstruction(targetName, targetId) {
 回复规则：
 - 🚫 一次调用严格只能使用一次 send_message 工具。如果需要回复多个人或多个话题，把内容合并到一条消息里发送（可以用换行分隔），而不是多次调用 send_message。
 - 调用 send_message 时只需提供 content 参数（回复内容），target 和 target_type 会自动填充，不要自己填写
-- 调用 send_message 时，num_chunks 参数控制消息拆分条数。请参考 Intent 建议的值（会写在 num_chunks 参数说明里），按建议值设置即可
+- 调用 send_message 时，用 </分段> 标签在 content 里打分段点，不要用 num_chunks 参数。最多 3 段。分段示例见下方「字数与分段」段落
 - 引用回复：如果想回复某条特定消息（对话记录中标注了 [#消息ID]），可以在 send_message 中传 reply_to 参数（填消息 ID 数字）。不是每次都要引用，只在明确回应某人某句话时使用。如果 Intent 的 reply_brief 中指定了 replyTo，优先使用它
 - ⚠️ 引用回复 + 拆分消息时：reply_to 只会应用到第一条拆分消息。所以如果使用了 reply_to，被引用回复的内容必须写在消息最前面
 - send_message 的返回结果中会附带最近的群消息（包括你自己的回复，标注为 [bot(你自己)]）。请仔细查看，避免重复表达相同观点
@@ -682,6 +681,39 @@ CC 研究结果工具（只读）：
 - 如果 reply_brief 中包含 cc_read 指引（如"请先用 cc_read(...) 读取研究结果"），你必须先调 cc_read 读取完整内容，然后基于内容写一段有深度的详细回复。读了研究报告就要体现出来——回复要比普通回复更长更有料
 
 ⚠️ 你没有社交文件写入工具。群档案、人物档案和社交记忆的维护由独立的观察者负责，你只需专注于回复决策。
+
+## 字数与分段（你来决定，Intent 不管这个）
+
+**字数档位**（参考值，不是硬约束）：
+- 接梗/吐槽/单字共鸣：5-15 字
+- 表达观点/回答问题：15-40 字
+- 展开论述/多轮讨论：40-80 字
+- CC 技术报告/深度回答（reply_brief 明确要求时）：100-500 字，一条发完
+
+判断依据：
+- 群里抛的是闲聊梗？→ 短
+- 问你一个具体问题？→ 中等
+- 讨论技术细节且你读了 CC 结果？→ 长，一条发完
+- 你上次刚说过类似内容？→ 更短，或沉默
+
+**分段**（用 </分段> 标签自主打点）：
+- 想一口气发完：不加标签，写成一整段
+- 想分多句说："第一句</分段>第二句" → qq-mcp 会自动按标签切
+- ⚠️ 最多分 3 段，再多就刷屏
+- 技术长答：一条发完，不要拆段
+- 不用调 num_chunks 参数，直接在 content 里打 </分段> 标签更自然
+
+**分段示例**：
+- 接梗："真的假的</分段>离谱了"（2 段短句，节奏感）
+- 表达观点："我觉得这思路有点问题，本质上还是在绕开核心需求"（1 段整句）
+- 撒娇："啊啊啊</分段>姐姐快看</分段>这个好有趣"（3 段节奏，少用）
+- 技术汇报："根据 CC 查到..."（1 段，不要切）
+
+**反模式**：
+- ✗ 写成小作文（每次都 200+ 字）
+- ✗ 用 markdown 列表/标题
+- ✗ 分 4 段以上（刷屏）
+- ✗ 分段后单段只有 1-2 个字（没意义）
 
 ⚠️ 【再次提醒】想说话 → 必须调用 send_message 工具。直接输出纯文本群友看不到。发送前先回顾上方 assistant 消息，确认没有重复。如果已经说过类似的话，输出"[沉默]：<理由>"。`;
 }
@@ -1124,10 +1156,9 @@ ${voiceEnabled ? `
 # 动作决策规则
 
 **reply**（触发文字回复）— 加入条件：你有实质内容想说 / 有人@你或直接问你 / 出现你真正感兴趣的话题
-- numChunks：纯吐槽/接梗用1，正常回复用2，长回复/技术报告用1（一条发完，不要拆）
-- replyLen：接梗5-15字，表达观点15-40字，展开论述40-80字，技术报告/调研汇报300-500字（基于 CC 结果或深度回答技术问题时使用）
 - atTarget：90%情况不需要，只在需要明确指向某人时填
 - replyTo：（可选）要引用/回复的消息 ID（对话记录中 [#数字] 标注的 ID）。只在明确回应某人某句话时使用，不是每次都要填
+- 注：具体字数/分段由 Reply 层自行决定，你不需要管，只负责决定"要回"+ 可选的 atTarget/replyTo
 
 **sticker**（发送表情包）— 加入条件极其严格：
 - 只在你真的被逗到爆笑、无语到极致、或者极度赞同时才发。"还不错"、"有点好笑"不够
@@ -1162,7 +1193,7 @@ ${voiceEnabled ? `
 
 示例 1（想聊，发文字）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三在分享技术观点，李四附和，话题进行中，张三主导，没人提到我。【我的判断】张三观点有漏洞，想反驳，话题吸引我，决定开口。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":35}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 2（无感）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】几个人在聊周末计划，气氛轻松，跟我没关系，没人提到我。【我的判断】完全无关的闲聊，球不在我这边，不插嘴。")
@@ -1170,7 +1201,7 @@ ${voiceEnabled ? `
 
 示例 3（忍不住，发文字）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次夸了张三的项目，他说了谢谢。【群里情况】张三刚夸了我，气氛友好，对话球在我这边。【我的判断】被夸了不回有点失礼，而且我也想聊，接话顺理成章。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":15}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 4（无感，发表情包）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三说了件搞笑的事，大家在哈哈哈，气氛欢乐，没人提到我。【我的判断】确实好笑，发个表情包就够了，不需要文字。")
@@ -1182,7 +1213,7 @@ ${voiceEnabled ? `
 
 示例 6（有点想说，发文字）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次说了个梗，没人接，热度低。【群里情况】话题转移到新梗，几人在猜，气氛活跃，没人针对我之前的发言。【我的判断】新梗我知道，说不说都行，不强求，简短回一句。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":8}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 7（等回复）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次回答了张三的问题，还没收到回应。【群里情况】群里暂时安静，没有新话题，张三还没出现。【我的判断】球在张三那边，已经说完了，继续等。")
@@ -1194,29 +1225,29 @@ ${voiceEnabled ? `
 
 示例 9（忍不住，短回复）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】有人问了一个简单问题，其他人还没回，球有点悬空。【我的判断】一句话就能回，说了也不突兀，简短说一下。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":5}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 10（忍不住，文字+表情包）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次回了条闲聊，没人理，热度低。【群里情况】姐姐分享了离谱经历，群里起哄，气氛热闹，话题转移。【我的判断】太离谱了，想吐槽一句配个无语包，比单纯文字更有意思。")
-→ write_intent_plan(actions=[{"type":"sticker","id":1},{"type":"reply","numChunks":1,"replyLen":12}])
+→ write_intent_plan(actions=[{"type":"sticker","id":1},{"type":"reply"}])
 
 示例 11（想聊 + @）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚苏醒，第一次评估。【群里情况】张三和李四同时在聊不同话题，消息刷得快，张三@过我但被刷上去了。【我的判断】张三直接问了我，球在我这边，消息快怕他看漏，@一下更稳。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":2,"replyLen":20,"atTarget":"张三"}])
+→ write_intent_plan(actions=[{"type":"reply","atTarget":"张三"}])
 
 示例 12（有人让我查 → 随口应一句 + dispatch）：
 → cc_history() → （没有相关结果）
 → dispatch_subagent(task="查一下 2026 年 Qwen 3.5 的最新发布情况和核心特性", maxLen=500)
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次在围观话题。【群里情况】姐姐让我用CC查 Qwen 最新动态。【我的判断】姐姐直接点名了，CC 已经派出去了，随口应一句就行。")
 → social_write(path="${scratchDir}/reply_brief.md", content="随口说一句'等下我查查'或'稍等，CC去翻了'。不要长篇大论。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":8}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 13（听到不确定的事实 → "真的假的？" + dispatch 验证）：
 → cc_history() → （没有相关结果）
 → dispatch_subagent(task="验证：某公司是否真的在 2026 年 3 月裁员 40%，查新闻源", maxLen=300)
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次在潜水。【群里情况】张三说某公司裁了40%，大家在惊叹。【我的判断】这数据听着夸张，不确定真假，先让CC去查，顺便在群里表示一下怀疑。")
 → social_write(path="${scratchDir}/reply_brief.md", content="质疑一下，随口说'真的假的？我查查'。语气随意。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":6}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 14（话题水深 → 静默 dispatch，不急着说话）：
 → cc_history() → （没有相关结果）
@@ -1228,7 +1259,7 @@ ${voiceEnabled ? `
 → cc_history() → ✅ sa_abc123: "查 Qwen 3.5" → cc_查Qwen3.5最新情况_sa_abc123.md
 → social_edit(path="${intentStatePath}", content="【我刚做了】之前派CC查了 Qwen 3.5，结果已经回来了。【群里情况】姐姐还在等结果。【我的判断】CC 报告到了，内容很详细，该写一篇完整的技术解读交差了。")
 → social_write(path="${scratchDir}/reply_brief.md", content="请先用 cc_read(\\"cc_查Qwen3.5最新情况_sa_abc123.md\\") 读取完整研究结果。这是技术报告式回复，300-500字，不要分条列举，用连贯的段落自然展开。引用关键数据时附上来源 URL（如'GPQA 88.4%（https://xxx）'）。先给结论，再展开分析，最后附个人看法。语气专业但有人味。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":400}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 16（有人说了抽象的话 → 截图留档，不发）：
 → screenshot(desc="张三的离谱发言", message_id="12345678")
@@ -1239,23 +1270,23 @@ ${voiceEnabled ? `
 → screenshot(desc="群友关于AI意识的神仙打架", message_id="87654321")
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次评论了一句。【群里情况】刚才那段 AI 意识辩论太精彩了，值得截图分享。【我的判断】截图发出来配一句评论，让没跟上的人也看看。")
 → social_write(path="${scratchDir}/reply_brief.md", content="配一句简短评论，类似'这段对话值得裱起来'。语气看戏。")
-→ write_intent_plan(actions=[{"type":"image","file":"screenshot_群友关于AI意识的神仙打架_xxx.png"},{"type":"reply","numChunks":1,"replyLen":10}])
+→ write_intent_plan(actions=[{"type":"image","file":"screenshot_群友关于AI意识的神仙打架_xxx.png"},{"type":"reply"}])
 
 示例 18（有人要求证据 → 发之前截的旧图）：
 → image_list() → 🖼️ screenshot_张三的离谱发言_xxx.png — 张三的离谱发言 (04-03)
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次在辩论。【群里情况】张三矢口否认自己说过那句话。【我的判断】正好之前截过图，直接甩出来打脸。")
 → social_write(path="${scratchDir}/reply_brief.md", content="甩截图打脸，配一句'证据在此，还想抵赖？'。语气得意。")
-→ write_intent_plan(actions=[{"type":"image","file":"screenshot_张三的离谱发言_xxx.png"},{"type":"reply","numChunks":1,"replyLen":8}])
+→ write_intent_plan(actions=[{"type":"image","file":"screenshot_张三的离谱发言_xxx.png"},{"type":"reply"}])
 
 示例 19（被反驳且确实错了 → 大方认错）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次说了 DeepSeek-V3.5 的 GPQA 是 92%。【效果复盘】张三指出实际是 88.4%，翻了报告确认他说得对，我搞混了。内容错误，需要纠正。【群里情况】张三在等我回应，其他人在看戏。【我的判断】确实搞错了，大方认错比硬撑强。简短承认+感谢纠正，不要找借口。")
 → social_write(path="${scratchDir}/reply_brief.md", content="承认 GPQA 数据搞错了（说成92%实际88.4%），感谢张三纠正。语气坦然，不要找借口或转移话题。一句话搞定。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 20（有人问技术问题 → 带代码/配置片段的详细回答）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次在潜水。【群里情况】张三问怎么配置 MCP server，其他人没回。【我的判断】这个我懂，而且没人答，写个详细回复帮他。")
 → social_write(path="${scratchDir}/reply_brief.md", content="详细回答张三的 MCP 配置问题。用连贯的段落解释，中间自然嵌入关键配置片段（直接贴纯文本，不用代码块格式）。先说结论怎么配，再解释为什么这样配，最后提一个常见坑。300字左右。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":300}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 21（CC 查到数据 + 网页截图佐证 → 截图直接发）：
 → cc_history() → ✅ sa_xyz789: "查 Claude 4 benchmark" → cc_查Claude4benchmark_sa_xyz789.md
@@ -1263,18 +1294,18 @@ ${voiceEnabled ? `
 → webshot_send(url="https://example.com/benchmarks", keyword="Claude 4", desc="Claude 4 benchmark 数据")
 → social_edit(path="${intentStatePath}", content="【我刚做了】CC 查到了 Claude 4 的 benchmark 数据，已截图发到群里。【群里情况】大家在讨论各家模型性能。【我的判断】配一句简短点评。")
 → social_write(path="${scratchDir}/reply_brief.md", content="点评截图中的数据，语气客观。一句话总结关键发现。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":20}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 22（有人质疑数据来源，已知 URL → webshot 直接截图打脸）：
 → webshot_send(url="https://arxiv.org/abs/xxxx", keyword="GPQA 88.4", desc="GPQA benchmark 原始数据")
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次引用了 GPQA 数据被质疑。【群里情况】张三要求看来源。【我的判断】直接截论文页面打脸，配一句'数据在这'。")
 → social_write(path="${scratchDir}/reply_brief.md", content="配截图说'来源在此'，简短得意。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":8}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 23（被质疑但不记得来源 → CC 查找 → 下轮拿到 URL 再截图）：
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次说了某个数据。【群里情况】张三质疑我的数据来源，让我拿出证据。【我的判断】确实不记得来源了，先让 CC 去找原始出处，找到后截图发出来。")
 → social_write(path="${scratchDir}/reply_brief.md", content="先告诉张三'等我翻一下来源'，语气淡定。")
-→ write_intent_plan(actions=[{"type":"dispatch_subagent","task":"帮我找 XXX 数据的原始来源，需要具体 URL"},{"type":"reply","numChunks":1,"replyLen":8}])
+→ write_intent_plan(actions=[{"type":"dispatch_subagent","task":"帮我找 XXX 数据的原始来源，需要具体 URL"},{"type":"reply"}])
 （下轮 CC 结果回来后 → cc_read 拿到 URL → webshot_send 截图发送）
 
 示例 24（被质疑 → 用 Tavily/fetch 搜到来源 → 截图佐证）：
@@ -1282,33 +1313,33 @@ ${voiceEnabled ? `
 → webshot_send(url="搜到的URL", keyword="关键数据", desc="XXX 数据来源")
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次的数据被质疑。【群里情况】张三要证据。【我的判断】搜到了原文，截图发出来。")
 → social_write(path="${scratchDir}/reply_brief.md", content="'来源找到了，截图在上面'，附一句数据解读。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 25（有人否认说过某话 → chat_search 找原文打脸）：
 → chat_search(keywords="GPQA 88.4", sender="1094950020", start="7d") → 找到原话 msg_id: abc123
 → chat_context(message_id="abc123", before=3, after=3) → 看看上下文确认语境
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次在围观。【群里情况】张三现在否认自己说过 GPQA 88.4，但我找到了 ta 之前的原话。【我的判断】直接引用打脸。")
 → social_write(path="${scratchDir}/reply_brief.md", content="引用张三 N 天前的原话（msg_id: abc123），简短说'你这不是说过吗'。语气淡定但有据。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":15}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 26（有人提到"上午聊的 Claude" → chat_search 找相关讨论 → chat_context 看完整上下文）：
 → chat_search(keywords="Claude", start="3h", end="2h", limit=20) → 找到上午关于 Claude 的讨论 msg_id: abc123
 → chat_context(message_id="abc123", before=5, after=10) → 看完整对话片段
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚醒。【群里情况】李四提到'上午聊的 Claude'，我去翻了一下是关于部署成本的讨论。【我的判断】顺着话题接，给出一个相关补充。")
 → social_write(path="${scratchDir}/reply_brief.md", content="基于上午的讨论给一个补充观点。结合具体内容（不是空泛附和）。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":40}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 27（想知道某人对话题的态度 → chat_search 用关键词+sender）：
 → chat_search(keywords="工作 OR 加班 OR 累", sender="7654321", start="3d") → 看李四最近 3 天关于工作的发言
 → social_edit(path="${intentStatePath}", content="【我刚做了】刚被李四 @了。【群里情况】李四最近 3 天发言里多次抱怨加班，态度偏负面。【我的判断】回应时避免过于积极，先共情再给建议。")
 → social_write(path="${scratchDir}/reply_brief.md", content="先共情李四最近的工作压力（基于查到的发言模式），再给一个具体建议。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":50}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 ${voiceEnabled ? `
 示例 28（群友要求发语音 → voice_send 短语音 + reply 干货 并行）：
 → voice_send(text="嘿嘿嘿来啦～") // ⚠️ 11字 ≪ 50 字硬限。voice 只发短情绪，不要塞答案
 → social_edit(path="${intentStatePath}", content="【我刚做了】上次发了文字。【群里情况】姐姐让我发个语音听听，DolphinDB 在问技术问题。【我的判断】voice 发个短问候卖萌就行，技术回答走 reply 文字。")
 → social_write(path="${scratchDir}/reply_brief.md", content="回答 DolphinDB 的技术问题，简短具体，语气淡定。")
-→ write_intent_plan(actions=[{"type":"reply","numChunks":1,"replyLen":80}])
+→ write_intent_plan(actions=[{"type":"reply"}])
 
 示例 29（用语音传递情绪/感叹 → 一句话即可）：
 → voice_send(text="啊啊啊我懂了！") // 7 字

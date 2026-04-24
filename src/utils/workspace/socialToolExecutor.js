@@ -1313,14 +1313,6 @@ export function getIntentPlanToolDefinitions() {
                     enum: ['reply', 'sticker', 'wait'],
                     description: '"reply" = 触发文字回复；"sticker" = 发送表情包；"wait" = 等新消息后再评估。有 reply 或 sticker 时 wait 可省略。',
                   },
-                  numChunks: {
-                    type: 'integer',
-                    description: '（reply 专用）消息拆分条数。短消息（≤30字）建议 2-3 条模拟真人节奏；长消息（>30字）建议 1 条避免刷屏。',
-                  },
-                  replyLen: {
-                    type: 'integer',
-                    description: '（reply 专用）建议回复字数。接梗/吐槽/附和通常 5-15 字；回答问题/表达观点通常 15-40 字；展开论述通常 40 字以上。',
-                  },
                   atTarget: {
                     type: 'string',
                     description: '（reply 专用）要@的人的QQ号（纯数字），不需要@时省略。90% 情况下不需要@，只有同时回复多人或消息已被刷远时才用。',

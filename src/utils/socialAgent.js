@@ -981,7 +981,6 @@ async function pollTarget({
       const replyAction = pollIntentPlan.actions?.find(a => a.type === 'reply');
       intentBlock += (pollIntentPlan.state || '').trim() + '\n';
       if (replyAction) {
-        if (replyAction.replyLen != null) intentBlock += `【字数严格控制在 ${replyAction.replyLen} 字左右】\n`;
         if (replyAction.atTarget && replyAction.atTarget !== '无') intentBlock += `【需要 @${replyAction.atTarget}】\n`;
       }
       intentBlock += '以上是你对当前对话的想法和行为倾向，自然体现在回复风格和话题选择中。不要直接说出这些想法。';
@@ -1053,32 +1052,6 @@ async function pollTarget({
     }));
     mcpTools = [...mcpTools, ...builtinToolsAsMcp];
 
-    // ── Inject replyLen / numChunks / atTarget constraints into send_message tool schema ──
-    if (pollIntentPlan) {
-      const replyAction = pollIntentPlan.actions?.find(a => a.type === 'reply');
-      if (replyAction) {
-        for (const tool of mcpTools) {
-          if (tool.name?.includes('send_message')) {
-            const props = tool.inputSchema?.properties;
-            if (props?.content) {
-              let desc = '回复正文。';
-              if (replyAction.replyLen != null) desc += `字数控制在 ${replyAction.replyLen} 字左右。`;
-              if (replyAction.atTarget && replyAction.atTarget !== '无') desc += `需要 @${replyAction.atTarget}。`;
-              props.content = { ...props.content, description: desc };
-            }
-            if (props?.num_chunks) {
-              if (replyAction.numChunks != null && replyAction.numChunks >= 2) {
-                props.num_chunks = { ...props.num_chunks, description: `发送条数。必须填 ${replyAction.numChunks}。` };
-              } else {
-                // numChunks=1：不暴露给 LLM，LLM 不传此参数
-                delete props.num_chunks;
-              }
-            }
-            break;
-          }
-        }
-      }
-    }
   }
 
   // -- Poll data collection for aggregated log entry --
@@ -1146,12 +1119,10 @@ async function pollTarget({
           for (const sec of Object.values(ephemeral)) {
             content = content.replaceAll(sec, '');
           }
-          // num_chunks：仅在 >= 2 时传递，=1 时不传（LLM 也看不到此参数）
-          const intentEntry = pollIntentPlan?.actions?.find(a => a.type === 'reply');
-          const numChunks = intentEntry?.numChunks ?? 1;
-          const extra = numChunks >= 2 ? { num_chunks: numChunks } : {};
           // reply_to: 优先用 LLM 自己传的，其次用 Intent plan 里的
+          const intentEntry = pollIntentPlan?.actions?.find(a => a.type === 'reply');
           const replyTo = args?.reply_to || intentEntry?.replyTo || undefined;
+          const extra = {};
           if (replyTo) extra.reply_to = String(replyTo);
           // 过滤 LLM 误抄的占位符
           content = content.replace(/\[图片\]/g, '').replace(/\[视频\]/g, '').replace(/\[语音\]/g, '').replace(/\[文件\]/g, '').trim();
@@ -2115,7 +2086,7 @@ JSON 数组格式，每条：
   const getIntentState = (target) => {
     if (!intentMap.has(target)) {
       intentMap.set(target, {
-        lastPlan: null,       // 最新 write_intent_plan args（供 Reply 读取 numChunks/replyLen）
+        lastPlan: null,       // 最新 write_intent_plan args（供 Reply 读取 atTarget/replyTo）
         lastEvalTime: 0,
         loopTimeoutId: null,
         _wake: null,          // 可中断 sleep 的 resolve 回调
@@ -2939,7 +2910,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
         // 日志
         const actionDesc = actions.filter(a => a.type !== 'wait')
-          .map(a => a.type === 'sticker' ? `📎sticker#${a.id}` : a.type === 'image' ? `🖼️image(${a.file})` : `reply(${a.numChunks ?? 1}条 ${a.replyLen ?? '?'}字)`).join(' + ')
+          .map(a => a.type === 'sticker' ? `📎sticker#${a.id}` : a.type === 'image' ? `🖼️image(${a.file})` : '💬reply').join(' + ')
           || 'wait';
         addLog('intent', `🧠 [${tName()}] ${actionDesc}`, JSON.stringify({ state: capturedPlan?.state || '', actions: capturedPlan?.actions || [] }), target);
 
