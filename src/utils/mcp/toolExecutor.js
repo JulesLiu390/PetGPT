@@ -809,7 +809,9 @@ export const callLLMWithTools = async ({
         }
 
         const stopAfterToolMatches = stopAfterTool && (
-          typeof stopAfterTool === 'function' ? stopAfterTool(call.name) : call.name === stopAfterTool
+          typeof stopAfterTool === 'function'
+            ? stopAfterTool(call.name, formattedResult, call.arguments)
+            : call.name === stopAfterTool
         );
         if (stopAfterToolMatches) {
           stopEarly = true;

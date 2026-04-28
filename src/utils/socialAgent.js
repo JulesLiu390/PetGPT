@@ -11,7 +11,7 @@ import { writeIntentTrace } from './intentTraining';
 import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition, getSituationToolDefinition } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -176,6 +176,235 @@ async function appendIntentHistory(petId, targetId, targetType, entry) {
     await tauri.workspaceWrite(petId, path, next.join('\n') + '\n');
   } catch (e) {
     console.warn('[IntentHistory] write failed:', e);
+  }
+}
+
+/**
+ * 把 write_intent_plan 的 args 拆成结构化 markdown，作为日志的可展开详情。
+ * 帮用户快速看清：plan / brief / 当前氛围（state【群里情况】+【我的判断】）/ todolist（state【策略】）/ 完整 state。
+ */
+function _buildPlanDetails(args = {}) {
+  const state = args?.state || '';
+  const brief = args?.brief || '';
+  const actions = Array.isArray(args?.actions) ? args.actions : [];
+
+  // 从 state 抽取 【XXX】 段。markers 顺序就是 state 里的预期顺序
+  const markers = ['我刚做了', '效果复盘', '群里情况', '我的判断', '策略'];
+  const sections = {};
+  if (state) {
+    for (let i = 0; i < markers.length; i++) {
+      const marker = markers[i];
+      const startIdx = state.indexOf(`【${marker}】`);
+      if (startIdx === -1) continue;
+      let endIdx = state.length;
+      for (let j = i + 1; j < markers.length; j++) {
+        const nextStart = state.indexOf(`【${markers[j]}】`, startIdx + 1);
+        if (nextStart !== -1 && nextStart < endIdx) endIdx = nextStart;
+      }
+      sections[marker] = state.slice(startIdx, endIdx).trim();
+    }
+  }
+
+  const planJson = JSON.stringify({ actions }, null, 2);
+
+  const atmosphere = [sections['群里情况'], sections['我的判断']]
+    .filter(Boolean).join('\n\n');
+  const todolist = sections['策略'] || '';
+
+  const parts = [
+    '## 📋 Plan (actions)',
+    planJson,
+    '',
+  ];
+  if (brief && brief.trim()) {
+    parts.push('## 💬 Reply brief');
+    parts.push(brief.trim());
+    parts.push('');
+  }
+  if (atmosphere) {
+    parts.push('## 🌡️ 当前氛围（INTENT 抽取）');
+    parts.push(atmosphere);
+    parts.push('');
+  }
+  if (todolist) {
+    parts.push('## ✅ Todolist / 多步策略（INTENT 抽取）');
+    parts.push(todolist);
+    parts.push('');
+  } else {
+    parts.push('## ✅ Todolist / 多步策略');
+    parts.push('（本轮无多步计划）');
+    parts.push('');
+  }
+  parts.push('---');
+  parts.push('## 📄 完整 state（INTENT_xxx.md 写入内容）');
+  parts.push(state || '(空)');
+
+  return parts.join('\n');
+}
+
+/**
+ * Intent eval 前写 recent_self.md，记录"我刚做了什么"。
+ * Intent 系统提示要求 LLM 调 social_read 这个文件作为第一步，强迫它处理已表达的内容，
+ * 防止下一轮 plan 派一个重复的 reply。
+ *
+ * 内容包含：
+ *  - 最近 N 条 sentMessagesCache 原文（带时间戳）
+ *  - 在途 Reply brief（上轮 plan 派了 reply 但 sentCache 里还没出现新消息）
+ *  - 上轮已发送 Reply brief（sentCache 已有此 plan 之后的消息）
+ *  - 上轮派出的图片文件名
+ */
+async function writeRecentSelfFile(petId, targetId, targetType, lastPlan, prevEvalTime) {
+  if (!petId || !targetId) return;
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const path = `social/${dir}/scratch_${targetId}/recent_self.md`;
+  const cached = sentMessagesCache.get(targetId) || [];
+  const recent = cached.slice(-5);
+  const lines = ['# 你最近的动作（必读）', ''];
+
+  if (recent.length > 0) {
+    lines.push('## 最近发出的原文');
+    for (const m of recent) {
+      const ts = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+      const content = (m.content || '').slice(0, 300);
+      lines.push(`- ${ts}: ${content}`);
+    }
+    lines.push('');
+  } else {
+    lines.push('## 最近发出的原文');
+    lines.push('（暂无最近发送记录）');
+    lines.push('');
+  }
+
+  if (lastPlan?.actions?.some(a => a.type === 'reply')) {
+    let brief = '';
+    try {
+      brief = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/reply_brief.md`).catch(() => '');
+    } catch { /* ignore */ }
+    if (brief && brief.trim()) {
+      const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
+      if (hasSentAfterPlan) {
+        lines.push('## 上轮已发送的 Reply（brief，已经说完）');
+        lines.push(brief.trim());
+        lines.push('');
+        lines.push('🚫 以上观点已经表达完毕。严禁再 reply 一个内容相同/相似的（包括"换说法重复结论"或"把长内容拆开再发"）。');
+        lines.push('只在出现以下情况才可以再 reply：');
+        lines.push('- 有人针对你刚才那句话追问或反驳');
+        lines.push('- 出现你没回应过的新人新话题');
+        lines.push('- 你有实质性的新论据/新角度/新信息要补充');
+        lines.push('');
+      } else {
+        lines.push('## 正在发送中的 Reply（brief，Reply 层正在生成内容）');
+        lines.push(brief.trim());
+        lines.push('');
+        lines.push('🚫 以上 brief 即将由 Reply 层说出。本轮 plan 严禁派一个内容相同或相似的 reply。');
+        lines.push('');
+      }
+    }
+  }
+
+  if (lastPlan?.actions?.some(a => a.type === 'image')) {
+    const sentFiles = lastPlan.actions.filter(a => a.type === 'image').map(a => a.file).filter(Boolean);
+    if (sentFiles.length > 0) {
+      lines.push('## 上轮发出的图片');
+      for (const f of sentFiles) lines.push(`- ${f}`);
+      lines.push('');
+      lines.push('🚫 以上图片已发过，不要再发同一张。');
+      lines.push('');
+    }
+  }
+
+  // 在途/最近的 AI 生图任务（generate_image_send 是 fire-and-forget，
+  // 状态通过 sentCache 占位条 _genImageFileName 跟踪）
+  // 把 filename / reason / prompt 全展开，让 Intent 做主题级去重
+  const imageGenEntries = cached.filter(m => m && m._genImageFileName);
+
+  // 孤儿检测：扫 pending_gen/ 锁文件，dispatchTs > 11 分钟还没被清的视为 IIFE 死亡
+  // （IIFE 自己有 10 分钟 fetch 超时；超时还会自清锁。锁还在=进程被杀）
+  // 用 Map 合并去重：同 fileName 优先用 sentCache 状态（活进程更新过的），锁文件只补缺失的孤儿
+  const ORPHAN_AGE_MS = 11 * 60 * 1000;
+  const seenFileNames = new Set(imageGenEntries.map(m => m._genImageFileName));
+  const orphans = [];
+  try {
+    const lockDir = `social/${dir}/scratch_${targetId}/pending_gen`;
+    const list = await tauri.workspaceListDir(petId, lockDir).catch(() => null);
+    if (Array.isArray(list)) {
+      for (const f of list) {
+        const name = (f && f.name) ? f.name : '';
+        if (!name.endsWith('.json')) continue;
+        const fileNameFromLock = name.replace(/\.json$/, '');
+        try {
+          const raw = await tauri.workspaceRead(petId, `${lockDir}/${name}`).catch(() => '');
+          if (!raw) continue;
+          const info = JSON.parse(raw);
+          const ageMs = Date.now() - (info?.dispatchTs || 0);
+          // 同 fileName 在 sentCache 已经有状态记录 → 跳过（活进程已经管它了）
+          if (seenFileNames.has(fileNameFromLock)) continue;
+          // 老于 11 分钟的 → 孤儿（IIFE 死亡）
+          if (ageMs > ORPHAN_AGE_MS) {
+            orphans.push({
+              fileName: fileNameFromLock,
+              prompt: (info.prompt || '').slice(0, 200),
+              reason: (info.reason || '(未记录)').slice(0, 200),
+              dispatchTs: info.dispatchTs || 0,
+              ageMin: Math.round(ageMs / 60000),
+            });
+            // 顺手清掉孤儿锁文件，避免下次又算一遍
+            await tauri.workspaceDeleteFile(petId, `${lockDir}/${name}`).catch(() => {});
+          }
+          // 11 分钟以内的还可能在生成中（10min timeout 缓冲），不动
+        } catch { /* 单条解析失败不影响其他 */ }
+      }
+    }
+  } catch { /* 没有 pending_gen 目录就跳过 */ }
+
+  if (imageGenEntries.length > 0 || orphans.length > 0) {
+    const recentGen = imageGenEntries.slice(-6);
+    lines.push('## 在途 / 最近的 AI 生图任务（generate_image_send 状态）');
+    lines.push('（**判断重复**：看 reason 字段——同主题/同请求只画一次。filename 不同 prompt 不同但 reason 相近=重复）');
+    lines.push('');
+    for (const m of recentGen) {
+      const ts = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
+      const status = m._genImageStatus || 'unknown';
+      const tag = status === 'dispatching' ? '⏳ 派发中'
+        : status === 'sent' ? '✅ 已发'
+        : status === 'failed' ? '❌ 失败'
+        : status;
+      lines.push(`- ${ts} ${tag}`);
+      lines.push(`    filename: ${m._genImageFileName || '?'}`);
+      lines.push(`    reason:   ${(m._genImageReason || '(未填)').slice(0, 200)}`);
+      lines.push(`    prompt:   ${(m._genImagePrompt || '').slice(0, 200)}`);
+    }
+    for (const o of orphans) {
+      const ts = o.dispatchTs ? new Date(o.dispatchTs).toLocaleTimeString('zh-CN', { hour12: false }) : '?';
+      lines.push(`- ${ts} ☠️ 孤儿（${o.ageMin} 分钟前派发，IIFE 没走完——大概是 HMR 重载或 app 重启杀了进程）`);
+      lines.push(`    filename: ${o.fileName}`);
+      lines.push(`    reason:   ${o.reason}`);
+      lines.push(`    prompt:   ${o.prompt}`);
+    }
+    lines.push('');
+    const hasFailed = recentGen.some(m => m._genImageStatus === 'failed');
+    const hasDispatching = recentGen.some(m => m._genImageStatus === 'dispatching');
+    const hasSent = recentGen.some(m => m._genImageStatus === 'sent');
+    const hasOrphan = orphans.length > 0;
+    if (hasDispatching) {
+      lines.push('⏳ 有正在派发中的 AI 生图任务（最多 10 分钟会出结果）→ 同主题**本轮严禁再调**（不论换什么 filename / prompt 风格）。无关的另一张可以并发。');
+    }
+    if (hasSent) {
+      lines.push('✅ 有已发出的 AI 生图任务 → 看 reason，本轮如果"为什么"和已发的相近 → **不要再画**。一张就够了。');
+    }
+    if (hasFailed) {
+      lines.push('❌ 有失败的 AI 生图任务 → 同主题**不要立刻重试**。失败原因常是配置/网络/参数问题，改 reply 告诉用户或换 image_send 发已有截图。');
+    }
+    if (hasOrphan) {
+      lines.push('☠️ 有孤儿派发（IIFE 死亡）→ 通常是 dev 模式 HMR 或重启导致。如果用户的请求还在等，可以**有节制地重画一次**；如果已经过去很久或话题转移了，就别画了。');
+    }
+    lines.push('');
+  }
+
+  try {
+    await tauri.workspaceWrite(petId, path, lines.join('\n'));
+  } catch (e) {
+    console.warn('[RecentSelf] write failed:', e);
   }
 }
 
@@ -496,20 +725,33 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
 
   const turns = [];
 
+  // 把 ISO 时间戳格式化成 HH:MM:SS（无时区，本地时区显示）
+  const formatHMS = (ts) => {
+    if (!ts) return '';
+    try {
+      return new Date(ts).toLocaleTimeString('zh-CN', { hour12: false });
+    } catch {
+      return '';
+    }
+  };
+
   for (const msg of messages) {
     const role = msg.is_self ? 'assistant' : 'user';
+    const tsTag = formatHMS(msg.timestamp);
 
     let text;
     if (msg.is_self) {
-      // assistant turn：只放内容，不加名字前缀
-      // 如果是 bot 自己发的纯图片（表情包），用文字占位（正常情况下 sentMessagesCache 会覆盖）
+      // assistant turn：标注为"我的回复"并带时间戳，避免和"背景描述"混淆
+      let body;
       if (!(msg.content || '').trim() && msg._images && msg._images.length > 0) {
-        text = '[发送了表情包]';
+        body = '[发送了表情包]';
       } else {
-        text = msg.content || '';
+        body = msg.content || '';
       }
+      const prefix = tsTag ? `[${tsTag} 我的回复]` : '[我的回复]';
+      text = `${prefix} ${body}`;
     } else {
-      // user turn：用安全分隔符包裹名字和消息
+      // user turn：用安全分隔符包裹名字和消息，前面附时间戳
       let name = stripSecrets(String(msg.sender_name || msg.sender_id));
       const isOwner = ownerQQ && (String(msg.sender_id) === String(ownerQQ));
       // 非主人：如果昵称试图冒充主人（包含主人名字/QQ/owner/user关键词），替换为警告
@@ -526,7 +768,8 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
       const idTag = isOwner && ownerSecret ? `owner:${ownerSecret}` : String(msg.sender_id || '');
       const msgIdTag = msg.message_id ? ` [#${msg.message_id}]` : '';
       let msgContent = stripSecrets(msg.content || '');
-      text = `${nameL}${name}(${idTag})${msgIdTag}${nameR} ${msgL}${msgContent}${msgR}`;
+      const tsPrefix = tsTag ? `[${tsTag}] ` : '';
+      text = `${tsPrefix}${nameL}${name}(${idTag})${msgIdTag}${nameR} ${msgL}${msgContent}${msgR}`;
     }
 
     if (sanitizeAtMe) {
@@ -1779,6 +2022,23 @@ export async function startSocialLoop(config, onStatusChange) {
     }
   }
 
+  // 解析 Image Generation provider（generate_image_send 工具用）
+  // imageGenConfig: { enabled, providerId, modelName }
+  let imageGenLLMConfig = null;
+  if (config.imageGenConfig?.enabled && config.imageGenConfig?.providerId && config.imageGenConfig?.modelName) {
+    const resolved = await resolveApiProvider(config.imageGenConfig.providerId, config.imageGenConfig.modelName);
+    if (resolved) {
+      imageGenLLMConfig = {
+        modelName: resolved.modelName,
+        baseUrl: resolved.baseUrl,
+        apiKey: resolved.apiKey,
+      };
+      addLog('info', `Image Gen LLM resolved: ${resolved.modelName}`);
+    } else {
+      addLog('warn', 'Image Gen API provider not resolved, generate_image_send disabled');
+    }
+  }
+
   // 为 MCP 服务器设置 Sampling LLM 配置（使用 Compress 配置）
   // 这样当 QQ MCP 的 compress_context 需要 Sampling 时，Tauri 能代理调用 LLM
   try {
@@ -2607,13 +2867,13 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // ── 常规意图评估（带重试） ──
         const intentModel = intentLLMConfig.modelName;
         addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
-        const prevEvalTime = state.lastEvalTime; // 保存上轮 eval 时间（用于 pendingReplyBrief 判断）
+        const prevEvalTime = state.lastEvalTime; // 上轮 eval 时间，用于 writeRecentSelfFile 区分"在途"与"已发送"
         state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
 
-        // 构建工具集（write_intent_plan + social_read + history + groupLog + 外部 MCP 只读工具）
+        // 构建工具集（get_situation + write_intent_plan + social_read + history + groupLog + 外部 MCP 只读工具）
         const intentPlanDefs = getIntentPlanToolDefinitions();
         const intentFileDefs = getSocialFileToolDefinitions().filter(t => ['social_read', 'social_edit', 'social_write'].includes(t.function.name));
-        const intentToolDefs = [...intentPlanDefs, ...intentFileDefs, ...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
+        const intentToolDefs = [getSituationToolDefinition(), ...intentPlanDefs, ...intentFileDefs, ...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
         if (config.subagentEnabled !== false) {
           intentToolDefs.push(getSubagentToolDefinition());
           intentToolDefs.push(getCcHistoryToolDefinition());
@@ -2630,6 +2890,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // voice_send 仅在 ttsConfig 启用时暴露给 LLM
         if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
           intentToolDefs.push(getVoiceSendToolDefinition());
+        }
+        // generate_image_send 仅在 imageGenConfig 启用且 provider 解析成功时暴露
+        if (imageGenLLMConfig) {
+          intentToolDefs.push(getGenerateImageSendToolDefinition());
         }
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
@@ -2674,98 +2938,25 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           }
         }
 
-        // 检查 Reply 是否正在执行（上一轮 plan 有 reply，且 sentMessagesCache 里还没有对应的新消息）
-        // 如果是，读 reply_brief.md 注入，防止 Intent 重复 Reply 即将说的内容
-        let pendingReplyBrief = '';
-        if (state.lastPlan?.actions?.some(a => a.type === 'reply')) {
-          const cached = sentMessagesCache.get(target) || [];
-          // 用上轮 eval 时间判断 Reply 是否已发出（不是当前 eval 时间）
-          const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
-          if (!hasSentAfterPlan) {
-            try {
-              const intentDir = targetType === 'friend' ? 'friend' : 'group';
-              const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`).catch(() => '');
-              if (brief && brief.trim()) {
-                pendingReplyBrief = `\n\n【以下内容已经发送或正在发送，视为已表达】\n${brief.trim()}\n\n🚫 以上观点已经表达完毕。严禁再次表达相同或相似的内容，包括：\n- 换个说法重复同样的结论\n- 把长内容拆开再发一遍`;
-              }
-            } catch { /* ignore */ }
-          }
-        }
-
-        // force-eval (reply/newmsg): 注入最近发送的消息原文，让 LLM 明确知道"我已经说过什么"
-        let forceEvalRecentSent = '';
-        if (wasForceEval === 'reply' || wasForceEval === 'newmsg') {
-          const cached = sentMessagesCache.get(target) || [];
-          // 取最近 60s 内发的消息
-          const cutoff = Date.now() - 60000;
-          const recentSent = cached.filter(m => {
-            const t = new Date(m.timestamp).getTime();
-            return t > cutoff;
-          });
-          if (recentSent.length > 0) {
-            forceEvalRecentSent = '\n\n【我刚发出的原文】\n' + recentSent.map(m => `> ${m.content}`).join('\n');
-          }
-        }
-        // 构建已发图片提示（防止重复发同一张图）
-        let recentSentImages = '';
-        if (state.lastPlan?.actions?.some(a => a.type === 'image')) {
-          const sentFiles = state.lastPlan.actions.filter(a => a.type === 'image').map(a => a.file);
-          if (sentFiles.length > 0) {
-            recentSentImages = `\n\n【我刚发出的图片】\n${sentFiles.map(f => `> ${f}`).join('\n')}\n🚫 以上图片已经发过，不要再次发送。`;
-          }
-        }
-
-        // ── 构造 "最近动作" 提示块 (always-on; 用于 LLM 填充【我刚做了】字段，防止抽象摘要) ──
-        // 包含: 最近 3 条 sentCache 原文 + (若 Reply 仍在生成) reply_brief 内容
-        let priorActivityBlock = '';
-        {
-          const cached = sentMessagesCache.get(target) || [];
-          const recent = cached.slice(-3);
-          const lines = [];
-          if (recent.length > 0) {
-            lines.push('【最近你发送的原文】（写 INTENT 的【我刚做了】字段时，必须保留这些具体内容，不要只写抽象摘要）');
-            for (const m of recent) {
-              const ts = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
-              const content = (m.content || '').slice(0, 200);
-              lines.push(`- ${ts}: ${content}`);
-            }
-          }
-          // 若上轮 plan 有 reply 且还未发出（Reply 层生成中） → 注入 brief 作"在途"信号
-          if (state.lastPlan?.actions?.some(a => a.type === 'reply')) {
-            const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
-            if (!hasSentAfterPlan) {
-              try {
-                const intentDir = targetType === 'friend' ? 'friend' : 'group';
-                const brief = await tauri.workspaceRead(config.petId, `social/${intentDir}/scratch_${target}/reply_brief.md`).catch(() => '');
-                if (brief && brief.trim()) {
-                  lines.push(lines.length > 0 ? '' : '');
-                  lines.push('【正在发送中的 Reply brief】（Reply 层正在基于以下 brief 生成内容，本轮 plan 的 reply 必须避开这些已表达的点）');
-                  lines.push(brief.trim());
-                }
-              } catch { /* ignore */ }
-            }
-          }
-          priorActivityBlock = lines.length > 0 ? '\n\n' + lines.join('\n') : '';
-        }
+        // ── 写 recent_self.md（Intent 系统提示要求 LLM 必须先 social_read 这个文件） ──
+        // 文件包含：最近 sentCache 原文 + 在途/已完成 brief + 上轮发出的图片
+        // 数据从 prompt 内联注入改为强制工具读取，迫使 LLM 处理"我刚说过什么"再决定 plan
+        const intentDir = targetType === 'friend' ? 'friend' : 'group';
+        const recentSelfPath = `social/${intentDir}/scratch_${target}/recent_self.md`;
+        await writeRecentSelfFile(config.petId, target, targetType, state.lastPlan, prevEvalTime);
 
         let intentEvalPrompt;
+        const readSelfDirective = `必须先调用 get_situation() 拿到现场快照（聊天记录 + 你最近动作 recent_self），然后调用 write_intent_plan(state, brief, actions) **一次性**提交完整决策（state 和 brief 都打包在这次调用里，不要分开 social_edit / social_write）。`;
         if (wasForceEval === 'reply') {
-          intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。${forceEvalRecentSent}${recentSentImages}\n\n⚠️ 以上是你刚才发出的内容。严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 已经发过的图片不要再发\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+          intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。\n\n⚠️ 严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 已经发过的图片不要再发\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n${readSelfDirective}`;
         } else if (wasForceEval === 'subagent') {
-          intentEvalPrompt = `你的后台研究任务（CC）刚刚完成。请查看上方"后台任务状态"中标记为 ✅ 的任务，用 social_read 读取结果文件，然后基于结果决定下一步行动。\n如果结果有用，可以 reply 把研究结论分享到群里（详细展开，不要只说一句"查到了"）。\n如果结果不理想，可以重新 dispatch 或放弃。\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+          intentEvalPrompt = `你的后台研究任务（CC）刚刚完成。请查看上方"后台任务状态"中标记为 ✅ 的任务，用 social_read 读取结果文件，然后基于结果决定下一步行动。\n如果结果有用，可以 reply 把研究结论分享到群里（详细展开，不要只说一句"查到了"）。\n如果结果不理想，可以重新 dispatch 或放弃。\n${readSelfDirective}`;
         } else if (wasForceEval === 'newmsg') {
-          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。${forceEvalRecentSent}${recentSentImages}${(forceEvalRecentSent || recentSentImages) ? '\n\n注意不要重复已经表达过的内容或已发的图片。' : ''}\n先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。`;
+          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。\n注意不要重复已经表达过的内容或已发的图片。\n${readSelfDirective}`;
         } else if (state.lastPlan === null) {
-          intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交初始决策。`;
+          intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。${readSelfDirective}`;
         } else {
-          intentEvalPrompt = `请分析当前想法和行为倾向，先用 social_edit 更新状态感知文件，再调用 write_intent_plan 提交决策。${newMsgHint}`;
-        }
-
-        intentEvalPrompt += priorActivityBlock;
-
-        // 追加 pending reply brief（Reply 正在执行但尚未发出的内容）
-        if (pendingReplyBrief) {
-          intentEvalPrompt += pendingReplyBrief;
+          intentEvalPrompt = `请分析当前想法和行为倾向。${readSelfDirective}${newMsgHint}`;
         }
 
         // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
@@ -2791,6 +2982,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         for (let attempt = 0; ; attempt++) {
           // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
           capturedPlan = null;
+          // write_intent_plan 暂存 args（onToolCall 收到，onToolResult 看到结果后决定是否真的捕获）
+          let _pendingPlanArgs = null;
           // Purge consumed subagent entries for this target
           for (const [taskId, entry] of subagentRegistry) {
             if (entry.target === target && entry.readByIntent) {
@@ -2820,6 +3013,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             subagentRegistry,
             customGroupRules: customGroupRulesMap.get(target) || '',
             voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
+            imageGenEnabled: !!imageGenLLMConfig,
           });
 
           // 初始化本次 Intent eval 的注入水位线（= buffer 当前最后一条消息 id）
@@ -2834,7 +3028,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             const raw = await callLLMWithTools({
               messages: [
                 { role: 'system', content: intentPrompt },
-                ...intentTurns,
+                // chat 历史不再作为 turns 注入——LLM 用 get_situation 工具一次性拿到
+                // intentTurns 仍生成（保留 ephemeral 安全令牌给 buildIntentSystemPrompt 用），但不推到对话里
                 { role: 'user', content: intentEvalPrompt },
               ],
               apiFormat: intentLLMConfig.apiFormat,
@@ -2847,8 +3042,14 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
                 cacheKey: buildCacheKey(config.petId, target, 'Intent:msg'),
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig },
-              stopAfterTool: 'write_intent_plan',
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig },
+              // 拦截时（formattedResult 含"write_intent_plan 暂缓"）不退出循环，让 LLM 重新评估再次提交
+              stopAfterTool: (name, formattedResult) => {
+                if (name !== 'write_intent_plan') return false;
+                const text = typeof formattedResult === 'string' ? formattedResult : '';
+                if (text.includes('write_intent_plan 暂缓')) return false;
+                return true;
+              },
               usageLabel: 'Intent:msg',
               usageTarget: target,
               usagePetId: config.petId,
@@ -2856,10 +3057,57 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               onTrace: _onTraceFn,
               onToolCall: (name, args) => {
                 if (name === 'write_intent_plan') {
-                  capturedPlan = { actions: args.actions || [] };
-                  addLog('intent-plan', '', JSON.stringify(args), target);
+                  _pendingPlanArgs = args;  // 暂存 args，结果出来后再决定是否捕获
+                  // write_intent_plan 的主消息行用摘要替代裸名字，让用户一眼看出写了啥
+                  const stateLen = (args?.state || '').length;
+                  const briefRaw = (args?.brief || '').trim();
+                  const briefFirstLine = briefRaw.split('\n')[0]?.trim() || '';
+                  const briefTier = briefFirstLine.match(/^\[(接梗|闲扯|观点|展开|深答)\]/)?.[0] || '';
+                  const briefSummary = briefRaw
+                    ? `brief=${briefTier || '(无标签)'}(${briefRaw.length}字)`
+                    : 'brief=(无 reply)';
+                  const actionsSummary = (args?.actions || []).map(a => {
+                    if (a?.type === 'reply') return a.atTarget ? `reply@${a.atTarget}` : 'reply';
+                    if (a?.type === 'sticker') return `sticker#${a.id ?? '?'}`;
+                    if (a?.type === 'wait') return 'wait';
+                    return a?.type || '?';
+                  });
+                  const actionsLabel = actionsSummary.length > 0 ? `actions=[${actionsSummary.join(',')}]` : 'actions=[]';
+                  addLog(
+                    'intent',
+                    `🧠 [${tName()}] tool: write_intent_plan → INTENT(${stateLen}字), ${briefSummary}, ${actionsLabel}`,
+                    _buildPlanDetails(args),
+                    target,
+                  );
+                  return;
                 }
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args, null, 2), target);
+              },
+              onToolResult: (name, result, _toolCallId, isError) => {
+                if (name !== 'write_intent_plan') return;
+                const text = typeof result === 'string' ? result : '';
+                const wasIntercepted = text.includes('write_intent_plan 暂缓');
+                if (isError) {
+                  addLog('intent', `🧠 [${tName()}] write_intent_plan ❌ 错误`, text, target);
+                  _pendingPlanArgs = null;
+                  return;
+                }
+                if (wasIntercepted) {
+                  // 拦截已经在 executeIntentPlanTool 里 addLog 过了，这里不重复
+                  _pendingPlanArgs = null;
+                  return;
+                }
+                // 成功提交：捕获 plan + 记成功日志（含写入了哪些文件）
+                capturedPlan = { actions: _pendingPlanArgs?.actions || [] };
+                const hasReply = (_pendingPlanArgs?.actions || []).some(a => a?.type === 'reply');
+                addLog(
+                  'intent',
+                  `🧠 [${tName()}] ✓ plan 已写入：INTENT_${target}.md${hasReply ? ' + reply_brief.md' : ''}`,
+                  _buildPlanDetails(_pendingPlanArgs || {}),
+                  target,
+                );
+                addLog('intent-plan', '', JSON.stringify(_pendingPlanArgs || {}), target);
+                _pendingPlanArgs = null;
               },
             });
             intentResult = { content: raw.content, error: null };

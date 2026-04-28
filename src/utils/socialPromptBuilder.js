@@ -490,8 +490,8 @@ function buildSocialModeInstruction(targetName, targetId, botQQ) {
 你不是在与用户私聊，而是在**观察一个群聊/私聊的消息流**，自主决定是否参与。
 
 对话记录已按多轮格式呈现：
-- user 消息 = 群友们的聊天记录
-- assistant 消息 = 你之前的回复
+- user 消息 = 群友们的聊天记录，每条以 [HH:MM:SS] 开头标注发送时间
+- assistant 消息 = 你之前的回复，每条以 [HH:MM:SS 我的回复] 开头标注发送时间——这是你**已经说过的话**，是判断"是否会重复"的硬证据
 
 ⚠️ 媒体说明：图片会以真实图片传递，你可以看到并回应图片内容。但消息中的 [视频]、[语音]、[文件]、[请在最新版qq查看] 等方括号标记只是纯文本占位符，你**看不到实际内容**，不要假装看懂了，也不要做任何特殊回应。
 
@@ -539,8 +539,8 @@ function buildLurkObservationInstruction(targetName, targetId, botQQ) {
 ⚠️ 不要只写概括性描述。记录**具体的人名、具体的梗、具体的事件**。越具体越好。
 
 对话记录已按多轮格式呈现：
-- 之前的 user 消息 = 群友们的历史聊天
-- 之前的 assistant 消息 = 你之前的回复（如果有的话）
+- 之前的 user 消息 = 群友们的历史聊天，每条带 [HH:MM:SS] 时间戳前缀
+- 之前的 assistant 消息 = 你之前的回复（如果有的话），每条带 [HH:MM:SS 我的回复] 前缀
 - **最后一条 user 消息** = 最新的群聊动态
 
 ⚠️ 媒体说明：图片会以真实图片传递，你可以看到。但 [视频]、[语音]、[文件]、[请在最新版qq查看] 等方括号标记只是纯文本占位符，你看不到实际内容，直接忽略即可。
@@ -706,14 +706,14 @@ CC 研究结果工具（只读）：
 ## 字数与分段
 
 **字数档位**：Intent 会在 reply_brief.md **第 1 行**给出档位标签，你按标签生成：
-- `[接梗]` 5-15 字
-- `[闲扯]` 5-30 字（**默认**：日常 / 情感 / 分享 / 轻吐槽 / 调侃）
-- `[观点]` 15-40 字（表达看法 / 事实纠正 / 核实 / 反问）
-- `[展开]` 40-80 字（多轮讨论 / 多话题）
-- `[深答]` 100-500 字（仅限 CC 报告交付 / 深度技术问答）
+- [接梗] 5-15 字
+- [闲扯] 5-30 字（**默认**：日常 / 情感 / 分享 / 轻吐槽 / 调侃）
+- [观点] 15-40 字（表达看法 / 事实纠正 / 核实 / 反问）
+- [展开] 40-80 字（多轮讨论 / 多话题）
+- [深答] 100-500 字（仅限 CC 报告交付 / 深度技术问答）
 
 ⚠️ **严格按标签控制长度**。如果生成的内容超过档位上限，先砍冗余，保留核心。
-⚠️ 如果 brief 没给标签（老版本或异常），默认当 `[闲扯]` 处理。
+⚠️ 如果 brief 没给标签（老版本或异常），默认当 [闲扯] 处理。
 ⚠️ 群聊不是论坛，80% 的 reply 都应该 ≤40 字。小作文是 bot 不像人的最常见失败模式。
 
 判断依据（当 brief 没标签或模糊时用）：
@@ -775,6 +775,7 @@ export async function buildIntentSystemPrompt({
   subagentRegistry = null,
   customGroupRules = '',
   voiceEnabled = false,
+  imageGenEnabled = false,
 }) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : (targetId || '当前群');
   const intentStateDir = targetType === 'friend' ? 'friend' : 'group';
@@ -1018,7 +1019,31 @@ ${voiceEnabled ? `
     • 适合配音的短句：打招呼、撒娇、惊呼、感叹、自嘲
   何时不用：解释概念/引用 URL/技术回答/@多人 → 走 reply
   ⚠️ 硬规则：硬限 50 字（含标点空格）；每轮 Intent 最多一次；即时调用，不写进 write_intent_plan.actions；voice 和 reply 并行时不要用 voice 替代 reply
-  完整用法 → social_read("social/tools/voice_send.md")` : ''}
+  完整用法 → social_read("social/tools/voice_send.md")` : ''}${imageGenEnabled ? `
+
+AI 生图工具（极其稀缺，慎用）：
+- generate_image_send(prompt, filename, **reason**)：用 AI 模型按 prompt 生成图片并自动发到当前会话。**fire-and-forget**——调用立即返回，后台生成（最多 10 分钟整体超时；gpt-image-2 等慢 provider 通常 3-6 分钟），完成后自动发到群里。状态走 recent_self.md 的"在途/最近的 AI 生图任务"段。
+  ⚠️ **三个参数都必填**：
+    • prompt：图像描述（具体的主体/风格/构图）
+    • filename：英文/拼音短名（如 "flow_mcp_arch" / "meme_崩溃猫"）
+    • reason：**为什么画这张图**——给谁看、回应哪条消息、想达到什么效果。这是**去重的核心字段**。
+  支持并发：同轮 plan 派多张**主题不同**的图允许；但同主题不论换 filename / prompt 风格都算重复。
+  状态可能是：⏳ 派发中 / ✅ 已发 / ❌ 失败 / ☠️ 孤儿（IIFE 被 HMR/重启杀了，锁文件留下，超过 11 分钟自动判定为孤儿）。
+  何时用（必须命中以下场景之一，否则不用）：
+    • 画**流程图 / 架构图 / 示意图**辅助讲解（自己解释 MCP 协议、Intent loop 等技术话题时配一张帮助理解）
+    • 自制**表情包 / 玩梗图**（群友抛了好玩的梗，画一张回应）
+    • 用户**明确说"画 X 给我看"**
+  何时**绝对不用**：
+    • 普通对话、闲聊、附和、调侃 → 不要画图
+    • 已有截图/旧表情包能解决 → image_list + image_send 翻一下，别浪费 token
+    • 自己想"加点视觉效果让回复更生动" → 不用，文字解决
+  ⚠️ **去重检测（最重要，靠 reason 不靠 filename/prompt）**：
+    调本工具前必须先看 recent_self.md 的"在途/最近的 AI 生图任务"段，**对比 reason 字段**：
+    • 已派过的图 reason 和你本轮想画的相近（同用户同请求 / 同主题 / 同梗）→ **不要再画**。换 filename 换 prompt 风格也算重复
+    • ⏳ 派发中：同主题**严禁**再调；不同主题可以并发
+    • ❌ 失败：同主题**不要立即重试**——失败多半是配置/网络问题；改 reply 告诉用户或 image_send 发已存在的截图
+    • ☠️ 孤儿：进程被杀过，如果用户请求还在等可以**有节制重画一次**；如果话题已转移就别画了
+  ⚠️ 其他硬规则：调用后**立即** write_intent_plan；不写进 actions 数组（即时调用）；reply 文字**不要写 filename**（filename 是内部存档名，群友看不到，写进 reply 会变成刷屏的怪文本）` : ''}
 
 历史查询工具（只读，按需使用）：
 - chat_search / chat_context — 聊天记录全文搜索（FTS5）
@@ -1076,20 +1101,35 @@ ${voiceEnabled ? `
   // === 评估要求 ===
   sections.push(`# 评估要求
 
-对话记录会以多轮消息呈现：
-- user 消息 = 群友们的聊天记录（使用上述分隔符格式）
-- assistant 消息 = 你（角色）之前的回复
+⚠️ 注意：聊天记录**不再作为 user/assistant turns 注入**——你看不到 chat 多轮历史。要看群里在聊什么，**必须调 get_situation 工具**。这个工具一次性返回：群聊记录最近 N 条原文 + 你最近的动作（recent_self.md 内容）。
 
-结合角色人格、群规则、社交记忆和最新聊天动态，分析角色当前的想法，然后**调用 write_intent_plan 提交你的状态感知和决策**。${lurkMode === 'full-lurk' ? `
+结合角色人格、群规则、社交记忆和 get_situation 拿到的现场快照，分析角色当前的想法，然后**调用 write_intent_plan 提交你的状态感知和决策**。${lurkMode === 'full-lurk' ? `
 
 ⚠️ 当前模式：纯观察（只看不说）——actions 必须为空数组 []，不可添加任何动作。` : lurkMode === 'semi-lurk' ? `
 
 ⚠️ 当前模式：半潜水——只有被 @ 时才可添加 reply 动作。` : ''}
 
-分析步骤（完成分析后，先调用 social_edit 更新状态感知文件，再调用 write_intent_plan）：
+分析步骤（**第一步必做**：get_situation()；最后一步必做：write_intent_plan(state, brief, actions) **一次性**提交完整决策——state、brief、actions 都打包进这一次调用，不要再分开 social_edit / social_write reply_brief）：
+
+**分析〇（强制）：先调 get_situation 拿现场快照**
+调用 get_situation()。返回内容包含：
+
+**A. 群聊记录（最近 60 条）**：每条格式
+- 别人发的：\`[HH:MM:SS] 名字(QQ号) [#消息ID] @me?: 内容\`
+- **你自己发的**：\`[HH:MM:SS] 【我自己发的】: 内容\`——这是你**已经说过的话**的硬证据，写 plan 前必须对照这些判断是否会重复
+
+**B. recent_self（你的最近动作）**：包含
+- 你最近发出的原文（带时间戳）
+- 在途 Reply brief（Reply 层正在生成）—— 严禁本轮再派一个内容相似的 reply
+- 上轮已发送 Reply brief（已经说完）—— 严禁换说法重复同一观点
+- 上轮派出的图片文件名 —— 不要重复发同一张
+
+这一步是为了让你看清"群里现在的对话"+"已表达的内容"，避免下面的 plan 派一个重复的 reply。
+
+⚡ eval 中途有新消息无需主动检查——write_intent_plan 提交时会**自动拦截**并把增量新消息塞给你看，要求重新评估再次提交（最多 5 次）。所以你只需专注思考决策。
 
 **分析一：刚刚我在干什么**
-对照上方"当前状态感知"（INTENT 文件内容）和对话记录中的 assistant 消息：
+结合 get_situation 返回的 recent_self、上方"当前状态感知"（INTENT 文件内容）和聊天记录里【我自己发的】条目：
 - 上次状态记录的是什么？（刚苏醒？发了 reply？发了 sticker？）
 - 如果发过 reply：说了什么，有没有人回应？
 - 如果发过 sticker：在回应什么，有没有人理？
@@ -1105,17 +1145,7 @@ ${voiceEnabled ? `
 
 **分析 2.5：要不要查历史？**（快速判断，不需要就跳过）
 - 有人否认说过某话 / 引用某句话 / 让我"翻翻聊天记录"？→ chat_search(keywords="关键词") 找原文
-- 想知道某人对某话题的态度？→ chat_search(keywords="话题词", sender="QQ号", start="3d")
-- 想回顾某段时间内某话题的讨论？→ chat_search(keywords="话题词", start="2026-04-05", end="2026-04-06")
-- 找到一条相关消息后想看它周围发生了什么？→ chat_context(message_id) 取前后 5 条
-- ⚠️ chat_search 必须传 keywords。想纯按时间或发送者拉消息时，至少要给一个有意义的关键词
-- buffer 里只有最近 64 条，更早的对话只能靠这些工具拿到 — 别凭印象瞎猜
 
-**分析三：我的想法与判断**
-- 我对当前话题的真实反应是什么？有没有实质内容想说？
-- 对话球在我这边吗？（有人直接问我/回应我 vs 球在别人那边）
-- **⚠️ 球不在我这边 ≠ 必须沉默**。如果我有真实内容想贡献，可以主动插话。以下情况值得主动出手：
-  • **提问**：对别人说的话我真的好奇（"那你怎么决定的？"）
   • **抛新观点**：我有不同角度或反例想贡献（"但其实..."）
   • **质疑**：别人说得不对/数据过期/逻辑有漏洞（先 tavily 核实）
   • **补充信息**：我知道一个相关的事实/例子能丰富讨论
@@ -1131,13 +1161,12 @@ ${voiceEnabled ? `
 
 ⚠️ 自测：如果我准备让 Reply 说的这句话能被"哈哈"或"确实"替代 → 那就是废话，别开口。找到一个具体的"我想知道 X" 或 "我想分享 Y" 再说。
 
-分析完成后：
-1. 调用 social_edit，path="${intentStatePath}"，更新状态感知文件。
+分析完成后：先**确定 state 内容**（不是马上写文件，是为下面 write_intent_plan 的 state 参数构思好），写法：
 
-   写法：先读取文件现有内容，判断哪些历史信息仍然有价值（比如某人持续的态度、上次行动的长期影响、尚未结束的话题线索、正在执行的策略），保留它们，再融入新的观察。如果有【策略】section，检查当前进展并更新。每段写充分，不要因为省字数而削减有价值的内容。
+先读取 ${intentStatePath} 现有内容（你 prompt 上方已注入），判断哪些历史信息仍然有价值（比如某人持续的态度、上次行动的长期影响、尚未结束的话题线索、正在执行的策略），保留它们，再融入新的观察。如果有【策略】section，检查当前进展并更新。每段写充分，不要因为省字数而削减有价值的内容。
 
    【我刚做了】
-   必须保留**具体动作 + 原文内容**（或文件名），不要只写抽象摘要。user turn 末尾如有「【最近你发送的原文】」/「【正在发送中的 Reply brief】」块，把关键原文/brief 内容浓缩进来（可以截断到 30 字 + … 以内，但必须能看出"对谁说了什么具体话"）。
+   必须保留**具体动作 + 原文内容**（或文件名），不要只写抽象摘要。从分析〇 social_read 到的 recent_self.md 中，把关键原文/brief 内容浓缩进来（可以截断到 30 字 + … 以内，但必须能看出"对谁说了什么具体话"）。
    示例格式：
    - 12:16:43 reply @ㅤ："GLM 5 Plan 秒空..."
    - 12:17:34 reply @RaDs："实测体感主观..."
@@ -1168,6 +1197,16 @@ ${voiceEnabled ? `
    - 第 2 步（如果条件 B）：做什么
    - 放弃条件：什么情况下放弃这个计划
    下次 eval 时回顾这个策略，看进展到哪一步了，根据实际情况推进或调整。如果不需要多步计划，可以不写这段。
+
+   ⚠️ **【策略】只写决策骨架和分支条件**，**绝对不要**写具体动作内容：
+   - ❌ "使用 sticker #272" / "发 sticker #X" → 这是动作，必须走 plan.actions = [{"type":"sticker","id":272}]
+   - ❌ "发 gen_xxx.png 图片" / "发图片 X" → 走 plan.actions = [{"type":"image","file":"X.png"}] 或 generate_image_send
+   - ❌ "发语音 'XX'" → 走 voice_send 工具（即时调用）
+   - ❌ "回复说 XX 内容" → 走 reply_brief.md（write_intent_plan 的 brief 参数）
+   - ✅ "如果对方继续挑衅，升级语气" / "等张三回应后再决定深答还是撤" / "话题转移就放弃"
+   原因：**【策略】会被 Reply 层一并读到**——如果【策略】里写了"sticker #272"这种动作引用，Reply 不能调 sticker action（那是 Intent 权限），就会把"#272"或"[表情272]"当**字面文字**塞进 send_message.content，群友看到的是字符串而不是表情。所有动作细节请走对应工具/参数，【策略】只描述"为什么 / 何时 / 分支"。
+
+   把上面 4-5 段拼成一份完整的 markdown，作为 write_intent_plan 的 **state** 参数传入（覆盖式写入到 ${intentStatePath}）。
 
 **分析 3.5：值得截图吗？有图可以打脸吗？**（快速过一遍，不需要就跳过）
 
@@ -1209,11 +1248,12 @@ ${voiceEnabled ? `
 
 ⚠️ 能 tavily 解决就别 dispatch CC。简单事实用大炮炸蚊子浪费资源。
 
-2. 如有新的 ground truth（验证过的事实、判断出的关系、搜索得到的结论）：用 social_write 更新 ${scratchDir}/notes.md。
+如有新的 ground truth（验证过的事实、判断出的关系、搜索得到的结论）：用 social_write 更新 ${scratchDir}/notes.md。
    格式：每条一行 bullet，写简短结论，括号注明来源或详情文件路径。只记稳定事实，不记当前动态状态（那是 INTENT 文件的职责）。
    详细内容可另建文件（如 ${scratchDir}/about_张三.md），notes.md 里引用即可。
+   （这是独立的工具调用，发生在 write_intent_plan 之前。）
 
-3. 如果 actions 包含 reply：在调用 write_intent_plan 之前，用 social_write 将交接内容写入 ${scratchDir}/reply_brief.md（每次覆盖）。
+如果 actions 包含 reply：构思好 **brief** 内容，作为 write_intent_plan 的 brief 参数（覆盖式写入到 ${scratchDir}/reply_brief.md）。
 
    ⚠️ **brief 第 1 行必须是字数档位标签**（Reply 层读这个决定生成多长）：
    - [接梗]：5-15 字。吐槽 / 附和 / 单字共鸣
@@ -1235,7 +1275,13 @@ ${voiceEnabled ? `
 
    如果回复需要引用 CC 研究结果：不要把完整内容抄进 brief，而是写 cc_read 指引，例如"请先用 cc_read(\"cc_查Qwen最新模型_sa_abc123.md\") 读取完整研究结果，基于结果详细回复，引用关键数据时附上来源 URL"。Reply 模块有 cc_read 工具，会自己读取并写出有深度的长回复。
 
-5. 调用 write_intent_plan(actions=[...]) 提交行动决策。
+最后一步：调用 **write_intent_plan(state, brief, actions)** 一次性提交：
+   - state：上面构思好的完整 INTENT 内容（4-5 段 markdown）
+   - brief：上面构思好的完整 reply_brief（仅当 actions 含 reply 时填，否则不传或传空字符串）
+   - actions：根据下面规则决定动作
+
+⚠️ 这一步是 eval 的**最后操作**，调用后就结束。不要在调用前还做 social_edit / social_write reply_brief（那是老流程，已废弃）——所有写入都打包到 write_intent_plan 一次完成。
+⚠️ 如果中途群里有新消息，write_intent_plan 会被拦截要求重提。这时把新消息融进 state 再次提交即可（最多 5 次）。
 
 - actions：根据以下规则决定动作
 

@@ -16,7 +16,7 @@ import { isPathAllowed, isSoulFile } from '../promptBuilder';
 
 // ============ 工具名常量 ============
 
-const BUILTIN_TOOL_NAMES = new Set(['read', 'write', 'edit']);
+const BUILTIN_TOOL_NAMES = new Set(['read', 'write', 'edit', 'generate_image']);
 
 /**
  * 检查工具名是否为内置工具
@@ -127,26 +127,107 @@ async function executeEdit(petId, args, memoryEnabled) {
   }
 }
 
+// ============ 图像生成 ============
+
+/**
+ * 调用 OpenAI-compatible 图像生成接口（POST {baseUrl}/v1/images/generations）。
+ * 兼容：OpenAI / DALL-E / gpt-image-1 / 大多数代理网关。
+ * 返回 base64 → 包装成 data URI → 由 toolExecutor 提取并塞到对话气泡。
+ */
+async function executeGenerateImage(args, context) {
+  const { imageModel } = context;
+  if (!imageModel || !imageModel.modelName) {
+    return { error: '尚未配置图像生成模型，请到设置 → Defaults 选择 Image Model Provider 和 Model。' };
+  }
+  const prompt = (args?.prompt || '').toString().trim();
+  if (!prompt) return { error: '缺少 prompt 参数（图像描述）。' };
+  const size = args?.size || '1024x1024';
+
+  const baseUrl = (imageModel.baseUrl || '').replace(/\/+$/, '');
+  if (!baseUrl) return { error: '图像生成 provider 缺少 baseUrl。' };
+  const endpoint = baseUrl.endsWith('/v1') ? `${baseUrl}/images/generations` : `${baseUrl}/v1/images/generations`;
+
+  const apiKey = pickApiKey(imageModel.apiKey || '');
+  if (!apiKey) return { error: '图像生成 provider 缺少 apiKey。' };
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: imageModel.modelName,
+        prompt,
+        size,
+        n: 1,
+        response_format: 'b64_json',
+      }),
+    });
+    if (!resp.ok) {
+      const text = await resp.text().catch(() => '');
+      return { error: `图像生成失败 (HTTP ${resp.status}): ${text.slice(0, 500)}` };
+    }
+    const data = await resp.json();
+    const item = data?.data?.[0];
+    let imageData = '';
+    let mimeType = 'image/png';
+    if (item?.b64_json) {
+      imageData = item.b64_json;  // 纯 base64，无 data URI 前缀
+    } else if (item?.url) {
+      imageData = String(item.url);  // HTTP URL，extractMediaFromToolResult 会原样保留
+    } else {
+      return { error: '图像生成响应中未找到 b64_json 或 url 字段。' };
+    }
+    // MCP 标准格式：type:'image' + data + mimeType
+    // 上游 toolExecutor.extractMediaFromToolResult 会把它收进 toolCallHistory.images，
+    // 下游 ChatboxInputBox 从 history 里取出来塞进 reply.content 多模态 parts
+    return {
+      content: [
+        { type: 'text', text: `已生成图片（prompt: ${prompt.slice(0, 80)}${prompt.length > 80 ? '…' : ''}）` },
+        { type: 'image', data: imageData, mimeType },
+      ],
+    };
+  } catch (err) {
+    return { error: `图像生成异常: ${err?.message || err}` };
+  }
+}
+
+// 从可能的多 key 字符串里挑一个（兼容 "key1\nkey2" 或 "key1,key2"）
+function pickApiKey(raw) {
+  if (!raw) return '';
+  const keys = String(raw).split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+  if (keys.length === 0) return '';
+  return keys[Math.floor(Math.random() * keys.length)];
+}
+
 // ============ 统一入口 ============
 
 /**
  * 执行内置工具
- * 
- * @param {string} toolName - 工具名: 'read' | 'write' | 'edit'
+ *
+ * @param {string} toolName - 工具名: 'read' | 'write' | 'edit' | 'generate_image'
  * @param {Object} args - 工具参数
  * @param {Object} context - 执行上下文
  * @param {string} context.petId - 当前宠物 ID
  * @param {boolean} context.memoryEnabled - 记忆开关状态
+ * @param {Object} [context.imageModel] - 图像生成 provider 配置 { modelName, baseUrl, apiKey }
  * @returns {Promise<Object>} MCP 标准响应格式 { content: [...] } 或 { error: string }
  */
 export async function executeBuiltinTool(toolName, args, context) {
   const { petId, memoryEnabled } = context;
 
+  console.log(`[Builtin] Executing ${toolName}`, { args, petId, memoryEnabled });
+
+  if (toolName === 'generate_image') {
+    // 图像生成不依赖 petId，单独走
+    return executeGenerateImage(args, context);
+  }
+
   if (!petId) {
     return { error: '缺少宠物 ID，无法执行文件操作。' };
   }
-
-  console.log(`[Builtin] Executing ${toolName}`, { args, petId, memoryEnabled });
 
   switch (toolName) {
     case 'read':

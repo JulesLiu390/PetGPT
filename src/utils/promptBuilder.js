@@ -257,6 +257,30 @@ export function getBuiltinToolDefinitions(memoryEnabled) {
     }
   });
 
+  // generate_image：根据 prompt 生成图片，返回 base64，前端渲染到对话气泡
+  tools.push({
+    type: 'function',
+    function: {
+      name: 'generate_image',
+      description: '根据文字描述生成图片。返回的图片会直接显示在对话中。当用户明确要求"画"、"生成图"、"做一张图"等时调用。',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: {
+            type: 'string',
+            description: '英文 / 中文 图像描述，越具体越好（主体、风格、构图、光影等）'
+          },
+          size: {
+            type: 'string',
+            enum: ['1024x1024', '1024x1792', '1792x1024'],
+            description: '图片尺寸（默认 1024x1024）'
+          }
+        },
+        required: ['prompt']
+      }
+    }
+  });
+
   return tools;
 }
 

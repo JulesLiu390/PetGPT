@@ -1564,6 +1564,54 @@ export default function SocialPage() {
                       </div>
                     )}
                   </Card>
+
+                  {/* AI 生图 (generate_image_send) */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={!!config.imageGenConfig?.enabled}
+                        onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">AI 生图 (generate_image_send)</span>
+                      <span className="text-xs text-gray-400">让 Glitch 用 AI 生图发到群里：流程图 / 示意图 / 自制表情包</span>
+                    </div>
+                    {config.imageGenConfig?.enabled && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <FormGroup label="Provider" hint="OpenAI-compatible /images/generations endpoint">
+                          <select
+                            className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                            value={config.imageGenConfig?.providerId || ''}
+                            onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), providerId: e.target.value, modelName: '' })}
+                          >
+                            <option value="">选择 provider</option>
+                            {apiProviders.map(p => (
+                              <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                        </FormGroup>
+                        <FormGroup label="Model" hint="provider 下所有缓存模型（不过滤），常见: dall-e-3 / gpt-image-1 / doubao-seedream-3-0">
+                          <select
+                            className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                            value={config.imageGenConfig?.modelName || ''}
+                            onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), modelName: e.target.value })}
+                            disabled={!config.imageGenConfig?.providerId}
+                          >
+                            <option value="">选择模型</option>
+                            {(() => {
+                              const p = apiProviders.find(x => (x._id || x.id) === config.imageGenConfig?.providerId);
+                              const list = p?.cachedModels || [];
+                              return list.map(m => {
+                                const name = typeof m === 'string' ? m : m.name;
+                                return <option key={name} value={name}>{name}</option>;
+                              });
+                            })()}
+                          </select>
+                        </FormGroup>
+                      </div>
+                    )}
+                  </Card>
                 </div>
               )}
 

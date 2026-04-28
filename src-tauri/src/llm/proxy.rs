@@ -17,12 +17,21 @@ pub struct LlmProxy {
     http_client: Client,
     /// 并发信号量：限制同时发出的 LLM HTTP 请求数
     semaphore: Semaphore,
+    /// 图像生成专用 client（更长超时）
+    image_gen_client: Client,
+    /// 图像生成专用 semaphore（独立并发额度，不挤占 LLM）
+    image_gen_semaphore: Semaphore,
 }
 
 /// 单次请求的超时秒数
 const REQUEST_TIMEOUT_SECS: u64 = 180;
 /// 最大并发 LLM 请求数（Observer + Intent + Compress 共享）
 const MAX_CONCURRENT_REQUESTS: usize = 2;
+
+/// 图像生成单次请求超时（gpt-image-2 等慢 provider 可能 5+ 分钟）
+const IMAGE_GEN_TIMEOUT_SECS: u64 = 600;
+/// 图像生成最大并发数（可同时画多张主题不同的图）
+const MAX_CONCURRENT_IMAGE_GEN: usize = 4;
 
 impl LlmProxy {
     pub fn new() -> Self {
@@ -32,6 +41,11 @@ impl LlmProxy {
                 .build()
                 .expect("Failed to build reqwest client"),
             semaphore: Semaphore::new(MAX_CONCURRENT_REQUESTS),
+            image_gen_client: Client::builder()
+                .timeout(Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS))
+                .build()
+                .expect("Failed to build image-gen reqwest client"),
+            image_gen_semaphore: Semaphore::new(MAX_CONCURRENT_IMAGE_GEN),
         }
     }
 }
@@ -89,6 +103,69 @@ pub async fn llm_proxy_call(
         .map_err(|e| {
             if e.is_timeout() {
                 format!("LLM request timed out after {}s", REQUEST_TIMEOUT_SECS)
+            } else {
+                format!("HTTP error: {}", e)
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status.as_u16(), error_text));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    Ok(data)
+}
+
+/// 代理图像生成 HTTP POST 请求
+///
+/// 与 llm_proxy_call 同样的接口，但使用独立的 client（10 分钟超时）和 semaphore，
+/// 不挤占 LLM 调用并发额度。专为 generate_image_send 设计——
+/// 部分 image provider（如 gpt-image-2）单次生成需要 3-6 分钟，180s 不够用。
+///
+/// 用 base64-编码 body 同样为了避免 Tauri IPC Unicode 转义问题。
+#[tauri::command]
+pub async fn image_gen_proxy_call(
+    proxy: tauri::State<'_, Arc<LlmProxy>>,
+    endpoint: String,
+    headers: HashMap<String, String>,
+    body_b64: String,
+) -> Result<serde_json::Value, String> {
+    let body_bytes = BASE64.decode(&body_b64)
+        .map_err(|e| format!("Base64 decode error: {}", e))?;
+    let body_str = String::from_utf8(body_bytes)
+        .map_err(|e| format!("UTF-8 decode error: {}", e))?;
+    let body_value: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| format!("Body JSON parse error: {}", e))?;
+
+    let _permit = proxy.image_gen_semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Image-gen semaphore closed: {}", e))?;
+
+    let mut req = proxy.image_gen_client
+        .post(&endpoint)
+        .header("Content-Type", "application/json");
+
+    for (key, value) in &headers {
+        if key.to_lowercase() == "content-type" {
+            continue;
+        }
+        req = req.header(key.as_str(), value.as_str());
+    }
+
+    let response = req
+        .json(&body_value)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("Image-gen request timed out after {}s", IMAGE_GEN_TIMEOUT_SECS)
             } else {
                 format!("HTTP error: {}", e)
             }

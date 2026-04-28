@@ -649,6 +649,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   const [petInfo, setPetInfo] = useState(null);
   const [activeModelConfig, setActiveModelConfig] = useState(null);
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
+  const [imageModelInfo, setImageModelInfo] = useState(null);
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
   const [founctionModel, setFounctionModel] = useState(null);
@@ -729,6 +730,30 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       } catch (error) {
         console.error("Error loading default character ID from settings:", error);
         setCharacterId(null);
+      }
+
+      // 加载图像生成模型配置（generate_image 工具用）
+      try {
+        if (settings && settings.imageModelProviderId && settings.imageModelName) {
+          const providers = await tauri.getApiProviders();
+          if (Array.isArray(providers)) {
+            const provider = providers.find(p => p._id === settings.imageModelProviderId);
+            if (provider) {
+              setImageModelInfo({
+                modelName: settings.imageModelName,
+                baseUrl: provider.baseUrl,
+                apiKey: provider.apiKey,
+              });
+            } else {
+              setImageModelInfo(null);
+            }
+          }
+        } else {
+          setImageModelInfo(null);
+        }
+      } catch (e) {
+        console.error('Error loading image model from settings:', e);
+        setImageModelInfo(null);
       }
 
       // 加载默认功能模型
@@ -1536,11 +1561,31 @@ When using tools, please follow these guidelines:
             memoryEnabled,
             subagentRegistry,
             subagentConfig: { enabled: true, model: 'sonnet', timeoutSecs: 300 },
+            imageModel: imageModelInfo,
           }
         });
-        
+
+        // 桥接：扫 toolCallHistory 里 generate_image 成功结果，把 base64 图片塞进 reply.content
+        const generatedImageParts = [];
+        for (const entry of (toolResult.toolCallHistory || [])) {
+          if (entry?.name !== 'generate_image' || !Array.isArray(entry.images)) continue;
+          for (const img of entry.images) {
+            if (!img?.data) continue;
+            const url = img.data.startsWith('data:') || img.data.startsWith('http')
+              ? img.data
+              : `data:${img.mimeType || 'image/png'};base64,${img.data}`;
+            generatedImageParts.push({ type: 'image_url', image_url: { url } });
+          }
+        }
+        const replyContent = generatedImageParts.length > 0
+          ? [
+              { type: 'text', text: toolResult.content || '' },
+              ...generatedImageParts,
+            ]
+          : toolResult.content;
+
         reply = {
-          content: toolResult.content,
+          content: replyContent,
           mood: 'normal',
           toolCallHistory: toolResult.toolCallHistory
         };

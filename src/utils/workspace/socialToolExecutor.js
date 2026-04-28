@@ -357,7 +357,7 @@ export async function executeSocialFileTool(toolName, args, context) {
       const injectionWatermarks = context.intentInjectionWatermarks;
       const interceptCounts = context.intentInterceptCounts;
       const buf = context.dataBuffer?.get(context.targetId);
-      const MAX_INTERCEPTS = 5;
+      const MAX_INTERCEPTS = 2;
 
       if (isReplyBrief && injectionWatermarks && interceptCounts && buf) {
         const watermark = injectionWatermarks.get(context.targetId) || '';
@@ -1298,10 +1298,18 @@ export function getIntentPlanToolDefinitions() {
       type: 'function',
       function: {
         name: 'write_intent_plan',
-        description: '提交本次评估的行动计划。调用此工具之前必须先用 social_edit 更新状态感知文件。actions 是要执行的动作列表，不需要任何动作时传空数组。',
+        description: '提交本次评估的**完整决策**——一次原子写入 INTENT 状态文件 + reply_brief（如有 reply 动作）+ 派发 actions。这是 eval 的最后一步，调用后 eval 立即结束。\n⚠️ 调用前必须已通过 social_read recent_self.md 读完最近发送过的内容，避免重复。\n⚠️ 如果中途群里有新消息到达，本调用会被拦截，要求你重新评估并再次提交（最多 5 次）。',
         parameters: {
           type: 'object',
           properties: {
+            state: {
+              type: 'string',
+              description: '⚠️ 必填。完整的 INTENT 状态文件内容（覆盖式写入到 INTENT_<target>.md）。必须包含【我刚做了】【效果复盘】（有上次行动时）【群里情况】【我的判断】，可选【策略】。每段写充分，不要省略。',
+            },
+            brief: {
+              type: 'string',
+              description: '完整的 reply_brief 内容（覆盖式写入到 scratch_<target>/reply_brief.md）。**仅当 actions 含 reply 时才填**，否则不传或传空字符串。第 1 行必须是档位标签 [接梗] / [闲扯] / [观点] / [展开] / [深答]，正文 ≤150 字。',
+            },
             actions: {
               type: 'array',
               description: '要执行的动作列表（并发执行）。不需要任何动作时传空数组。',
@@ -1326,7 +1334,7 @@ export function getIntentPlanToolDefinitions() {
               },
             },
           },
-          required: ['actions'],
+          required: ['state', 'actions'],
         },
       },
     },
@@ -1338,16 +1346,100 @@ export async function executeIntentPlanTool(toolName, args, context) {
   const { petId, targetId, targetType } = context;
   if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
 
-  const { actions = [] } = args;
+  const { state = '', brief = '', actions = [] } = args || {};
+  const intentDir = targetType === 'friend' ? 'friend' : 'group';
 
-  return { content: [{ type: 'text', text: '✓ 计划已提交' }] };
+  // ── 拦截：检查 eval 中途群里有无新消息，有则要求重提 ──
+  // 把原本在 social_write reply_brief 上的拦截语义挪过来，因为现在 plan 是一次性提交的
+  const MAX_INTERCEPTS = 2;
+  const injectionWatermarks = context.intentInjectionWatermarks;
+  const interceptCounts = context.intentInterceptCounts;
+  const buf = context.dataBuffer?.get(targetId);
+  if (injectionWatermarks && interceptCounts && buf) {
+    const watermark = injectionWatermarks.get(targetId) || '';
+    const currentIntercepts = interceptCounts.get(targetId) || 0;
+    let newMessages = [];
+    if (watermark) {
+      const idx = buf.messages.findIndex(m => m.message_id === watermark);
+      if (idx >= 0) newMessages = buf.messages.slice(idx + 1);
+    }
+
+    if (newMessages.length > 0 && currentIntercepts < MAX_INTERCEPTS) {
+      const lastNewMsg = newMessages[newMessages.length - 1];
+      if (lastNewMsg?.message_id) injectionWatermarks.set(targetId, lastNewMsg.message_id);
+      interceptCounts.set(targetId, currentIntercepts + 1);
+
+      const botId = context.botQQ || '';
+      const updateText = newMessages.map(m => {
+        const name = m.sender_id === botId ? '[BOT]' : (m.sender_name || m.sender_id || '?');
+        return `[${name}] ${m.content || ''}`;
+      }).join('\n');
+
+      if (context.addLog) {
+        context.addLog(
+          'intent',
+          `🛑 intercept write_intent_plan: ${newMessages.length} 条新消息 (${currentIntercepts + 1}/${MAX_INTERCEPTS})`,
+          JSON.stringify({
+            intercepted: 'write_intent_plan',
+            newMessages: newMessages.map(m => ({
+              sender: m.sender_name || m.sender_id,
+              content: m.content,
+              isBot: m.sender_id === botId,
+            })),
+            interceptCount: currentIntercepts + 1,
+            maxIntercepts: MAX_INTERCEPTS,
+          }),
+          targetId,
+        );
+      }
+
+      const customRules = context.customGroupRules || '';
+      const customRulesBlock = customRules && customRules.trim()
+        ? `\n\n⚠️ 自定义群规则（最高优先级）：\n${customRules.trim()}\n`
+        : '';
+
+      return {
+        content: [{
+          type: 'text',
+          text: `⚠️ write_intent_plan 暂缓提交。期间群里出现 ${newMessages.length} 条新消息（含你自己刚发送的）：\n\n${updateText}\n\n请把这些新信息融进 state 的【群里情况】【我的判断】等段落，必要时调整 brief 或 actions，然后再次调用 write_intent_plan 提交完整 plan。${customRulesBlock}\n(第 ${currentIntercepts + 1}/${MAX_INTERCEPTS} 次拦截)`,
+        }],
+      };
+    }
+  }
+
+  // ── 写 INTENT 状态文件（覆盖） ──
+  if (!state || !state.trim()) {
+    return { error: 'state 参数为空，必须提供完整的 INTENT 文件内容（4 段：【我刚做了】【效果复盘】【群里情况】【我的判断】）' };
+  }
+  const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
+  try {
+    await tauri.workspaceWrite(petId, intentPath, state);
+  } catch (e) {
+    return { error: `写 INTENT 失败: ${e?.message || e}` };
+  }
+
+  // ── 写 reply_brief（仅当 actions 含 reply 且 brief 非空） ──
+  const hasReply = Array.isArray(actions) && actions.some(a => a?.type === 'reply');
+  if (hasReply) {
+    if (!brief || !brief.trim()) {
+      return { error: 'actions 含 reply 但 brief 为空——必须提供完整 reply_brief（第 1 行档位标签，正文 ≤150 字）' };
+    }
+    const briefPath = `social/${intentDir}/scratch_${targetId}/reply_brief.md`;
+    try {
+      await tauri.workspaceWrite(petId, briefPath, brief);
+    } catch (e) {
+      return { error: `写 reply_brief 失败: ${e?.message || e}` };
+    }
+  }
+
+  return { content: [{ type: 'text', text: '✓ 计划已提交（INTENT 已更新' + (hasReply ? '，brief 已写入' : '') + '）' }] };
 }
 
 // ============ Subagent 工具 ============
 
 /** 检查是否为 subagent 工具 */
 export function isSubagentTool(toolName) {
-  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list' || toolName === 'webshot' || toolName === 'webshot_send' || toolName === 'chat_search' || toolName === 'chat_context' || toolName === 'voice_send';
+  return toolName === 'dispatch_subagent' || toolName === 'cc_history' || toolName === 'cc_read' || toolName === 'md_organize' || toolName === 'screenshot' || toolName === 'image_send' || toolName === 'image_list' || toolName === 'webshot' || toolName === 'webshot_send' || toolName === 'chat_search' || toolName === 'chat_context' || toolName === 'voice_send' || toolName === 'generate_image_send' || toolName === 'get_situation';
 }
 
 /** 获取 dispatch_subagent 工具的 function calling 定义 */
@@ -1514,6 +1606,8 @@ export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'image_send') return executeImageSend(args, context);
   if (toolName === 'webshot') return executeWebshot(args, context);
   if (toolName === 'webshot_send') return executeWebshotSend(args, context);
+  if (toolName === 'generate_image_send') return executeGenerateImageSend(args, context);
+  if (toolName === 'get_situation') return executeGetSituation(args, context);
   if (toolName === 'chat_search') return executeChatSearch(args, context);
   if (toolName === 'chat_context') return executeChatContext(args, context);
   if (toolName === 'voice_send') return executeVoiceSend(args, context);
@@ -2245,6 +2339,379 @@ async function executeVoiceSend(args, context) {
 
   return {
     content: [{ type: 'text', text: `✓ 已发送语音: "${text}"` }],
+  };
+}
+
+// ============ generate_image_send（AI 生图 → 存档 → 发到群） ============
+
+// ============ get_situation：一站式上下文快照 ============
+
+/** 获取 get_situation 工具定义 */
+export function getSituationToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'get_situation',
+      description: '⚠️ **本轮 eval 第一步必调**。返回当前对话情况的一站式快照：群聊记录（最近 N 条原文，含时间戳、@me、图片描述）+ 你最近的动作（recent_self.md 全部内容，含 AI 生图状态、在途/孤儿任务、刚发出的文字）。\n一次调用拿到所有做决策需要的输入，不要分开调 social_read recent_self.md + 翻 chat history。\n本轮**只调一次**。eval 中途到达的新消息会在 write_intent_plan 时自动拦截要求重提（无需手动再次 get_situation）。',
+      parameters: {
+        type: 'object',
+        properties: {
+          n: {
+            type: 'integer',
+            description: '群聊记录返回最近多少条，默认 60，最大 200。',
+          },
+        },
+      },
+    },
+  };
+}
+
+/** 共享的消息格式化（get_situation / read_new_messages 都用） */
+function _formatChatMsg(msg) {
+  const ts = msg.timestamp ? new Date(msg.timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '?';
+  if (msg.is_self) {
+    let text = (msg.content || '').trim();
+    if (!text && (msg._images?.length || 0) > 0) text = '[发送了表情包/图片]';
+    return `[${ts}] **【我自己发的】**: ${text}`;
+  }
+  const name = msg.sender_name || msg.sender_id || '?';
+  const id = msg.sender_id || '?';
+  const msgIdTag = msg.message_id ? ` [#${msg.message_id}]` : '';
+  const atMeTag = msg.is_at_me ? ' @me' : '';
+  let content = msg.content || '';
+  if (msg._imageDescs?.length > 0) {
+    const descs = msg._imageDescs.map(d => `[图片: ${d}]`).join(' ');
+    content = (content + ' ' + descs).trim();
+  } else if ((msg._images?.length || 0) > 0) {
+    content = (content + ` [图片x${msg._images.length}]`).trim();
+  }
+  return `[${ts}] ${name}(${id})${msgIdTag}${atMeTag}: ${content}`;
+}
+
+async function executeGetSituation(args, context) {
+  const { petId, targetId, targetType, dataBuffer, intentInjectionWatermarks } = context;
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+
+  const n = Math.max(1, Math.min(parseInt(args?.n, 10) || 60, 200));
+  const buf = dataBuffer?.get(targetId);
+
+  let chatBlock;
+  let chatCount = 0;
+  if (buf?.messages?.length > 0) {
+    const recent = buf.messages.slice(-n);
+    chatCount = recent.length;
+    chatBlock = recent.map(_formatChatMsg).join('\n');
+    // 推进水位线到 buffer 末尾——LLM 已经看过这些消息，下次 read_new_messages 只返回更新的；
+    // write_intent_plan 拦截也只对真正"未看过"的消息触发
+    const lastBufMsg = buf.messages[buf.messages.length - 1];
+    if (lastBufMsg?.message_id && intentInjectionWatermarks) {
+      intentInjectionWatermarks.set(targetId, lastBufMsg.message_id);
+    }
+  } else {
+    chatBlock = '（暂无群消息）';
+  }
+
+  // 读 recent_self.md
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  let recentSelf = '';
+  try {
+    recentSelf = (await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/recent_self.md`).catch(() => '')) || '';
+  } catch { /* 文件不存在则为空 */ }
+
+  const output = [
+    '# 当前情况快照',
+    '',
+    `## 群聊记录（最近 ${chatCount} 条；【我自己发的】= bot 自己之前发的内容，避免重复）`,
+    chatBlock,
+    '',
+    '## 你最近的动作 / 在途任务（recent_self）',
+    recentSelf.trim() || '（无最近动作）',
+    '',
+    '⚠️ eval 中途若有新消息，write_intent_plan 提交时会自动拦截，把增量新消息塞给你看，要求重新评估再次提交。所以你专注思考决策即可，不需要中途主动检查。',
+  ].join('\n');
+
+  return { content: [{ type: 'text', text: output }] };
+}
+
+/** 获取 generate_image_send 工具定义 */
+export function getGenerateImageSendToolDefinition() {
+  return {
+    type: 'function',
+    function: {
+      name: 'generate_image_send',
+      description: '用 AI 生成一张图片并直接发送到当前会话。fire-and-forget：调用立刻返回成功，图片在后台生成（最多 10 分钟整体超时，gpt-image-2 等慢 provider 可能 3-6 分钟），完成后自动发到群里并存档到 social/images/。\n状态跟踪：派发瞬间会在 sentCache 写一条"⏳ 派发中"占位（含 filename / prompt / reason）+ 写一个磁盘锁文件 pending_gen/<filename>.json；IIFE 完成（成功/失败/超时）后清锁、更新占位为"✅ 已发"或"❌ 失败"。dev 模式 HMR 或 app 重启杀掉 IIFE 时锁不会被清——下次 eval 会扫到，标"☠️ 孤儿"。所有状态都在 recent_self.md 的"在途/最近"段。\n**支持并发**：同一轮 plan 派多张是允许的（每张独立 IIFE / 独立 filename / 独立锁），但前提是**主题不同**——同主题不论 filename / prompt 怎么改都算重复。\n仅在以下场景使用（极其稀缺，绝不滥用）：(1) 画流程图/示意图辅助讲解技术 (2) 自制表情包/玩梗 (3) 用户明确"画个 X 给我看"。普通对话**不要用**——已有截图/旧表情包能解决就别生成。\n⚠️ **本轮 plan 调过本工具就停（同主题）**——已派发；无关的另一张主题可以并发再调。\n⚠️ **看到 recent_self.md 里有 ❌ 失败的同主题记录就不要立即重调**——失败常是配置/网络/参数问题。\n⚠️ **去重核心是 reason 字段**：换名换风格画同一个主题=重复。',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: {
+            type: 'string',
+            description: '图片描述（中英文皆可）。越具体越好：主体 + 风格 + 构图 + 配色。例: "一个程序员对着屏幕崩溃，扁平卡通风，黄色背景"',
+          },
+          filename: {
+            type: 'string',
+            description: '存档文件名（不含扩展名，会自动加 .png）。简短、英文/拼音、可识别用途。例: "flow_mcp_arch" / "meme_崩溃猫" / "diagram_intent_loop"',
+          },
+          reason: {
+            type: 'string',
+            description: '⚠️ 必填。一句话说明你**为什么**画这张图：给谁看、回应哪条消息、想达到什么效果。这是去重判定的核心字段——下次 eval 看到 reason 相近的已派记录就不要再画。\n例: "回应 冯·诺依曼 #123 的\'画一张我的自画像\'请求，把他作为逻辑神性的强大表现出来"\n例: "群里在讨论 MCP 协议架构，画一张架构图辅助 reply 讲解"\n例: "啾啾 #456 抛了崩溃的梗，画只崩溃猫回应"',
+          },
+        },
+        required: ['prompt', 'filename', 'reason'],
+      },
+    },
+  };
+}
+
+/** 把成功/失败信息回写到 INTENT 文件的【我刚做了】行 */
+async function _writeImageGenIntent(petId, targetId, targetType, line) {
+  const intentDir = targetType === 'friend' ? 'friend' : 'group';
+  const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
+  try {
+    const current = (await tauri.workspaceRead(petId, intentPath)) || '';
+    const updated = current.replace(/【我刚做了】[^\n]*/, `【我刚做了】${line}`);
+    if (updated !== current) {
+      await tauri.workspaceWrite(petId, intentPath, updated);
+    }
+  } catch { /* 非致命 */ }
+}
+
+/** 简单 sluggify：去除非法字符，限制长度 */
+function _slugifyFilename(raw) {
+  const cleaned = String(raw || '').trim().replace(/[/\\:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  return cleaned.slice(0, 60) || `gen_${Date.now().toString(36)}`;
+}
+
+/**
+ * 派发瞬间往 sentCache 推占位条，让下一轮 Intent 通过 recent_self.md 看到"在途/已失败"。
+ * status: 'dispatching' | 'sent' | 'failed'
+ * IIFE 完成后用 _updateImageGenSentCache 修改同一条（按 fileName 唯一定位）。
+ * genReason 是 LLM 调用时填的"为什么画"——用于下次 eval 的主题级去重判定。
+ */
+function _pushImageGenSentCache(sentCache, targetId, fileName, status, prompt = '', genReason = '', errReason = '') {
+  if (!sentCache || !targetId || !fileName) return;
+  const arr = sentCache.get(targetId) || [];
+  arr.push({
+    content: _formatImageGenSentLine(fileName, status, prompt, genReason, errReason),
+    timestamp: new Date().toISOString(),
+    message_id: null,
+    _genImageFileName: fileName,
+    _genImageStatus: status,
+    _genImagePrompt: prompt,
+    _genImageReason: genReason,
+  });
+  sentCache.set(targetId, arr);
+}
+
+function _updateImageGenSentCache(sentCache, targetId, fileName, status, errReason = '') {
+  if (!sentCache || !targetId || !fileName) return;
+  const arr = sentCache.get(targetId);
+  if (!arr) return;
+  // 倒序找：通常我们刚 push 的就在末尾
+  for (let i = arr.length - 1; i >= 0; i--) {
+    const entry = arr[i];
+    if (entry?._genImageFileName === fileName) {
+      entry._genImageStatus = status;
+      entry.content = _formatImageGenSentLine(
+        fileName, status,
+        entry._genImagePrompt || '',
+        entry._genImageReason || '',
+        errReason,
+      );
+      return;
+    }
+  }
+}
+
+function _formatImageGenSentLine(fileName, status, prompt, genReason, errReason) {
+  const promptPart = prompt ? ` prompt="${String(prompt).slice(0, 80)}"` : '';
+  const reasonPart = genReason ? ` reason="${String(genReason).slice(0, 100)}"` : '';
+  if (status === 'dispatching') return `[AI 生图派发中: ${fileName}${reasonPart}${promptPart}]`;
+  if (status === 'sent') return `[已发 AI 生图: ${fileName}${reasonPart}${promptPart}]`;
+  // failed
+  const reason = errReason ? ` 原因=${String(errReason).slice(0, 80)}` : '';
+  return `[AI 生图失败: ${fileName}${reasonPart}${reason}]`;
+}
+
+/**
+ * 执行 generate_image_send：fire-and-forget
+ * 派发瞬间立即返回 "✓ 已派发"，并 push 占位条到 sentCache 让下一轮 Intent 看到"在途任务"。
+ * 后台 IIFE 异步：调 API → 存盘 → 发群 → 更新 sentCache 占位条 + 回写 INTENT。
+ *
+ * 任何失败（包括早期校验）都会：
+ *   1) 把 sentCache 占位条标记为 'failed: 原因=...'
+ *   2) 写 INTENT【我刚做了】"AI 生图失败: ..."
+ *   3) 返回的 error 文案明确禁止本会话内重试
+ * 这样下一轮 Intent eval 通过 recent_self.md 就能看到"上次失败"，不会盲目重试。
+ */
+/** 派发锁文件目录 */
+function _pendingGenDir(targetType, targetId) {
+  const dir = targetType === 'friend' ? 'friend' : 'group';
+  return `social/${dir}/scratch_${targetId}/pending_gen`;
+}
+
+/** 写派发锁：让 IIFE 即便被 HMR/重启杀死，下次 Intent eval 也能扫到孤儿任务 */
+async function _writePendingGenLock(petId, targetType, targetId, fileName, info) {
+  const path = `${_pendingGenDir(targetType, targetId)}/${fileName}.json`;
+  try {
+    await tauri.workspaceWrite(petId, path, JSON.stringify({
+      ...info,
+      fileName,
+      dispatchTs: Date.now(),
+    }));
+  } catch (e) {
+    console.warn('[generate_image_send] write lock failed:', e);
+  }
+}
+
+/** 删派发锁（IIFE 走完任意终态——success/fail/timeout 都要清） */
+async function _deletePendingGenLock(petId, targetType, targetId, fileName) {
+  const path = `${_pendingGenDir(targetType, targetId)}/${fileName}.json`;
+  try {
+    await tauri.workspaceDeleteFile(petId, path);
+  } catch { /* 锁文件可能本来就不存在或被其他流程清掉，忽略 */ }
+}
+
+async function executeGenerateImageSend(args, context) {
+  const { petId, targetId, targetType, mcpServerName, imageModel, addLog, sentCache } = context;
+  if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
+  if (!mcpServerName) return { error: '缺少 mcpServerName' };
+  const prompt = (args?.prompt || '').toString().trim();
+  const filenameRaw = (args?.filename || '').toString().trim();
+  const reason = (args?.reason || '').toString().trim();
+
+  // 即便参数缺失也先生成一个 fileName 用于占位/INTENT 回写（让 Intent 知道"试过了但参数不对"）
+  const slug = _slugifyFilename(filenameRaw || 'unnamed');
+  // 加随机 4 字符避免并发同 slug 的极小概率撞名
+  const rand = Math.random().toString(36).slice(2, 6);
+  const fileName = `gen_${slug}_${Date.now().toString(36)}${rand}.png`;
+
+  // 同步硬错误：参数缺失 / imageModel 缺失 → 推失败占位 + 写 INTENT + 返回硬错误（禁止重试）
+  const failHard = async (errMsg) => {
+    _pushImageGenSentCache(sentCache, targetId, fileName, 'failed', prompt, reason, errMsg);
+    await _writeImageGenIntent(petId, targetId, targetType, `AI 生图失败: ${fileName} 原因=${errMsg.slice(0, 80)}${reason ? ` (本来是为了: ${reason.slice(0, 60)})` : ''}`);
+    return {
+      error: `${errMsg}。⚠️ 本会话内不要再调用 generate_image_send，需要用户解决配置后重启 social agent。可以在 reply 里告诉用户"现在画不了图，去设置里启用 AI 生图模型"。`,
+    };
+  };
+
+  if (!prompt) return failHard('缺少 prompt 参数');
+  if (!filenameRaw) return failHard('缺少 filename 参数');
+  if (!reason) return failHard('缺少 reason 参数（你必须说明为什么画这张图——给谁看、回应什么、想达到什么）');
+  if (!imageModel || !imageModel.modelName || !imageModel.baseUrl || !imageModel.apiKey) {
+    return failHard('社交 agent 未配置 Image Model（在社交设置启用并填好 provider/model，并重启 agent）');
+  }
+
+  // 派发：push '派发中' 占位条 + 同步写 INTENT + **写派发锁文件**（用于孤儿检测）
+  _pushImageGenSentCache(sentCache, targetId, fileName, 'dispatching', prompt, reason);
+  await _writeImageGenIntent(
+    petId, targetId, targetType,
+    `派发了 AI 生图任务 (${fileName}) reason="${reason.slice(0, 80)}" prompt="${prompt.slice(0, 50)}"`,
+  );
+  await _writePendingGenLock(petId, targetType, targetId, fileName, {
+    prompt: prompt.slice(0, 500),
+    reason: reason.slice(0, 500),
+    model: imageModel.modelName,
+  });
+
+  // fire-and-forget IIFE
+  // 多个并发调用：每次调用各自独立 IIFE + 独立 fileName + 独立锁，互不干扰
+  (async () => {
+    const log = (level, msg, detail) => {
+      try { (addLog || (() => {}))(level, msg, detail || null, targetId); } catch { /* ignore */ }
+    };
+    const cleanup = async () => {
+      // 任何终态都要清锁，否则下次 eval 会误判为孤儿
+      await _deletePendingGenLock(petId, targetType, targetId, fileName);
+    };
+    const failAsync = async (errMsg) => {
+      _updateImageGenSentCache(sentCache, targetId, fileName, 'failed', errMsg);
+      await _writeImageGenIntent(petId, targetId, targetType, `AI 生图失败: ${fileName} 原因=${errMsg.slice(0, 80)} (本来是为了: ${reason.slice(0, 60)})`);
+      log('warn', `generate_image_send failed: ${errMsg}`);
+      await cleanup();
+    };
+
+    try {
+      // 1. 调 OpenAI-compatible /v1/images/generations
+      // ⚠️ 走 Rust image_gen_proxy_call（10 min 超时，独立 semaphore），不直接用 JS fetch
+      // 原因：WKWebView 的 fetch 对长连接 / 第三方代理常返回 "Load failed"；reqwest 没这问题
+      const baseUrl = String(imageModel.baseUrl).replace(/\/+$/, '');
+      const endpoint = baseUrl.endsWith('/v1') ? `${baseUrl}/images/generations` : `${baseUrl}/v1/images/generations`;
+      const apiKey = String(imageModel.apiKey).split(/[\n,]/).map(s => s.trim()).filter(Boolean)[0] || '';
+      if (!apiKey) return failAsync('缺少 apiKey');
+
+      let data;
+      try {
+        data = await tauri.imageGenProxyCall(
+          endpoint,
+          { Authorization: `Bearer ${apiKey}` },
+          {
+            model: imageModel.modelName,
+            prompt,
+            size: '1024x1024',
+            n: 1,
+            response_format: 'b64_json',
+          },
+        );
+      } catch (e) {
+        // Rust 侧把 timeout / HTTP error / API error 都格式化成 string 抛过来
+        return failAsync(String(e?.message || e));
+      }
+      const item = data?.data?.[0];
+      let base64 = item?.b64_json || '';
+      if (!base64 && item?.url) {
+        // URL fallback：走 Rust download_url_as_base64（30s 超时），同样不走 JS fetch
+        try {
+          const dl = await tauri.downloadUrlAsBase64(item.url);
+          base64 = dl?.data || '';
+        } catch (e) {
+          return failAsync(`URL 下载失败: ${e?.message || e}`);
+        }
+      }
+      if (!base64) return failAsync('响应无图片数据');
+
+      // 2. 存到 social/images/
+      try {
+        await tauri.workspaceWriteBinary(petId, `social/images/${fileName}`, base64);
+      } catch (e) {
+        log('warn', `generate_image_send save fail`, String(e?.message || e));
+      }
+
+      // 3. 追加 index.toml（含 reason 字段，便于以后 image_list 看出每张图的"用途"）
+      try {
+        const tomlEntry = `\n[[screenshots]]\nfile = "${fileName}"\ndesc = "AI 生图: ${prompt.replace(/"/g, '\\"').slice(0, 100)}"\ntype = "ai_generated"\nprompt = "${prompt.replace(/"/g, '\\"').slice(0, 200)}"\nreason = "${reason.replace(/"/g, '\\"').slice(0, 200)}"\nmodel = "${imageModel.modelName}"\ncreated_at = "${new Date().toISOString()}"\n`;
+        await tauri.workspaceAppend(petId, 'social/images/index.toml', tomlEntry);
+      } catch { /* 非致命 */ }
+
+      // 4. 发到群
+      try {
+        const sendToolName = `${mcpServerName}__send_image`;
+        await tauri.mcp.callToolByName(sendToolName, {
+          target: targetId,
+          target_type: targetType || 'group',
+          image: base64,
+        });
+        log('send', `🎨 generated → ${targetId}: ${fileName} (reason="${reason.slice(0, 60)}")`);
+      } catch (e) {
+        return failAsync(`生成成功但发送失败: ${e?.message || e}`);
+      }
+
+      // 5. 成功：update 占位条为 sent + 写 INTENT + 清锁
+      _updateImageGenSentCache(sentCache, targetId, fileName, 'sent');
+      await _writeImageGenIntent(
+        petId, targetId, targetType,
+        `发了 AI 生图 (${fileName}) reason="${reason.slice(0, 80)}" prompt="${prompt.slice(0, 50)}"`,
+      );
+      await cleanup();
+    } catch (err) {
+      await failAsync(String(err?.message || err));
+    }
+  })();
+
+  return {
+    content: [{
+      type: 'text',
+      text: `✓ 已派发 AI 生图任务（最长等 10 分钟）。\n  filename: ${fileName}\n  reason: ${reason}\n  prompt: ${prompt}\n后台会调 API → 存盘 → 发群 → 更新 sentCache + INTENT。\n⚠️ **本轮 Intent 不要再调本工具**（除非要画的是完全无关的另一张）。多个并发派发是支持的，每张独立 IIFE / 独立 filename / 独立锁文件，互不干扰。\n⚠️ **下次 eval 必须先看 recent_self.md 的"在途/最近"段，按 reason 字段去重**——同主题不要换 filename / 换 prompt 风格再调一次。`,
+    }],
   };
 }
 

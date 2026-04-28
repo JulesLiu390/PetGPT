@@ -355,6 +355,22 @@ export const llmProxyCall = (endpoint, headers, body) => {
 };
 
 /**
+ * 图像生成代理 — 与 llmProxyCall 接口一致，但走独立的 Rust client（10 分钟超时）
+ * 用于 generate_image_send 工具：gpt-image-2 等慢 provider 单次 3-6 分钟，
+ * llm_proxy_call 的 180s 超时不够；JS fetch 又会撞 WKWebView 的"Load failed"。
+ */
+export const imageGenProxyCall = (endpoint, headers, body) => {
+  const jsonStr = JSON.stringify(body)
+    .replace(/\\ud[89ab][0-9a-f]{2}(?!\\ud[cdef][0-9a-f]{2})/gi, '\\ufffd')
+    .replace(/(?<!\\ud[89ab][0-9a-f]{2})\\ud[cdef][0-9a-f]{2}/gi, '\\ufffd');
+  const bytes = new TextEncoder().encode(jsonStr);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const bodyB64 = btoa(binary);
+  return invoke('image_gen_proxy_call', { endpoint, headers, bodyB64 });
+};
+
+/**
  * 流式 LLM 调用 - 通过事件推送响应块
  * @param {Object} request - LLM 请求配置 (同 llmCall)
  * @returns {Promise<Object>} 完整响应

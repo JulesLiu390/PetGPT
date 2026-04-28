@@ -3120,9 +3120,9 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
   
   // 获取选中的 provider
   const selectedProvider = apiProviders?.find(p => p._id === settings.functionModelProviderId);
-  
+
   // 获取该 provider 下的可见模型列表
-  const availableModels = selectedProvider 
+  const availableModels = selectedProvider
     ? (selectedProvider.cachedModels || []).filter(model => {
         const hiddenModels = selectedProvider.hiddenModels || [];
         const modelName = typeof model === 'string' ? model : model.name;
@@ -3133,7 +3133,17 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
         return na.localeCompare(nb);
       })
     : [];
-  
+
+  // 图像模型列表：不过滤 hiddenModels（图像模型通常被 hidden 掉了，要全部显示）
+  const selectedImageProvider = apiProviders?.find(p => p._id === settings.imageModelProviderId);
+  const availableImageModels = selectedImageProvider
+    ? [...(selectedImageProvider.cachedModels || [])].sort((a, b) => {
+        const na = typeof a === 'string' ? a : a.name;
+        const nb = typeof b === 'string' ? b : b.name;
+        return na.localeCompare(nb);
+      })
+    : [];
+
   // 处理 provider 变化
   const handleProviderChange = (e) => {
     const providerId = e.target.value;
@@ -3151,7 +3161,7 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
       }
     });
   };
-  
+
   // 处理 model 变化
   const handleModelChange = (e) => {
     onSettingsChange({
@@ -3160,6 +3170,18 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
         value: e.target.value
       }
     });
+  };
+
+  // 图像模型 provider 变化
+  const handleImageProviderChange = (e) => {
+    const providerId = e.target.value;
+    onSettingsChange({ target: { name: 'imageModelProviderId', value: providerId } });
+    onSettingsChange({ target: { name: 'imageModelName', value: '' } });
+  };
+
+  // 图像模型 model 变化
+  const handleImageModelChange = (e) => {
+    onSettingsChange({ target: { name: 'imageModelName', value: e.target.value } });
   };
 
   return (
@@ -3215,6 +3237,40 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
                 >
                   <option value="">Select Model</option>
                   {availableModels.map((model) => {
+                    const modelName = typeof model === 'string' ? model : model.name;
+                    return (
+                      <option key={modelName} value={modelName}>
+                        {modelName}
+                      </option>
+                    );
+                  })}
+                </Select>
+              </FormGroup>
+
+              <FormGroup label="Image Model Provider" hint="Provider for the generate_image tool (OpenAI-compatible /images/generations endpoint)">
+                <Select
+                  name="imageModelProviderId"
+                  value={settings.imageModelProviderId || ""}
+                  onChange={handleImageProviderChange}
+                >
+                  <option value="">Select Provider (leave empty to disable)</option>
+                  {(apiProviders || []).map((provider) => (
+                    <option key={provider._id} value={provider._id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </Select>
+              </FormGroup>
+
+              <FormGroup label="Image Model" hint="provider 下所有已缓存模型（不过滤）">
+                <Select
+                  name="imageModelName"
+                  value={settings.imageModelName || ""}
+                  onChange={handleImageModelChange}
+                  disabled={!settings.imageModelProviderId}
+                >
+                  <option value="">Select Model</option>
+                  {availableImageModels.map((model) => {
                     const modelName = typeof model === 'string' ? model : model.name;
                     return (
                       <option key={modelName} value={modelName}>
