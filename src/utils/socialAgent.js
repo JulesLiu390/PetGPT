@@ -11,7 +11,7 @@ import { writeIntentTrace } from './intentTraining';
 import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition, getSituationToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition, getSituationToolDefinition, autoFixPlanArgs } from './workspace/socialToolExecutor';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -3042,7 +3042,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
                 cacheKey: buildCacheKey(config.petId, target, 'Intent:msg'),
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, prevEvalTime, lastPlan: state.lastPlan },
               // 拦截时（formattedResult 含"write_intent_plan 暂缓"）不退出循环，让 LLM 重新评估再次提交
               stopAfterTool: (name, formattedResult) => {
                 if (name !== 'write_intent_plan') return false;
@@ -3057,26 +3057,31 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               onTrace: _onTraceFn,
               onToolCall: (name, args) => {
                 if (name === 'write_intent_plan') {
-                  _pendingPlanArgs = args;  // 暂存 args，结果出来后再决定是否捕获
+                  // 与 executor 同步应用 auto-fix（brief 非空但 actions 缺 reply → 自动补 reply）
+                  // 这样 capturedPlan / 日志和 executor 实际写入的文件保持一致
+                  const fixed = autoFixPlanArgs(args);
+                  const fixedArgs = { state: fixed.state, brief: fixed.brief, actions: fixed.actions };
+                  _pendingPlanArgs = fixedArgs;  // 暂存修正后的 args
                   // write_intent_plan 的主消息行用摘要替代裸名字，让用户一眼看出写了啥
-                  const stateLen = (args?.state || '').length;
-                  const briefRaw = (args?.brief || '').trim();
+                  const stateLen = fixed.state.length;
+                  const briefRaw = fixed.brief.trim();
                   const briefFirstLine = briefRaw.split('\n')[0]?.trim() || '';
                   const briefTier = briefFirstLine.match(/^\[(接梗|闲扯|观点|展开|深答)\]/)?.[0] || '';
                   const briefSummary = briefRaw
                     ? `brief=${briefTier || '(无标签)'}(${briefRaw.length}字)`
                     : 'brief=(无 reply)';
-                  const actionsSummary = (args?.actions || []).map(a => {
+                  const actionsSummary = fixed.actions.map(a => {
                     if (a?.type === 'reply') return a.atTarget ? `reply@${a.atTarget}` : 'reply';
                     if (a?.type === 'sticker') return `sticker#${a.id ?? '?'}`;
                     if (a?.type === 'wait') return 'wait';
                     return a?.type || '?';
                   });
                   const actionsLabel = actionsSummary.length > 0 ? `actions=[${actionsSummary.join(',')}]` : 'actions=[]';
+                  const fixTag = fixed.autoFixed ? ' 🔧auto-fix' : '';
                   addLog(
                     'intent',
-                    `🧠 [${tName()}] tool: write_intent_plan → INTENT(${stateLen}字), ${briefSummary}, ${actionsLabel}`,
-                    _buildPlanDetails(args),
+                    `🧠 [${tName()}] tool: write_intent_plan → INTENT(${stateLen}字), ${briefSummary}, ${actionsLabel}${fixTag}`,
+                    _buildPlanDetails(fixedArgs),
                     target,
                   );
                   return;

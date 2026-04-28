@@ -1341,13 +1341,45 @@ export function getIntentPlanToolDefinitions() {
   ];
 }
 
+/**
+ * 校正 write_intent_plan 的 args：
+ *   brief 非空 + actions 不含 reply → 自动补 {type:'reply'} 进 actions
+ *   （LLM 常见漏报：写了 brief 却忘记把 reply 加进 actions，此时静默修正）
+ * 返回的 actions 是新数组（不修改原引用）。
+ */
+export function autoFixPlanArgs(args) {
+  const state = args?.state || '';
+  const brief = args?.brief || '';
+  let actions = Array.isArray(args?.actions) ? [...args.actions] : [];
+  const hasReply = actions.some(a => a?.type === 'reply');
+  const briefHasContent = brief && brief.trim();
+  let autoFixed = false;
+  if (briefHasContent && !hasReply) {
+    actions.push({ type: 'reply' });
+    autoFixed = true;
+  }
+  return { state, brief, actions, autoFixed };
+}
+
 export async function executeIntentPlanTool(toolName, args, context) {
   if (toolName !== 'write_intent_plan') return { error: `未知工具: ${toolName}` };
   const { petId, targetId, targetType } = context;
   if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
 
-  const { state = '', brief = '', actions = [] } = args || {};
+  const fixed = autoFixPlanArgs(args);
+  const state = fixed.state;
+  const brief = fixed.brief;
+  const actions = fixed.actions;
   const intentDir = targetType === 'friend' ? 'friend' : 'group';
+
+  if (fixed.autoFixed && context.addLog) {
+    context.addLog(
+      'intent',
+      `🔧 auto-fix: brief 非空但 actions 缺 reply → 自动补上 {type:"reply"}`,
+      JSON.stringify({ originalActions: args?.actions || [], fixedActions: actions }),
+      targetId,
+    );
+  }
 
   // ── 拦截：检查 eval 中途群里有无新消息，有则要求重提 ──
   // 把原本在 social_write reply_brief 上的拦截语义挪过来，因为现在 plan 是一次性提交的
@@ -1407,10 +1439,18 @@ export async function executeIntentPlanTool(toolName, args, context) {
     }
   }
 
-  // ── 写 INTENT 状态文件（覆盖） ──
+  // ── 参数校验：state 必须非空；actions 含 reply 时 brief 必须非空 ──
   if (!state || !state.trim()) {
     return { error: 'state 参数为空，必须提供完整的 INTENT 文件内容（4 段：【我刚做了】【效果复盘】【群里情况】【我的判断】）' };
   }
+  const hasReply = actions.some(a => a?.type === 'reply');
+  const briefHasContent = brief && brief.trim();
+  if (hasReply && !briefHasContent) {
+    return { error: 'actions 含 reply 但 brief 为空——必须提供完整 reply_brief（第 1 行档位标签，正文 ≤150 字），否则 Reply 层不知道说什么' };
+  }
+  // 反向（brief 非空但 actions 不含 reply）已被 autoFixPlanArgs 自动补救，不再报错
+
+  // ── 校验通过，开始写入（INTENT 先；brief 后） ──
   const intentPath = `social/${intentDir}/INTENT_${targetId}.md`;
   try {
     await tauri.workspaceWrite(petId, intentPath, state);
@@ -1418,12 +1458,7 @@ export async function executeIntentPlanTool(toolName, args, context) {
     return { error: `写 INTENT 失败: ${e?.message || e}` };
   }
 
-  // ── 写 reply_brief（仅当 actions 含 reply 且 brief 非空） ──
-  const hasReply = Array.isArray(actions) && actions.some(a => a?.type === 'reply');
   if (hasReply) {
-    if (!brief || !brief.trim()) {
-      return { error: 'actions 含 reply 但 brief 为空——必须提供完整 reply_brief（第 1 行档位标签，正文 ≤150 字）' };
-    }
     const briefPath = `social/${intentDir}/scratch_${targetId}/reply_brief.md`;
     try {
       await tauri.workspaceWrite(petId, briefPath, brief);
@@ -2389,7 +2424,7 @@ function _formatChatMsg(msg) {
 }
 
 async function executeGetSituation(args, context) {
-  const { petId, targetId, targetType, dataBuffer, intentInjectionWatermarks } = context;
+  const { petId, targetId, targetType, dataBuffer, intentInjectionWatermarks, sentCache, prevEvalTime, lastPlan } = context;
   if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
 
   const n = Math.max(1, Math.min(parseInt(args?.n, 10) || 60, 200));
@@ -2401,8 +2436,7 @@ async function executeGetSituation(args, context) {
     const recent = buf.messages.slice(-n);
     chatCount = recent.length;
     chatBlock = recent.map(_formatChatMsg).join('\n');
-    // 推进水位线到 buffer 末尾——LLM 已经看过这些消息，下次 read_new_messages 只返回更新的；
-    // write_intent_plan 拦截也只对真正"未看过"的消息触发
+    // 推进水位线到 buffer 末尾——LLM 已经看过这些消息
     const lastBufMsg = buf.messages[buf.messages.length - 1];
     if (lastBufMsg?.message_id && intentInjectionWatermarks) {
       intentInjectionWatermarks.set(targetId, lastBufMsg.message_id);
@@ -2411,8 +2445,34 @@ async function executeGetSituation(args, context) {
     chatBlock = '（暂无群消息）';
   }
 
-  // 读 recent_self.md
+  // ── "正在送达中"的 reply 注入：把上轮 plan 派的、还在 Reply 层处理的 reply 伪装成
+  // chat 末尾的一条 bot 消息。LLM 看到自然会把它当成"我刚说过"，避免重复。
+  // 触发条件：lastPlan 含 reply + sentCache 中没有 prevEvalTime 之后的真实 send 条目
+  // + reply_brief.md 还有内容。
   const dir = targetType === 'friend' ? 'friend' : 'group';
+  const lastPlanHadReply = lastPlan?.actions?.some(a => a?.type === 'reply');
+  if (lastPlanHadReply && prevEvalTime) {
+    const cached = sentCache?.get(targetId) || [];
+    // 只数真正的文字 reply send（过滤掉 voice/sticker/AI 生图等占位条）
+    const hasRealReplySent = cached.some(m => {
+      if (!m?.timestamp) return false;
+      if (m._isVoiceSend || m._isStickerSend || m._genImageFileName) return false;
+      return new Date(m.timestamp).getTime() > prevEvalTime;
+    });
+    if (!hasRealReplySent) {
+      let brief = '';
+      try {
+        brief = (await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/reply_brief.md`).catch(() => '')) || '';
+      } catch { /* ignore */ }
+      if (brief.trim()) {
+        const ts = new Date(prevEvalTime).toLocaleTimeString('zh-CN', { hour12: false });
+        const synth = `[${ts}] **【我刚提交的 reply, 即将送达】** (Reply 层处理中, 群友尚未看到):\n${brief.trim()}`;
+        chatBlock = chatBlock === '（暂无群消息）' ? synth : `${chatBlock}\n${synth}`;
+      }
+    }
+  }
+
+  // 读 recent_self.md
   let recentSelf = '';
   try {
     recentSelf = (await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/recent_self.md`).catch(() => '')) || '';
@@ -2421,7 +2481,7 @@ async function executeGetSituation(args, context) {
   const output = [
     '# 当前情况快照',
     '',
-    `## 群聊记录（最近 ${chatCount} 条；【我自己发的】= bot 自己之前发的内容，避免重复）`,
+    `## 群聊记录（最近 ${chatCount} 条；【我自己发的】= bot 自己之前发的内容；【我刚提交的 reply, 即将送达】= 上轮派的 reply 在 Reply 层生成中——本轮**严禁**派同主题 reply 重复说一遍）`,
     chatBlock,
     '',
     '## 你最近的动作 / 在途任务（recent_self）',

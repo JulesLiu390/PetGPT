@@ -1280,8 +1280,15 @@ AI 生图工具（极其稀缺，慎用）：
    - brief：上面构思好的完整 reply_brief（仅当 actions 含 reply 时填，否则不传或传空字符串）
    - actions：根据下面规则决定动作
 
+⚠️ **brief 和 actions=[reply] 必须配对**——这是硬规则：
+- ✅ 想 reply（不论多简单/多复杂）→ brief **非空** + actions **含** {type:"reply"}
+- ✅ 不想 reply（沉默 / 只发 sticker / 只发图）→ brief **空字符串** + actions **不含** reply
+- ⚠️ brief 空 + actions 含 reply → Reply 层不知道说什么，会被代码拒绝
+- ⚠️ 想 sticker 单发（不带文字 reply）→ brief 必须留空。如果只是想"描述 sticker 主题"，那是 plan【策略】里写的事，不该写进 brief——brief 写非空就会被理解成"要发文字"
+**brief 是文字 reply 的内容**，不是描述用的备忘——非空就意味着"要发出去"。两件事**同一个决策**，缺一不可。
+
 ⚠️ 这一步是 eval 的**最后操作**，调用后就结束。不要在调用前还做 social_edit / social_write reply_brief（那是老流程，已废弃）——所有写入都打包到 write_intent_plan 一次完成。
-⚠️ 如果中途群里有新消息，write_intent_plan 会被拦截要求重提。这时把新消息融进 state 再次提交即可（最多 5 次）。
+⚠️ 如果中途群里有新消息，write_intent_plan 会被拦截要求重提。这时把新消息融进 state 再次提交即可（最多 2 次）。
 
 - actions：根据以下规则决定动作
 
