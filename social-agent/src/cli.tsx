@@ -52,17 +52,17 @@ interface ScreenProps {
 // ─────────────────── small components ───────────────────
 
 function Avatar() {
-  // Minimal girl face. 4 rows. Box-drawing only — glyph widths stay 1-cell.
-  //   row 1   ╱╳╲╱╲╱╲     hair + cross hair clip
-  //   row 2   │ ◕   ◕ │   eyes
-  //   row 3   │   ‿    │  smile
-  //   row 4   ╲━━━━━╱    chin
+  // Kitten face. 4 rows. Box-drawing only — glyph widths stay 1-cell.
+  //   row 1   ╱╲   ╱╲    pointed cat ears
+  //   row 2   │ ◕   ◕ │  eyes
+  //   row 3   │  ω   │   omega mouth
+  //   row 4   ╲━━━━╱    chin
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>{'  ╱╳╲╱╲╱╲  '}</Text>
-      <Text color={ACCENT}>{' │ ◕   ◕ │ '}</Text>
-      <Text color={ACCENT}>{' │   ‿    │'}</Text>
-      <Text color={ACCENT}>{'  ╲━━━━━╱  '}</Text>
+      <Text color={ACCENT}>{' ╱╲   ╱╲ '}</Text>
+      <Text color={ACCENT}>{'│ ◕   ◕ │'}</Text>
+      <Text color={ACCENT}>{'│   ω    │'}</Text>
+      <Text color={ACCENT}>{' ╲━━━━━╱ '}</Text>
     </Box>
   );
 }
