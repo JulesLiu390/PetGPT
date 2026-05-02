@@ -8,6 +8,9 @@ import {
   getProviderInternal, setCachedModels,
 } from './providers.ts';
 import { readSocialConfig, writeSocialConfig, patchSocialConfig } from './socialConfig.ts';
+import {
+  listMCPServers, getMCPServer, createMCPServer, updateMCPServer, deleteMCPServer,
+} from './mcpServers.ts';
 import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
 import { runIntentEval } from './core/agent/intentEval.ts';
@@ -314,6 +317,50 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
       });
     }
 
+    // ── MCP servers ──
+    if (method === 'GET' && pathname === '/api/mcp-servers') {
+      return safe(async () => ok(await listMCPServers()));
+    }
+    if (method === 'POST' && pathname === '/api/mcp-servers') {
+      return safe(async () => {
+        const body = await readBody<any>(req);
+        if (!body) return err(400, 'invalid JSON body');
+        if (!body.name)    return err(400, 'name required');
+        if (!body.command) return err(400, 'command required');
+        try {
+          return ok(await createMCPServer(body), 201);
+        } catch (e: any) {
+          if (e?.message?.startsWith('MCP server name already exists')) return err(409, e.message);
+          throw e;
+        }
+      });
+    }
+    {
+      const m = pathname.match(/^\/api\/mcp-servers\/([^/]+)$/);
+      if (m) {
+        const id = m[1];
+        if (method === 'GET') return safe(async () => {
+          const s = await getMCPServer(id);
+          return s ? ok(s) : err(404, 'mcp server not found');
+        });
+        if (method === 'PATCH') return safe(async () => {
+          const body = await readBody<any>(req);
+          if (!body) return err(400, 'invalid JSON body');
+          try {
+            const next = await updateMCPServer(id, body);
+            return next ? ok(next) : err(404, 'mcp server not found');
+          } catch (e: any) {
+            if (e?.message?.startsWith('MCP server name already exists')) return err(409, e.message);
+            throw e;
+          }
+        });
+        if (method === 'DELETE') return safe(async () => {
+          const removed = await deleteMCPServer(id);
+          return removed ? ok({ ok: true }) : err(404, 'mcp server not found');
+        });
+      }
+    }
+
     // ── Agent sessions ──
     if (method === 'GET' && pathname === '/api/agent/sessions') {
       return ok(agent.list());
@@ -378,6 +425,8 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/pets                  POST   { name, persona? }',
           '  GET    /api/pets/:id              PATCH  DELETE',
           '  GET    /api/pets/:id/social-config   PUT  PATCH',
+          '  GET    /api/mcp-servers           POST   { name, command, args?, env?, enabled? }',
+          '  GET    /api/mcp-servers/:id       PATCH  DELETE',
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
           '  POST   /api/providers/:id/fetch-models',

@@ -6,7 +6,7 @@ import { SocialConfigEditor } from './socialConfigEditor';
 
 // ─────────────────── App shell ───────────────────
 
-type Tab = 'sessions' | 'providers' | 'pets' | 'llm' | 'settings';
+type Tab = 'sessions' | 'providers' | 'mcp' | 'pets' | 'llm' | 'settings';
 
 function App() {
   const [status, setStatus]   = useState<Status | null>(null);
@@ -36,7 +36,7 @@ function App() {
       )}
 
       <nav className="bg-white border-b border-slate-200 px-6 flex gap-1">
-        {(['sessions','providers','pets','llm','settings'] as const).map(t => (
+        {(['sessions','providers','mcp','pets','llm','settings'] as const).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -46,7 +46,7 @@ function App() {
                 : 'border-transparent text-slate-500 hover:text-slate-700'
             }`}
           >
-            {t === 'llm' ? 'LLM Test' : t.charAt(0).toUpperCase() + t.slice(1)}
+            {t === 'llm' ? 'LLM Test' : t === 'mcp' ? 'MCP' : t.charAt(0).toUpperCase() + t.slice(1)}
           </button>
         ))}
       </nav>
@@ -54,6 +54,7 @@ function App() {
       <main className={`p-6 mx-auto ${tab === 'sessions' ? 'max-w-7xl' : 'max-w-4xl'}`}>
         {tab === 'sessions'  && <SessionsTab  onError={setError} />}
         {tab === 'providers' && <ProvidersTab onError={setError} />}
+        {tab === 'mcp'       && <MCPTab       onError={setError} />}
         {tab === 'pets'      && <PetsTab      onError={setError} />}
         {tab === 'llm'       && <LLMTab       onError={setError} />}
         {tab === 'settings'  && <SettingsTab  onError={setError} />}
@@ -673,6 +674,161 @@ function ProviderForm({ onSave, onCancel }: {
         <input value={model} onChange={e => setModel(e.target.value)} placeholder="claude-3-5-haiku-latest"
           className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
       </Field>
+      <div className="flex gap-2 justify-end">
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-100">Cancel</button>
+        <button type="submit" disabled={pending} className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded disabled:opacity-50">
+          {pending ? 'saving…' : 'Save'}
+        </button>
+      </div>
+    </form>
+  );
+}
+
+// ─────────────────── MCP servers ───────────────────
+
+function MCPTab({ onError }: { onError: (s: string) => void }) {
+  const [items,    setItems]    = useState<api.MCPServer[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [editing,  setEditing]  = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    try { setItems(await api.listMCPServers()); }
+    catch (e: any) { onError(e.message); }
+  }, [onError]);
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const onDelete = async (id: string) => {
+    if (!confirm('delete this MCP server?')) return;
+    try { await api.deleteMCPServer(id); refresh(); }
+    catch (e: any) { onError(e.message); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <h2 className="text-lg font-semibold">MCP Servers</h2>
+        <button onClick={() => setCreating(true)} className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded">+ Add</button>
+      </div>
+      <p className="text-xs text-slate-500">
+        Each server is a child process spawned via <code>command</code> + <code>args</code> + <code>env</code>.
+        Reference one in a pet's <code>mcpServerName</code> to make its tools available to the agent.
+        (Lifecycle / spawning will be wired in Phase 5; this tab manages config only.)
+      </p>
+
+      {creating && (
+        <MCPServerForm
+          onSave={async (input) => {
+            try { await api.createMCPServer(input); setCreating(false); refresh(); }
+            catch (e: any) { onError(e.message); }
+          }}
+          onCancel={() => setCreating(false)}
+        />
+      )}
+
+      {items.length === 0 && !creating && (
+        <div className="text-sm text-slate-400 italic">No MCP servers yet. Click + Add.</div>
+      )}
+
+      <div className="space-y-2">
+        {items.map(s => editing === s.id ? (
+          <MCPServerForm
+            key={s.id}
+            initial={s}
+            onSave={async (input) => {
+              try { await api.updateMCPServer(s.id, input); setEditing(null); refresh(); }
+              catch (e: any) { onError(e.message); }
+            }}
+            onCancel={() => setEditing(null)}
+          />
+        ) : (
+          <div key={s.id} className="bg-white border border-slate-200 rounded p-4 flex items-start gap-4">
+            <div className="flex-1">
+              <div className="flex items-center gap-2">
+                <span className="font-mono font-medium">{s.name}</span>
+                {!s.enabled && <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">disabled</span>}
+                <span className="ml-auto text-[10px] text-slate-400 font-mono">{s.id.slice(0, 8)}…</span>
+              </div>
+              <div className="text-xs text-slate-600 font-mono mt-1 whitespace-pre-wrap">
+                {[s.command, ...s.args].join(' ')}
+              </div>
+              {Object.keys(s.env).length > 0 && (
+                <div className="text-xs text-slate-500 font-mono mt-1">
+                  env: {Object.keys(s.env).join(', ')} <span className="text-slate-400">({Object.keys(s.env).length})</span>
+                </div>
+              )}
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setEditing(s.id)} className="text-sm text-cyan-600 hover:text-cyan-800">edit</button>
+              <button onClick={() => onDelete(s.id)} className="text-sm text-red-500 hover:text-red-700">delete</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function MCPServerForm({ initial, onSave, onCancel }: {
+  initial?: api.MCPServer;
+  onSave: (input: { name: string; command: string; args: string[]; env: Record<string, string>; enabled: boolean }) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [name,    setName]    = useState(initial?.name ?? '');
+  const [command, setCommand] = useState(initial?.command ?? 'npx');
+  const [argsText, setArgsText] = useState(initial?.args.join('\n') ?? '');
+  const [envText,  setEnvText]  = useState(
+    initial ? Object.entries(initial.env).map(([k, v]) => `${k}=${v}`).join('\n') : ''
+  );
+  const [enabled, setEnabled] = useState(initial?.enabled ?? true);
+  const [pending, setPending] = useState(false);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !command.trim()) return;
+    const args = argsText.split('\n').map(s => s.trim()).filter(Boolean);
+    const env: Record<string, string> = {};
+    for (const line of envText.split('\n')) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+      const eq = trimmed.indexOf('=');
+      if (eq < 0) continue;
+      const k = trimmed.slice(0, eq).trim();
+      const v = trimmed.slice(eq + 1);
+      if (k) env[k] = v;
+    }
+    setPending(true);
+    try { await onSave({ name: name.trim(), command: command.trim(), args, env, enabled }); }
+    finally { setPending(false); }
+  };
+
+  return (
+    <form onSubmit={submit} className="bg-white border border-cyan-200 rounded p-4 space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="name (referenced by social-config.mcpServerName)">
+          <input value={name} onChange={e => setName(e.target.value)} required
+            placeholder="qq-mcp"
+            className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+        </Field>
+        <Field label="command (executable)">
+          <input value={command} onChange={e => setCommand(e.target.value)} required
+            placeholder="npx / uvx / bun / python"
+            className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+        </Field>
+      </div>
+      <Field label="args (one per line)">
+        <textarea value={argsText} onChange={e => setArgsText(e.target.value)} rows={4}
+          placeholder={'-y\n@modelcontextprotocol/qq'}
+          className="w-full px-2 py-1 border border-slate-300 rounded font-mono text-sm" />
+      </Field>
+      <Field label="env (KEY=VALUE per line)">
+        <textarea value={envText} onChange={e => setEnvText(e.target.value)} rows={4}
+          placeholder="QQ_BOT_TOKEN=...\nDEBUG=1"
+          className="w-full px-2 py-1 border border-slate-300 rounded font-mono text-sm" />
+      </Field>
+      <label className="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" checked={enabled} onChange={e => setEnabled(e.target.checked)} />
+        <span>enabled</span>
+      </label>
       <div className="flex gap-2 justify-end">
         <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-100">Cancel</button>
         <button type="submit" disabled={pending} className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded disabled:opacity-50">

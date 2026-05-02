@@ -202,6 +202,27 @@ export interface SocialConfig {
   subagentModel: string;
 }
 
+// ─── MCP servers ───
+
+export interface MCPServer {
+  id: string;
+  name: string;
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export const listMCPServers   = ()                                      => request<MCPServer[]>('GET', '/api/mcp-servers');
+export const getMCPServer     = (id: string)                            => request<MCPServer>('GET', `/api/mcp-servers/${encodeURIComponent(id)}`);
+export const createMCPServer  = (input: { name: string; command: string; args?: string[]; env?: Record<string, string>; enabled?: boolean }) =>
+  request<MCPServer>('POST', '/api/mcp-servers', input);
+export const updateMCPServer  = (id: string, partial: Partial<Omit<MCPServer, 'id' | 'createdAt' | 'updatedAt'>>) =>
+  request<MCPServer>('PATCH', `/api/mcp-servers/${encodeURIComponent(id)}`, partial);
+export const deleteMCPServer  = (id: string)                            => request<{ ok: true }>('DELETE', `/api/mcp-servers/${encodeURIComponent(id)}`);
+
 export const getSocialConfig    = (petId: string)                          => request<SocialConfig>('GET', `/api/pets/${encodeURIComponent(petId)}/social-config`);
 export const putSocialConfig    = (petId: string, cfg: SocialConfig)       => request<SocialConfig>('PUT', `/api/pets/${encodeURIComponent(petId)}/social-config`, cfg);
 export const patchSocialConfig  = (petId: string, cfg: Partial<SocialConfig>) => request<SocialConfig>('PATCH', `/api/pets/${encodeURIComponent(petId)}/social-config`, cfg);
