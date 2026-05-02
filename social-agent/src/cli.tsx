@@ -52,24 +52,17 @@ interface ScreenProps {
 // ─────────────────── small components ───────────────────
 
 function Avatar() {
-  // Sailor-uniform schoolgirl portrait. Box-drawing only so glyph widths
-  // stay 1-cell on every terminal font.
-  //   row 1   ╱╳╲╱╲╱╲     long flowing hair + cross hair clip
+  // Minimal girl face. 4 rows. Box-drawing only — glyph widths stay 1-cell.
+  //   row 1   ╱╳╲╱╲╱╲     hair + cross hair clip
   //   row 2   │ ◕   ◕ │   eyes
   //   row 3   │   ‿    │  smile
-  //   row 4   ╲━━♥━━╱    choker with heart pendant
-  //   row 5   ╱┃═══┃╲    sailor collar with stripes
-  //   row 6   │ ◢▼◣ │    red ribbon
-  //   row 7   ╲══════╱   uniform body
+  //   row 4   ╲━━━━━╱    chin
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>{'   ╱╳╲╱╲╱╲   '}</Text>
-      <Text color={ACCENT}>{'  │ ◕   ◕ │  '}</Text>
-      <Text color={ACCENT}>{'  │   ‿    │ '}</Text>
-      <Text color={ACCENT}>{'   ╲━━♥━━╱   '}</Text>
-      <Text color={ACCENT}>{'   ╱┃═══┃╲   '}</Text>
-      <Text color={ACCENT}>{'   │ ◢▼◣ │   '}</Text>
-      <Text color={ACCENT}>{'   ╲══════╱  '}</Text>
+      <Text color={ACCENT}>{'  ╱╳╲╱╲╱╲  '}</Text>
+      <Text color={ACCENT}>{' │ ◕   ◕ │ '}</Text>
+      <Text color={ACCENT}>{' │   ‿    │'}</Text>
+      <Text color={ACCENT}>{'  ╲━━━━━╱  '}</Text>
     </Box>
   );
 }
