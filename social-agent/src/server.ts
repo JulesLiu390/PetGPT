@@ -6,7 +6,12 @@ import {
 import {
   isUnlocked, isInitialized, unlock, lock,
   listProviders, getProvider, createProvider, updateProvider, deleteProvider, changePassword,
+  getProviderInternal,
 } from './providers.ts';
+import { createNodePlatform } from './platform/index.ts';
+import { createLLMClient, LLMError } from './core/llm/index.ts';
+
+const platform = createNodePlatform();
 
 const PORT = Number(process.env.SOCIAL_AGENT_PORT ?? 8787);
 const paths = ensureHome();
@@ -168,6 +173,41 @@ const server = Bun.serve({
       }
     }
 
+    // ── LLM test (probe a saved provider) ──
+    if (method === 'POST' && pathname === '/api/llm/test') {
+      return safe(async () => {
+        const body = await readBody<{ providerId?: string; model?: string; prompt?: string; temperature?: number; maxTokens?: number; timeoutMs?: number }>(req);
+        if (!body?.providerId || !body?.model || !body?.prompt) {
+          return err(400, 'providerId, model, prompt required');
+        }
+        const provider = await getProviderInternal(body.providerId);
+        if (!provider) return err(404, 'provider not found');
+        const client = createLLMClient(platform, provider);
+        try {
+          const r = await client.chat({
+            messages: [{ role: 'user', content: body.prompt }],
+            model: body.model,
+            temperature: body.temperature,
+            maxTokens: body.maxTokens ?? 256,
+            timeoutMs: body.timeoutMs,
+          });
+          return ok({
+            content: r.content,
+            model: r.model,
+            inputTokens: r.inputTokens,
+            outputTokens: r.outputTokens,
+            elapsedMs: r.elapsedMs,
+            finishReason: r.finishReason,
+          });
+        } catch (e) {
+          if (e instanceof LLMError) {
+            return err(e.status && e.status >= 400 ? e.status : 502, e.message);
+          }
+          throw e;
+        }
+      });
+    }
+
     // ── Index ──
     if (method === 'GET' && pathname === '/') {
       return new Response(
@@ -186,6 +226,7 @@ const server = Bun.serve({
           '  POST   /api/providers/change-password { newPassword }',
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
+          '  POST   /api/llm/test              { providerId, model, prompt, ...opts }',
           '  WS     /ws',
           '',
         ].join('\n'),
