@@ -4,8 +4,7 @@ import {
   listPets, createPet, getPet, updatePet, deletePet,
 } from './config.ts';
 import {
-  isUnlocked, isInitialized, unlock, lock,
-  listProviders, getProvider, createProvider, updateProvider, deleteProvider, changePassword,
+  listProviders, getProvider, createProvider, updateProvider, deleteProvider,
   getProviderInternal,
 } from './providers.ts';
 import { createNodePlatform } from './platform/index.ts';
@@ -43,9 +42,6 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
     return await fn();
   } catch (e: any) {
     const msg = e?.message ?? String(e);
-    if (msg === 'locked') return err(423, 'providers store is locked — POST /api/providers/unlock first');
-    if (msg === 'invalid master password') return err(401, msg);
-    if (msg.startsWith('master password too short')) return err(400, msg);
     if (msg === 'apiKey required') return err(400, msg);
     return err(500, msg);
   }
@@ -77,10 +73,7 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
 
     // ── Status ──
     if (method === 'GET' && pathname === '/api/status') {
-      return ok({
-        home: paths.home,
-        providers: { initialized: isInitialized(), unlocked: isUnlocked() },
-      });
+      return ok({ home: paths.home });
     }
 
     // ── Settings ──
@@ -128,26 +121,6 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
     }
 
     // ── Providers ──
-    if (method === 'POST' && pathname === '/api/providers/unlock') {
-      return safe(async () => {
-        const body = await readBody<{ password?: string }>(req);
-        if (!body?.password) return err(400, 'password required');
-        const r = await unlock(body.password);
-        return ok({ ok: true, unlocked: true, created: r.created });
-      });
-    }
-    if (method === 'POST' && pathname === '/api/providers/lock') {
-      lock();
-      return ok({ ok: true, unlocked: false });
-    }
-    if (method === 'POST' && pathname === '/api/providers/change-password') {
-      return safe(async () => {
-        const body = await readBody<{ newPassword?: string }>(req);
-        if (!body?.newPassword) return err(400, 'newPassword required');
-        await changePassword(body.newPassword);
-        return ok({ ok: true });
-      });
-    }
     if (method === 'GET' && pathname === '/api/providers') {
       return safe(async () => ok(await listProviders()));
     }
@@ -230,9 +203,6 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/settings              PATCH',
           '  GET    /api/pets                  POST   { name, persona? }',
           '  GET    /api/pets/:id              PATCH  DELETE',
-          '  POST   /api/providers/unlock      { password }',
-          '  POST   /api/providers/lock',
-          '  POST   /api/providers/change-password { newPassword }',
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
           '  POST   /api/llm/test              { providerId, model, prompt, ...opts }',

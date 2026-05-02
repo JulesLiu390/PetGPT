@@ -5,7 +5,6 @@
 
 export interface Status {
   home: string;
-  providers: { initialized: boolean; unlocked: boolean };
 }
 
 export interface Settings {
@@ -79,9 +78,6 @@ export const updatePet  = (id: string, partial: Partial<Pick<Pet, 'name'|'person
 export const deletePet  = (id: string)                                         => request<{ ok: true }>('DELETE', `/api/pets/${encodeURIComponent(id)}`);
 
 // ─── providers ───
-export const unlockProviders = (password: string)               => request<{ ok: true; unlocked: true; created: boolean }>('POST', '/api/providers/unlock', { password });
-export const lockProviders   = ()                               => request<{ ok: true; unlocked: false }>('POST', '/api/providers/lock');
-export const changeMasterPassword = (newPassword: string)       => request<{ ok: true }>('POST', '/api/providers/change-password', { newPassword });
 export const listProviders   = ()                               => request<ProviderPublic[]>('GET', '/api/providers');
 export const createProvider  = (input: {
   type: ProviderPublic['type'];

@@ -36,7 +36,7 @@ export interface Paths {
   home: string;
   settings: string;
   settingsLocal: string;
-  providers: string;       // 加密文件 (AES-GCM, master password 派生)
+  providers: string;       // plaintext JSON, file mode 0600
   petsRegistry: string;    // pets.json — list of pets (name / persona / id)
   mcpServers: string;
   petsDir: string;         // pets/ — per-pet runtime state (workspace, training, ...)
@@ -51,7 +51,7 @@ export function getPaths(home = resolveHome()): Paths {
     home,
     settings:      join(home, 'settings.json'),
     settingsLocal: join(home, 'settings.local.json'),
-    providers:     join(home, 'providers.enc'),
+    providers:     join(home, 'providers.json'),
     petsRegistry:  join(home, 'pets.json'),
     mcpServers:    join(home, 'mcp-servers.json'),
     petsDir:       join(home, 'pets'),

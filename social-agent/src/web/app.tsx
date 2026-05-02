@@ -12,27 +12,12 @@ function App() {
   const [tab,    setTab]      = useState<Tab>('providers');
   const [error,  setError]    = useState<string | null>(null);
 
-  const refreshStatus = useCallback(async () => {
-    try { setStatus(await api.getStatus()); }
-    catch (e: any) { setError(e.message); }
+  useEffect(() => {
+    api.getStatus().then(setStatus).catch(e => setError(e.message));
   }, []);
-
-  useEffect(() => { refreshStatus(); }, [refreshStatus]);
-
-  const onLock = async () => {
-    await api.lockProviders();
-    refreshStatus();
-  };
 
   if (!status) {
     return <div className="p-8 text-slate-500">loading…</div>;
-  }
-
-  if (!status.providers.unlocked) {
-    return <UnlockScreen
-      initialized={status.providers.initialized}
-      onUnlocked={refreshStatus}
-    />;
   }
 
   return (
@@ -40,12 +25,6 @@ function App() {
       <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-4">
         <h1 className="font-semibold text-lg">social-agent</h1>
         <span className="text-xs text-slate-400 font-mono">{status.home}</span>
-        <span className="ml-auto text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-700">
-          🔓 unlocked
-        </span>
-        <button onClick={onLock} className="text-xs px-3 py-1 rounded border border-slate-300 hover:bg-slate-100">
-          Lock
-        </button>
       </header>
 
       {error && (
@@ -77,54 +56,6 @@ function App() {
         {tab === 'llm'       && <LLMTab       onError={setError} />}
         {tab === 'settings'  && <SettingsTab  onError={setError} />}
       </main>
-    </div>
-  );
-}
-
-// ─────────────────── Unlock screen ───────────────────
-
-function UnlockScreen({ initialized, onUnlocked }: { initialized: boolean; onUnlocked: () => void }) {
-  const [password, setPassword] = useState('');
-  const [pending,  setPending]  = useState(false);
-  const [error,    setError]    = useState<string | null>(null);
-
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setPending(true); setError(null);
-    try {
-      await api.unlockProviders(password);
-      onUnlocked();
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setPending(false);
-    }
-  };
-
-  return (
-    <div className="min-h-screen flex items-center justify-center bg-slate-50">
-      <form onSubmit={submit} className="bg-white border border-slate-200 rounded-lg p-8 w-96 shadow-sm">
-        <h2 className="font-semibold text-lg mb-1">social-agent</h2>
-        <p className="text-sm text-slate-500 mb-4">
-          {initialized ? 'enter master password to unlock providers store' : 'create master password (≥4 chars) to initialize'}
-        </p>
-        <input
-          type="password"
-          value={password}
-          onChange={e => setPassword(e.target.value)}
-          autoFocus
-          placeholder="master password"
-          className="w-full px-3 py-2 border border-slate-300 rounded mb-3 focus:outline-none focus:border-cyan-500"
-        />
-        {error && <div className="text-sm text-red-600 mb-3">{error}</div>}
-        <button
-          type="submit"
-          disabled={pending || !password}
-          className="w-full py-2 bg-cyan-600 hover:bg-cyan-700 text-white rounded disabled:opacity-50"
-        >
-          {pending ? 'unlocking…' : initialized ? 'Unlock' : 'Initialize'}
-        </button>
-      </form>
     </div>
   );
 }

@@ -1,52 +1,26 @@
-import { scryptSync, randomBytes, createCipheriv, createDecipheriv, randomUUID } from 'node:crypto';
-import { readFile, writeFile, rename } from 'node:fs/promises';
+import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
 import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { getPaths } from './paths.ts';
 
 /**
- * providers.enc layout
+ * Plaintext provider store.
  *
- *   {
- *     v: 1,
- *     kdf: 'scrypt',
- *     N, r, p,
- *     salt:  base64,
- *     nonce: base64,
- *     ct:    base64,
- *     tag:   base64
- *   }
+ * Same posture as ~/.aws/credentials, ~/.kube/config, ~/.npmrc, ~/.gitconfig:
+ * a plain JSON file with mode 0600. Security relies on FS permissions + user
+ * account isolation + (optionally) full-disk encryption.
  *
- * Decryption authenticates via GCM tag — that *is* the password verifier.
- * No separate password hash is stored.
+ * No master password, no unlock flow.
  */
-
-const SCRYPT_N = 1 << 14;   // ~50ms on a modern Mac, comfortable for interactive unlock
-const SCRYPT_R = 8;
-const SCRYPT_P = 1;
-const KEY_LEN = 32;
-const SALT_LEN = 16;
-const NONCE_LEN = 12;       // 96-bit nonce required by GCM
-
-interface EncryptedFile {
-  v: 1;
-  kdf: 'scrypt';
-  N: number;
-  r: number;
-  p: number;
-  salt: string;
-  nonce: string;
-  ct: string;
-  tag: string;
-}
 
 export interface Provider {
   id: string;
   type: 'openai-compat' | 'anthropic' | 'gemini';
-  name: string;            // display label
+  name: string;
   baseUrl?: string;
   defaultModel?: string;
-  apiKey: string;          // sensitive — never returned in API responses
+  apiKey: string;          // sensitive — never returned by listProviders/getProvider
   createdAt: number;
   updatedAt: number;
 }
@@ -59,125 +33,29 @@ const EMPTY: ProvidersData = { providers: [] };
 
 const paths = getPaths();
 
-// ─────────────────── in-memory unlocked state ───────────────────
-
-let unlockedKey: Buffer | null = null;
-let unlockedSalt: Buffer | null = null;
-let cached: ProvidersData | null = null;
-
-// ─────────────────── crypto helpers ───────────────────
-
-function deriveKey(password: string, salt: Buffer): Buffer {
-  return scryptSync(password, salt, KEY_LEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P });
-}
-
-function encrypt(plaintext: Buffer, key: Buffer) {
-  const nonce = randomBytes(NONCE_LEN);
-  const cipher = createCipheriv('aes-256-gcm', key, nonce);
-  const ct = Buffer.concat([cipher.update(plaintext), cipher.final()]);
-  const tag = cipher.getAuthTag();
-  return { nonce, ct, tag };
-}
-
-function decrypt(ct: Buffer, key: Buffer, nonce: Buffer, tag: Buffer): Buffer {
-  const decipher = createDecipheriv('aes-256-gcm', key, nonce);
-  decipher.setAuthTag(tag);
-  return Buffer.concat([decipher.update(ct), decipher.final()]);
-}
-
 // ─────────────────── disk I/O ───────────────────
 
-async function readEncryptedFile(): Promise<EncryptedFile | null> {
-  if (!existsSync(paths.providers)) return null;
-  const text = await readFile(paths.providers, 'utf8');
-  return JSON.parse(text) as EncryptedFile;
+async function load(): Promise<ProvidersData> {
+  if (!existsSync(paths.providers)) return structuredClone(EMPTY);
+  try {
+    const text = await readFile(paths.providers, 'utf8');
+    const parsed = JSON.parse(text) as ProvidersData;
+    if (!Array.isArray(parsed.providers)) return structuredClone(EMPTY);
+    return parsed;
+  } catch {
+    return structuredClone(EMPTY);
+  }
 }
 
-async function persist(data: ProvidersData, key: Buffer, salt: Buffer): Promise<void> {
-  const { nonce, ct, tag } = encrypt(Buffer.from(JSON.stringify(data)), key);
-  const file: EncryptedFile = {
-    v: 1,
-    kdf: 'scrypt',
-    N: SCRYPT_N,
-    r: SCRYPT_R,
-    p: SCRYPT_P,
-    salt: salt.toString('base64'),
-    nonce: nonce.toString('base64'),
-    ct: ct.toString('base64'),
-    tag: tag.toString('base64'),
-  };
+async function save(data: ProvidersData): Promise<void> {
   mkdirSync(dirname(paths.providers), { recursive: true });
   const tmp = `${paths.providers}.tmp.${process.pid}.${Date.now()}`;
-  await writeFile(tmp, JSON.stringify(file), 'utf8');
+  await writeFile(tmp, JSON.stringify(data, null, 2), 'utf8');
+  await chmod(tmp, 0o600);
   await rename(tmp, paths.providers);
 }
 
 // ─────────────────── public API ───────────────────
-
-export function isUnlocked(): boolean {
-  return unlockedKey !== null;
-}
-
-export function isInitialized(): boolean {
-  return existsSync(paths.providers);
-}
-
-/**
- * Unlock with a master password.
- * - First call (file missing) → initializes the store with this password.
- * - Subsequent calls → derives key, attempts decrypt; throws on wrong password.
- *
- * After success, providers can be read/written until {@link lock}().
- */
-export async function unlock(password: string): Promise<{ created: boolean }> {
-  if (!password || password.length < 4) {
-    throw new Error('master password too short (min 4 chars)');
-  }
-  const file = await readEncryptedFile();
-  if (!file) {
-    // first-time setup
-    const salt = randomBytes(SALT_LEN);
-    const key = deriveKey(password, salt);
-    await persist(EMPTY, key, salt);
-    unlockedKey = key;
-    unlockedSalt = salt;
-    cached = structuredClone(EMPTY);
-    return { created: true };
-  }
-  // existing file → use file's stored salt + KDF params (allows future rotation)
-  const salt = Buffer.from(file.salt, 'base64');
-  const key = scryptSync(password, salt, KEY_LEN, { N: file.N, r: file.r, p: file.p });
-  let pt: Buffer;
-  try {
-    pt = decrypt(
-      Buffer.from(file.ct, 'base64'),
-      key,
-      Buffer.from(file.nonce, 'base64'),
-      Buffer.from(file.tag, 'base64'),
-    );
-  } catch {
-    throw new Error('invalid master password');
-  }
-  cached = JSON.parse(pt.toString('utf8')) as ProvidersData;
-  unlockedKey = key;
-  unlockedSalt = salt;
-  return { created: false };
-}
-
-/** Drop the unlocked key from memory. Subsequent reads/writes will fail. */
-export function lock(): void {
-  if (unlockedKey) unlockedKey.fill(0);
-  unlockedKey = null;
-  unlockedSalt = null;
-  cached = null;
-}
-
-function requireUnlocked(): { key: Buffer; salt: Buffer; data: ProvidersData } {
-  if (!unlockedKey || !unlockedSalt || !cached) {
-    throw new Error('locked');
-  }
-  return { key: unlockedKey, salt: unlockedSalt, data: cached };
-}
 
 export type ProviderPublic = Omit<Provider, 'apiKey'> & { apiKeyMasked: string };
 
@@ -192,22 +70,21 @@ function toPublic(p: Provider): ProviderPublic {
   return { ...rest, apiKeyMasked: maskApiKey(apiKey) };
 }
 
-/** List providers — apiKey field is masked, never sent in clear. */
 export async function listProviders(): Promise<ProviderPublic[]> {
-  const { data } = requireUnlocked();
-  return data.providers.map(toPublic);
+  const { providers } = await load();
+  return providers.map(toPublic);
 }
 
 export async function getProvider(id: string): Promise<ProviderPublic | undefined> {
-  const { data } = requireUnlocked();
-  const p = data.providers.find(x => x.id === id);
+  const { providers } = await load();
+  const p = providers.find(x => x.id === id);
   return p ? toPublic(p) : undefined;
 }
 
-/** Internal — full record incl. apiKey. Used by LLM dispatcher (not by REST). */
+/** Internal — full record incl. apiKey. Only the LLM dispatcher should use this. */
 export async function getProviderInternal(id: string): Promise<Provider | undefined> {
-  const { data } = requireUnlocked();
-  return data.providers.find(x => x.id === id);
+  const { providers } = await load();
+  return providers.find(x => x.id === id);
 }
 
 export async function createProvider(input: {
@@ -217,8 +94,8 @@ export async function createProvider(input: {
   defaultModel?: string;
   apiKey: string;
 }): Promise<ProviderPublic> {
-  const { key, salt, data } = requireUnlocked();
   if (!input.apiKey) throw new Error('apiKey required');
+  const data = await load();
   const now = Date.now();
   const p: Provider = {
     id: randomUUID(),
@@ -231,7 +108,7 @@ export async function createProvider(input: {
     updatedAt: now,
   };
   data.providers.push(p);
-  await persist(data, key, salt);
+  await save(data);
   return toPublic(p);
 }
 
@@ -239,7 +116,7 @@ export async function updateProvider(
   id: string,
   partial: Partial<Pick<Provider, 'type' | 'name' | 'baseUrl' | 'defaultModel' | 'apiKey'>>,
 ): Promise<ProviderPublic | null> {
-  const { key, salt, data } = requireUnlocked();
+  const data = await load();
   const idx = data.providers.findIndex(p => p.id === id);
   if (idx < 0) return null;
   const cur = data.providers[idx];
@@ -250,29 +127,15 @@ export async function updateProvider(
     createdAt: cur.createdAt,
     updatedAt: Date.now(),
   };
-  await persist(data, key, salt);
+  await save(data);
   return toPublic(data.providers[idx]);
 }
 
 export async function deleteProvider(id: string): Promise<boolean> {
-  const { key, salt, data } = requireUnlocked();
+  const data = await load();
   const before = data.providers.length;
   data.providers = data.providers.filter(p => p.id !== id);
   if (data.providers.length === before) return false;
-  await persist(data, key, salt);
+  await save(data);
   return true;
-}
-
-/** Change the master password by re-encrypting everything with a new key. */
-export async function changePassword(newPassword: string): Promise<void> {
-  const { data } = requireUnlocked();
-  if (!newPassword || newPassword.length < 4) {
-    throw new Error('master password too short (min 4 chars)');
-  }
-  const newSalt = randomBytes(SALT_LEN);
-  const newKey = deriveKey(newPassword, newSalt);
-  await persist(data, newKey, newSalt);
-  if (unlockedKey) unlockedKey.fill(0);
-  unlockedKey = newKey;
-  unlockedSalt = newSalt;
 }

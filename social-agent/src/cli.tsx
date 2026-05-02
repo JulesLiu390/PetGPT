@@ -1,12 +1,9 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect } from 'react';
 import { render, Box, Text, useInput, useApp } from 'ink';
 import { startServer } from './server.ts';
 import { getPaths } from './paths.ts';
 import { readSettings, listPets, type Pet } from './config.ts';
-import {
-  isUnlocked, isInitialized, unlock, lock,
-  listProviders, type ProviderPublic,
-} from './providers.ts';
+import { listProviders, type ProviderPublic } from './providers.ts';
 
 // ─────────────────── boot: start server in same process ───────────────────
 
@@ -16,17 +13,15 @@ const SERVER_URL = `http://localhost:${server.port}`;
 
 // ─────────────────── types ───────────────────
 
-type Screen = 'menu' | 'status' | 'unlock' | 'providers' | 'pets' | 'settings';
+type Screen = 'menu' | 'status' | 'providers' | 'pets' | 'settings';
 
 interface ScreenProps {
   goto: (s: Screen) => void;
-  unlocked: boolean;
-  refreshUnlocked: () => void;
 }
 
 // ─────────────────── small components ───────────────────
 
-function Header({ unlocked }: { unlocked: boolean }) {
+function Header() {
   const paths = getPaths();
   return (
     <Box flexDirection="column" marginBottom={1}>
@@ -34,10 +29,6 @@ function Header({ unlocked }: { unlocked: boolean }) {
         <Text bold color="cyan">social-agent</Text>
         <Text dimColor> v0.0.1 · </Text>
         <Text>{SERVER_URL}</Text>
-        <Text>  </Text>
-        <Text color={unlocked ? 'green' : 'yellow'}>
-          {unlocked ? '🔓 unlocked' : '🔒 locked'}
-        </Text>
       </Box>
       <Text dimColor>{paths.home}</Text>
     </Box>
@@ -52,7 +43,7 @@ function Footer({ hint }: { hint: string }) {
   );
 }
 
-interface MenuItem { key: Screen | 'lock' | 'quit'; label: string; disabled?: boolean }
+interface MenuItem { key: Screen | 'quit'; label: string; disabled?: boolean }
 
 function Menu({ items, onSelect }: { items: MenuItem[]; onSelect: (k: MenuItem['key']) => void }) {
   const enabledIdxs = items.map((it, i) => it.disabled ? -1 : i).filter(i => i >= 0);
@@ -86,25 +77,13 @@ function Menu({ items, onSelect }: { items: MenuItem[]; onSelect: (k: MenuItem['
   );
 }
 
-function PasswordDots({ length }: { length: number }) {
-  return (
-    <Box>
-      <Text>{'•'.repeat(length)}</Text>
-      <Text color="cyan">▌</Text>
-    </Box>
-  );
-}
-
 // ─────────────────── screens ───────────────────
 
-function MainMenu({ goto, unlocked, refreshUnlocked }: ScreenProps) {
+function MainMenu({ goto }: ScreenProps) {
   const { exit } = useApp();
   const items: MenuItem[] = [
     { key: 'status',    label: 'Status' },
-    unlocked
-      ? { key: 'lock',  label: 'Lock' }
-      : { key: 'unlock', label: isInitialized() ? 'Unlock providers store' : 'Initialize providers store' },
-    { key: 'providers', label: 'Providers',  disabled: !unlocked },
+    { key: 'providers', label: 'Providers' },
     { key: 'pets',      label: 'Pets' },
     { key: 'settings',  label: 'Settings' },
     { key: 'quit',      label: 'Quit' },
@@ -112,7 +91,6 @@ function MainMenu({ goto, unlocked, refreshUnlocked }: ScreenProps) {
 
   const onSelect = (k: MenuItem['key']) => {
     if (k === 'quit') exit();
-    else if (k === 'lock') { lock(); refreshUnlocked(); }
     else goto(k as Screen);
   };
 
@@ -124,15 +102,15 @@ function MainMenu({ goto, unlocked, refreshUnlocked }: ScreenProps) {
   );
 }
 
-function StatusScreen({ goto, unlocked }: ScreenProps) {
+function StatusScreen({ goto }: ScreenProps) {
   const paths = getPaths();
   const [pets, setPets] = useState<Pet[]>([]);
   const [providerCount, setProviderCount] = useState<number | null>(null);
 
   useEffect(() => {
     listPets().then(setPets).catch(() => {});
-    if (unlocked) listProviders().then(ps => setProviderCount(ps.length)).catch(() => {});
-  }, [unlocked]);
+    listProviders().then(ps => setProviderCount(ps.length)).catch(() => {});
+  }, []);
 
   useInput((input, key) => { if (key.escape || input === 'q') goto('menu'); });
 
@@ -140,53 +118,14 @@ function StatusScreen({ goto, unlocked }: ScreenProps) {
     <Box flexDirection="column">
       <Text bold underline>Status</Text>
       <Box marginTop={1} flexDirection="column">
-        <Row k="server"        v={SERVER_URL} />
-        <Row k="home"          v={paths.home} />
-        <Row k="settings"      v={paths.settings} />
-        <Row k="providers.enc" v={`${paths.providers}  ${unlocked ? '(unlocked)' : '(locked)'}`} />
-        <Row k="pets count"    v={String(pets.length)} />
-        <Row k="provider count" v={unlocked ? String(providerCount ?? '…') : '— (unlock first)'} />
+        <Row k="server"         v={SERVER_URL} />
+        <Row k="home"           v={paths.home} />
+        <Row k="settings"       v={paths.settings} />
+        <Row k="providers"      v={paths.providers} />
+        <Row k="pets count"     v={String(pets.length)} />
+        <Row k="provider count" v={String(providerCount ?? '…')} />
       </Box>
       <Footer hint="esc / q to back" />
-    </Box>
-  );
-}
-
-function UnlockScreen({ goto, refreshUnlocked }: ScreenProps) {
-  const [value, setValue] = useState('');
-  const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState(false);
-  const initialized = isInitialized();
-
-  useInput((input, key) => {
-    if (pending) return;
-    if (key.escape) goto('menu');
-    else if (key.return) {
-      if (!value || value.length < 4) { setError('password too short (min 4 chars)'); return; }
-      setError(null); setPending(true);
-      unlock(value)
-        .then(() => { refreshUnlocked(); goto('menu'); })
-        .catch((e) => { setError(e?.message ?? String(e)); setPending(false); });
-    }
-    else if (key.backspace || key.delete) setValue(v => v.slice(0, -1));
-    else if (input && !key.ctrl && !key.meta && input.length === 1) setValue(v => v + input);
-  });
-
-  return (
-    <Box flexDirection="column">
-      <Text bold underline>{initialized ? 'Unlock providers store' : 'Initialize providers store'}</Text>
-      <Text dimColor>
-        {initialized
-          ? 'enter your master password'
-          : 'create a master password (≥ 4 chars). this will encrypt providers.enc.'}
-      </Text>
-      <Box marginTop={1}>
-        <Text>password: </Text>
-        <PasswordDots length={value.length} />
-      </Box>
-      {error && <Box marginTop={1}><Text color="red">{error}</Text></Box>}
-      {pending && <Box marginTop={1}><Text color="yellow">deriving key…</Text></Box>}
-      <Footer hint="enter to submit · esc to cancel" />
     </Box>
   );
 }
@@ -291,22 +230,19 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
 
 function App() {
   const [screen, setScreen] = useState<Screen>('menu');
-  const [unlocked, setUnlocked] = useState<boolean>(isUnlocked());
-  const refreshUnlocked = useCallback(() => setUnlocked(isUnlocked()), []);
 
   const { exit } = useApp();
   useInput((input, key) => {
     if (screen === 'menu' && (input === 'q' || (key.ctrl && input === 'c'))) exit();
   });
 
-  const props: ScreenProps = { goto: setScreen, unlocked, refreshUnlocked };
+  const props: ScreenProps = { goto: setScreen };
 
   return (
     <Box flexDirection="column" padding={1}>
-      <Header unlocked={unlocked} />
+      <Header />
       {screen === 'menu'      && <MainMenu      {...props} />}
       {screen === 'status'    && <StatusScreen  {...props} />}
-      {screen === 'unlock'    && <UnlockScreen  {...props} />}
       {screen === 'providers' && <ProvidersScreen {...props} />}
       {screen === 'pets'      && <PetsScreen    {...props} />}
       {screen === 'settings'  && <SettingsScreen {...props} />}
