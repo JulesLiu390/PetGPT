@@ -52,29 +52,16 @@ interface ScreenProps {
 // ─────────────────── small components ───────────────────
 
 function Avatar() {
-  // Sitting cat — 9 rows, full body (head + ears + body + paws + tail).
-  // Adapted from a common Joan Stark style sitting cat, normalized to box
-  // drawing so glyph widths stay 1-cell across terminal fonts.
-  //   row 1   /\___/\        ears + head dome
-  //   row 2  (  o   o )      eyes
-  //   row 3   ( =^= )         nose / whiskers
-  //   row 4    \   /          jaw
-  //   row 5   / o.o \         chest
-  //   row 6  /       \        body
-  //   row 7  | |   | |        front legs
-  //   row 8   \___/_/         lower body
-  //   row 9     U U           paws
+  // 7-row ASCII cat (user-supplied). Pure ASCII — never width-issues.
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>{'   ╱╲___╱╲   '}</Text>
-      <Text color={ACCENT}>{'  ╱       ╲  '}</Text>
-      <Text color={ACCENT}>{' │ ◕     ◕ │ '}</Text>
-      <Text color={ACCENT}>{' │    ω    │ '}</Text>
-      <Text color={ACCENT}>{'  ╲ ─━━━─ ╱  '}</Text>
-      <Text color={ACCENT}>{' ╱           ╲'}</Text>
-      <Text color={ACCENT}>{'│  ╳     ╳  │'}</Text>
-      <Text color={ACCENT}>{' ╲━━━━━━━━━╱ '}</Text>
-      <Text color={ACCENT}>{'   ╲╱   ╲╱   '}</Text>
+      <Text color={ACCENT}>{'A_A'}</Text>
+      <Text color={ACCENT}>{' (-.-)'}</Text>
+      <Text color={ACCENT}>{'  |-|'}</Text>
+      <Text color={ACCENT}>{' /   \\'}</Text>
+      <Text color={ACCENT}>{'|     |   __'}</Text>
+      <Text color={ACCENT}>{'|  || |  |  \\__'}</Text>
+      <Text color={ACCENT}>{' \\_||_/_/'}</Text>
     </Box>
   );
 }
