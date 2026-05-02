@@ -20,6 +20,21 @@ import { createLLMClient, type ChatResponse } from './core/llm/index.ts';
 const { server, platform } = await startServer();
 const SERVER_URL = `http://localhost:${server.port}`;
 
+// ─────────────────── theme ───────────────────
+
+/** Pink accent — replaces the previous cyan brand color throughout the TUI. */
+const ACCENT = '#ff69b4';
+
+/** Rainbow palette used by the main menu (per-item index). */
+const RAINBOW = [
+  '#ff5577',   // red
+  '#ff9933',   // orange
+  '#ffd700',   // yellow
+  '#33dd66',   // green
+  '#3399ff',   // blue
+  '#aa55ff',   // violet
+];
+
 // ─────────────────── types ───────────────────
 
 type Screen =
@@ -36,16 +51,32 @@ interface ScreenProps {
 
 // ─────────────────── small components ───────────────────
 
+function Avatar() {
+  // 4-row mini character used as the TUI mascot. Pure box-drawing so the
+  // glyph widths stay 1-cell on every terminal font.
+  return (
+    <Box flexDirection="column">
+      <Text color={ACCENT}>{'  ╭─────╮  '}</Text>
+      <Text color={ACCENT}>{'  │ ◕‿◕ │  '}</Text>
+      <Text color={ACCENT}>{'  ╰──┬──╯  '}</Text>
+      <Text color={ACCENT}>{'   ╱ │ ╲   '}</Text>
+    </Box>
+  );
+}
+
 function Header() {
   const paths = getPaths();
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Box>
-        <Text bold color="cyan">social-agent</Text>
-        <Text dimColor> v0.0.1 · </Text>
+    <Box flexDirection="row" marginBottom={1}>
+      <Avatar />
+      <Box flexDirection="column" marginLeft={2}>
+        <Text>
+          <Text bold color={ACCENT}>social-agent</Text>
+          <Text dimColor> v0.0.1</Text>
+        </Text>
         <Text>{SERVER_URL}</Text>
+        <Text dimColor>{paths.home}</Text>
       </Box>
-      <Text dimColor>{paths.home}</Text>
     </Box>
   );
 }
@@ -80,14 +111,22 @@ function Menu({ items, onSelect }: { items: MenuItem[]; onSelect: (k: MenuItem['
 
   return (
     <Box flexDirection="column">
-      {items.map((it, i) => (
-        <Box key={it.key}>
-          <Text color={i === idx ? 'cyan' : it.disabled ? 'gray' : undefined} bold={i === idx}>
-            {i === idx ? '▶ ' : '  '}{it.label}
-            {it.disabled ? ' (disabled)' : ''}
-          </Text>
-        </Box>
-      ))}
+      {items.map((it, i) => {
+        const selected = i === idx;
+        const color = it.disabled
+          ? 'gray'
+          : selected
+            ? ACCENT
+            : RAINBOW[i % RAINBOW.length];
+        return (
+          <Box key={it.key}>
+            <Text color={color} bold={selected}>
+              {selected ? '▶ ' : '  '}{it.label}
+              {it.disabled ? ' (disabled)' : ''}
+            </Text>
+          </Box>
+        );
+      })}
     </Box>
   );
 }
@@ -195,8 +234,8 @@ function ProvidersScreen({ goto }: ScreenProps) {
           return (
             <Box key={p.id} flexDirection="column" marginBottom={1}>
               <Box>
-                <Text color={sel ? 'cyan' : undefined}>{sel ? '▶ ' : '  '}</Text>
-                <Text bold={sel} color={sel ? 'cyan' : undefined}>{p.name}</Text>
+                <Text color={sel ? '#ff69b4' : undefined}>{sel ? '▶ ' : '  '}</Text>
+                <Text bold={sel} color={sel ? '#ff69b4' : undefined}>{p.name}</Text>
                 <Text dimColor> · {p.type}</Text>
               </Box>
               <Box marginLeft={2}><Text dimColor>apiKey:       {p.apiKeyMasked}</Text></Box>
@@ -330,8 +369,8 @@ function PetsScreen({ goto }: ScreenProps) {
           return (
             <Box key={p.id} flexDirection="column" marginBottom={1}>
               <Box>
-                <Text color={sel ? 'cyan' : undefined}>{sel ? '▶ ' : '  '}</Text>
-                <Text bold={sel} color={sel ? 'cyan' : undefined}>{p.name}</Text>
+                <Text color={sel ? '#ff69b4' : undefined}>{sel ? '▶ ' : '  '}</Text>
+                <Text bold={sel} color={sel ? '#ff69b4' : undefined}>{p.name}</Text>
                 <Text dimColor>  ({p.id.slice(0, 8)}…)</Text>
               </Box>
               {p.persona && (

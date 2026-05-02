@@ -139,7 +139,7 @@ export function Form({ fields, initial, submitLabel = 'Save', cancelLabel = 'Can
       ))}
       <Box marginTop={1}>
         <ButtonText label={submitting ? `${submitLabel}…` : submitLabel}
-                    color="cyan"
+                    color="#ff69b4"
                     focused={focusIdx === submitIdx} />
         <Box marginLeft={2}>
           <ButtonText label={cancelLabel} color="red" focused={focusIdx === cancelIdx} />
@@ -156,7 +156,7 @@ export function Form({ fields, initial, submitLabel = 'Save', cancelLabel = 'Can
 function FieldRender({ field, value, focused }: { field: FormField; value: string; focused: boolean }) {
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <Text color={focused ? 'cyan' : undefined} bold={focused} dimColor={!focused}>
+      <Text color={focused ? '#ff69b4' : undefined} bold={focused} dimColor={!focused}>
         {focused ? '▶ ' : '  '}{field.label}
       </Text>
       <Box marginLeft={2}>
@@ -174,7 +174,7 @@ function TextLine({ value, focused, placeholder, mask }: { value: string; focuse
   return (
     <Box>
       <Text>{display}</Text>
-      {focused && <Text color="cyan">▌</Text>}
+      {focused && <Text color="#ff69b4">▌</Text>}
     </Box>
   );
 }
@@ -195,7 +195,7 @@ function SelectRow({ options, value, focused }: { options: { value: string; labe
         const selected = o.value === value;
         return (
           <Box key={o.value} marginRight={2}>
-            <Text color={selected ? (focused ? 'cyan' : 'white') : 'gray'} bold={selected && focused}>
+            <Text color={selected ? (focused ? '#ff69b4' : 'white') : 'gray'} bold={selected && focused}>
               {selected ? '(•) ' : '( ) '}{o.label ?? o.value}
             </Text>
           </Box>
