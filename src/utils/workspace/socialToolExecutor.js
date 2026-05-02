@@ -2424,7 +2424,7 @@ function _formatChatMsg(msg) {
 }
 
 async function executeGetSituation(args, context) {
-  const { petId, targetId, targetType, dataBuffer, intentInjectionWatermarks, sentCache, prevEvalTime, lastPlan } = context;
+  const { petId, targetId, targetType, dataBuffer, intentInjectionWatermarks, inFlightReplies } = context;
   if (!petId || !targetId) return { error: '缺少 petId 或 targetId' };
 
   const n = Math.max(1, Math.min(parseInt(args?.n, 10) || 60, 200));
@@ -2445,31 +2445,20 @@ async function executeGetSituation(args, context) {
     chatBlock = '（暂无群消息）';
   }
 
-  // ── "正在送达中"的 reply 注入：把上轮 plan 派的、还在 Reply 层处理的 reply 伪装成
-  // chat 末尾的一条 bot 消息。LLM 看到自然会把它当成"我刚说过"，避免重复。
-  // 触发条件：lastPlan 含 reply + sentCache 中没有 prevEvalTime 之后的真实 send 条目
-  // + reply_brief.md 还有内容。
+  // ── "正在送达中"的 reply 注入：当前 target 上还在 Reply 层跑的所有任务（最多 3 条）
+  // 都伪装成 chat 末尾的消息块——按派发时间顺序排列，brief 用派发瞬间的快照。
+  // 任务一旦真正 send_message 完成就被 finally 从 inFlightReplies splice 掉，下轮 eval 自然消失。
+  // 目的：让 LLM 看到自己已派出但群友尚未看到的 reply，不再派同主题重复。
   const dir = targetType === 'friend' ? 'friend' : 'group';
-  const lastPlanHadReply = lastPlan?.actions?.some(a => a?.type === 'reply');
-  if (lastPlanHadReply && prevEvalTime) {
-    const cached = sentCache?.get(targetId) || [];
-    // 只数真正的文字 reply send（过滤掉 voice/sticker/AI 生图等占位条）
-    const hasRealReplySent = cached.some(m => {
-      if (!m?.timestamp) return false;
-      if (m._isVoiceSend || m._isStickerSend || m._genImageFileName) return false;
-      return new Date(m.timestamp).getTime() > prevEvalTime;
-    });
-    if (!hasRealReplySent) {
-      let brief = '';
-      try {
-        brief = (await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/reply_brief.md`).catch(() => '')) || '';
-      } catch { /* ignore */ }
-      if (brief.trim()) {
-        const ts = new Date(prevEvalTime).toLocaleTimeString('zh-CN', { hour12: false });
-        const synth = `[${ts}] **【我刚提交的 reply, 即将送达】** (Reply 层处理中, 群友尚未看到):\n${brief.trim()}`;
-        chatBlock = chatBlock === '（暂无群消息）' ? synth : `${chatBlock}\n${synth}`;
-      }
-    }
+  const inFlightList = inFlightReplies?.get(targetId) || [];
+  if (inFlightList.length > 0) {
+    const sortedEntries = [...inFlightList].sort((a, b) => a.createdAt - b.createdAt);
+    const synthLines = sortedEntries.map((entry, i) => {
+      const ts = new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour12: false });
+      const briefText = entry.brief || '(brief 为空)';
+      return `[${ts}] **【在途 reply ${i + 1}/${sortedEntries.length}, 即将送达】** (Reply 层处理中, 群友尚未看到):\n${briefText}`;
+    }).join('\n');
+    chatBlock = chatBlock === '（暂无群消息）' ? synthLines : `${chatBlock}\n${synthLines}`;
   }
 
   // 读 recent_self.md
@@ -2481,7 +2470,7 @@ async function executeGetSituation(args, context) {
   const output = [
     '# 当前情况快照',
     '',
-    `## 群聊记录（最近 ${chatCount} 条；【我自己发的】= bot 自己之前发的内容；【我刚提交的 reply, 即将送达】= 上轮派的 reply 在 Reply 层生成中——本轮**严禁**派同主题 reply 重复说一遍）`,
+    `## 群聊记录（最近 ${chatCount} 条；【我自己发的】= bot 自己之前发的内容；【在途 reply N/M】= 之前派的 reply 在 Reply 层生成中（最多同时 3 条，按派发时间顺序），群友尚未看到——本轮**严禁**派同主题 reply 重复说一遍，发送完成后会自动从快照消失）`,
     chatBlock,
     '',
     '## 你最近的动作 / 在途任务（recent_self）',

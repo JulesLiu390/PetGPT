@@ -99,6 +99,43 @@ export default function SocialPage() {
   const [testingVoice, setTestingVoice] = useState(false);
   const [testVoiceError, setTestVoiceError] = useState('');
 
+  // 左侧栏（target 列表）+ 右侧栏（Intent State / Prompt Cache / Training Data）的折叠状态 + 可拖宽度
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);     // 默认展开
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);   // 默认展开
+  const [leftPanelWidth, setLeftPanelWidth] = useState(160);               // px，默认 w-40
+  const [rightPanelWidth, setRightPanelWidth] = useState(320);             // px，默认 w-80
+  const LEFT_MIN = 120, LEFT_MAX = 360;
+  const RIGHT_MIN = 200, RIGHT_MAX = 600;
+  const [panelStateExpanded, setPanelStateExpanded] = useState(true);      // Intent State 默认展开
+  const [panelCacheExpanded, setPanelCacheExpanded] = useState(true);      // Prompt Cache 默认展开
+  const [panelTrainingExpanded, setPanelTrainingExpanded] = useState(true);// Training Data 默认展开
+
+  // 通用拖动分隔条：mousedown 抓起始 X 和起始宽度，mousemove 算 delta 调宽度，mouseup 解绑
+  const startResize = useCallback((side) => (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = side === 'left' ? leftPanelWidth : rightPanelWidth;
+    const setter = side === 'left' ? setLeftPanelWidth : setRightPanelWidth;
+    const min = side === 'left' ? LEFT_MIN : RIGHT_MIN;
+    const max = side === 'left' ? LEFT_MAX : RIGHT_MAX;
+    // 左栏拖右扩、右栏拖左扩 → sign 决定方向
+    const sign = side === 'left' ? 1 : -1;
+    const onMove = (ev) => {
+      const next = Math.max(min, Math.min(max, startW + sign * (ev.clientX - startX)));
+      setter(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [leftPanelWidth, rightPanelWidth]);
+
   // Helper: ensure MCP server is running, then call a tool
   const callMcpTool = async (toolName, args = {}) => {
     const serverName = config.mcpServerName;
@@ -1633,63 +1670,99 @@ export default function SocialPage() {
         {/* ========== Log Section (always visible, superset feature) ========== */}
         <div className="flex-1 min-h-0 flex flex-row">
           {/* ── Left Sidebar: target list ── */}
-          <div className="w-40 shrink-0 border-r border-slate-200/60 flex flex-col overflow-hidden bg-slate-50/30">
-            {/* Fixed: All + System */}
-            <SidebarItem
-              active={logFilter === 'all'}
-              onClick={() => setLogFilter('all')}
-              label="All"
-              count={logs.length}
-            />
-            <SidebarItem
-              active={logFilter === 'system'}
-              onClick={() => setLogFilter('system')}
-              label="System"
-              count={logs.filter(l => !l.target).length}
-            />
-
-            {/* Separator */}
-            {watchedTargets.length > 0 && <div className="border-t border-slate-200/60 mx-2 my-1" />}
-
-            {/* Scrollable target list */}
-            <div className="flex-1 overflow-y-auto">
-              {watchedTargets.map(t => {
-                const mode = lurkModes[t.id] || 'normal';
-                const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
-                const displayName = targetNames[t.id] || t.id;
-                const isPaused = pausedTargets[t.id] || false;
-                const isTrainingEnabled = trainingTargets[t.id] || false;
-                return (
-                  <SidebarItem
-                    key={t.id}
-                    active={logFilter === t.id}
-                    onClick={() => setLogFilter(t.id)}
-                    label={displayName}
-                    count={logCountByTarget[t.id] || 0}
-                    lurkIcon={socialActive ? lurkIcon : null}
-                    onLurkClick={socialActive ? () => {
-                      const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
-                      setTargetLurkMode(t.id, next);
-                    } : null}
-                    paused={isPaused}
-                    onPauseClick={() => toggleTargetPaused(t.id)}
-                    trainingEnabled={trainingCollectionEnabled ? isTrainingEnabled : undefined}
-                    onTrainingClick={trainingCollectionEnabled ? () => setTargetTrainingEnabled(t.id, !isTrainingEnabled) : null}
-                  />
-                );
-              })}
-            </div>
-
-            {/* Clear logs */}
-            <div className="border-t border-slate-200/60 p-1.5">
+          <div
+            className="shrink-0 border-r border-slate-200/60 flex flex-col overflow-hidden bg-slate-50/30"
+            style={{ width: leftPanelCollapsed ? 28 : leftPanelWidth }}
+          >
+            {leftPanelCollapsed ? (
               <button
-                onClick={() => { emit('social-clear-logs'); setLogs([]); }}
-                className="w-full text-[10px] text-slate-400 hover:text-red-500 py-1 rounded hover:bg-red-50 transition-colors"
+                onClick={() => setLeftPanelCollapsed(false)}
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 self-center"
+                title="展开 Targets"
               >
-                Clear Logs
+                ▶
               </button>
-            </div>
+            ) : (
+              <>
+                {/* Header: collapse button */}
+                <div className="flex items-center justify-between px-2 py-1 border-b border-slate-200/60 shrink-0 bg-white/40">
+                  <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Targets</span>
+                  <button
+                    onClick={() => setLeftPanelCollapsed(true)}
+                    className="p-0.5 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100"
+                    title="折叠 Targets"
+                  >
+                    ◀
+                  </button>
+                </div>
+
+                {/* Fixed: All + System */}
+                <SidebarItem
+                  active={logFilter === 'all'}
+                  onClick={() => setLogFilter('all')}
+                  label="All"
+                  count={logs.length}
+                />
+                <SidebarItem
+                  active={logFilter === 'system'}
+                  onClick={() => setLogFilter('system')}
+                  label="System"
+                  count={logs.filter(l => !l.target).length}
+                />
+
+                {/* Separator */}
+                {watchedTargets.length > 0 && <div className="border-t border-slate-200/60 mx-2 my-1" />}
+
+                {/* Scrollable target list */}
+                <div className="flex-1 overflow-y-auto">
+                  {watchedTargets.map(t => {
+                    const mode = lurkModes[t.id] || 'normal';
+                    const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
+                    const displayName = targetNames[t.id] || t.id;
+                    const isPaused = pausedTargets[t.id] || false;
+                    const isTrainingEnabled = trainingTargets[t.id] || false;
+                    return (
+                      <SidebarItem
+                        key={t.id}
+                        active={logFilter === t.id}
+                        onClick={() => setLogFilter(t.id)}
+                        label={displayName}
+                        count={logCountByTarget[t.id] || 0}
+                        lurkIcon={socialActive ? lurkIcon : null}
+                        onLurkClick={socialActive ? () => {
+                          const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
+                          setTargetLurkMode(t.id, next);
+                        } : null}
+                        paused={isPaused}
+                        onPauseClick={() => toggleTargetPaused(t.id)}
+                        trainingEnabled={trainingCollectionEnabled ? isTrainingEnabled : undefined}
+                        onTrainingClick={trainingCollectionEnabled ? () => setTargetTrainingEnabled(t.id, !isTrainingEnabled) : null}
+                      />
+                    );
+                  })}
+                </div>
+
+                {/* Clear logs */}
+                <div className="border-t border-slate-200/60 p-1.5">
+                  <button
+                    onClick={() => { emit('social-clear-logs'); setLogs([]); }}
+                    className="w-full text-[10px] text-slate-400 hover:text-red-500 py-1 rounded hover:bg-red-50 transition-colors"
+                  >
+                    Clear Logs
+                  </button>
+                </div>
+              </>
+            )}
           </div>
+
+          {/* Drag handle: 左栏 ↔ 中栏（折叠时不显示） */}
+          {!leftPanelCollapsed && (
+            <div
+              onMouseDown={startResize('left')}
+              className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-cyan-300/60 transition-colors"
+              title="拖动调整宽度"
+            />
+          )}
 
           {/* ── Right: toolbar + log content ── */}
           <div className="flex-1 min-w-0 flex flex-col">
@@ -1832,33 +1905,9 @@ export default function SocialPage() {
                       ));
                     })()}
                   </div>
-                  {plan.state && (
-                    <div className="text-[9px] text-slate-400 font-mono whitespace-pre-wrap">{plan.state}</div>
-                  )}
                 </div>
               );
             })()}
-
-            <PromptCachePanel logs={usageLogsAfterReset} />
-
-            <TrainingDataCard
-              petId={selectedPetId}
-              trainingCollectionEnabled={trainingCollectionEnabled}
-              trainingTargets={trainingTargets}
-              onToggleGlobal={async (v) => {
-                setTrainingCollectionEnabled(v);
-                await tauri.updateSettings({ trainingCollectionEnabled: v }).catch(() => {});
-                emit('social-set-training-collection-enabled', { enabled: v });
-              }}
-              onOpenFolder={async () => {
-                try {
-                  await tauri.workspaceOpenSubfolder(selectedPetId, 'social/training/intent');
-                } catch (e) {
-                  console.error('[TrainingData] open folder failed:', e);
-                }
-              }}
-              onExport={() => setExportModalOpen(true)}
-            />
 
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
@@ -1903,6 +1952,97 @@ export default function SocialPage() {
                 ))
               )}
             </div>
+          </div>
+
+          {/* Drag handle: 中栏 ↔ 右栏（折叠时不显示） */}
+          {!rightPanelCollapsed && (
+            <div
+              onMouseDown={startResize('right')}
+              className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-cyan-300/60 transition-colors"
+              title="拖动调整宽度"
+            />
+          )}
+
+          {/* ── Right Sidebar: Inspector (Intent State / Prompt Cache / Training Data) ── */}
+          <div
+            className="shrink-0 border-l border-slate-200/60 flex flex-col bg-slate-50/40"
+            style={{ width: rightPanelCollapsed ? 28 : rightPanelWidth }}
+          >
+            {rightPanelCollapsed ? (
+              <button
+                onClick={() => setRightPanelCollapsed(false)}
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 self-center"
+                title="展开 Inspector"
+              >
+                ◀
+              </button>
+            ) : (
+              <>
+                <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-slate-200/60 shrink-0 bg-white/40">
+                  <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Inspector</span>
+                  <button
+                    onClick={() => setRightPanelCollapsed(true)}
+                    className="p-0.5 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100"
+                    title="折叠 Inspector"
+                  >
+                    ▶
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  {/* Intent State */}
+                  <CollapsibleSection
+                    title={`Intent State${selectedTarget ? ` · ${targetNames[selectedTarget] || selectedTarget}` : ''}`}
+                    expanded={panelStateExpanded}
+                    onToggle={() => setPanelStateExpanded(v => !v)}
+                  >
+                    {selectedTarget && intentPlans[selectedTarget]?.state ? (
+                      <div className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap leading-relaxed">
+                        {intentPlans[selectedTarget].state}
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        {selectedTarget ? '等待 Intent 评估…' : '未选择 target'}
+                      </div>
+                    )}
+                  </CollapsibleSection>
+
+                  {/* Prompt Cache */}
+                  <CollapsibleSection
+                    title="Prompt Cache（本次会话）"
+                    expanded={panelCacheExpanded}
+                    onToggle={() => setPanelCacheExpanded(v => !v)}
+                  >
+                    <PromptCachePanel logs={usageLogsAfterReset} />
+                  </CollapsibleSection>
+
+                  {/* Training Data */}
+                  <CollapsibleSection
+                    title="Training Data Collection"
+                    expanded={panelTrainingExpanded}
+                    onToggle={() => setPanelTrainingExpanded(v => !v)}
+                  >
+                    <TrainingDataCard
+                      petId={selectedPetId}
+                      trainingCollectionEnabled={trainingCollectionEnabled}
+                      trainingTargets={trainingTargets}
+                      onToggleGlobal={async (v) => {
+                        setTrainingCollectionEnabled(v);
+                        await tauri.updateSettings({ trainingCollectionEnabled: v }).catch(() => {});
+                        emit('social-set-training-collection-enabled', { enabled: v });
+                      }}
+                      onOpenFolder={async () => {
+                        try {
+                          await tauri.workspaceOpenSubfolder(selectedPetId, 'social/training/intent');
+                        } catch (e) {
+                          console.error('[TrainingData] open folder failed:', e);
+                        }
+                      }}
+                      onExport={() => setExportModalOpen(true)}
+                    />
+                  </CollapsibleSection>
+                </div>
+              </>
+            )}
           </div>
         </div>
       </div>
@@ -2118,6 +2258,25 @@ function IntentLogEntry({ log, logFilter }) {
   );
 }
 
+function CollapsibleSection({ title, expanded, onToggle, children }) {
+  return (
+    <div className="border-b border-slate-200/60">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-slate-100/60 transition-colors"
+      >
+        <span className="text-[10px] font-semibold text-slate-600 uppercase tracking-wide">{title}</span>
+        {expanded ? <FaChevronUp className="w-2.5 h-2.5 text-slate-400" /> : <FaChevronDown className="w-2.5 h-2.5 text-slate-400" />}
+      </button>
+      {expanded && (
+        <div className="px-2.5 pb-2 pt-0.5">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function UsageLogEntry({ log, logFilter }) {
   return (
     <div className="py-0.5 text-slate-600">
@@ -2151,10 +2310,11 @@ function PromptCachePanel({ logs }) {
     return Array.from(map.values()).sort((a, b) => b.calls - a.calls);
   }, [logs]);
 
-  if (stats.length === 0) return null;
+  if (stats.length === 0) {
+    return <div className="text-[10px] text-slate-400 font-mono">（暂无 usage 数据）</div>;
+  }
   return (
-    <div className="border-b border-slate-100 px-3 py-1.5 bg-slate-50/50 text-xs font-mono">
-      <div className="font-semibold text-slate-700 mb-1">Prompt Cache（本次会话）</div>
+    <div className="text-xs font-mono">
       <table className="w-full">
         <tbody>
           {stats.map(s => {
@@ -2210,9 +2370,7 @@ function TrainingDataCard({ petId, trainingCollectionEnabled, trainingTargets, o
   const stats = useTrainingStats(petId, trainingCollectionEnabled);
 
   return (
-    <div className="border-b border-slate-100 px-3 py-1.5 bg-slate-50/50 text-xs font-mono">
-      <div className="font-semibold text-slate-700 mb-1">Training Data Collection</div>
-
+    <div className="text-xs font-mono">
       <label className="flex items-center gap-2 cursor-pointer">
         <input
           type="checkbox"

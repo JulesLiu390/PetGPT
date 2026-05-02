@@ -2143,8 +2143,16 @@ export async function startSocialLoop(config, onStatusChange) {
   const INTENT_RETRY_DELAYS = [5000, 25000, 125000];           // 默认退避 5s/25s/125s
   const INTENT_RETRY_DELAYS_OVERLOAD = [32000, 64000, 128000]; // 上游 503/UNAVAILABLE 时用更长退避
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
-  const replyWakeFlag = new Map();                // target → true（Intent 评出 ≥3 时置位，Reply 消费后清除）
-  const replyWakeResolvers = new Map();           // target → resolve 回调（用于中断 Reply loop 的 sleep）
+  // ── Reply 并发派发 ──
+  // 旧机制：replyWakeFlag (one-shot) → Reply loop 消费后启动单一 LLM。问题：Reply LLM 慢时，
+  // 新派的 wake flag 可能被消费但因 llmRunning=true 而丢弃。
+  // 新机制：Intent 派 reply 时直接 spawnReplyTask 并发起 task，并发上限 3 条。
+  // 每个在途任务携带 brief 快照——在 executeGetSituation 中按时间顺序伪装成"即将送达"的消息块，
+  // 让下轮 Intent eval 看到自己已经派出但群友还没看到的 reply，避免重复派同主题。
+  // 任务进入 finally（成功 / 失败 / 取消）即被 splice 删除——【发送后就删除该伪装消息】。
+  // 旧 replyWakeFlag/replyWakeResolvers 已废弃。
+  const inFlightReplies = new Map();              // target → Array<{ id, brief, createdAt }>（按 push 顺序即时间顺序）
+  const MAX_CONCURRENT_REPLY = 3;                 // 每 target Reply 并发上限
 
   // === Lessons Review 机制 ===
   const LESSONS_MAX_WAIT_MS = 30 * 60 * 1000;       // 最长 30 分钟必须 review
@@ -3042,7 +3050,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
                 cacheKey: buildCacheKey(config.petId, target, 'Intent:msg'),
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, prevEvalTime, lastPlan: state.lastPlan },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, inFlightReplies },
               // 拦截时（formattedResult 含"write_intent_plan 暂缓"）不退出循环，让 LLM 重新评估再次提交
               stopAfterTool: (name, formattedResult) => {
                 if (name !== 'write_intent_plan') return false;
@@ -3086,9 +3094,22 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                   );
                   return;
                 }
+                // get_situation 的 args 仅 {n}，无意义；改在 onToolResult 中合并记录"调用 + 结果"
+                if (name === 'get_situation') return;
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args, null, 2), target);
               },
               onToolResult: (name, result, _toolCallId, isError) => {
+                if (name === 'get_situation') {
+                  // 把 bot 看到的快照（chat 记录 + recent_self）作为 details，前端展开即显示
+                  const text = typeof result === 'string' ? result : (result == null ? '' : JSON.stringify(result, null, 2));
+                  if (isError) {
+                    addLog('intent', `🧠 [${tName()}] tool: get_situation ❌ 错误`, text, target);
+                  } else {
+                    const lines = text.split('\n').length;
+                    addLog('intent', `🧠 [${tName()}] tool: get_situation ✓ (${text.length}字 / ${lines}行 — 展开查看 bot 视角)`, text, target);
+                  }
+                  return;
+                }
                 if (name !== 'write_intent_plan') return;
                 const text = typeof result === 'string' ? result : '';
                 const wasIntercepted = text.includes('write_intent_plan 暂缓');
@@ -3279,11 +3300,11 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         updatePeopleCache(target, targetType).catch(() => {});
 
         if (replyAction) {
-          replyWakeFlag.set(target, { atMe: false });
-          // 立即唤醒 Reply loop（中断其 sleep）
-          const rWake = replyWakeResolvers.get(target);
-          if (rWake) { rWake(); replyWakeResolvers.delete(target); }
           addLog('send', `💬 reply → ${tName()}`, null, target);
+          // 直接派发 Reply 任务（fire-and-forget，并发上限 3 由 spawnReplyTask 内部管理）
+          spawnReplyTask(target, targetType).catch(e => {
+            addLog('error', `spawnReplyTask 启动失败 ${tName()}`, e?.message || e, target);
+          });
         }
         await sleepInterruptible(state, 500);
       } catch (e) {
@@ -3591,23 +3612,116 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     addLog('debug', `Observer ${label} stopped`, null, target);
   };
 
-  // ============ 层3: Reply — 每个 target 独立回复循环 ============
+  // ============ 层3: Reply ============
+  // 新模型：Intent 派 reply 时直接调 spawnReplyTask 启动（fire-and-forget）。
+  // replyLoop 仅做被动监听（推水位 + 日志），不再做触发。
+  // 同 target 并发上限 MAX_CONCURRENT_REPLY=3——超出则丢弃本次派发并 warn。
 
   /**
-   * replyLoop: 每个 target 独立运行的回复循环
-   * 模式控制：normal → 正常回复，semi-lurk → 仅 @me，full-lurk → 不运行
-   * 冷却周期：replyIntervalMs（默认 0，用户可配置）
-   * 职责：决定是否回复 + send_message，不写 group_rule/social_memory
+   * spawnReplyTask: 启动一次 Reply LLM 调用（独立异步）
+   * - 检查 lurk mode / paused / replyIntervalMs 冷却 / 并发上限
+   * - 通过即扣减计数 → 调 pollTarget → finally 减计数
+   */
+  const spawnReplyTask = async (target, targetType) => {
+    const label = `${targetType}:${target}`;
+    if (pausedTargets.get(target)) {
+      addLog('info', `${label} paused → skip reply`, null, target);
+      return;
+    }
+    const targetLurkMode = lurkModes.get(target) || 'normal';
+    if (targetLurkMode === 'full-lurk') {
+      addLog('info', `${label} full-lurk → skip reply`, null, target);
+      return;
+    }
+    if (replyIntervalMs > 0) {
+      const sinceLastReply = Date.now() - (lastReplyTime.get(target) || 0);
+      if (sinceLastReply < replyIntervalMs) {
+        addLog('info', `${label} reply 冷却中（剩 ${replyIntervalMs - sinceLastReply}ms），跳过`, null, target);
+        return;
+      }
+    }
+    const list = inFlightReplies.get(target) || [];
+    if (list.length >= MAX_CONCURRENT_REPLY) {
+      addLog('warn', `⚠️ ${label} Reply 并发已达上限 (${list.length}/${MAX_CONCURRENT_REPLY})，本次 reply 跳过`, null, target);
+      return;
+    }
+
+    // 派发瞬间快照 brief——后续若有第二个 Intent 覆盖 reply_brief.md，本任务携带的 brief 不受影响
+    const briefDir = targetType === 'friend' ? 'friend' : 'group';
+    let briefSnapshot = '';
+    try {
+      briefSnapshot = (await tauri.workspaceRead(config.petId, `social/${briefDir}/scratch_${target}/reply_brief.md`).catch(() => '')) || '';
+    } catch { /* ignore */ }
+    const inFlightEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      brief: briefSnapshot.trim(),
+      createdAt: Date.now(),
+    };
+    list.push(inFlightEntry);
+    inFlightReplies.set(target, list);
+    addLog('info', `🔔 Reply ${label}: 启动 (并发 ${list.length}/${MAX_CONCURRENT_REPLY})`, null, target);
+
+    // ── Lessons Review: 在下一次 Reply 启动前 review 上一次 ──
+    dispatchLessonsReview(target, targetType).catch(() => {});
+
+    try {
+      const buf = dataBuffer.get(target);
+      if (!buf || buf.messages.length === 0) {
+        return;
+      }
+      const allConsumed = consumedAtMe.get(target) || new Set();
+
+      const result = await pollTarget({
+        target,
+        targetType,
+        mcpServerName: config.mcpServerName,
+        llmConfig: replyLLMConfig,
+        petId: config.petId,
+        promptConfig,
+        watermarks: replyWatermarks,
+        sentCache: sentMessagesCache,
+        bufferMessages: buf.messages,
+        compressedSummary: buf.compressedSummary,
+        groupName: buf.metadata?.group_name || buf.metadata?.friend_name || target,
+        consumedAtMeIds: allConsumed,
+        lurkMode: 'normal',
+        role: 'reply',
+        intentPlan: getIntentState(target).lastPlan,
+        enableImages: config.enableImages !== false,
+        imageDescMode: config.imageDescMode || 'off',
+        visionLLMConfig,
+        botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
+        socialConfig: config,
+      });
+
+      if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
+      if (result && result.action === 'replied') {
+        addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
+        getIntentState(target).postReplyRestUntil = Date.now() + 1000;
+        snapshotForReview(target, targetType).catch(() => {});
+      }
+    } catch (e) {
+      addLog('error', `Reply ${label} LLM error`, e.message || e, target);
+    } finally {
+      const cur = inFlightReplies.get(target) || [];
+      const idx = cur.findIndex(e => e.id === inFlightEntry.id);
+      if (idx >= 0) {
+        cur.splice(idx, 1);
+        if (cur.length === 0) inFlightReplies.delete(target);
+        else inFlightReplies.set(target, cur);
+      }
+    }
+  };
+
+  /**
+   * replyLoop: 监听 buffer 变化、推水位线、记日志。**不再做 LLM 触发**。
+   * Intent 派 reply 时直接调 spawnReplyTask；这里只是被动观察。
    */
   const replyLoop = async (target, targetType) => {
     const label = `${targetType}:${target}`;
-    /** Reply 专用可中断 sleep — Intent 设 replyWakeFlag 时可立即唤醒 */
-    const replySleep = (ms) => new Promise(r => {
-      replyWakeResolvers.set(target, r);
-      setTimeout(() => { replyWakeResolvers.delete(target); r(); }, ms);
-    });
+    /** Reply loop 普通 sleep（旧 wake 机制已废弃，不再需要可中断） */
+    const replySleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    let llmRunning = false;        // 本 target 的 LLM 是否正在执行
     let lastLoggedNewCount = 0;    // 上次日志记录的新消息条数（去重用）
 
     while (activeLoop && activeLoop._generation === loopGeneration) {
@@ -3626,141 +3740,41 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
         // ── 检测变化 ──
         const detection = detectChange(target, replyWatermarks);
-
         if (!detection) {
           await replySleep(1000);
           continue;
         }
-        
         const { changed, hasAtMe, isFirstRun, newCount } = detection;
-        
+
         // ── 检测日志：仅当新消息条数变化时记录 ──
         if (changed && newCount > 0 && newCount !== lastLoggedNewCount) {
-          addLog('info', `📨 Reply ${label}: +${newCount} new messages${hasAtMe ? ' (has @me)' : ''}${llmRunning ? ' [LLM busy]' : ''}`, null, target);
+          const runningCount = inFlightReplies.get(target)?.length || 0;
+          const busyTag = runningCount > 0 ? ` [并发 ${runningCount}/${MAX_CONCURRENT_REPLY}]` : '';
+          addLog('info', `📨 Reply ${label}: +${newCount} new messages${hasAtMe ? ' (has @me)' : ''}${busyTag}`, null, target);
           lastLoggedNewCount = newCount;
         }
-        
+
         if (isFirstRun) {
-          // 首次运行设水位线，等 Intent 评估后通过 replyWakeFlag 触发
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
           addLog('info', `${label} reply first run, watermark set`, null, target);
           await replySleep(1000);
           continue;
         }
-        
-        // ── Intent 唯一触发：Reply 只在 Intent 信号或 @me 时运行，不再因“有新消息”就跑 ──
-        const intentWoke = replyWakeFlag.get(target);
-        if (!intentWoke) {
-          // 无 Intent 信号 → 推进水位线但不触发 Reply
-          if (changed) {
-            const lastMsg = buf.messages[buf.messages.length - 1];
-            if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          }
-          await replySleep(1000);
-          continue;
-        }
-        replyWakeFlag.delete(target);
-        addLog('info', `🔔 Reply ${label}: triggered by Intent (willingness ≥ 3)`, null, target);
-        
-        // ── LLM 正在执行 → 等待完成 ──
-        if (llmRunning) {
-          await replySleep(1000);
-          continue;
-        }
 
-        // ── 潜水模式决定是否跳过回复 ──
-        const targetLurkMode = lurkModes.get(target) || 'normal';
-        if (targetLurkMode === 'full-lurk') {
+        // ── 推进水位线（不再做 LLM 触发；触发由 Intent 派 spawnReplyTask 完成）──
+        // hasAtMe 不再触发额外 reply（Intent 会处理 @me 信号）
+        if (changed) {
           const lastMsg = buf.messages[buf.messages.length - 1];
           if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          await replySleep(1000);
-          continue;
         }
-        if (targetLurkMode === 'semi-lurk' && !intentWoke?.atMe) {
-          const lastMsg = buf.messages[buf.messages.length - 1];
-          if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          await replySleep(1000);
-          continue;
-        }
-        
-        // Reply 冷却（replyIntervalMs，默认 0 = 无冷却）
-        if (replyIntervalMs > 0) {
-          const now = Date.now();
-          const sinceLastReply = now - (lastReplyTime.get(target) || 0);
-          if (sinceLastReply < replyIntervalMs) {
-            await replySleep(1000);
-            continue;
-          }
-        }
-        
-        // 标记 @me 为已消费（统一流程，不再特殊处理）
-        if (hasAtMe) {
-          const consumed = consumedAtMe.get(target) || new Set();
-          for (const id of detection.atMeIds) consumed.add(id);
-          consumedAtMe.set(target, consumed);
-        }
-        
-        // ── Lessons Review: 在下一次 Reply 启动前 review 上一次 ──
-        dispatchLessonsReview(target, targetType).catch(() => {});
 
-        // ── 启动 LLM（单轮，不再自主 catchup，新消息交还 Intent 决策） ──
-        llmRunning = true;
-        lastLoggedNewCount = 0;
-
-        const runReplyLLM = async () => {
-          try {
-            const allConsumed = consumedAtMe.get(target) || new Set();
-            const snapshotBuf = dataBuffer.get(target);
-
-            const result = await pollTarget({
-              target,
-              targetType,
-              mcpServerName: config.mcpServerName,
-              llmConfig: replyLLMConfig,
-              petId: config.petId,
-              promptConfig,
-              watermarks: replyWatermarks,
-              sentCache: sentMessagesCache,
-              bufferMessages: snapshotBuf ? snapshotBuf.messages : buf.messages,
-              compressedSummary: snapshotBuf ? snapshotBuf.compressedSummary : buf.compressedSummary,
-              groupName: (snapshotBuf || buf).metadata?.group_name || (snapshotBuf || buf).metadata?.friend_name || target,
-              consumedAtMeIds: allConsumed,
-              lurkMode: 'normal',
-              role: 'reply',
-              intentPlan: getIntentState(target).lastPlan,
-              enableImages: config.enableImages !== false,
-              imageDescMode: config.imageDescMode || 'off',
-              visionLLMConfig,
-              botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
-              socialConfig: config,
-            });
-
-            if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
-            if (result && result.action === 'replied') {
-              addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
-              // 发完消息后，Intent 休息再重评（有新消息则提前结束休息）
-              // Intent 自己通过读群消息分析【我刚做了】，不由代码覆盖
-              getIntentState(target).postReplyRestUntil = Date.now() + 1000;
-              // Lessons: 快照 INTENT + 对话记录，加入待 review 队列
-              snapshotForReview(target, targetType).catch(() => {});
-            }
-          } catch (e) {
-            addLog('error', `Reply ${label} LLM error`, e.message || e, target);
-          } finally {
-            llmRunning = false;
-            lastLoggedNewCount = 0;
-          }
-        };
-
-        // 不 await — 异步执行，检测循环继续运行（但 llmRunning 会阻止重复启动）
-        runReplyLLM();
+        // 重置去重日志计数
+        if (newCount === 0) lastLoggedNewCount = 0;
 
         await replySleep(1000);
       } catch (e) {
         addLog('error', `Reply ${label} loop error`, e.message || e, target);
-        // 安全清理：防止崩溃后 llmRunning 卡死
-        llmRunning = false;
         await new Promise(r => setTimeout(r, 3000));
       }
     }
