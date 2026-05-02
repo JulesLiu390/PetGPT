@@ -7,6 +7,7 @@ import {
   listProviders, getProvider, createProvider, updateProvider, deleteProvider,
   getProviderInternal,
 } from './providers.ts';
+import { readSocialConfig, writeSocialConfig, patchSocialConfig } from './socialConfig.ts';
 import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
 import { runIntentEval } from './core/agent/intentEval.ts';
@@ -132,6 +133,32 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
         if (method === 'DELETE') return safe(async () => {
           const removed = await deletePet(id);
           return removed ? ok({ ok: true }) : err(404, 'pet not found');
+        });
+      }
+      // Social config (per-pet) — schema mirrors Tauri's SocialPage config
+      const sc = pathname.match(/^\/api\/pets\/([^/]+)\/social-config$/);
+      if (sc) {
+        const id = sc[1];
+        if (method === 'GET') return safe(async () => {
+          // Verify pet exists before returning config (otherwise consumers might
+          // think any string is a valid pet id).
+          const p = await getPet(id);
+          if (!p) return err(404, 'pet not found');
+          return ok(await readSocialConfig(id));
+        });
+        if (method === 'PUT') return safe(async () => {
+          const p = await getPet(id);
+          if (!p) return err(404, 'pet not found');
+          const body = await readBody<any>(req);
+          if (!body || typeof body !== 'object') return err(400, 'invalid JSON body');
+          return ok(await writeSocialConfig(id, body));
+        });
+        if (method === 'PATCH') return safe(async () => {
+          const p = await getPet(id);
+          if (!p) return err(404, 'pet not found');
+          const body = await readBody<any>(req);
+          if (!body || typeof body !== 'object') return err(400, 'invalid JSON body');
+          return ok(await patchSocialConfig(id, body));
         });
       }
     }
@@ -331,6 +358,7 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/settings              PATCH',
           '  GET    /api/pets                  POST   { name, persona? }',
           '  GET    /api/pets/:id              PATCH  DELETE',
+          '  GET    /api/pets/:id/social-config   PUT  PATCH',
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
           '  POST   /api/llm/test              { providerId, model, prompt, ...opts }',
