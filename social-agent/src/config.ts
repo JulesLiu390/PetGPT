@@ -37,7 +37,7 @@ export interface Settings {
 }
 
 export const DEFAULT_SETTINGS: Settings = {
-  port: 8787,
+  port: 39066,
   logLevel: 'info',
 };
 
