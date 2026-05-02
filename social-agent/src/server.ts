@@ -10,6 +10,8 @@ import {
 import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
 import { runIntentEval } from './core/agent/intentEval.ts';
+import { createAgentManager } from './core/agent/agent.ts';
+import { AGENT_EVENT_CHANNEL, type AgentEvent } from './core/agent/events.ts';
 import dashboardHtml from './web/index.html';
 
 export interface StartServerOptions {
@@ -23,6 +25,11 @@ export async function startServer(opts: StartServerOptions = {}) {
   const settingsAtBoot = await readSettings();
   const envPort = Number(process.env.SOCIAL_AGENT_PORT ?? '');
   const port = opts.port ?? (Number.isFinite(envPort) && envPort > 0 ? envPort : settingsAtBoot.port);
+
+  // Agent manager — singleton per server instance
+  const agent = createAgentManager(platform, {
+    providerLookup: (id: string) => getProviderInternal(id),
+  });
 
 // ─────────────────── helpers ───────────────────
 
@@ -53,7 +60,8 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
 
 // ─────────────────── server ───────────────────
 
-  const server = Bun.serve({
+  type WSData = { kind: 'echo' | 'agent'; off?: () => void };
+  const server = Bun.serve<WSData, never>({
     port,
   // HTML import auto-bundles dashboard's .tsx + transitive deps + Tailwind CDN refs
   routes: {
@@ -66,7 +74,11 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
 
     // ── WebSocket ──
     if (pathname === '/ws') {
-      if (server.upgrade(req)) return;
+      if (server.upgrade(req, { data: { kind: 'echo' } })) return;
+      return new Response('expected WebSocket upgrade', { status: 426 });
+    }
+    if (pathname === '/ws/agent') {
+      if (server.upgrade(req, { data: { kind: 'agent' } })) return;
       return new Response('expected WebSocket upgrade', { status: 426 });
     }
 
@@ -256,6 +268,56 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
       });
     }
 
+    // ── Agent sessions ──
+    if (method === 'GET' && pathname === '/api/agent/sessions') {
+      return ok(agent.list());
+    }
+    if (method === 'POST' && pathname === '/api/agent/sessions') {
+      return safe(async () => {
+        const body = await readBody<any>(req);
+        if (!body) return err(400, 'invalid JSON body');
+        if (!body.petId)      return err(400, 'petId required');
+        if (!body.targetId)   return err(400, 'targetId required');
+        if (!body.providerId) return err(400, 'providerId required');
+        if (!body.model)      return err(400, 'model required');
+        try {
+          return ok(agent.start(body), 201);
+        } catch (e: any) {
+          if (e?.message?.startsWith('session already exists')) return err(409, e.message);
+          throw e;
+        }
+      });
+    }
+    {
+      const m = pathname.match(/^\/api\/agent\/sessions\/([^/]+)(?:\/(feed|pause|resume))?$/);
+      if (m) {
+        const targetId = decodeURIComponent(m[1]);
+        const action = m[2];
+        if (!action && method === 'GET') {
+          const v = agent.get(targetId);
+          return v ? ok(v) : err(404, 'session not found');
+        }
+        if (!action && method === 'DELETE') {
+          return agent.stop(targetId) ? ok({ ok: true }) : err(404, 'session not found');
+        }
+        if (action === 'feed' && method === 'POST') {
+          return safe(async () => {
+            const body = await readBody<{ chatSnapshot?: string }>(req);
+            if (!body || typeof body.chatSnapshot !== 'string') return err(400, 'chatSnapshot (string) required');
+            return agent.feedChat(targetId, body.chatSnapshot)
+              ? ok({ ok: true, queued: true })
+              : err(404, 'session not found');
+          });
+        }
+        if (action === 'pause' && method === 'POST') {
+          return agent.pause(targetId) ? ok({ ok: true }) : err(404, 'session not found or already paused');
+        }
+        if (action === 'resume' && method === 'POST') {
+          return agent.resume(targetId) ? ok({ ok: true }) : err(404, 'session not found or not paused');
+        }
+      }
+    }
+
     // ── Help index (text listing, useful from terminal) ──
     if (method === 'GET' && pathname === '/api/help') {
       return new Response(
@@ -273,6 +335,12 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/providers/:id         PATCH  DELETE',
           '  POST   /api/llm/test              { providerId, model, prompt, ...opts }',
           '  POST   /api/agent/intent-eval     { petId, targetId, providerId, model, chatSnapshot, ... }',
+          '  GET    /api/agent/sessions        POST   { petId, targetId, providerId, model, ... }',
+          '  GET    /api/agent/sessions/:id    DELETE',
+          '  POST   /api/agent/sessions/:id/feed   { chatSnapshot }',
+          '  POST   /api/agent/sessions/:id/pause',
+          '  POST   /api/agent/sessions/:id/resume',
+          '  WS     /ws/agent                  agent event stream',
           '  WS     /ws',
           '',
         ].join('\n'),
@@ -283,9 +351,29 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
     return err(404, 'not found');
   },
   websocket: {
-    open(ws) { ws.send(JSON.stringify({ type: 'hello', ts: Date.now() })); },
-    message(ws, msg) { ws.send(JSON.stringify({ type: 'echo', payload: String(msg) })); },
-    close() { /* noop */ },
+    open(ws) {
+      if (ws.data.kind === 'agent') {
+        // Subscribe this socket to agent events. Unsubscribe on close.
+        const off = platform.events.on(AGENT_EVENT_CHANNEL, (e: AgentEvent) => {
+          try { ws.send(JSON.stringify(e)); }
+          catch { /* socket dead, listener will be released on close */ }
+        });
+        ws.data.off = off;
+        ws.send(JSON.stringify({ type: 'hello', channel: 'agent', ts: Date.now() }));
+        ws.send(JSON.stringify({ type: 'snapshot', sessions: agent.list(), ts: Date.now() }));
+      } else {
+        ws.send(JSON.stringify({ type: 'hello', ts: Date.now() }));
+      }
+    },
+    message(ws, msg) {
+      if (ws.data.kind === 'agent') {
+        return; // push-only
+      }
+      ws.send(JSON.stringify({ type: 'echo', payload: String(msg) }));
+    },
+    close(ws) {
+      if (typeof ws.data.off === 'function') ws.data.off();
+    },
   },
 });
 
