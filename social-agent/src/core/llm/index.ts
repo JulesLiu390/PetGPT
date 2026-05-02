@@ -8,8 +8,14 @@ import { createGeminiClient } from './gemini.ts';
 export type {
   ChatMessage, ChatRequest, ChatResponse,
   ChatRole, FinishReason, LLMClient,
+  ToolCall, ToolDefinition, ToolChoice,
 } from './types.ts';
 export { LLMError } from './types.ts';
+export {
+  callWithTools,
+  type ToolHandler, type ToolHandlerResult,
+  type CallWithToolsOptions, type CallWithToolsResult,
+} from './tool-loop.ts';
 
 /** Build an LLMClient for the given provider config, dispatching by `provider.type`. */
 export function createLLMClient(platform: Platform, provider: Provider): LLMClient {
