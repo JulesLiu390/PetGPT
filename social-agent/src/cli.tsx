@@ -52,14 +52,17 @@ interface ScreenProps {
 // ─────────────────── small components ───────────────────
 
 function Avatar() {
-  // 4-row mini character used as the TUI mascot. Pure box-drawing so the
-  // glyph widths stay 1-cell on every terminal font.
+  // Sailor-uniform girl hugging a bear. Box-drawing only so glyph widths
+  // stay 1-cell on every terminal font.
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>{'  ╭─────╮  '}</Text>
-      <Text color={ACCENT}>{'  │ ◕‿◕ │  '}</Text>
-      <Text color={ACCENT}>{'  ╰──┬──╯  '}</Text>
-      <Text color={ACCENT}>{'   ╱ │ ╲   '}</Text>
+      <Text color={ACCENT}>{'   ╱╳╲╱╲╱╲   '}</Text>
+      <Text color={ACCENT}>{'  ╱ ◔   ◔ ╲  '}</Text>
+      <Text color={ACCENT}>{'  │   ‿    │ '}</Text>
+      <Text color={ACCENT}>{'   ╲━━♥━━╱   '}</Text>
+      <Text color={ACCENT}>{'  ╱┃▓▓▓┃╲    '}</Text>
+      <Text color={ACCENT}>{'  │(◉‿◉)│   '}</Text>
+      <Text color={ACCENT}>{'   ╲━━━━╱    '}</Text>
     </Box>
   );
 }
