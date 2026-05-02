@@ -2,8 +2,10 @@ import { randomUUID } from 'node:crypto';
 import type { Platform } from '../../platform/index.ts';
 import type { Provider } from '../../providers.ts';
 import { runIntentEval } from './intentEval.ts';
+import { runReply } from './replyTask.ts';
 import type { SessionConfig, SessionState, SessionView } from './types.ts';
 import { AGENT_EVENT_CHANNEL, type AgentEvent } from './events.ts';
+import type { InFlightReplyView } from '../tools/intent.ts';
 
 /**
  * Continuous Intent loop manager (Phase 3e2).
@@ -33,9 +35,14 @@ export interface AgentManagerOptions {
 }
 
 const PREVIEW_MAX = 280;
+const MAX_CONCURRENT_REPLY = 3;
 
 export function createAgentManager(platform: Platform, opts: AgentManagerOptions): AgentManager {
   const sessions = new Map<string, SessionState>();
+  /** target → array of in-flight reply tasks (max MAX_CONCURRENT_REPLY each).
+   *  Brief is snapshotted at dispatch so intent layer's reply_brief.md
+   *  rewrites don't mutate live tasks. */
+  const inFlightReplies = new Map<string, InFlightReplyView[]>();
 
   const emit = (e: AgentEvent) => platform.events.emit(AGENT_EVENT_CHANNEL, e);
 
@@ -54,6 +61,125 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
   function preview(s: string): string {
     if (s.length <= PREVIEW_MAX) return s;
     return s.slice(0, PREVIEW_MAX) + `\n…(+${s.length - PREVIEW_MAX} chars)`;
+  }
+
+  function getInFlight(targetId: string): InFlightReplyView[] {
+    return inFlightReplies.get(targetId) || [];
+  }
+
+  /**
+   * Fire-and-forget Reply task launcher.
+   * Pushes an entry onto inFlightReplies (snapshotting brief at dispatch),
+   * runs runReply, splices the entry on completion.
+   */
+  async function spawnReplyTask(targetId: string, snapshot: string): Promise<void> {
+    const s = sessions.get(targetId);
+    if (!s) return;
+    if (s.status === 'paused') {
+      platform.events.emit<AgentEvent>(AGENT_EVENT_CHANNEL, {
+        type: 'reply:skip', ts: Date.now(), targetId,
+        reason: 'paused', inFlightCount: getInFlight(targetId).length,
+      });
+      return;
+    }
+
+    const list = getInFlight(targetId);
+    if (list.length >= MAX_CONCURRENT_REPLY) {
+      emit({
+        type: 'reply:skip', ts: Date.now(), targetId,
+        reason: 'concurrency-limit', inFlightCount: list.length,
+      });
+      return;
+    }
+
+    // Snapshot brief at dispatch — protects against Intent's next reply_brief.md overwrite.
+    const dir = (s.config.targetType ?? 'group') === 'friend' ? 'friend' : 'group';
+    const briefPath = `social/${dir}/scratch_${targetId}/reply_brief.md`;
+    let briefSnapshot = '';
+    try { briefSnapshot = (await platform.workspace.read(s.config.petId, briefPath)) || ''; }
+    catch { /* missing — emit skip */ }
+
+    if (!briefSnapshot.trim()) {
+      emit({
+        type: 'reply:skip', ts: Date.now(), targetId,
+        reason: 'no-brief', inFlightCount: list.length,
+      });
+      return;
+    }
+
+    const replyId = randomUUID();
+    const entry: InFlightReplyView = { id: replyId, brief: briefSnapshot.trim(), createdAt: Date.now() };
+    list.push(entry);
+    inFlightReplies.set(targetId, list);
+
+    emit({
+      type: 'reply:spawn', ts: Date.now(), targetId, replyId,
+      brief: entry.brief, inFlightCount: list.length,
+    });
+
+    let provider: Provider | undefined;
+    let sent = false;
+    let iterations = 0;
+    const startedAt = Date.now();
+    try {
+      provider = await opts.providerLookup(s.config.providerId);
+      if (!provider) throw new Error(`provider not found: ${s.config.providerId}`);
+
+      const r = await runReply(platform, {
+        petId: s.config.petId, targetId, targetType: s.config.targetType,
+        provider, model: s.config.model,
+        temperature: s.config.temperature, maxTokens: s.config.maxTokens,
+        timeoutMs: s.config.timeoutMs,
+        chatSnapshot: snapshot,
+        socialPersonaPrompt: s.config.socialPersonaPrompt,
+        targetName: s.config.targetName, botQQ: s.config.botQQ,
+        ownerQQ: s.config.ownerQQ, ownerName: s.config.ownerName, ownerSecret: s.config.ownerSecret,
+        nameDelimiterL: s.config.nameDelimiterL, nameDelimiterR: s.config.nameDelimiterR,
+        msgDelimiterL: s.config.msgDelimiterL, msgDelimiterR: s.config.msgDelimiterR,
+        lurkMode: s.config.lurkMode,
+      });
+      iterations = r.iterations;
+
+      for (const t of r.toolCalls) {
+        emit({
+          type: 'reply:tool', ts: Date.now(), targetId, replyId,
+          name: t.name, arguments: t.arguments,
+          resultPreview: preview(t.resultContent),
+          isError: t.isError,
+        });
+      }
+
+      if (r.captured) {
+        sent = true;
+        emit({
+          type: 'reply:sent', ts: Date.now(), targetId, replyId,
+          content: r.captured.content,
+          replyTo: r.captured.replyTo,
+        });
+      }
+
+      emit({
+        type: 'reply:done', ts: Date.now(), targetId, replyId,
+        sent, iterations, elapsedMs: Date.now() - startedAt,
+      });
+    } catch (e: any) {
+      emit({
+        type: 'reply:error', ts: Date.now(), targetId, replyId,
+        message: e?.message ?? String(e),
+      });
+    } finally {
+      // Splice entry from in-flight list, even on error/skip — list is the
+      // source of truth and must drain.
+      const cur = inFlightReplies.get(targetId);
+      if (cur) {
+        const idx = cur.findIndex(x => x.id === replyId);
+        if (idx >= 0) {
+          cur.splice(idx, 1);
+          if (cur.length === 0) inFlightReplies.delete(targetId);
+          else inFlightReplies.set(targetId, cur);
+        }
+      }
+    }
   }
 
   /**
@@ -113,6 +239,7 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
         sinceLastEvalMin:    s.lastEvalAt
           ? Math.max(0, Math.round((startedAt - s.lastEvalAt) / 60000))
           : 0,
+        inFlightReplies:     getInFlight(targetId),
       });
 
       // Mid-stream events: each tool result becomes one eval:tool event.
@@ -128,6 +255,13 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
       if (result.plan) {
         s.lastPlan = result.plan;
         emit({ type: 'eval:plan', ts: Date.now(), targetId, evalId, plan: result.plan });
+
+        // If the plan contains a reply action, fire-and-forget the Reply task.
+        // Concurrency / pause / brief-empty checks live inside spawnReplyTask.
+        const hasReply = result.plan.actions.some(a => a?.type === 'reply');
+        if (hasReply) {
+          spawnReplyTask(targetId, snapshot).catch(() => { /* error already emitted */ });
+        }
       }
 
       emit({
@@ -189,6 +323,9 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
       const s = sessions.get(targetId);
       if (!s) return false;
       sessions.delete(targetId);
+      // Forget queued in-flight reply views — running tasks will still attempt
+      // to splice their entry on completion (no-op if the list is gone).
+      inFlightReplies.delete(targetId);
       emit({ type: 'session:stopped', ts: Date.now(), targetId });
       return true;
     },

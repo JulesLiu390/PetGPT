@@ -21,6 +21,12 @@ import type { TargetType, IntentActionLite } from '../prompts/social.ts';
  * the spawn-reply loop lives in this codebase.
  */
 
+export interface InFlightReplyView {
+  id: string;
+  brief: string;
+  createdAt: number;
+}
+
 export interface IntentToolsContext {
   petId: string;
   targetId: string;
@@ -31,6 +37,10 @@ export interface IntentToolsContext {
   /** Mutated when the LLM calls write_intent_plan. Caller reads it after
    *  callWithTools resolves. */
   capturedPlan: { state: string; brief: string; actions: IntentActionLite[] } | null;
+  /** Up to 3 reply tasks currently in-flight (briefs snapshotted at dispatch).
+   *  get_situation surfaces them as "【在途 reply N/M, 即将送达】" blocks so
+   *  the LLM doesn't queue a same-topic duplicate. */
+  inFlightReplies?: InFlightReplyView[];
 }
 
 export function createIntentTools(platform: Platform, ctx: IntentToolsContext): {
@@ -95,11 +105,25 @@ export function createIntentTools(platform: Platform, ctx: IntentToolsContext): 
       let recent = '';
       try { recent = (await ws.read(ctx.petId, recentPath)) || ''; } catch { /* missing */ }
 
-      const chat = ctx.chatSnapshot.trim() || '（暂无群消息）';
+      let chat = ctx.chatSnapshot.trim() || '（暂无群消息）';
+
+      // Inject in-flight reply blocks at the tail of the chat record so the
+      // LLM treats them as "messages from the very recent past that haven't
+      // landed yet" — same shape as Tauri-era 在途 reply 注入.
+      const inflight = (ctx.inFlightReplies || []).slice().sort((a, b) => a.createdAt - b.createdAt);
+      if (inflight.length > 0) {
+        const lines = inflight.map((entry, i) => {
+          const ts = new Date(entry.createdAt).toLocaleTimeString('zh-CN', { hour12: false });
+          const briefText = entry.brief || '(brief 为空)';
+          return `[${ts}] **【在途 reply ${i + 1}/${inflight.length}, 即将送达】** (Reply 层处理中, 群友尚未看到):\n${briefText}`;
+        }).join('\n');
+        chat = chat === '（暂无群消息）' ? lines : `${chat}\n${lines}`;
+      }
+
       const out = [
         '# 当前情况快照',
         '',
-        '## 群聊记录',
+        `## 群聊记录${inflight.length > 0 ? '（含在途 reply）' : ''}`,
         chat,
         '',
         '## 你最近的动作 / 在途任务（recent_self）',

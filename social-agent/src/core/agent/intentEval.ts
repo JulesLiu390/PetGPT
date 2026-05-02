@@ -4,7 +4,7 @@ import type { ChatMessage, ToolCall } from '../llm/index.ts';
 import { createLLMClient, callWithTools } from '../llm/index.ts';
 import { createSocialPromptBuilders, type LurkMode, type TargetType, type IntentActionLite } from '../prompts/social.ts';
 import { createWorkspaceTools } from '../tools/workspace.ts';
-import { createIntentTools } from '../tools/intent.ts';
+import { createIntentTools, type InFlightReplyView } from '../tools/intent.ts';
 
 /**
  * One-shot Intent evaluation.
@@ -57,6 +57,11 @@ export interface RunIntentEvalOptions {
   /** Override the user-facing kickoff message. Default: a single-character "go"
    *  prompt — the system prompt instructs the LLM to call get_situation first. */
   userPrompt?: string;
+
+  /** Snapshot of currently in-flight replies for this target, surfaced via
+   *  get_situation as "在途 reply N/M" blocks. Caller (AgentManager) owns
+   *  this list; intentEval is read-only. */
+  inFlightReplies?: InFlightReplyView[];
 }
 
 export interface IntentToolTrace {
@@ -120,6 +125,7 @@ export async function runIntentEval(
     targetType,
     chatSnapshot: opts.chatSnapshot,
     capturedPlan: null as IntentEvalResult['plan'],
+    inFlightReplies: opts.inFlightReplies ?? [],
   };
   const intentTools = createIntentTools(platform, intentCtx);
 

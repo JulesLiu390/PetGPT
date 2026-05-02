@@ -20,7 +20,13 @@ export type AgentEventType =
   | 'eval:tool'
   | 'eval:plan'
   | 'eval:done'
-  | 'eval:error';
+  | 'eval:error'
+  | 'reply:spawn'
+  | 'reply:skip'
+  | 'reply:tool'
+  | 'reply:sent'
+  | 'reply:done'
+  | 'reply:error';
 
 interface BaseAgentEvent {
   type: AgentEventType;
@@ -86,6 +92,53 @@ export interface EvalErrorEvent extends BaseAgentEvent {
   message: string;
 }
 
+export interface ReplySpawnEvent extends BaseAgentEvent {
+  type: 'reply:spawn';
+  replyId: string;
+  /** Brief snapshot at dispatch time. */
+  brief: string;
+  /** Concurrency: this task's index + total in-flight at spawn. */
+  inFlightCount: number;
+}
+
+export interface ReplySkipEvent extends BaseAgentEvent {
+  type: 'reply:skip';
+  reason: 'concurrency-limit' | 'no-brief' | 'paused' | 'other';
+  inFlightCount: number;
+}
+
+export interface ReplyToolEvent extends BaseAgentEvent {
+  type: 'reply:tool';
+  replyId: string;
+  name: string;
+  arguments: unknown;
+  resultPreview: string;
+  isError: boolean;
+}
+
+export interface ReplySentEvent extends BaseAgentEvent {
+  type: 'reply:sent';
+  replyId: string;
+  content: string;
+  replyTo?: string;
+}
+
+export interface ReplyDoneEvent extends BaseAgentEvent {
+  type: 'reply:done';
+  replyId: string;
+  /** Whether send_message was actually invoked during the run. */
+  sent: boolean;
+  iterations: number;
+  elapsedMs: number;
+}
+
+export interface ReplyErrorEvent extends BaseAgentEvent {
+  type: 'reply:error';
+  replyId: string;
+  message: string;
+}
+
 export type AgentEvent =
   | SessionCreatedEvent | SessionStoppedEvent | SessionPausedEvent | SessionResumedEvent
-  | EvalStartEvent      | EvalToolEvent       | EvalPlanEvent     | EvalDoneEvent | EvalErrorEvent;
+  | EvalStartEvent      | EvalToolEvent       | EvalPlanEvent     | EvalDoneEvent | EvalErrorEvent
+  | ReplySpawnEvent     | ReplySkipEvent      | ReplyToolEvent    | ReplySentEvent | ReplyDoneEvent | ReplyErrorEvent;
