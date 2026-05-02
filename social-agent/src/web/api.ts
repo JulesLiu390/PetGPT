@@ -144,3 +144,56 @@ export function agentWsUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   return `${proto}//${window.location.host}/ws/agent`;
 }
+
+// ─── per-pet social config (Tauri-parity schema) ───
+
+export type ImageDescMode = 'off' | 'on' | 'when-mentioned';
+
+export interface ImageGenConfig { enabled: boolean; providerId: string; modelName: string; }
+export interface TtsConfig      { enabled: boolean; apiKey: string; voiceId: string; modelId: string; }
+
+export interface SocialConfig {
+  petId: string;
+  mcpServerName: string;
+  apiProviderId: string;
+  modelName: string;
+  intentApiProviderId: string;
+  intentModelName: string;
+  observerApiProviderId: string;
+  observerModelName: string;
+  compressApiProviderId: string;
+  compressModelName: string;
+  imageDescProviderId: string;
+  imageDescModelName: string;
+  imageGenConfig: ImageGenConfig;
+  ttsConfig: TtsConfig;
+  watchedGroups: string[];
+  watchedFriends: string[];
+  customGroupRules: Record<string, string>;
+  lurkModes: Record<string, LurkMode>;
+  pausedTargets: Record<string, boolean>;
+  botQQ: string;
+  ownerQQ: string;
+  ownerName: string;
+  ownerSecret: string;
+  nameDelimiterL: string;
+  nameDelimiterR: string;
+  msgDelimiterL: string;
+  msgDelimiterR: string;
+  socialPersonaPrompt: string;
+  replyStrategyPrompt: string;
+  agentCanEditStrategy: boolean;
+  atMustReply: boolean;
+  enableImages: boolean;
+  imageDescMode: ImageDescMode;
+  replyInterval: number;
+  observerInterval: number;
+  subagentEnabled: boolean;
+  subagentMaxConcurrent: number;
+  subagentTimeoutSecs: number;
+  subagentModel: string;
+}
+
+export const getSocialConfig    = (petId: string)                          => request<SocialConfig>('GET', `/api/pets/${encodeURIComponent(petId)}/social-config`);
+export const putSocialConfig    = (petId: string, cfg: SocialConfig)       => request<SocialConfig>('PUT', `/api/pets/${encodeURIComponent(petId)}/social-config`, cfg);
+export const patchSocialConfig  = (petId: string, cfg: Partial<SocialConfig>) => request<SocialConfig>('PATCH', `/api/pets/${encodeURIComponent(petId)}/social-config`, cfg);

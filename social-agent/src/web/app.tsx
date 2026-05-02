@@ -2,6 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as api from './api';
 import type { Pet, ProviderPublic, Settings, Status } from './api';
+import { SocialConfigEditor } from './socialConfigEditor';
 
 // ─────────────────── App shell ───────────────────
 
@@ -141,6 +142,18 @@ function SessionsTab({ onError }: { onError: (s: string) => void }) {
   const [feeding,    setFeeding]    = useState(false);
   const [feedText,   setFeedText]   = useState('');
 
+  // Pet picker + provider list (drives the social config editor up top)
+  const [pets,         setPets]         = useState<Pet[]>([]);
+  const [providers,    setProviders]    = useState<ProviderPublic[]>([]);
+  const [editingPetId, setEditingPetId] = useState<string>('');
+  useEffect(() => {
+    api.listPets().then(ps => {
+      setPets(ps);
+      if (!editingPetId && ps[0]) setEditingPetId(ps[0].id);
+    }).catch(e => onError(e.message));
+    api.listProviders().then(setProviders).catch(e => onError(e.message));
+  }, [onError]);
+
   const selected = sessions.find(s => s.config.targetId === selectedId);
   const selectedEvents = selectedId ? events.filter(e => e.targetId === selectedId) : [];
 
@@ -168,8 +181,29 @@ function SessionsTab({ onError }: { onError: (s: string) => void }) {
 
   return (
     <div className="space-y-4">
+      {/* ── Pet picker + Social Config editor (Tauri parity) ── */}
+      {pets.length === 0 ? (
+        <div className="bg-amber-50 border border-amber-200 text-amber-800 text-sm rounded p-3">
+          No pets yet — add one in the <strong>Pets</strong> tab to start configuring a social agent.
+        </div>
+      ) : (
+        <div className="bg-slate-50 border border-slate-200 rounded p-3 space-y-3">
+          <div className="flex items-center gap-2">
+            <label className="text-xs uppercase tracking-wide text-slate-500">Editing pet:</label>
+            <select value={editingPetId} onChange={e => setEditingPetId(e.target.value)}
+              className="px-2 py-1 border border-slate-300 rounded text-sm">
+              {pets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+          </div>
+          {editingPetId && (
+            <SocialConfigEditor petId={editingPetId} providers={providers} onError={onError} />
+          )}
+        </div>
+      )}
+
+      {/* ── Active sessions header ── */}
       <div className="flex items-center gap-3">
-        <h2 className="text-lg font-semibold">Sessions</h2>
+        <h2 className="text-lg font-semibold">Active Sessions</h2>
         <span className={`text-xs px-2 py-0.5 rounded-full ${connected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
           {connected ? '● connected' : '○ disconnected'}
         </span>
