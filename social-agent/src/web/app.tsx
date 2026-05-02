@@ -690,16 +690,39 @@ function MCPTab({ onError }: { onError: (s: string) => void }) {
   const [items,    setItems]    = useState<api.MCPServer[]>([]);
   const [creating, setCreating] = useState(false);
   const [editing,  setEditing]  = useState<string | null>(null);
+  const [statuses, setStatuses] = useState<Record<string, 'running' | 'stopped'>>({});
 
   const refresh = useCallback(async () => {
-    try { setItems(await api.listMCPServers()); }
+    try {
+      const list = await api.listMCPServers();
+      setItems(list);
+      // Refresh statuses for each server in parallel
+      const statusEntries = await Promise.all(list.map(async s => {
+        try { const r = await api.statusMCPServer(s.id); return [s.id, r.status] as const; }
+        catch { return [s.id, 'stopped'] as const; }
+      }));
+      setStatuses(Object.fromEntries(statusEntries));
+    }
     catch (e: any) { onError(e.message); }
   }, [onError]);
   useEffect(() => { refresh(); }, [refresh]);
+  // Status poll every 3s
+  useEffect(() => {
+    const id = setInterval(() => { refresh(); }, 3000);
+    return () => clearInterval(id);
+  }, [refresh]);
 
   const onDelete = async (id: string) => {
     if (!confirm('delete this MCP server?')) return;
     try { await api.deleteMCPServer(id); refresh(); }
+    catch (e: any) { onError(e.message); }
+  };
+  const onStart = async (id: string) => {
+    try { await api.startMCPServer(id); refresh(); }
+    catch (e: any) { onError(e.message); }
+  };
+  const onStop = async (id: string) => {
+    try { await api.stopMCPServer(id); refresh(); }
     catch (e: any) { onError(e.message); }
   };
 
@@ -741,29 +764,88 @@ function MCPTab({ onError }: { onError: (s: string) => void }) {
             onCancel={() => setEditing(null)}
           />
         ) : (
-          <div key={s.id} className="bg-white border border-slate-200 rounded p-4 flex items-start gap-4">
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <span className="font-mono font-medium">{s.name}</span>
-                {!s.enabled && <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">disabled</span>}
-                <span className="ml-auto text-[10px] text-slate-400 font-mono">{s.id.slice(0, 8)}…</span>
-              </div>
-              <div className="text-xs text-slate-600 font-mono mt-1 whitespace-pre-wrap">
-                {[s.command, ...s.args].join(' ')}
-              </div>
-              {Object.keys(s.env).length > 0 && (
-                <div className="text-xs text-slate-500 font-mono mt-1">
-                  env: {Object.keys(s.env).join(', ')} <span className="text-slate-400">({Object.keys(s.env).length})</span>
-                </div>
-              )}
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setEditing(s.id)} className="text-sm text-cyan-600 hover:text-cyan-800">edit</button>
-              <button onClick={() => onDelete(s.id)} className="text-sm text-red-500 hover:text-red-700">delete</button>
-            </div>
-          </div>
+          <MCPRow key={s.id} s={s} status={statuses[s.id] ?? 'stopped'}
+            onEdit={() => setEditing(s.id)}
+            onDelete={() => onDelete(s.id)}
+            onStart={() => onStart(s.id)}
+            onStop={() => onStop(s.id)}
+            onError={onError}
+          />
         ))}
       </div>
+    </div>
+  );
+}
+
+function MCPRow({ s, status, onEdit, onDelete, onStart, onStop, onError }: {
+  s: api.MCPServer;
+  status: 'running' | 'stopped';
+  onEdit: () => void;
+  onDelete: () => void;
+  onStart: () => void;
+  onStop: () => void;
+  onError: (m: string) => void;
+}) {
+  const [tools, setTools] = useState<api.MCPToolDescriptor[] | null>(null);
+  const [showTools, setShowTools] = useState(false);
+  const [loadingTools, setLoadingTools] = useState(false);
+
+  const fetchTools = async () => {
+    setLoadingTools(true);
+    try { const r = await api.toolsMCPServer(s.id); setTools(r.tools); setShowTools(true); }
+    catch (e: any) { onError(e.message); }
+    finally { setLoadingTools(false); }
+  };
+
+  return (
+    <div className="bg-white border border-slate-200 rounded p-4">
+      <div className="flex items-start gap-4">
+        <div className="flex-1">
+          <div className="flex items-center gap-2">
+            <span className="font-mono font-medium">{s.name}</span>
+            <span className={`text-xs px-2 py-0.5 rounded-full ${status === 'running' ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-100 text-slate-500'}`}>
+              {status === 'running' ? '● running' : '○ stopped'}
+            </span>
+            {!s.enabled && <span className="text-xs px-2 py-0.5 rounded bg-amber-100 text-amber-700">disabled</span>}
+            <span className="ml-auto text-[10px] text-slate-400 font-mono">{s.id.slice(0, 8)}…</span>
+          </div>
+          <div className="text-xs text-slate-600 font-mono mt-1 whitespace-pre-wrap">
+            {[s.command, ...s.args].join(' ')}
+          </div>
+          {Object.keys(s.env).length > 0 && (
+            <div className="text-xs text-slate-500 font-mono mt-1">
+              env: {Object.keys(s.env).join(', ')} <span className="text-slate-400">({Object.keys(s.env).length})</span>
+            </div>
+          )}
+        </div>
+        <div className="flex flex-col gap-1 items-end">
+          {status === 'running'
+            ? <button onClick={onStop}  className="text-xs px-2 py-1 rounded border border-red-300    text-red-700    hover:bg-red-50">⏹ stop</button>
+            : <button onClick={onStart} disabled={!s.enabled} className="text-xs px-2 py-1 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50 disabled:opacity-50">▶ start</button>}
+          <button onClick={fetchTools} disabled={loadingTools}
+            className="text-xs px-2 py-1 rounded border border-cyan-300 text-cyan-700 hover:bg-cyan-50 disabled:opacity-50">
+            {loadingTools ? '…' : `🔧 tools${tools ? ` (${tools.length})` : ''}`}
+          </button>
+          <button onClick={onEdit}   className="text-xs text-cyan-600 hover:text-cyan-800">edit</button>
+          <button onClick={onDelete} className="text-xs text-red-500 hover:text-red-700">delete</button>
+        </div>
+      </div>
+
+      {showTools && tools && (
+        <details open className="mt-3 border-t border-slate-100 pt-2">
+          <summary className="text-xs font-semibold text-slate-600 cursor-pointer">
+            Tools ({tools.length}) <button onClick={() => setShowTools(false)} className="ml-2 text-slate-400">hide</button>
+          </summary>
+          <div className="mt-2 space-y-1">
+            {tools.map(t => (
+              <div key={t.name} className="text-xs">
+                <span className="font-mono font-semibold text-cyan-700">{t.name}</span>
+                {t.description && <span className="text-slate-600"> · {t.description}</span>}
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
     </div>
   );
 }

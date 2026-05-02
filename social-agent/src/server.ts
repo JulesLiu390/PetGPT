@@ -361,6 +361,38 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           return removed ? ok({ ok: true }) : err(404, 'mcp server not found');
         });
       }
+      // /api/mcp-servers/:id/(start|stop|status|tools)
+      const lc = pathname.match(/^\/api\/mcp-servers\/([^/]+)\/(start|stop|status|tools)$/);
+      if (lc) {
+        const id = lc[1];
+        const action = lc[2];
+        return safe(async () => {
+          const s = await getMCPServer(id);
+          if (!s) return err(404, 'mcp server not found');
+
+          if (action === 'status' && method === 'GET') {
+            return ok({ name: s.name, status: platform.mcp.status(s.name) });
+          }
+          if (action === 'start' && method === 'POST') {
+            try { await platform.mcp.ensureRunning(s.name); }
+            catch (e: any) { return err(502, `start failed: ${e?.message ?? e}`); }
+            return ok({ ok: true, name: s.name, status: platform.mcp.status(s.name) });
+          }
+          if (action === 'stop' && method === 'POST') {
+            await platform.mcp.shutdown(s.name);
+            return ok({ ok: true, name: s.name, status: platform.mcp.status(s.name) });
+          }
+          if (action === 'tools' && method === 'GET') {
+            try {
+              const tools = await platform.mcp.listTools(s.name);
+              return ok({ name: s.name, status: platform.mcp.status(s.name), tools });
+            } catch (e: any) {
+              return err(502, `listTools failed: ${e?.message ?? e}`);
+            }
+          }
+          return err(405, `method ${method} not allowed for /${action}`);
+        });
+      }
     }
 
     // ── Agent sessions ──
@@ -429,6 +461,10 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/pets/:id/social-config   PUT  PATCH',
           '  GET    /api/mcp-servers           POST   { name, command, args?, env?, enabled? }',
           '  GET    /api/mcp-servers/:id       PATCH  DELETE',
+          '  GET    /api/mcp-servers/:id/status',
+          '  POST   /api/mcp-servers/:id/start',
+          '  POST   /api/mcp-servers/:id/stop',
+          '  GET    /api/mcp-servers/:id/tools',
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
           '  POST   /api/providers/:id/fetch-models',

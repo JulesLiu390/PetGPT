@@ -18,6 +18,8 @@ export const nodeMCPStub: PlatformMCP = {
     throw new Error(`MCP not configured (server=${name}, tool=${tool})`);
   },
   async shutdown(): Promise<void> { /* nothing to shut down */ },
+  status(_name: string) { return 'stopped' as const; },
+  running() { return [] as string[]; },
 };
 
 /**
@@ -47,7 +49,7 @@ interface ManagedClient {
   startedAt: number;
 }
 
-export function createNodeMCP(opts: NodeMCPOptions): PlatformMCP & { status(name: string): 'running' | 'stopped'; running(): string[] } {
+export function createNodeMCP(opts: NodeMCPOptions): PlatformMCP {
   const clients = new Map<string, ManagedClient>();
   const inFlight = new Map<string, Promise<void>>();
 

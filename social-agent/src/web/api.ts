@@ -223,6 +223,12 @@ export const updateMCPServer  = (id: string, partial: Partial<Omit<MCPServer, 'i
   request<MCPServer>('PATCH', `/api/mcp-servers/${encodeURIComponent(id)}`, partial);
 export const deleteMCPServer  = (id: string)                            => request<{ ok: true }>('DELETE', `/api/mcp-servers/${encodeURIComponent(id)}`);
 
+export interface MCPToolDescriptor { name: string; description?: string; inputSchema?: unknown }
+export const startMCPServer  = (id: string) => request<{ ok: true; name: string; status: string }>('POST', `/api/mcp-servers/${encodeURIComponent(id)}/start`);
+export const stopMCPServer   = (id: string) => request<{ ok: true; name: string; status: string }>('POST', `/api/mcp-servers/${encodeURIComponent(id)}/stop`);
+export const statusMCPServer = (id: string) => request<{ name: string; status: 'running' | 'stopped' }>('GET', `/api/mcp-servers/${encodeURIComponent(id)}/status`);
+export const toolsMCPServer  = (id: string) => request<{ name: string; status: string; tools: MCPToolDescriptor[] }>('GET', `/api/mcp-servers/${encodeURIComponent(id)}/tools`);
+
 export const getSocialConfig    = (petId: string)                          => request<SocialConfig>('GET', `/api/pets/${encodeURIComponent(petId)}/social-config`);
 export const putSocialConfig    = (petId: string, cfg: SocialConfig)       => request<SocialConfig>('PUT', `/api/pets/${encodeURIComponent(petId)}/social-config`, cfg);
 export const patchSocialConfig  = (petId: string, cfg: Partial<SocialConfig>) => request<SocialConfig>('PATCH', `/api/pets/${encodeURIComponent(petId)}/social-config`, cfg);

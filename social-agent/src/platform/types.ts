@@ -96,6 +96,10 @@ export interface PlatformMCP {
   listTools(serverName: string): Promise<MCPToolDescriptor[]>;
   callTool(serverName: string, toolName: string, args: unknown): Promise<unknown>;
   shutdown(serverName?: string): Promise<void>;
+  /** 'running' if a connected client exists for this name, else 'stopped'. */
+  status(serverName: string): 'running' | 'stopped';
+  /** Names of all currently-running servers. */
+  running(): string[];
 }
 
 // ─────────────────── aggregate ───────────────────
