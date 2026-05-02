@@ -18,7 +18,10 @@ export interface StartServerOptions {
 export async function startServer(opts: StartServerOptions = {}) {
   const platform = createNodePlatform();
   const paths = ensureHome();
-  const port = opts.port ?? Number(process.env.SOCIAL_AGENT_PORT ?? 8787);
+  // Port resolution precedence: explicit opts > $SOCIAL_AGENT_PORT > settings.json > default 8787
+  const settingsAtBoot = await readSettings();
+  const envPort = Number(process.env.SOCIAL_AGENT_PORT ?? '');
+  const port = opts.port ?? (Number.isFinite(envPort) && envPort > 0 ? envPort : settingsAtBoot.port);
 
 // ─────────────────── helpers ───────────────────
 
