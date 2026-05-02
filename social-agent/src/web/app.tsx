@@ -5,11 +5,11 @@ import type { Pet, ProviderPublic, Settings, Status } from './api';
 
 // ─────────────────── App shell ───────────────────
 
-type Tab = 'providers' | 'pets' | 'llm' | 'settings';
+type Tab = 'sessions' | 'providers' | 'pets' | 'llm' | 'settings';
 
 function App() {
   const [status, setStatus]   = useState<Status | null>(null);
-  const [tab,    setTab]      = useState<Tab>('providers');
+  const [tab,    setTab]      = useState<Tab>('sessions');
   const [error,  setError]    = useState<string | null>(null);
 
   useEffect(() => {
@@ -35,7 +35,7 @@ function App() {
       )}
 
       <nav className="bg-white border-b border-slate-200 px-6 flex gap-1">
-        {(['providers','pets','llm','settings'] as const).map(t => (
+        {(['sessions','providers','pets','llm','settings'] as const).map(t => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -50,13 +50,443 @@ function App() {
         ))}
       </nav>
 
-      <main className="p-6 max-w-4xl mx-auto">
+      <main className={`p-6 mx-auto ${tab === 'sessions' ? 'max-w-7xl' : 'max-w-4xl'}`}>
+        {tab === 'sessions'  && <SessionsTab  onError={setError} />}
         {tab === 'providers' && <ProvidersTab onError={setError} />}
         {tab === 'pets'      && <PetsTab      onError={setError} />}
         {tab === 'llm'       && <LLMTab       onError={setError} />}
         {tab === 'settings'  && <SettingsTab  onError={setError} />}
       </main>
     </div>
+  );
+}
+
+// ─────────────────── Sessions (real-time WS feed) ───────────────────
+
+interface AgentEventBase { type: string; ts: number; targetId?: string; [k: string]: any }
+
+function useAgentWS(onError: (s: string) => void) {
+  const [connected, setConnected] = useState(false);
+  const [sessions,  setSessions]  = useState<api.SessionView[]>([]);
+  const [events,    setEvents]    = useState<AgentEventBase[]>([]);
+
+  const refresh = useCallback(() => {
+    api.listSessions().then(setSessions).catch(e => onError(e.message));
+  }, [onError]);
+
+  useEffect(() => {
+    let ws: WebSocket | null = null;
+    let alive = true;
+    try {
+      ws = new WebSocket(api.agentWsUrl());
+    } catch (e: any) {
+      onError(`WS connect failed: ${e?.message ?? e}`);
+      return;
+    }
+
+    ws.onopen    = () => { if (alive) setConnected(true); };
+    ws.onclose   = () => { if (alive) setConnected(false); };
+    ws.onerror   = () => { if (alive) setConnected(false); };
+    ws.onmessage = (e) => {
+      if (!alive) return;
+      let msg: any;
+      try { msg = JSON.parse(e.data); } catch { return; }
+
+      if (msg.type === 'snapshot' && Array.isArray(msg.sessions)) {
+        setSessions(msg.sessions);
+        return;
+      }
+      if (msg.type === 'hello') return;
+
+      // It's an AgentEvent
+      setEvents(prev => {
+        const next = [...prev, msg as AgentEventBase];
+        return next.length > 500 ? next.slice(-500) : next;
+      });
+
+      // Refresh sessions snapshot on lifecycle / plan events
+      if (msg.type?.startsWith('session:') || msg.type === 'eval:plan' || msg.type === 'eval:done') {
+        refresh();
+      }
+    };
+
+    return () => { alive = false; ws?.close(); };
+  }, [refresh, onError]);
+
+  return { connected, sessions, events, refresh };
+}
+
+const EVENT_COLOR: Record<string, string> = {
+  'session:created': 'text-emerald-700 bg-emerald-50',
+  'session:stopped': 'text-slate-500 bg-slate-100',
+  'session:paused':  'text-amber-700 bg-amber-50',
+  'session:resumed': 'text-emerald-700 bg-emerald-50',
+  'eval:start':      'text-cyan-700 bg-cyan-50',
+  'eval:tool':       'text-slate-600 bg-slate-50',
+  'eval:plan':       'text-violet-700 bg-violet-50',
+  'eval:done':       'text-cyan-700 bg-cyan-50',
+  'eval:error':      'text-red-700 bg-red-50',
+  'reply:spawn':     'text-pink-700 bg-pink-50',
+  'reply:skip':      'text-amber-700 bg-amber-50',
+  'reply:tool':      'text-slate-600 bg-slate-50',
+  'reply:sent':      'text-emerald-700 bg-emerald-50',
+  'reply:done':      'text-pink-700 bg-pink-50',
+  'reply:error':     'text-red-700 bg-red-50',
+};
+
+function SessionsTab({ onError }: { onError: (s: string) => void }) {
+  const { connected, sessions, events, refresh } = useAgentWS(onError);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [creating,   setCreating]   = useState(false);
+  const [feeding,    setFeeding]    = useState(false);
+  const [feedText,   setFeedText]   = useState('');
+
+  const selected = sessions.find(s => s.config.targetId === selectedId);
+  const selectedEvents = selectedId ? events.filter(e => e.targetId === selectedId) : [];
+
+  // auto-select first session when sessions arrive and nothing selected
+  useEffect(() => {
+    if (!selectedId && sessions.length > 0) setSelectedId(sessions[0].config.targetId);
+  }, [sessions, selectedId]);
+
+  const onStop = async (id: string) => {
+    if (!confirm(`stop session "${id}"?`)) return;
+    try { await api.stopSession(id); }
+    catch (e: any) { onError(e.message); }
+    if (selectedId === id) setSelectedId(null);
+    refresh();
+  };
+  const onPause  = async (id: string) => { try { await api.pauseSession(id);  refresh(); } catch (e: any) { onError(e.message); } };
+  const onResume = async (id: string) => { try { await api.resumeSession(id); refresh(); } catch (e: any) { onError(e.message); } };
+  const onFeed   = async () => {
+    if (!selectedId || !feedText.trim()) return;
+    setFeeding(true);
+    try { await api.feedSession(selectedId, feedText); setFeedText(''); }
+    catch (e: any) { onError(e.message); }
+    finally { setFeeding(false); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3">
+        <h2 className="text-lg font-semibold">Sessions</h2>
+        <span className={`text-xs px-2 py-0.5 rounded-full ${connected ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'}`}>
+          {connected ? '● connected' : '○ disconnected'}
+        </span>
+        <span className="text-xs text-slate-400">{sessions.length} session{sessions.length === 1 ? '' : 's'}</span>
+        <button
+          onClick={() => setCreating(true)}
+          className="ml-auto px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded"
+        >+ Start Session</button>
+      </div>
+
+      {creating && (
+        <SessionForm
+          onSave={async (cfg) => {
+            try { await api.createSession(cfg); setCreating(false); setSelectedId(cfg.targetId); refresh(); }
+            catch (e: any) { onError(e.message); }
+          }}
+          onCancel={() => setCreating(false)}
+        />
+      )}
+
+      {sessions.length === 0 && !creating && (
+        <div className="text-sm text-slate-400 italic">No sessions yet. Click + Start Session.</div>
+      )}
+
+      {sessions.length > 0 && (
+        <div className="grid grid-cols-12 gap-4">
+          {/* Left: sessions list */}
+          <div className="col-span-4 space-y-2">
+            {sessions.map(s => (
+              <SessionRow
+                key={s.config.targetId}
+                s={s}
+                selected={s.config.targetId === selectedId}
+                onClick={() => setSelectedId(s.config.targetId)}
+                onPause={() => onPause(s.config.targetId)}
+                onResume={() => onResume(s.config.targetId)}
+                onStop={() => onStop(s.config.targetId)}
+              />
+            ))}
+          </div>
+
+          {/* Right: session detail + event stream */}
+          <div className="col-span-8 space-y-3">
+            {selected ? (
+              <>
+                <SessionDetail s={selected} />
+
+                {/* Feed snapshot */}
+                <div className="bg-white border border-slate-200 rounded p-3 space-y-2">
+                  <div className="text-xs font-semibold text-slate-600 uppercase">Feed Chat Snapshot</div>
+                  <textarea
+                    value={feedText}
+                    onChange={e => setFeedText(e.target.value)}
+                    placeholder="[14:00] Bob(2222) [#abc1]: 这个问题怎么解决？"
+                    rows={3}
+                    className="w-full px-2 py-1 border border-slate-300 rounded font-mono text-sm"
+                  />
+                  <button
+                    onClick={onFeed}
+                    disabled={feeding || !feedText.trim()}
+                    className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded disabled:opacity-50"
+                  >{feeding ? 'feeding…' : 'Feed → trigger eval'}</button>
+                </div>
+
+                {/* Event stream */}
+                <EventStream events={selectedEvents} />
+              </>
+            ) : (
+              <div className="text-sm text-slate-400 italic">Select a session to inspect.</div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SessionRow({ s, selected, onClick, onPause, onResume, onStop }: {
+  s: api.SessionView;
+  selected: boolean;
+  onClick: () => void;
+  onPause: () => void;
+  onResume: () => void;
+  onStop: () => void;
+}) {
+  return (
+    <div
+      onClick={onClick}
+      className={`bg-white border rounded p-3 cursor-pointer transition-colors ${
+        selected ? 'border-cyan-500 ring-1 ring-cyan-200' : 'border-slate-200 hover:border-slate-300'
+      }`}
+    >
+      <div className="flex items-center gap-2">
+        <span className="font-medium truncate">{s.config.targetName || s.config.targetId}</span>
+        <span className="text-xs text-slate-400">{s.config.targetType ?? 'group'}</span>
+        <span className="ml-auto" />
+        <StatusPill status={s.status} />
+      </div>
+      <div className="text-xs text-slate-500 font-mono mt-1 truncate">
+        targetId: {s.config.targetId}
+      </div>
+      <div className="text-xs text-slate-400 mt-1">
+        evals: {s.evalCount}{s.lastEvalAt ? ` · last ${new Date(s.lastEvalAt).toLocaleTimeString()}` : ''}
+        {s.hasPendingSnapshot && <span className="ml-2 text-amber-600">⏳ queued</span>}
+      </div>
+      <div className="flex gap-2 mt-2 text-xs" onClick={e => e.stopPropagation()}>
+        {s.status === 'paused'
+          ? <button onClick={onResume} className="px-2 py-0.5 rounded border border-emerald-300 text-emerald-700 hover:bg-emerald-50">▶ resume</button>
+          : <button onClick={onPause}  className="px-2 py-0.5 rounded border border-amber-300 text-amber-700 hover:bg-amber-50">⏸ pause</button>}
+        <button onClick={onStop} className="px-2 py-0.5 rounded border border-red-300 text-red-600 hover:bg-red-50">⏹ stop</button>
+      </div>
+    </div>
+  );
+}
+
+function StatusPill({ status }: { status: api.SessionView['status'] }) {
+  const cls =
+    status === 'evaluating' ? 'bg-cyan-100 text-cyan-700' :
+    status === 'paused'     ? 'bg-amber-100 text-amber-700' :
+                              'bg-slate-100 text-slate-600';
+  const label =
+    status === 'evaluating' ? '⚙️ thinking' :
+    status === 'paused'     ? '⏸ paused' :
+                              '○ idle';
+  return <span className={`text-xs px-2 py-0.5 rounded-full ${cls}`}>{label}</span>;
+}
+
+function SessionDetail({ s }: { s: api.SessionView }) {
+  return (
+    <div className="bg-white border border-slate-200 rounded p-3 space-y-2 text-sm">
+      <div className="text-xs font-semibold text-slate-600 uppercase">Session Detail</div>
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1 text-xs font-mono">
+        <span className="text-slate-400">petId:</span>     <span className="truncate">{s.config.petId}</span>
+        <span className="text-slate-400">targetId:</span>  <span>{s.config.targetId}</span>
+        <span className="text-slate-400">model:</span>     <span>{s.config.model}</span>
+        <span className="text-slate-400">lurkMode:</span>  <span>{s.config.lurkMode ?? 'normal'}</span>
+        <span className="text-slate-400">created:</span>   <span>{new Date(s.createdAt).toLocaleString()}</span>
+        <span className="text-slate-400">evalCount:</span> <span>{s.evalCount}</span>
+      </div>
+      {s.lastPlan && (
+        <details className="text-xs">
+          <summary className="cursor-pointer font-semibold text-violet-700">Last Plan ▾</summary>
+          <div className="mt-2 space-y-2">
+            <div>
+              <div className="text-slate-500 font-semibold">state</div>
+              <pre className="whitespace-pre-wrap break-words bg-violet-50 p-2 rounded text-violet-900">{s.lastPlan.state}</pre>
+            </div>
+            {s.lastPlan.brief && (
+              <div>
+                <div className="text-slate-500 font-semibold">brief</div>
+                <pre className="whitespace-pre-wrap break-words bg-pink-50 p-2 rounded text-pink-900">{s.lastPlan.brief}</pre>
+              </div>
+            )}
+            <div>
+              <div className="text-slate-500 font-semibold">actions</div>
+              <pre className="whitespace-pre-wrap break-words bg-slate-50 p-2 rounded">{JSON.stringify(s.lastPlan.actions, null, 2)}</pre>
+            </div>
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function EventStream({ events }: { events: AgentEventBase[] }) {
+  const reversed = [...events].reverse();   // newest first
+  return (
+    <div className="bg-white border border-slate-200 rounded p-3">
+      <div className="text-xs font-semibold text-slate-600 uppercase mb-2">Event Stream ({events.length})</div>
+      {events.length === 0 ? (
+        <div className="text-xs text-slate-400 italic">no events yet — try Feed to trigger an eval.</div>
+      ) : (
+        <div className="space-y-1 max-h-[60vh] overflow-y-auto font-mono text-xs">
+          {reversed.map((e, i) => (
+            <details key={`${e.ts}-${i}`} className={`rounded px-2 py-1 ${EVENT_COLOR[e.type] ?? 'text-slate-600 bg-slate-50'}`}>
+              <summary className="cursor-pointer flex items-center gap-2">
+                <span className="text-slate-400">{new Date(e.ts).toLocaleTimeString()}</span>
+                <span className="font-semibold">{e.type}</span>
+                <EventSummary e={e} />
+              </summary>
+              <pre className="mt-1 whitespace-pre-wrap break-words text-[10px] text-slate-700">
+                {JSON.stringify(e, null, 2)}
+              </pre>
+            </details>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function EventSummary({ e }: { e: AgentEventBase }) {
+  if (e.type === 'eval:tool')  return <span className="truncate"> {e.name}{e.isError ? ' ❌' : ''}</span>;
+  if (e.type === 'eval:plan')  return <span className="truncate"> actions=[{e.plan?.actions?.map((a: any) => a.type).join(',')}]</span>;
+  if (e.type === 'eval:done')  return <span className="truncate"> iter={e.iterations} {e.elapsedMs}ms{e.hadPlan ? ' ✓ plan' : ''}</span>;
+  if (e.type === 'reply:spawn') return <span className="truncate"> #{e.replyId?.slice(0, 8)} (in-flight {e.inFlightCount})</span>;
+  if (e.type === 'reply:sent') return <span className="truncate"> "{(e.content ?? '').slice(0, 40)}{e.content?.length > 40 ? '…' : ''}"</span>;
+  if (e.type === 'reply:done') return <span className="truncate"> {e.sent ? '✓ sent' : '○ no-send'} · {e.elapsedMs}ms</span>;
+  if (e.type === 'reply:skip') return <span className="truncate"> {e.reason}</span>;
+  return null;
+}
+
+function SessionForm({ onSave, onCancel }: {
+  onSave: (cfg: api.SessionConfig) => Promise<void>;
+  onCancel: () => void;
+}) {
+  const [pets,      setPets]      = useState<Pet[]>([]);
+  const [providers, setProviders] = useState<ProviderPublic[]>([]);
+  useEffect(() => {
+    api.listPets().then(setPets).catch(() => {});
+    api.listProviders().then(setProviders).catch(() => {});
+  }, []);
+
+  const [petId,         setPetId]      = useState('');
+  const [targetId,      setTargetId]   = useState('');
+  const [targetType,    setTargetType] = useState<api.TargetType>('group');
+  const [targetName,    setTargetName] = useState('');
+  const [providerId,    setProviderId] = useState('');
+  const [model,         setModel]      = useState('');
+  const [botQQ,         setBotQQ]      = useState('');
+  const [lurkMode,      setLurkMode]   = useState<api.LurkMode>('normal');
+  const [pending,       setPending]    = useState(false);
+
+  // Auto-fill defaults when lists arrive
+  useEffect(() => { if (!petId && pets.length > 0)           setPetId(pets[0].id); }, [pets, petId]);
+  useEffect(() => {
+    if (!providerId && providers.length > 0) {
+      setProviderId(providers[0].id);
+      if (providers[0].defaultModel) setModel(providers[0].defaultModel);
+    }
+  }, [providers, providerId]);
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!petId || !targetId.trim() || !providerId || !model.trim()) return;
+    setPending(true);
+    try {
+      await onSave({
+        petId,
+        targetId: targetId.trim(),
+        targetType,
+        targetName: targetName.trim() || undefined,
+        providerId,
+        model: model.trim(),
+        botQQ: botQQ.trim() || undefined,
+        lurkMode,
+      });
+    } finally { setPending(false); }
+  };
+
+  return (
+    <form onSubmit={submit} className="bg-white border border-cyan-200 rounded p-4 space-y-3">
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="pet">
+          <select value={petId} onChange={e => setPetId(e.target.value)} required
+            className="w-full px-2 py-1 border border-slate-300 rounded">
+            {pets.length === 0 && <option value="">(no pets — add one in Pets tab)</option>}
+            {pets.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </Field>
+        <Field label="provider">
+          <select value={providerId} onChange={e => {
+            setProviderId(e.target.value);
+            const p = providers.find(p => p.id === e.target.value);
+            if (p?.defaultModel) setModel(p.defaultModel);
+          }} required className="w-full px-2 py-1 border border-slate-300 rounded">
+            {providers.length === 0 && <option value="">(no providers — add one in Providers tab)</option>}
+            {providers.map(p => <option key={p.id} value={p.id}>{p.name} ({p.type})</option>)}
+          </select>
+        </Field>
+      </div>
+      <Field label="model">
+        <input value={model} onChange={e => setModel(e.target.value)} required
+          placeholder="claude-sonnet-4-6 / gpt-4 / ..."
+          className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+      </Field>
+      <div className="grid grid-cols-3 gap-3">
+        <Field label="targetId (e.g. group QQ)">
+          <input value={targetId} onChange={e => setTargetId(e.target.value)} required
+            placeholder="902317662"
+            className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+        </Field>
+        <Field label="targetType">
+          <select value={targetType} onChange={e => setTargetType(e.target.value as api.TargetType)}
+            className="w-full px-2 py-1 border border-slate-300 rounded">
+            <option value="group">group</option>
+            <option value="friend">friend</option>
+          </select>
+        </Field>
+        <Field label="lurkMode">
+          <select value={lurkMode} onChange={e => setLurkMode(e.target.value as api.LurkMode)}
+            className="w-full px-2 py-1 border border-slate-300 rounded">
+            <option value="normal">normal</option>
+            <option value="semi-lurk">semi-lurk</option>
+            <option value="full-lurk">full-lurk</option>
+          </select>
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <Field label="targetName (optional)">
+          <input value={targetName} onChange={e => setTargetName(e.target.value)}
+            placeholder="测试群"
+            className="w-full px-2 py-1 border border-slate-300 rounded" />
+        </Field>
+        <Field label="botQQ (optional)">
+          <input value={botQQ} onChange={e => setBotQQ(e.target.value)}
+            placeholder="bot QQ number for self-recognition"
+            className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+        </Field>
+      </div>
+      <div className="flex gap-2 justify-end">
+        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-slate-300 rounded hover:bg-slate-100">Cancel</button>
+        <button type="submit" disabled={pending} className="px-3 py-1 text-sm bg-cyan-600 hover:bg-cyan-700 text-white rounded disabled:opacity-50">
+          {pending ? 'starting…' : 'Start'}
+        </button>
+      </div>
+    </form>
   );
 }
 

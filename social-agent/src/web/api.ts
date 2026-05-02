@@ -93,3 +93,54 @@ export const deleteProvider  = (id: string) => request<{ ok: true }>('DELETE', `
 // ─── LLM test ───
 export const llmTest = (input: { providerId: string; model: string; prompt: string; temperature?: number; maxTokens?: number }) =>
   request<LLMTestResult>('POST', '/api/llm/test', input);
+
+// ─── agent sessions ───
+
+export type LurkMode = 'normal' | 'semi-lurk' | 'full-lurk';
+export type TargetType = 'group' | 'friend';
+
+export interface SessionConfig {
+  petId: string;
+  targetId: string;
+  targetType?: TargetType;
+  providerId: string;
+  model: string;
+  temperature?: number;
+  maxTokens?: number;
+  timeoutMs?: number;
+  maxIterations?: number;
+  targetName?: string;
+  socialPersonaPrompt?: string;
+  botQQ?: string;
+  ownerQQ?: string;
+  ownerName?: string;
+  ownerSecret?: string;
+  lurkMode?: LurkMode;
+  voiceEnabled?: boolean;
+  imageGenEnabled?: boolean;
+  customGroupRules?: string;
+}
+
+export interface SessionView {
+  config: SessionConfig;
+  status: 'idle' | 'evaluating' | 'paused';
+  lastEvalAt: number | null;
+  evalCount: number;
+  lastPlan: { state: string; brief: string; actions: any[] } | null;
+  hasPendingSnapshot: boolean;
+  createdAt: number;
+}
+
+export const listSessions   = ()                                      => request<SessionView[]>('GET', '/api/agent/sessions');
+export const getSession     = (id: string)                            => request<SessionView>('GET', `/api/agent/sessions/${encodeURIComponent(id)}`);
+export const createSession  = (cfg: SessionConfig)                    => request<SessionView>('POST', '/api/agent/sessions', cfg);
+export const stopSession    = (id: string)                            => request<{ ok: true }>('DELETE', `/api/agent/sessions/${encodeURIComponent(id)}`);
+export const feedSession    = (id: string, chatSnapshot: string)      => request<{ ok: true; queued: true }>('POST', `/api/agent/sessions/${encodeURIComponent(id)}/feed`, { chatSnapshot });
+export const pauseSession   = (id: string)                            => request<{ ok: true }>('POST', `/api/agent/sessions/${encodeURIComponent(id)}/pause`);
+export const resumeSession  = (id: string)                            => request<{ ok: true }>('POST', `/api/agent/sessions/${encodeURIComponent(id)}/resume`);
+
+// WebSocket URL helper (browser uses ws/wss based on the page protocol)
+export function agentWsUrl(): string {
+  const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${window.location.host}/ws/agent`;
+}
