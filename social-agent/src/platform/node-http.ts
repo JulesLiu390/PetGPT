@@ -25,7 +25,7 @@ export const nodeHTTP: PlatformHTTP = {
       const res = await fetch(req.url, {
         method: req.method ?? 'GET',
         headers: req.headers,
-        body: req.body,
+        body: req.body as BodyInit | undefined,
         signal,
       });
       const body = await res.text();
@@ -46,7 +46,7 @@ export const nodeHTTP: PlatformHTTP = {
       const res = await fetch(req.url, {
         method: req.method ?? 'POST',
         headers: req.headers,
-        body: req.body,
+        body: req.body as BodyInit | undefined,
         signal,
       });
       if (!res.ok) {

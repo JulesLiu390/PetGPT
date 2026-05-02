@@ -10,6 +10,7 @@ import {
 } from './providers.ts';
 import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
+import dashboardHtml from './web/index.html';
 
 const platform = createNodePlatform();
 
@@ -50,6 +51,10 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
 
 const server = Bun.serve({
   port: PORT,
+  // HTML import auto-bundles dashboard's .tsx + transitive deps + Tailwind CDN refs
+  routes: {
+    '/': dashboardHtml,
+  },
   async fetch(req, server) {
     const url = new URL(req.url);
     const { pathname } = url;
@@ -208,8 +213,8 @@ const server = Bun.serve({
       });
     }
 
-    // ── Index ──
-    if (method === 'GET' && pathname === '/') {
+    // ── Help index (text listing, useful from terminal) ──
+    if (method === 'GET' && pathname === '/api/help') {
       return new Response(
         [
           'social-agent service v0.0.1',
