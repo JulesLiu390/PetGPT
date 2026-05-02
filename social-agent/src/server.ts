@@ -12,10 +12,14 @@ import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
 import dashboardHtml from './web/index.html';
 
-const platform = createNodePlatform();
+export interface StartServerOptions {
+  port?: number;
+}
 
-const PORT = Number(process.env.SOCIAL_AGENT_PORT ?? 8787);
-const paths = ensureHome();
+export async function startServer(opts: StartServerOptions = {}) {
+  const platform = createNodePlatform();
+  const paths = ensureHome();
+  const port = opts.port ?? Number(process.env.SOCIAL_AGENT_PORT ?? 8787);
 
 // ─────────────────── helpers ───────────────────
 
@@ -49,8 +53,8 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
 
 // ─────────────────── server ───────────────────
 
-const server = Bun.serve({
-  port: PORT,
+  const server = Bun.serve({
+    port,
   // HTML import auto-bundles dashboard's .tsx + transitive deps + Tailwind CDN refs
   routes: {
     '/': dashboardHtml,
@@ -248,5 +252,11 @@ const server = Bun.serve({
   },
 });
 
-console.log(`social-agent listening on http://localhost:${server.port}`);
-console.log(`home: ${paths.home}`);
+  return { server, paths, platform };
+}
+
+if (import.meta.main) {
+  const { server, paths } = await startServer();
+  console.log(`social-agent listening on http://localhost:${server.port}`);
+  console.log(`home: ${paths.home}`);
+}
