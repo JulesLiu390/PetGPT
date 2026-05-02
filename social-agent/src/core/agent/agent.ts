@@ -156,6 +156,29 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
           content: r.captured.content,
           replyTo: r.captured.replyTo,
         });
+
+        // ── Phase 5c: forward to MCP if a server is configured ──
+        if (s.config.mcpServerName) {
+          const toolName = s.config.mcpSendTool || 'send_message';
+          try {
+            const mcpResult = await platform.mcp.callTool(s.config.mcpServerName, toolName, {
+              target: targetId,
+              target_type: s.config.targetType ?? 'group',
+              content: r.captured.content,
+              ...(r.captured.replyTo ? { reply_to: r.captured.replyTo } : {}),
+            });
+            emit({
+              type: 'reply:dispatched', ts: Date.now(), targetId, replyId,
+              mcpServerName: s.config.mcpServerName, toolName, result: mcpResult,
+            });
+          } catch (e: any) {
+            emit({
+              type: 'reply:dispatch-failed', ts: Date.now(), targetId, replyId,
+              mcpServerName: s.config.mcpServerName, toolName,
+              message: e?.message ?? String(e),
+            });
+          }
+        }
       }
 
       emit({

@@ -26,7 +26,9 @@ export type AgentEventType =
   | 'reply:tool'
   | 'reply:sent'
   | 'reply:done'
-  | 'reply:error';
+  | 'reply:error'
+  | 'reply:dispatched'
+  | 'reply:dispatch-failed';
 
 interface BaseAgentEvent {
   type: AgentEventType;
@@ -138,7 +140,25 @@ export interface ReplyErrorEvent extends BaseAgentEvent {
   message: string;
 }
 
+export interface ReplyDispatchedEvent extends BaseAgentEvent {
+  type: 'reply:dispatched';
+  replyId: string;
+  mcpServerName: string;
+  toolName: string;
+  /** Vendor-specific MCP callTool result, kept opaque on the wire. */
+  result: unknown;
+}
+
+export interface ReplyDispatchFailedEvent extends BaseAgentEvent {
+  type: 'reply:dispatch-failed';
+  replyId: string;
+  mcpServerName: string;
+  toolName: string;
+  message: string;
+}
+
 export type AgentEvent =
   | SessionCreatedEvent | SessionStoppedEvent | SessionPausedEvent | SessionResumedEvent
   | EvalStartEvent      | EvalToolEvent       | EvalPlanEvent     | EvalDoneEvent | EvalErrorEvent
-  | ReplySpawnEvent     | ReplySkipEvent      | ReplyToolEvent    | ReplySentEvent | ReplyDoneEvent | ReplyErrorEvent;
+  | ReplySpawnEvent     | ReplySkipEvent      | ReplyToolEvent    | ReplySentEvent | ReplyDoneEvent | ReplyErrorEvent
+  | ReplyDispatchedEvent | ReplyDispatchFailedEvent;

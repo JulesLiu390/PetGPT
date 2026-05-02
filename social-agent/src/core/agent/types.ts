@@ -28,6 +28,12 @@ export interface SessionConfig {
   voiceEnabled?: boolean;
   imageGenEnabled?: boolean;
   customGroupRules?: string;
+
+  // ─── MCP dispatch (Phase 5c) ───
+  /** When set, captured Reply content is forwarded to this MCP server. */
+  mcpServerName?: string;
+  /** Tool name to invoke on the MCP server. Default 'send_message'. */
+  mcpSendTool?: string;
 }
 
 export type SessionStatus = 'idle' | 'evaluating' | 'paused';
