@@ -9,6 +9,7 @@ import {
 } from './providers.ts';
 import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
+import { runIntentEval } from './core/agent/intentEval.ts';
 import dashboardHtml from './web/index.html';
 
 export interface StartServerOptions {
@@ -193,6 +194,68 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
       });
     }
 
+    // ── Intent eval (one-shot agent evaluation) ──
+    if (method === 'POST' && pathname === '/api/agent/intent-eval') {
+      return safe(async () => {
+        const body = await readBody<any>(req);
+        if (!body) return err(400, 'invalid JSON body');
+        if (!body.petId)        return err(400, 'petId required');
+        if (!body.targetId)     return err(400, 'targetId required');
+        if (!body.providerId)   return err(400, 'providerId required');
+        if (!body.model)        return err(400, 'model required');
+        if (typeof body.chatSnapshot !== 'string') return err(400, 'chatSnapshot (string) required');
+
+        const provider = await getProviderInternal(body.providerId);
+        if (!provider) return err(404, 'provider not found');
+
+        try {
+          const result = await runIntentEval(platform, {
+            petId: body.petId,
+            targetId: body.targetId,
+            targetType: body.targetType,
+            provider,
+            model: body.model,
+            temperature: body.temperature,
+            maxTokens: body.maxTokens,
+            timeoutMs: body.timeoutMs,
+            maxIterations: body.maxIterations,
+            chatSnapshot: body.chatSnapshot,
+            targetName: body.targetName,
+            socialPersonaPrompt: body.socialPersonaPrompt,
+            botQQ: body.botQQ,
+            ownerQQ: body.ownerQQ,
+            ownerName: body.ownerName,
+            ownerSecret: body.ownerSecret,
+            nameDelimiterL: body.nameDelimiterL,
+            nameDelimiterR: body.nameDelimiterR,
+            msgDelimiterL: body.msgDelimiterL,
+            msgDelimiterR: body.msgDelimiterR,
+            lurkMode: body.lurkMode,
+            voiceEnabled: body.voiceEnabled,
+            imageGenEnabled: body.imageGenEnabled,
+            customGroupRules: body.customGroupRules,
+            sinceLastEvalMin: body.sinceLastEvalMin,
+            userPrompt: body.userPrompt,
+          });
+          // Drop full transcript from the wire to keep payload small;
+          // toolCalls trace + plan is the actionable info.
+          return ok({
+            plan: result.plan,
+            toolCalls: result.toolCalls,
+            finalContent: result.finalContent,
+            iterations: result.iterations,
+            stoppedEarly: result.stoppedEarly,
+            elapsedMs: result.elapsedMs,
+          });
+        } catch (e: any) {
+          if (e instanceof LLMError) {
+            return err(e.status && e.status >= 400 ? e.status : 502, e.message);
+          }
+          throw e;
+        }
+      });
+    }
+
     // ── Help index (text listing, useful from terminal) ──
     if (method === 'GET' && pathname === '/api/help') {
       return new Response(
@@ -209,6 +272,7 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
           '  POST   /api/llm/test              { providerId, model, prompt, ...opts }',
+          '  POST   /api/agent/intent-eval     { petId, targetId, providerId, model, chatSnapshot, ... }',
           '  WS     /ws',
           '',
         ].join('\n'),
