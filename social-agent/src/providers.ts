@@ -14,13 +14,42 @@ import { getPaths } from './paths.ts';
  * No master password, no unlock flow.
  */
 
+export type ProviderType = 'openai-compat' | 'anthropic' | 'gemini';
+
+/** Tauri-side `apiFormat` aliases. Read-only mirror derived from `type`. */
+export type ProviderApiFormat = 'openai_compatible' | 'anthropic_native' | 'gemini_official';
+
+export function apiFormatOf(t: ProviderType): ProviderApiFormat {
+  switch (t) {
+    case 'openai-compat': return 'openai_compatible';
+    case 'anthropic':     return 'anthropic_native';
+    case 'gemini':        return 'gemini_official';
+  }
+}
+
+/** Inverse: accept Tauri-style format strings when ingesting external configs. */
+export function typeFromApiFormat(f: string): ProviderType | null {
+  switch (f) {
+    case 'openai_compatible':
+    case 'openai-compat':       return 'openai-compat';
+    case 'anthropic_native':
+    case 'anthropic':           return 'anthropic';
+    case 'gemini_official':
+    case 'gemini':              return 'gemini';
+    default:                    return null;
+  }
+}
+
 export interface Provider {
   id: string;
-  type: 'openai-compat' | 'anthropic' | 'gemini';
+  type: ProviderType;
   name: string;
   baseUrl?: string;
   defaultModel?: string;
   apiKey: string;          // sensitive — never returned by listProviders/getProvider
+  /** Last-fetched model id list. Populated by POST /api/providers/:id/fetch-models. */
+  cachedModels?: string[];
+  cachedModelsAt?: number; // epoch ms
   createdAt: number;
   updatedAt: number;
 }
@@ -57,7 +86,11 @@ async function save(data: ProvidersData): Promise<void> {
 
 // ─────────────────── public API ───────────────────
 
-export type ProviderPublic = Omit<Provider, 'apiKey'> & { apiKeyMasked: string };
+export type ProviderPublic = Omit<Provider, 'apiKey'> & {
+  apiKeyMasked: string;
+  /** Tauri-style alias of `type`, surfaced read-only for UI labels. */
+  apiFormat: ProviderApiFormat;
+};
 
 function maskApiKey(k: string): string {
   if (!k) return '';
@@ -67,7 +100,7 @@ function maskApiKey(k: string): string {
 
 function toPublic(p: Provider): ProviderPublic {
   const { apiKey, ...rest } = p;
-  return { ...rest, apiKeyMasked: maskApiKey(apiKey) };
+  return { ...rest, apiKeyMasked: maskApiKey(apiKey), apiFormat: apiFormatOf(p.type) };
 }
 
 export async function listProviders(): Promise<ProviderPublic[]> {
@@ -138,4 +171,24 @@ export async function deleteProvider(id: string): Promise<boolean> {
   if (data.providers.length === before) return false;
   await save(data);
   return true;
+}
+
+/**
+ * System-write to update the cached model list after a successful fetch.
+ * Bypasses regular update path because this is provider metadata, not a user
+ * edit — keeps `updatedAt` for UI freshness semantics.
+ */
+export async function setCachedModels(id: string, models: string[]): Promise<ProviderPublic | null> {
+  const data = await load();
+  const idx = data.providers.findIndex(p => p.id === id);
+  if (idx < 0) return null;
+  const cur = data.providers[idx];
+  data.providers[idx] = {
+    ...cur,
+    cachedModels: models,
+    cachedModelsAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+  await save(data);
+  return toPublic(data.providers[idx]);
 }

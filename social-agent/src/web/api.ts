@@ -22,13 +22,19 @@ export interface Pet {
   updatedAt: number;
 }
 
+export type ProviderType       = 'openai-compat' | 'anthropic' | 'gemini';
+export type ProviderApiFormat  = 'openai_compatible' | 'anthropic_native' | 'gemini_official';
+
 export interface ProviderPublic {
   id: string;
-  type: 'openai-compat' | 'anthropic' | 'gemini';
+  type: ProviderType;
+  apiFormat: ProviderApiFormat;     // Tauri-style alias of `type`
   name: string;
   baseUrl?: string;
   defaultModel?: string;
   apiKeyMasked: string;
+  cachedModels?: string[];
+  cachedModelsAt?: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -89,6 +95,8 @@ export const createProvider  = (input: {
 export const updateProvider  = (id: string, partial: Partial<{ name: string; apiKey: string; baseUrl: string; defaultModel: string }>) =>
   request<ProviderPublic>('PATCH', `/api/providers/${encodeURIComponent(id)}`, partial);
 export const deleteProvider  = (id: string) => request<{ ok: true }>('DELETE', `/api/providers/${encodeURIComponent(id)}`);
+export const fetchProviderModels = (id: string) =>
+  request<{ ok: true; models: string[]; count: number; provider: ProviderPublic }>('POST', `/api/providers/${encodeURIComponent(id)}/fetch-models`);
 
 // ─── LLM test ───
 export const llmTest = (input: { providerId: string; model: string; prompt: string; temperature?: number; maxTokens?: number }) =>

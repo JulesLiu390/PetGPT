@@ -70,6 +70,9 @@ export interface ChatResponse {
 export interface LLMClient {
   /** Single round-trip chat call. Throws on transport / 4xx / 5xx. */
   chat(req: ChatRequest): Promise<ChatResponse>;
+  /** List models available on this provider's account. Throws if the provider
+   *  doesn't expose a /models endpoint or auth fails. */
+  listModels(opts?: { timeoutMs?: number }): Promise<string[]>;
 }
 
 export class LLMError extends Error {

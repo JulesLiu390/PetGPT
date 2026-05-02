@@ -93,6 +93,18 @@ export function createOpenAICompatClient(http: PlatformHTTP, provider: Provider)
         raw: parsed,
       };
     },
+
+    async listModels(opts = {}) {
+      const res = await http.request({
+        url: `${baseUrl}/models`,
+        method: 'GET',
+        headers: { 'authorization': `Bearer ${provider.apiKey}` },
+        timeoutMs: opts.timeoutMs,
+      });
+      if (!res.ok) throw new LLMError(`OpenAI-compat ${res.status}: ${shortErr(res.body)}`, res.status, res.body);
+      const parsed = JSON.parse(res.body) as { data?: Array<{ id: string }> };
+      return (parsed.data ?? []).map(m => m.id).filter(Boolean);
+    },
   };
 }
 

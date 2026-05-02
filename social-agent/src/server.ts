@@ -5,7 +5,7 @@ import {
 } from './config.ts';
 import {
   listProviders, getProvider, createProvider, updateProvider, deleteProvider,
-  getProviderInternal,
+  getProviderInternal, setCachedModels,
 } from './providers.ts';
 import { readSocialConfig, writeSocialConfig, patchSocialConfig } from './socialConfig.ts';
 import { createNodePlatform } from './platform/index.ts';
@@ -196,6 +196,25 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           return removed ? ok({ ok: true }) : err(404, 'provider not found');
         });
       }
+      const fm = pathname.match(/^\/api\/providers\/([^/]+)\/fetch-models$/);
+      if (fm && method === 'POST') {
+        const id = fm[1];
+        return safe(async () => {
+          const provider = await getProviderInternal(id);
+          if (!provider) return err(404, 'provider not found');
+          const client = createLLMClient(platform, provider);
+          try {
+            const models = await client.listModels({ timeoutMs: 30000 });
+            const updated = await setCachedModels(id, models);
+            return ok({ ok: true, models, count: models.length, provider: updated });
+          } catch (e: any) {
+            if (e instanceof LLMError) {
+              return err(e.status && e.status >= 400 ? e.status : 502, e.message);
+            }
+            throw e;
+          }
+        });
+      }
     }
 
     // ── LLM test (probe a saved provider) ──
@@ -361,6 +380,7 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           '  GET    /api/pets/:id/social-config   PUT  PATCH',
           '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
           '  GET    /api/providers/:id         PATCH  DELETE',
+          '  POST   /api/providers/:id/fetch-models',
           '  POST   /api/llm/test              { providerId, model, prompt, ...opts }',
           '  POST   /api/agent/intent-eval     { petId, targetId, providerId, model, chatSnapshot, ... }',
           '  GET    /api/agent/sessions        POST   { petId, targetId, providerId, model, ... }',

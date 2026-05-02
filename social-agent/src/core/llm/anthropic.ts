@@ -87,6 +87,21 @@ export function createAnthropicClient(http: PlatformHTTP, provider: Provider): L
         raw: parsed,
       };
     },
+
+    async listModels(opts = {}) {
+      const res = await http.request({
+        url: `${baseUrl}/v1/models`,
+        method: 'GET',
+        headers: {
+          'x-api-key': provider.apiKey,
+          'anthropic-version': ANTHROPIC_VERSION,
+        },
+        timeoutMs: opts.timeoutMs,
+      });
+      if (!res.ok) throw new LLMError(`Anthropic ${res.status}: ${shortErr(res.body)}`, res.status, res.body);
+      const parsed = JSON.parse(res.body) as { data?: Array<{ id: string }> };
+      return (parsed.data ?? []).map(m => m.id).filter(Boolean);
+    },
   };
 }
 

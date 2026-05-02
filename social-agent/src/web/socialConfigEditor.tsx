@@ -94,8 +94,8 @@ export function SocialConfigEditor({ petId, providers, onError, onSaved }: Props
             }} providers={providers} />
           </Field>
           <Field label="Default Model">
-            <input value={cfg.modelName} onChange={e => set('modelName', e.target.value)}
-              className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+            <ModelInput value={cfg.modelName} onChange={v => set('modelName', v)}
+              providers={providers} providerId={cfg.apiProviderId} />
           </Field>
         </Grid>
       </Section>
@@ -166,9 +166,10 @@ export function SocialConfigEditor({ petId, providers, onError, onSaved }: Props
                 providers={providers} />
             </Field>
             <Field label="Model">
-              <input value={cfg.imageGenConfig.modelName} onChange={e => set('imageGenConfig', { ...cfg.imageGenConfig, modelName: e.target.value })}
-                placeholder="gpt-image-2 / dall-e-3 / ..."
-                className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+              <ModelInput value={cfg.imageGenConfig.modelName}
+                onChange={v => set('imageGenConfig', { ...cfg.imageGenConfig, modelName: v })}
+                providers={providers} providerId={cfg.imageGenConfig.providerId}
+                placeholder="gpt-image-2 / dall-e-3 / ..." />
             </Field>
           </Grid>
         )}
@@ -328,8 +329,42 @@ function RoleLLMRow({ label, cfg, set, providers, idKey, modelKey }: {
     <div className="grid grid-cols-[120px_1fr_1fr] gap-3 items-center">
       <span className="text-xs uppercase tracking-wide text-slate-500">{label}</span>
       <ProviderPicker value={id} onChange={v => set(idKey, v as any)} providers={providers} />
-      <input value={model} onChange={e => set(modelKey, e.target.value as any)} placeholder="(default)"
-        className="w-full px-2 py-1 border border-slate-300 rounded font-mono text-sm" />
+      <ModelInput value={model} onChange={v => set(modelKey, v as any)}
+        providers={providers} providerId={id} placeholder="(default)" />
+    </div>
+  );
+}
+
+/**
+ * Model input field — combines a free-text input with a <datalist> of the
+ * provider's cachedModels. Browsers render this as a typeable combo box:
+ * autocomplete suggests cached models but the user can also type any string
+ * (e.g. a model name not yet in the cache).
+ */
+function ModelInput({ value, onChange, providers, providerId, placeholder }: {
+  value: string;
+  onChange: (v: string) => void;
+  providers: ProviderPublic[];
+  providerId: string;
+  placeholder?: string;
+}) {
+  const provider = providers.find(p => p.id === providerId);
+  const cached = provider?.cachedModels ?? [];
+  const listId = `models-${providerId || 'none'}`;
+  return (
+    <div className="flex items-center gap-2">
+      <input value={value} onChange={e => onChange(e.target.value)}
+        list={cached.length > 0 ? listId : undefined}
+        placeholder={placeholder ?? (provider?.defaultModel ?? '')}
+        className="flex-1 px-2 py-1 border border-slate-300 rounded font-mono text-sm" />
+      {cached.length > 0 && (
+        <datalist id={listId}>
+          {cached.map(m => <option key={m} value={m} />)}
+        </datalist>
+      )}
+      {cached.length > 0 && (
+        <span className="text-[10px] text-slate-400 whitespace-nowrap">{cached.length} cached</span>
+      )}
     </div>
   );
 }

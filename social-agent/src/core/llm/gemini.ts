@@ -112,6 +112,17 @@ export function createGeminiClient(http: PlatformHTTP, provider: Provider): LLMC
         raw: parsed,
       };
     },
+
+    async listModels(opts = {}) {
+      const url = `${baseUrl}/models?key=${encodeURIComponent(provider.apiKey)}&pageSize=1000`;
+      const res = await http.request({ url, method: 'GET', timeoutMs: opts.timeoutMs });
+      if (!res.ok) throw new LLMError(`Gemini ${res.status}: ${shortErr(res.body)}`, res.status, res.body);
+      const parsed = JSON.parse(res.body) as { models?: Array<{ name: string }> };
+      // Gemini reports "models/gemini-2.5-flash" — strip the prefix to get clean ids
+      return (parsed.models ?? [])
+        .map(m => m.name?.startsWith('models/') ? m.name.slice(7) : m.name)
+        .filter(Boolean);
+    },
   };
 }
 

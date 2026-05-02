@@ -571,26 +571,51 @@ function ProvidersTab({ onError }: { onError: (s: string) => void }) {
 
       <div className="space-y-2">
         {items.map(p => (
-          <div key={p.id} className="bg-white border border-slate-200 rounded p-4 flex items-start gap-4">
-            <div className="flex-1">
-              <div className="flex items-center gap-2">
-                <span className="font-medium">{p.name}</span>
-                <span className="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-mono">{p.type}</span>
-              </div>
-              <div className="text-xs text-slate-500 font-mono mt-1">
-                {p.baseUrl && <div>baseUrl: {p.baseUrl}</div>}
-                {p.defaultModel && <div>defaultModel: {p.defaultModel}</div>}
-                <div>apiKey: {p.apiKeyMasked}</div>
-              </div>
-            </div>
-            <button
-              onClick={() => onDelete(p.id)}
-              className="text-sm text-red-500 hover:text-red-700"
-            >
-              delete
-            </button>
-          </div>
+          <ProviderRow key={p.id} p={p} onDelete={() => onDelete(p.id)} onRefresh={refresh} onError={onError} />
         ))}
+      </div>
+    </div>
+  );
+}
+
+function ProviderRow({ p, onDelete, onRefresh, onError }: {
+  p: ProviderPublic;
+  onDelete: () => void;
+  onRefresh: () => void;
+  onError: (s: string) => void;
+}) {
+  const [fetching, setFetching] = useState(false);
+  const onFetchModels = async () => {
+    setFetching(true);
+    try { const r = await api.fetchProviderModels(p.id); onRefresh(); alert(`✓ fetched ${r.count} models`); }
+    catch (e: any) { onError(e.message); }
+    finally { setFetching(false); }
+  };
+  return (
+    <div className="bg-white border border-slate-200 rounded p-4 flex items-start gap-4">
+      <div className="flex-1">
+        <div className="flex items-center gap-2">
+          <span className="font-medium">{p.name}</span>
+          <span className="text-xs px-2 py-0.5 rounded bg-slate-100 text-slate-600 font-mono">{p.apiFormat}</span>
+        </div>
+        <div className="text-xs text-slate-500 font-mono mt-1">
+          {p.baseUrl && <div>baseUrl: {p.baseUrl}</div>}
+          {p.defaultModel && <div>defaultModel: {p.defaultModel}</div>}
+          <div>apiKey: {p.apiKeyMasked}</div>
+          <div className="mt-1">
+            cachedModels: {p.cachedModels?.length
+              ? <span className="text-emerald-600">{p.cachedModels.length} models · {p.cachedModelsAt ? new Date(p.cachedModelsAt).toLocaleString() : ''}</span>
+              : <span className="text-slate-400">(not fetched)</span>}
+          </div>
+        </div>
+      </div>
+      <div className="flex flex-col gap-1 items-end">
+        <button
+          onClick={onFetchModels}
+          disabled={fetching}
+          className="text-xs px-2 py-1 rounded border border-cyan-300 text-cyan-700 hover:bg-cyan-50 disabled:opacity-50"
+        >{fetching ? 'fetching…' : '↻ Fetch Models'}</button>
+        <button onClick={onDelete} className="text-xs text-red-500 hover:text-red-700">delete</button>
       </div>
     </div>
   );
