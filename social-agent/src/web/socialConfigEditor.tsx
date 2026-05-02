@@ -341,7 +341,7 @@ function RoleLLMRow({ label, cfg, set, providers, idKey, modelKey }: {
  * autocomplete suggests cached models but the user can also type any string
  * (e.g. a model name not yet in the cache).
  */
-function ModelInput({ value, onChange, providers, providerId, placeholder }: {
+export function ModelInput({ value, onChange, providers, providerId, placeholder }: {
   value: string;
   onChange: (v: string) => void;
   providers: ProviderPublic[];

@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { createRoot } from 'react-dom/client';
 import * as api from './api';
 import type { Pet, ProviderPublic, Settings, Status } from './api';
-import { SocialConfigEditor } from './socialConfigEditor';
+import { SocialConfigEditor, ModelInput } from './socialConfigEditor';
 
 // ─────────────────── App shell ───────────────────
 
@@ -1073,8 +1073,8 @@ function LLMTab({ onError }: { onError: (s: string) => void }) {
         </select>
       </Field>
       <Field label="model">
-        <input value={model} onChange={e => setModel(e.target.value)} required
-          className="w-full px-2 py-1 border border-slate-300 rounded font-mono" />
+        <ModelInput value={model} onChange={setModel}
+          providers={providers} providerId={providerId} />
       </Field>
       <Field label="prompt">
         <textarea value={prompt} onChange={e => setPrompt(e.target.value)} required rows={3}
