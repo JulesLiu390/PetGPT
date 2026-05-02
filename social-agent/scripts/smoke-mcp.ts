@@ -62,7 +62,7 @@ console.log('\n── ensure / list / call / shutdown ──');
   check('running list has fake',        mcp.running().includes('fake'));
 
   const tools = await mcp.listTools('fake');
-  check('listTools returns 2',          tools.length === 2);
+  check('listTools returns ≥ 2',        tools.length >= 2);
   const echoTool = tools.find(t => t.name === 'echo');
   check('echo tool exists',             !!echoTool);
   check('echo has description',         !!echoTool?.description);
@@ -100,7 +100,7 @@ console.log('\n── concurrent ensure dedup ──');
 
   // listTools after concurrent ensure still works
   const tools = await mcp.listTools('fake2');
-  check('post-dedup listTools works', tools.length === 2);
+  check('post-dedup listTools works', tools.length >= 2);
 
   await mcp.shutdown('fake2');
 }

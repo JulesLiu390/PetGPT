@@ -28,7 +28,11 @@ export type AgentEventType =
   | 'reply:done'
   | 'reply:error'
   | 'reply:dispatched'
-  | 'reply:dispatch-failed';
+  | 'reply:dispatch-failed'
+  | 'fetch:started'
+  | 'fetch:tick'
+  | 'fetch:error'
+  | 'fetch:stopped';
 
 interface BaseAgentEvent {
   type: AgentEventType;
@@ -157,8 +161,33 @@ export interface ReplyDispatchFailedEvent extends BaseAgentEvent {
   message: string;
 }
 
+export interface FetchStartedEvent extends BaseAgentEvent {
+  type: 'fetch:started';
+  mcpServerName: string;
+  toolName: string;
+  intervalMs: number;
+}
+
+export interface FetchTickEvent extends BaseAgentEvent {
+  type: 'fetch:tick';
+  newMessageCount: number;
+  bufferSize: number;
+  watermark: string | null;
+}
+
+export interface FetchErrorEvent extends BaseAgentEvent {
+  type: 'fetch:error';
+  message: string;
+}
+
+export interface FetchStoppedEvent extends BaseAgentEvent {
+  type: 'fetch:stopped';
+  reason: 'session-stopped' | 'session-paused' | 'config-missing';
+}
+
 export type AgentEvent =
   | SessionCreatedEvent | SessionStoppedEvent | SessionPausedEvent | SessionResumedEvent
   | EvalStartEvent      | EvalToolEvent       | EvalPlanEvent     | EvalDoneEvent | EvalErrorEvent
   | ReplySpawnEvent     | ReplySkipEvent      | ReplyToolEvent    | ReplySentEvent | ReplyDoneEvent | ReplyErrorEvent
-  | ReplyDispatchedEvent | ReplyDispatchFailedEvent;
+  | ReplyDispatchedEvent | ReplyDispatchFailedEvent
+  | FetchStartedEvent    | FetchTickEvent  | FetchErrorEvent | FetchStoppedEvent;

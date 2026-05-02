@@ -34,9 +34,26 @@ export interface SessionConfig {
   mcpServerName?: string;
   /** Tool name to invoke on the MCP server. Default 'send_message'. */
   mcpSendTool?: string;
+
+  // ─── MCP fetch (Phase 5d) ───
+  /** When set + mcpServerName set, AgentManager polls this tool for messages. */
+  mcpFetchTool?: string;
+  /** Polling interval in ms. Default 3000. */
+  fetchIntervalMs?: number;
+  /** Cap on the rolling chat buffer surfaced via feedChat. Default 60. */
+  fetchBufferSize?: number;
 }
 
 export type SessionStatus = 'idle' | 'evaluating' | 'paused';
+
+/** Single message in the rolling fetch buffer. */
+export interface BufferedMessage {
+  id: string;
+  sender_id?: string;
+  sender_name?: string;
+  content: string;
+  timestamp?: string;       // free-form, comes from MCP fetch result
+}
 
 /** Live state of a session (internal — exported for read-only consumption). */
 export interface SessionState {
@@ -54,6 +71,12 @@ export interface SessionState {
   /** Currently-running eval's snapshot (if status === 'evaluating'). */
   activeSnapshot: string | null;
   createdAt: number;
+  /** Rolling buffer of messages fetched from MCP (for snapshot rendering). */
+  fetchBuffer: BufferedMessage[];
+  /** Last seen message id, passed back as `since` on the next fetch tick. */
+  fetchWatermark: string | null;
+  /** Active fetch interval handle; null when fetcher is not running. */
+  fetcherHandle: ReturnType<typeof setInterval> | null;
 }
 
 /** Read-only view safe to send over the wire. */

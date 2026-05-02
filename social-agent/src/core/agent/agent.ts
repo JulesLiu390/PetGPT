@@ -3,7 +3,7 @@ import type { Platform } from '../../platform/index.ts';
 import type { Provider } from '../../providers.ts';
 import { runIntentEval } from './intentEval.ts';
 import { runReply } from './replyTask.ts';
-import type { SessionConfig, SessionState, SessionView } from './types.ts';
+import type { SessionConfig, SessionState, SessionView, BufferedMessage } from './types.ts';
 import { AGENT_EVENT_CHANNEL, type AgentEvent } from './events.ts';
 import type { InFlightReplyView } from '../tools/intent.ts';
 
@@ -36,6 +36,9 @@ export interface AgentManagerOptions {
 
 const PREVIEW_MAX = 280;
 const MAX_CONCURRENT_REPLY = 3;
+const DEFAULT_FETCH_INTERVAL_MS = 3000;
+const DEFAULT_FETCH_BUFFER_SIZE = 60;
+const DEFAULT_FETCH_TOOL = 'fetch_messages';
 
 export function createAgentManager(platform: Platform, opts: AgentManagerOptions): AgentManager {
   const sessions = new Map<string, SessionState>();
@@ -314,6 +317,100 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
     }
   }
 
+  // ─── Fetcher (Phase 5d) ───
+  function renderBuffered(messages: BufferedMessage[]): string {
+    return messages.map(m => {
+      const ts   = m.timestamp ? `[${m.timestamp}] ` : '';
+      const name = m.sender_name ?? m.sender_id ?? '?';
+      const sid  = m.sender_id ? `(${m.sender_id})` : '';
+      return `${ts}${name}${sid} [#${m.id}]: ${m.content}`;
+    }).join('\n');
+  }
+
+  /**
+   * Parse an MCP CallToolResult into BufferedMessage[]. Convention:
+   *   result.content[0].text holds JSON-encoded { messages: [...] }
+   *   each message: { id|message_id, sender_id?, sender_name?, content, timestamp? }
+   */
+  function parseFetchResult(result: unknown): BufferedMessage[] {
+    const text = (result as any)?.content?.[0]?.text;
+    if (typeof text !== 'string') return [];
+    let parsed: any;
+    try { parsed = JSON.parse(text); } catch { return []; }
+    const arr = Array.isArray(parsed) ? parsed : Array.isArray(parsed.messages) ? parsed.messages : [];
+    return arr
+      .map((m: any) => ({
+        id:           String(m.id ?? m.message_id ?? ''),
+        sender_id:    m.sender_id != null ? String(m.sender_id) : undefined,
+        sender_name:  m.sender_name,
+        content:      String(m.content ?? ''),
+        timestamp:    m.timestamp,
+      }))
+      .filter((m: BufferedMessage) => m.id !== '' && m.content !== '');
+  }
+
+  function startFetcher(targetId: string): void {
+    const s = sessions.get(targetId);
+    if (!s) return;
+    if (s.fetcherHandle) return;     // already running
+    if (!s.config.mcpServerName) return;
+
+    const tool       = s.config.mcpFetchTool ?? DEFAULT_FETCH_TOOL;
+    const intervalMs = s.config.fetchIntervalMs ?? DEFAULT_FETCH_INTERVAL_MS;
+    const bufSize    = s.config.fetchBufferSize ?? DEFAULT_FETCH_BUFFER_SIZE;
+
+    emit({ type: 'fetch:started', ts: Date.now(), targetId,
+           mcpServerName: s.config.mcpServerName, toolName: tool, intervalMs });
+
+    const tick = async () => {
+      const cur = sessions.get(targetId);
+      if (!cur || !cur.fetcherHandle) return;   // stopped while pending
+      try {
+        const r = await platform.mcp.callTool(cur.config.mcpServerName!, tool, {
+          target: targetId,
+          target_type: cur.config.targetType ?? 'group',
+          ...(cur.fetchWatermark ? { since: cur.fetchWatermark } : {}),
+        });
+        const parsed = parseFetchResult(r);
+        // Dedup: drop messages whose ids already exist in the buffer
+        const existingIds = new Set(cur.fetchBuffer.map(m => m.id));
+        const fresh = parsed.filter(m => !existingIds.has(m.id));
+        if (fresh.length === 0) {
+          emit({ type: 'fetch:tick', ts: Date.now(), targetId,
+                 newMessageCount: 0, bufferSize: cur.fetchBuffer.length, watermark: cur.fetchWatermark });
+          return;
+        }
+        cur.fetchBuffer.push(...fresh);
+        if (cur.fetchBuffer.length > bufSize) {
+          cur.fetchBuffer = cur.fetchBuffer.slice(-bufSize);
+        }
+        cur.fetchWatermark = fresh.at(-1)!.id;
+        emit({ type: 'fetch:tick', ts: Date.now(), targetId,
+               newMessageCount: fresh.length, bufferSize: cur.fetchBuffer.length, watermark: cur.fetchWatermark });
+
+        // Trigger eval with the rolling buffer rendered as snapshot
+        cur.pendingSnapshot = renderBuffered(cur.fetchBuffer);
+        if (cur.status === 'idle') {
+          setImmediate(() => { runEvalIfNeeded(targetId).catch(() => {}); });
+        }
+      } catch (e: any) {
+        emit({ type: 'fetch:error', ts: Date.now(), targetId, message: e?.message ?? String(e) });
+      }
+    };
+
+    // Fire immediately + on interval
+    setImmediate(() => { tick().catch(() => {}); });
+    s.fetcherHandle = setInterval(() => { tick().catch(() => {}); }, intervalMs);
+  }
+
+  function stopFetcher(targetId: string, reason: 'session-stopped' | 'session-paused' | 'config-missing'): void {
+    const s = sessions.get(targetId);
+    if (!s || !s.fetcherHandle) return;
+    clearInterval(s.fetcherHandle);
+    s.fetcherHandle = null;
+    emit({ type: 'fetch:stopped', ts: Date.now(), targetId, reason });
+  }
+
   return {
     start(config: SessionConfig): SessionView {
       if (sessions.has(config.targetId)) {
@@ -328,6 +425,9 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
         pendingSnapshot: null,
         activeSnapshot: null,
         createdAt: Date.now(),
+        fetchBuffer: [],
+        fetchWatermark: null,
+        fetcherHandle: null,
       };
       sessions.set(config.targetId, s);
       emit({
@@ -339,12 +439,15 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
         model: config.model,
         providerId: config.providerId,
       });
+      // Auto-start fetcher if MCP is configured
+      if (config.mcpServerName) startFetcher(config.targetId);
       return toView(s);
     },
 
     stop(targetId: string): boolean {
       const s = sessions.get(targetId);
       if (!s) return false;
+      stopFetcher(targetId, 'session-stopped');
       sessions.delete(targetId);
       // Forget queued in-flight reply views — running tasks will still attempt
       // to splice their entry on completion (no-op if the list is gone).
@@ -359,9 +462,8 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
       if (s.status === 'paused') return false;
       // Only flip the bit; an active eval continues to completion. New feeds
       // will queue but not trigger new evals while paused.
-      const wasIdle = s.status === 'idle';
       s.status = 'paused';
-      void wasIdle;
+      stopFetcher(targetId, 'session-paused');
       emit({ type: 'session:paused', ts: Date.now(), targetId });
       return true;
     },
@@ -372,6 +474,8 @@ export function createAgentManager(platform: Platform, opts: AgentManagerOptions
       if (s.status !== 'paused') return false;
       s.status = 'idle';
       emit({ type: 'session:resumed', ts: Date.now(), targetId });
+      // Resume fetcher if MCP configured
+      if (s.config.mcpServerName) startFetcher(targetId);
       // Pick up any queued snapshot
       if (s.pendingSnapshot !== null) {
         setImmediate(() => { runEvalIfNeeded(targetId).catch(() => { /* logged */ }); });
