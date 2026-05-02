@@ -18,7 +18,7 @@ const App: React.FC = () => {
         <Text dimColor>providers: </Text>
         <Text>  {paths.providers}</Text>
         <Text dimColor>pets:      </Text>
-        <Text>  {paths.pets}</Text>
+        <Text>  {paths.petsDir}</Text>
       </Box>
       <Box marginTop={1}>
         <Text color="yellow">scaffolding only — server / TUI dashboard not yet wired.</Text>

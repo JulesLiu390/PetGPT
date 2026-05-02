@@ -1,32 +1,199 @@
 import { ensureHome } from './paths.ts';
-
-/**
- * Minimal Bun HTTP+WS server placeholder.
- * Real routes will land once the core agent is migrated.
- */
+import {
+  readSettings, patchSettings,
+  listPets, createPet, getPet, updatePet, deletePet,
+} from './config.ts';
+import {
+  isUnlocked, isInitialized, unlock, lock,
+  listProviders, getProvider, createProvider, updateProvider, deleteProvider, changePassword,
+} from './providers.ts';
 
 const PORT = Number(process.env.SOCIAL_AGENT_PORT ?? 8787);
-
 const paths = ensureHome();
+
+// ─────────────────── helpers ───────────────────
+
+function ok(body: unknown, status = 200): Response {
+  return Response.json(body as any, { status });
+}
+function err(status: number, message: string): Response {
+  return Response.json({ error: message }, { status });
+}
+async function readBody<T>(req: Request): Promise<T | null> {
+  try {
+    return (await req.json()) as T;
+  } catch {
+    return null;
+  }
+}
+
+/** Wrap a handler so thrown errors become 4xx/5xx JSON without crashing the server. */
+async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
+  try {
+    return await fn();
+  } catch (e: any) {
+    const msg = e?.message ?? String(e);
+    if (msg === 'locked') return err(423, 'providers store is locked — POST /api/providers/unlock first');
+    if (msg === 'invalid master password') return err(401, msg);
+    if (msg.startsWith('master password too short')) return err(400, msg);
+    if (msg === 'apiKey required') return err(400, msg);
+    return err(500, msg);
+  }
+}
+
+// ─────────────────── server ───────────────────
 
 const server = Bun.serve({
   port: PORT,
-  fetch(req, server) {
+  async fetch(req, server) {
     const url = new URL(req.url);
+    const { pathname } = url;
+    const method = req.method;
 
-    if (url.pathname === '/ws') {
+    // ── WebSocket ──
+    if (pathname === '/ws') {
       if (server.upgrade(req)) return;
       return new Response('expected WebSocket upgrade', { status: 426 });
     }
 
-    if (url.pathname === '/api/ping') {
-      return Response.json({ ok: true, home: paths.home, ts: Date.now() });
+    // ── Liveness ──
+    if (method === 'GET' && pathname === '/api/ping') {
+      return ok({ ok: true, home: paths.home, ts: Date.now() });
     }
 
-    return new Response(
-      `social-agent service v0.0.1\nhome: ${paths.home}\n\nendpoints:\n  GET  /api/ping\n  WS   /ws\n`,
-      { headers: { 'content-type': 'text/plain; charset=utf-8' } },
-    );
+    // ── Status ──
+    if (method === 'GET' && pathname === '/api/status') {
+      return ok({
+        home: paths.home,
+        providers: { initialized: isInitialized(), unlocked: isUnlocked() },
+      });
+    }
+
+    // ── Settings ──
+    if (method === 'GET' && pathname === '/api/settings') {
+      return safe(async () => ok(await readSettings()));
+    }
+    if (method === 'PATCH' && pathname === '/api/settings') {
+      return safe(async () => {
+        const body = await readBody<Record<string, unknown>>(req);
+        if (!body) return err(400, 'invalid JSON body');
+        return ok(await patchSettings(body));
+      });
+    }
+
+    // ── Pets (registry) ──
+    if (method === 'GET' && pathname === '/api/pets') {
+      return safe(async () => ok(await listPets()));
+    }
+    if (method === 'POST' && pathname === '/api/pets') {
+      return safe(async () => {
+        const body = await readBody<{ name?: string; persona?: string }>(req);
+        if (!body || !body.name) return err(400, 'name required');
+        return ok(await createPet({ name: body.name, persona: body.persona }), 201);
+      });
+    }
+    {
+      const m = pathname.match(/^\/api\/pets\/([^/]+)$/);
+      if (m) {
+        const id = m[1];
+        if (method === 'GET') return safe(async () => {
+          const p = await getPet(id);
+          return p ? ok(p) : err(404, 'pet not found');
+        });
+        if (method === 'PATCH') return safe(async () => {
+          const body = await readBody<{ name?: string; persona?: string }>(req);
+          if (!body) return err(400, 'invalid JSON body');
+          const next = await updatePet(id, body);
+          return next ? ok(next) : err(404, 'pet not found');
+        });
+        if (method === 'DELETE') return safe(async () => {
+          const removed = await deletePet(id);
+          return removed ? ok({ ok: true }) : err(404, 'pet not found');
+        });
+      }
+    }
+
+    // ── Providers ──
+    if (method === 'POST' && pathname === '/api/providers/unlock') {
+      return safe(async () => {
+        const body = await readBody<{ password?: string }>(req);
+        if (!body?.password) return err(400, 'password required');
+        const r = await unlock(body.password);
+        return ok({ ok: true, unlocked: true, created: r.created });
+      });
+    }
+    if (method === 'POST' && pathname === '/api/providers/lock') {
+      lock();
+      return ok({ ok: true, unlocked: false });
+    }
+    if (method === 'POST' && pathname === '/api/providers/change-password') {
+      return safe(async () => {
+        const body = await readBody<{ newPassword?: string }>(req);
+        if (!body?.newPassword) return err(400, 'newPassword required');
+        await changePassword(body.newPassword);
+        return ok({ ok: true });
+      });
+    }
+    if (method === 'GET' && pathname === '/api/providers') {
+      return safe(async () => ok(await listProviders()));
+    }
+    if (method === 'POST' && pathname === '/api/providers') {
+      return safe(async () => {
+        const body = await readBody<any>(req);
+        if (!body) return err(400, 'invalid JSON body');
+        if (!body.type || !body.name || !body.apiKey) {
+          return err(400, 'type, name, apiKey required');
+        }
+        return ok(await createProvider(body), 201);
+      });
+    }
+    {
+      const m = pathname.match(/^\/api\/providers\/([^/]+)$/);
+      if (m) {
+        const id = m[1];
+        if (method === 'GET') return safe(async () => {
+          const p = await getProvider(id);
+          return p ? ok(p) : err(404, 'provider not found');
+        });
+        if (method === 'PATCH') return safe(async () => {
+          const body = await readBody<any>(req);
+          if (!body) return err(400, 'invalid JSON body');
+          const next = await updateProvider(id, body);
+          return next ? ok(next) : err(404, 'provider not found');
+        });
+        if (method === 'DELETE') return safe(async () => {
+          const removed = await deleteProvider(id);
+          return removed ? ok({ ok: true }) : err(404, 'provider not found');
+        });
+      }
+    }
+
+    // ── Index ──
+    if (method === 'GET' && pathname === '/') {
+      return new Response(
+        [
+          'social-agent service v0.0.1',
+          `home: ${paths.home}`,
+          '',
+          'endpoints:',
+          '  GET    /api/ping',
+          '  GET    /api/status',
+          '  GET    /api/settings              PATCH',
+          '  GET    /api/pets                  POST   { name, persona? }',
+          '  GET    /api/pets/:id              PATCH  DELETE',
+          '  POST   /api/providers/unlock      { password }',
+          '  POST   /api/providers/lock',
+          '  POST   /api/providers/change-password { newPassword }',
+          '  GET    /api/providers             POST   { type, name, apiKey, baseUrl?, defaultModel? }',
+          '  GET    /api/providers/:id         PATCH  DELETE',
+          '  WS     /ws',
+          '',
+        ].join('\n'),
+        { headers: { 'content-type': 'text/plain; charset=utf-8' } },
+      );
+    }
+
+    return err(404, 'not found');
   },
   websocket: {
     open(ws) { ws.send(JSON.stringify({ type: 'hello', ts: Date.now() })); },

@@ -36,9 +36,10 @@ export interface Paths {
   home: string;
   settings: string;
   settingsLocal: string;
-  providers: string;     // 加密文件 (AES-GCM, master password 派生)
+  providers: string;       // 加密文件 (AES-GCM, master password 派生)
+  petsRegistry: string;    // pets.json — list of pets (name / persona / id)
   mcpServers: string;
-  pets: string;
+  petsDir: string;         // pets/ — per-pet runtime state (workspace, training, ...)
   cache: string;
   logs: string;
   debug: string;
@@ -51,8 +52,9 @@ export function getPaths(home = resolveHome()): Paths {
     settings:      join(home, 'settings.json'),
     settingsLocal: join(home, 'settings.local.json'),
     providers:     join(home, 'providers.enc'),
+    petsRegistry:  join(home, 'pets.json'),
     mcpServers:    join(home, 'mcp-servers.json'),
-    pets:          join(home, 'pets'),
+    petsDir:       join(home, 'pets'),
     cache:         join(home, 'cache'),
     logs:          join(home, 'logs'),
     debug:         join(home, 'debug'),
@@ -76,7 +78,7 @@ export function getPetPaths(petId: string, home = resolveHome()) {
 /** Create the home directory tree if missing. Idempotent. */
 export function ensureHome(home = resolveHome()): Paths {
   const paths = getPaths(home);
-  for (const dir of [paths.home, paths.pets, paths.cache, paths.logs, paths.debug]) {
+  for (const dir of [paths.home, paths.petsDir, paths.cache, paths.logs, paths.debug]) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
   return paths;
