@@ -197,7 +197,7 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
     if (method === 'GET' && pathname === '/api/help') {
       return new Response(
         [
-          'social-agent service v0.0.1',
+          'PetGPT-Amadeus service v0.0.1',
           `home: ${paths.home}`,
           '',
           'endpoints:',
@@ -230,6 +230,6 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
 
 if (import.meta.main) {
   const { server, paths } = await startServer();
-  console.log(`social-agent listening on http://localhost:${server.port}`);
+  console.log(`PetGPT-Amadeus listening on http://localhost:${server.port}`);
   console.log(`home: ${paths.home}`);
 }

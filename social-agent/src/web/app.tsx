@@ -23,7 +23,7 @@ function App() {
   return (
     <div className="min-h-screen bg-slate-50 text-slate-800">
       <header className="bg-white border-b border-slate-200 px-6 py-3 flex items-center gap-4">
-        <h1 className="font-semibold text-lg">social-agent</h1>
+        <h1 className="font-semibold text-lg">PetGPT-Amadeus</h1>
         <span className="text-xs text-slate-400 font-mono">{status.home}</span>
       </header>
 

@@ -72,7 +72,7 @@ function Header() {
       <Avatar />
       <Box flexDirection="column" marginLeft={2}>
         <Text>
-          <Text bold color={ACCENT}>social-agent</Text>
+          <Text bold color={ACCENT}>PetGPT-Amadeus</Text>
           <Text dimColor> v0.0.1</Text>
         </Text>
         <Text>{SERVER_URL}</Text>
