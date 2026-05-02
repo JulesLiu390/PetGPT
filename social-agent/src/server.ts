@@ -9,7 +9,7 @@ import {
 } from './providers.ts';
 import { readSocialConfig, writeSocialConfig, patchSocialConfig } from './socialConfig.ts';
 import {
-  listMCPServers, getMCPServer, createMCPServer, updateMCPServer, deleteMCPServer,
+  listMCPServers, getMCPServer, getMCPServerByName, createMCPServer, updateMCPServer, deleteMCPServer,
 } from './mcpServers.ts';
 import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
@@ -23,7 +23,9 @@ export interface StartServerOptions {
 }
 
 export async function startServer(opts: StartServerOptions = {}) {
-  const platform = createNodePlatform();
+  const platform = createNodePlatform({
+    mcpLookup: (name: string) => getMCPServerByName(name),
+  });
   const paths = ensureHome();
   // Port resolution precedence: explicit opts > $SOCIAL_AGENT_PORT > settings.json > default 8787
   const settingsAtBoot = await readSettings();
