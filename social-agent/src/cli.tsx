@@ -52,13 +52,16 @@ interface ScreenProps {
 // ─────────────────── small components ───────────────────
 
 function Avatar() {
-  // 7-row ASCII cat (user-supplied). Pure ASCII — never width-issues.
+  // 7-row ASCII cat. Alignment fixed:
+  //   - row 1 indented +2 so the two A's sit directly over the eyes (-.-)
+  //   - row 4 widened to match body width so the shoulder slopes (/ \) drop
+  //     vertically into the body posts (| |) instead of jutting inward
   return (
     <Box flexDirection="column">
-      <Text color={ACCENT}>{'A_A'}</Text>
+      <Text color={ACCENT}>{'  A_A'}</Text>
       <Text color={ACCENT}>{' (-.-)'}</Text>
       <Text color={ACCENT}>{'  |-|'}</Text>
-      <Text color={ACCENT}>{' /   \\'}</Text>
+      <Text color={ACCENT}>{'/     \\'}</Text>
       <Text color={ACCENT}>{'|     |   __'}</Text>
       <Text color={ACCENT}>{'|  || |  |  \\__'}</Text>
       <Text color={ACCENT}>{' \\_||_/_/'}</Text>
