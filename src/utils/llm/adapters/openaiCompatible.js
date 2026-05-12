@@ -65,7 +65,7 @@ export const convertMessages = async (messages) => {
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
     if (m.role === 'assistant' && m.tool_calls) {
-      toolMetaByIndex.set(i, { tool_calls: m.tool_calls, content: m.content ?? null });
+      toolMetaByIndex.set(i, { tool_calls: m.tool_calls, content: m.content ?? null, reasoning_content: m.reasoning_content });
     } else if (m.role === 'tool' && m.tool_call_id) {
       toolMetaByIndex.set(i, { tool_call_id: m.tool_call_id });
     }
@@ -77,11 +77,15 @@ export const convertMessages = async (messages) => {
 
     // assistant 带 tool_calls → 直接透传，不走 content 转换
     if (toolMeta?.tool_calls) {
-      result.push({
+      const msg = {
         role: 'assistant',
         content: toolMeta.content,
         tool_calls: toolMeta.tool_calls,
-      });
+      };
+      if (toolMeta.reasoning_content) {
+        msg.reasoning_content = toolMeta.reasoning_content;
+      }
+      result.push(msg);
       continue;
     }
 
@@ -318,18 +322,24 @@ export const formatToolResultMessage = (toolCallId, result, images = []) => {
  * @param {Array} toolCalls - 工具调用数组
  * @returns {Object} Assistant message
  */
-export const createAssistantToolCallMessage = (toolCalls) => ({
-  role: "assistant",
-  content: null,
-  tool_calls: toolCalls.map(tc => ({
-    id: tc.id,
-    type: "function",
-    function: {
-      name: tc.name,
-      arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments)
-    }
-  }))
-});
+export const createAssistantToolCallMessage = (toolCalls, reasoningContent) => {
+  const msg = {
+    role: "assistant",
+    content: null,
+    tool_calls: toolCalls.map(tc => ({
+      id: tc.id,
+      type: "function",
+      function: {
+        name: tc.name,
+        arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments)
+      }
+    }))
+  };
+  if (reasoningContent) {
+    msg.reasoning_content = reasoningContent;
+  }
+  return msg;
+};
 
 export default {
   capabilities,

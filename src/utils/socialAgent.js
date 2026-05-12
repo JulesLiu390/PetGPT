@@ -1349,6 +1349,10 @@ async function pollTarget({
   let _messagesForLLM = messages;
   for (let _imgRetry = 0; _imgRetry < 2; _imgRetry++) {
   try {
+    const retryOpts = { label: `${role === 'observer' ? 'Observer' : 'Reply'} ${target}`, target };
+    if (_imgRetry === 0 && totalImageCount > 0) {
+      retryOpts.delays = [0, 0];
+    }
     const result = await retryLLM(() => callLLMWithTools({
       messages: _messagesForLLM,
       apiFormat: llmConfig.apiFormat,
@@ -1445,7 +1449,7 @@ async function pollTarget({
           }
         }
       },
-    }), { label: `${role === 'observer' ? 'Observer' : 'Reply'} ${target}`, target });
+    }), retryOpts);
     
     // 只有 LLM 调用成功完成后才推进水位线
     // 使用开头快照的 snapshotWatermarkId，而非 bufferMessages 当前末尾

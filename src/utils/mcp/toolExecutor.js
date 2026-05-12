@@ -871,7 +871,7 @@ export const callLLMWithTools = async ({
         }
       } else {
         // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息（支持多模态）
-        currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls));
+        currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls, result.reasoningContent));
 
         for (let i = 0; i < result.toolCalls.length; i++) {
           const call = result.toolCalls[i];
