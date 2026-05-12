@@ -5,6 +5,7 @@ import TitleBar from "../components/UI/TitleBar";
 import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/UI/ui";
 import * as tauri from "../utils/tauri";
 import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
+import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/subagentManager";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { listen, emit } from "@tauri-apps/api/event";
 
@@ -42,6 +43,11 @@ export default function SocialPage() {
     intentApiProviderId: '',
     compressApiProviderId: '',
     compressModelName: '',
+    // Subagent
+    subagentEnabled: true,
+    subagentMaxConcurrent: 5,
+    subagentTimeoutSecs: 300,
+    subagentModel: 'sonnet',
   });
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
@@ -56,14 +62,79 @@ export default function SocialPage() {
   const [showConfig, setShowConfig] = useState(false);
   const [showAdvancedLLM, setShowAdvancedLLM] = useState(false);
   const [lurkModes, setLurkModes] = useState({}); // { [target]: 'normal'|'semi-lurk'|'full-lurk' }
+  const [trainingTargets, setTrainingTargets] = useState({}); // { [target]: true }
+  const [trainingCollectionEnabled, setTrainingCollectionEnabled] = useState(false);
+  const [exportModalOpen, setExportModalOpen] = useState(false);
+  const [exportOptions, setExportOptions] = useState({
+    redact: true,
+    statusSuccessOnly: true,
+    terminationStrict: true,
+  });
+  const [exportResult, setExportResult] = useState(null);
+  const [exportRunning, setExportRunning] = useState(false);
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
+  const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
 
   // ── MCP target picker ──
   const [mcpGroups, setMcpGroups] = useState(null); // [{ group_id, group_name, member_count }] or null
   const [mcpFriends, setMcpFriends] = useState(null); // [{ user_id, nickname }] or null
   const [fetchingGroups, setFetchingGroups] = useState(false);
   const [fetchingFriends, setFetchingFriends] = useState(false);
+
+  // ── ElevenLabs TTS models ──
+  // 兜底模型列表：当 API key 没有 models_read 权限时仍可选择
+  const FALLBACK_TTS_MODELS = [
+    { model_id: 'eleven_multilingual_v2', name: 'Multilingual v2 (推荐，多语言)' },
+    { model_id: 'eleven_flash_v2_5', name: 'Flash v2.5 (超低延迟，多语言)' },
+    { model_id: 'eleven_turbo_v2_5', name: 'Turbo v2.5 (低延迟，多语言)' },
+    { model_id: 'eleven_flash_v2', name: 'Flash v2 (超低延迟，英文)' },
+    { model_id: 'eleven_turbo_v2', name: 'Turbo v2 (低延迟，英文)' },
+    { model_id: 'eleven_monolingual_v1', name: 'Monolingual v1 (英文)' },
+    { model_id: 'eleven_multilingual_v1', name: 'Multilingual v1 (旧版)' },
+  ];
+  const [ttsModels, setTtsModels] = useState(FALLBACK_TTS_MODELS); // [{ model_id, name }]
+  const [loadingTtsModels, setLoadingTtsModels] = useState(false);
+  const [ttsModelsError, setTtsModelsError] = useState('');
+  const [testingVoice, setTestingVoice] = useState(false);
+  const [testVoiceError, setTestVoiceError] = useState('');
+
+  // 左侧栏（target 列表）+ 右侧栏（Intent State / Prompt Cache / Training Data）的折叠状态 + 可拖宽度
+  const [leftPanelCollapsed, setLeftPanelCollapsed] = useState(false);     // 默认展开
+  const [rightPanelCollapsed, setRightPanelCollapsed] = useState(false);   // 默认展开
+  const [leftPanelWidth, setLeftPanelWidth] = useState(160);               // px，默认 w-40
+  const [rightPanelWidth, setRightPanelWidth] = useState(320);             // px，默认 w-80
+  const LEFT_MIN = 120, LEFT_MAX = 360;
+  const RIGHT_MIN = 200, RIGHT_MAX = 600;
+  const [panelStateExpanded, setPanelStateExpanded] = useState(true);      // Intent State 默认展开
+  const [panelCacheExpanded, setPanelCacheExpanded] = useState(true);      // Prompt Cache 默认展开
+  const [panelTrainingExpanded, setPanelTrainingExpanded] = useState(true);// Training Data 默认展开
+
+  // 通用拖动分隔条：mousedown 抓起始 X 和起始宽度，mousemove 算 delta 调宽度，mouseup 解绑
+  const startResize = useCallback((side) => (e) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = side === 'left' ? leftPanelWidth : rightPanelWidth;
+    const setter = side === 'left' ? setLeftPanelWidth : setRightPanelWidth;
+    const min = side === 'left' ? LEFT_MIN : RIGHT_MIN;
+    const max = side === 'left' ? LEFT_MAX : RIGHT_MAX;
+    // 左栏拖右扩、右栏拖左扩 → sign 决定方向
+    const sign = side === 'left' ? 1 : -1;
+    const onMove = (ev) => {
+      const next = Math.max(min, Math.min(max, startW + sign * (ev.clientX - startX)));
+      setter(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [leftPanelWidth, rightPanelWidth]);
 
   // Helper: ensure MCP server is running, then call a tool
   const callMcpTool = async (toolName, args = {}) => {
@@ -150,6 +221,11 @@ export default function SocialPage() {
   const [showTools, setShowTools] = useState(true);
   const [showSystem, setShowSystem] = useState(true);
   const [showIntent, setShowIntent] = useState(true);
+  const [showSubagent, setShowSubagent] = useState(true);
+  const [showReflect, setShowReflect] = useState(true);
+  const [showUsage, setShowUsage] = useState(true);
+  const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+  const [cacheResetAt, setCacheResetAt] = useState(0);
 
   // ── Load assistants + providers ──
   useEffect(() => {
@@ -182,6 +258,14 @@ export default function SocialPage() {
     return () => { if (unlisten) unlisten(); };
   }, []);
 
+  // ── Load trainingCollectionEnabled and trainingTargets from persisted settings ──
+  useEffect(() => {
+    tauri.getSettings().then(s => {
+      if (s?.trainingCollectionEnabled != null) setTrainingCollectionEnabled(!!s.trainingCollectionEnabled);
+      if (s?.trainingTargets && typeof s.trainingTargets === 'object') setTrainingTargets(s.trainingTargets);
+    }).catch(() => {});
+  }, []);
+
   // ── Load MCP servers ──
   useEffect(() => {
     const load = async () => {
@@ -204,6 +288,7 @@ export default function SocialPage() {
         if (petId === selectedPetId || !selectedPetId) {
           setSocialActive(active);
           if (active) setIsStarting(false);
+          if (!active) setActiveSubagentCount(0);
           if (lm) setLurkModes(lm);
           if (pt) setPausedTargets(pt);
         }
@@ -238,6 +323,12 @@ export default function SocialPage() {
     };
     setup();
     return () => { unlisten?.(); };
+  }, []);
+
+  // ── Subscribe to subagent registry changes ──
+  useEffect(() => {
+    const unsub = onSubagentChange(() => setActiveSubagentCount(getActiveCount()));
+    return unsub;
   }, []);
 
   // ── Listen for full log responses (initial load / clear) ──
@@ -275,6 +366,29 @@ export default function SocialPage() {
         const ids = seenLogIdsRef.current;
         if (entry.id != null && ids.has(entry.id)) return; // already seen
         if (entry.id != null) ids.add(entry.id);
+        // Intent plan updates — drive the dynamic todolist
+        if (entry.level === 'intent-plan' && entry.target && entry.details) {
+          try {
+            const plan = JSON.parse(entry.details);
+            setIntentPlans(prev => ({
+              ...prev,
+              [entry.target]: { planLogId: entry.id, actions: plan.actions || [], state: plan.state || '', done: [] },
+            }));
+          } catch { /* ignore */ }
+          return; // don't add to log list
+        }
+        if (entry.level === 'intent-action-done' && entry.target && entry.details) {
+          try {
+            const data = JSON.parse(entry.details);
+            setIntentPlans(prev => {
+              const cur = prev[entry.target];
+              if (!cur) return prev;
+              return { ...prev, [entry.target]: { ...cur, done: [...cur.done, data] } };
+            });
+          } catch { /* ignore */ }
+          return; // don't add to log list
+        }
+
         setLogs(prev => {
           const next = [...prev, entry];
           if (next.length > UI_MAX_LOGS) {
@@ -292,6 +406,17 @@ export default function SocialPage() {
     };
     setup();
     return () => { unlisten?.(); };
+  }, []);
+
+  // ── Listen for cache stats reset (agent start) ──
+  useEffect(() => {
+    let unlisten = null;
+    (async () => {
+      unlisten = await listen('social-cache-stats-reset', () => {
+        setCacheResetAt(Date.now());
+      });
+    })();
+    return () => { if (unlisten) unlisten(); };
   }, []);
 
   // ── Listen for target names ──
@@ -413,6 +538,7 @@ export default function SocialPage() {
     'replyInterval', 'observerInterval',
     'botQQ', 'ownerQQ', 'ownerName',
     'enabledMcpServers',
+    'subagentEnabled', 'subagentMaxConcurrent', 'subagentTimeoutSecs', 'subagentModel',
   ];
 
   // ── Handlers ──
@@ -508,7 +634,12 @@ export default function SocialPage() {
       const configToStart = buildConfigToSave();
       await saveSocialConfig(selectedPetId, configToStart);
       setConfig(configToStart);
-      emit('social-start', configToStart);
+      const appSettings = await tauri.getSettings().catch(() => ({}));
+      emit('social-start', {
+        ...configToStart,
+        trainingCollectionEnabled: appSettings?.trainingCollectionEnabled || false,
+        trainingTargets,
+      });
     }
   };
 
@@ -568,20 +699,62 @@ export default function SocialPage() {
   // Memoized filtered logs (based on sorted data)
   const filteredLogs = useMemo(() => sortedLogs.filter(log => {
     // Intent logs have target — apply target filter normally
-    if (log.level === 'intent') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'intent' || log.level === 'send') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'subagent') return showSubagent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'reflect') return showReflect && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
+    if (log.level === 'usage') return showUsage && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (logFilter === 'system' && log.target) return false;
     if (logFilter !== 'all' && logFilter !== 'system' && log.target !== logFilter) return false;
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [sortedLogs, logFilter, showSystem, showIntent]);
+  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent, showReflect, showUsage]);
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
 
+  // Usage logs after the most recent agent start (for PromptCachePanel)
+  const usageLogsAfterReset = useMemo(
+    () => sortedLogs.filter(l => {
+      if (l.level !== 'usage') return false;
+      const t = typeof l.timestamp === 'number' ? l.timestamp : new Date(l.timestamp).getTime();
+      return t >= cacheResetAt;
+    }),
+    [sortedLogs, cacheResetAt],
+  );
+
   // ── Close handler ──
   const handleClose = () => {
     tauri.hideSocialWindow();
+  };
+
+  // ── Training Export ──
+  const runExport = async () => {
+    setExportRunning(true);
+    setExportResult(null);
+    try {
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+      let outputPath;
+      try {
+        const homeDir = await tauri.getHomeDir();
+        outputPath = `${homeDir}/Downloads/qwen_intent_${timestamp}.jsonl`;
+      } catch {
+        outputPath = `./qwen_intent_${timestamp}.jsonl`;
+      }
+
+      const result = await tauri.runTrainingExport({
+        pet_id: selectedPetId,
+        output_path: outputPath,
+        redact: exportOptions.redact,
+        status: exportOptions.statusSuccessOnly ? 'success' : null,
+        termination: exportOptions.terminationStrict ? 'write_intent_plan' : null,
+      });
+      setExportResult({ ...result, outputPath });
+    } catch (e) {
+      setExportResult({ stdout: '', stderr: String(e?.message || e), success: false, outputPath: '' });
+    } finally {
+      setExportRunning(false);
+    }
   };
 
   // ── Per-target lurk mode ──
@@ -592,6 +765,14 @@ export default function SocialPage() {
   ];
   const setTargetLurkMode = (target, mode) => {
     emit('social-set-lurk-mode', { target, mode });
+  };
+  const setTargetTrainingEnabled = (target, enabled) => {
+    emit('social-set-training-enabled', { target, enabled });
+    setTrainingTargets(prev => {
+      const next = { ...prev, [target]: enabled };
+      tauri.updateSettings({ trainingTargets: next }).catch(() => {});
+      return next;
+    });
   };
   const toggleTargetPaused = (target) => {
     const isPaused = pausedTargets[target] || false;
@@ -609,6 +790,7 @@ export default function SocialPage() {
   const selectedTarget = logFilter !== 'all' && logFilter !== 'system' ? logFilter : null;
 
   return (
+    <>
     <div className="h-screen flex flex-col bg-white/95 backdrop-blur-xl rounded-2xl overflow-hidden border border-slate-200/80 shadow-xl">
       {/* Title Bar */}
       <TitleBar
@@ -717,6 +899,16 @@ export default function SocialPage() {
                     onChange={(v) => handleConfigChange('enableImages', v)}
                   />
                 </div>
+              </Card>
+
+              {/* Prompt Cache — performance setting for OpenAI-type APIs */}
+              <Card title="Prompt Cache" description="显式缓存参数（仅影响 OpenAI 类 API；Anthropic 始终启用，Gemini 走隐式缓存）">
+                <ToggleRow
+                  label="启用显式 Prompt Cache（OpenAI 类 API）"
+                  hint="向 OpenAI 类 API 附加 prompt_cache_key + 24h 保留，提升多轮缓存命中率。如果你用的兼容网关对未知字段报错，请关闭此开关。"
+                  checked={config.explicitPromptCache !== false}
+                  onChange={(v) => handleConfigChange('explicitPromptCache', v)}
+                />
               </Card>
 
               {/* MCP Server — all per-server settings nested below */}
@@ -1264,6 +1456,199 @@ export default function SocialPage() {
                       </FormGroup>
                     </div>
                   </Card>
+
+                  {/* CC Subagent */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={config.subagentEnabled !== false}
+                        onChange={(e) => handleConfigChange('subagentEnabled', e.target.checked)}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">CC Subagent</span>
+                      <span className="text-xs text-gray-400">后台研究任务</span>
+                    </div>
+                    {config.subagentEnabled !== false && (
+                      <div className="grid grid-cols-3 gap-3">
+                        <FormGroup label="Max Concurrent" hint="同时运行上限">
+                          <Input
+                            type="number"
+                            min={1}
+                            max={20}
+                            value={config.subagentMaxConcurrent ?? 5}
+                            onChange={(e) => handleConfigChange('subagentMaxConcurrent', parseInt(e.target.value) || 5)}
+                          />
+                        </FormGroup>
+                        <FormGroup label="Timeout (seconds)" hint="兜底超时">
+                          <Input
+                            type="number"
+                            min={30}
+                            max={600}
+                            value={config.subagentTimeoutSecs ?? 300}
+                            onChange={(e) => handleConfigChange('subagentTimeoutSecs', parseInt(e.target.value) || 300)}
+                          />
+                        </FormGroup>
+                        <FormGroup label="Model" hint="CC 模型">
+                          <Input
+                            type="text"
+                            value={config.subagentModel || 'sonnet'}
+                            onChange={(e) => handleConfigChange('subagentModel', e.target.value)}
+                            placeholder="sonnet"
+                          />
+                        </FormGroup>
+                      </div>
+                    )}
+                  </Card>
+
+                  {/* TTS / 语音 (ElevenLabs) */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={!!config.ttsConfig?.enabled}
+                        onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">TTS 语音 (ElevenLabs)</span>
+                      <span className="text-xs text-gray-400">启用 voice_send 内置工具，最多 50 字</span>
+                    </div>
+                    {config.ttsConfig?.enabled && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <FormGroup label="API Key" hint="ElevenLabs xi-api-key">
+                          <Input
+                            type="password"
+                            value={config.ttsConfig?.apiKey || ''}
+                            onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), apiKey: e.target.value })}
+                            placeholder="sk_..."
+                          />
+                        </FormGroup>
+                        <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? '生成中...' : 'ElevenLabs voice id')}>
+                          <div className="flex gap-2">
+                            <Input
+                              type="text"
+                              value={config.ttsConfig?.voiceId || ''}
+                              onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), voiceId: e.target.value })}
+                              placeholder="21m00Tcm4TlvDq8ikWAM"
+                            />
+                            <button
+                              type="button"
+                              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
+                              disabled={testingVoice || !config.ttsConfig?.apiKey || !config.ttsConfig?.voiceId}
+                              onClick={async () => {
+                                setTestingVoice(true);
+                                setTestVoiceError('');
+                                try {
+                                  const base64 = await tauri.elevenlabsTts({
+                                    apiKey: config.ttsConfig.apiKey,
+                                    voiceId: config.ttsConfig.voiceId,
+                                    text: 'hello',
+                                    modelId: config.ttsConfig.modelId || undefined,
+                                  });
+                                  if (!base64) throw new Error('返回为空');
+                                  const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
+                                  await audio.play();
+                                } catch (err) {
+                                  setTestVoiceError(String(err?.message || err).slice(0, 80));
+                                } finally {
+                                  setTestingVoice(false);
+                                }
+                              }}
+                            >
+                              {testingVoice ? '测试中...' : '测试'}
+                            </button>
+                          </div>
+                        </FormGroup>
+                        <FormGroup label="Model" hint={ttsModelsError ? `刷新失败: ${ttsModelsError}（仍可使用兜底列表）` : `${ttsModels.length} 个模型可选`}>
+                          <div className="flex gap-2">
+                            <select
+                              className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                              value={config.ttsConfig?.modelId || ''}
+                              onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), modelId: e.target.value })}
+                            >
+                              <option value="">默认 (eleven_multilingual_v2)</option>
+                              {ttsModels.map(m => (
+                                <option key={m.model_id} value={m.model_id}>{m.name} ({m.model_id})</option>
+                              ))}
+                            </select>
+                            <button
+                              type="button"
+                              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                              disabled={loadingTtsModels || !config.ttsConfig?.apiKey}
+                              title="拉取最新模型列表（需要 API key 有 models_read 权限）"
+                              onClick={async () => {
+                                setLoadingTtsModels(true);
+                                setTtsModelsError('');
+                                try {
+                                  const list = await tauri.elevenlabsListModels(config.ttsConfig.apiKey);
+                                  if (Array.isArray(list) && list.length > 0) {
+                                    setTtsModels(list);
+                                  } else {
+                                    setTtsModelsError('返回为空');
+                                  }
+                                } catch (err) {
+                                  // 失败保留原有列表（兜底或上次成功的）
+                                  setTtsModelsError(String(err?.message || err).slice(0, 80));
+                                } finally {
+                                  setLoadingTtsModels(false);
+                                }
+                              }}
+                            >
+                              {loadingTtsModels ? '加载中...' : '刷新'}
+                            </button>
+                          </div>
+                        </FormGroup>
+                      </div>
+                    )}
+                  </Card>
+
+                  {/* AI 生图 (generate_image_send) */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={!!config.imageGenConfig?.enabled}
+                        onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">AI 生图 (generate_image_send)</span>
+                      <span className="text-xs text-gray-400">让 Glitch 用 AI 生图发到群里：流程图 / 示意图 / 自制表情包</span>
+                    </div>
+                    {config.imageGenConfig?.enabled && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <FormGroup label="Provider" hint="OpenAI-compatible /images/generations endpoint">
+                          <select
+                            className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                            value={config.imageGenConfig?.providerId || ''}
+                            onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), providerId: e.target.value, modelName: '' })}
+                          >
+                            <option value="">选择 provider</option>
+                            {apiProviders.map(p => (
+                              <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
+                            ))}
+                          </select>
+                        </FormGroup>
+                        <FormGroup label="Model" hint="provider 下所有缓存模型（不过滤），常见: dall-e-3 / gpt-image-1 / doubao-seedream-3-0">
+                          <select
+                            className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                            value={config.imageGenConfig?.modelName || ''}
+                            onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), modelName: e.target.value })}
+                            disabled={!config.imageGenConfig?.providerId}
+                          >
+                            <option value="">选择模型</option>
+                            {(() => {
+                              const p = apiProviders.find(x => (x._id || x.id) === config.imageGenConfig?.providerId);
+                              const list = p?.cachedModels || [];
+                              return list.map(m => {
+                                const name = typeof m === 'string' ? m : m.name;
+                                return <option key={name} value={name}>{name}</option>;
+                              });
+                            })()}
+                          </select>
+                        </FormGroup>
+                      </div>
+                    )}
+                  </Card>
                 </div>
               )}
 
@@ -1285,71 +1670,113 @@ export default function SocialPage() {
         {/* ========== Log Section (always visible, superset feature) ========== */}
         <div className="flex-1 min-h-0 flex flex-row">
           {/* ── Left Sidebar: target list ── */}
-          <div className="w-40 shrink-0 border-r border-slate-200/60 flex flex-col overflow-hidden bg-slate-50/30">
-            {/* Fixed: All + System */}
-            <SidebarItem
-              active={logFilter === 'all'}
-              onClick={() => setLogFilter('all')}
-              label="All"
-              count={logs.length}
-            />
-            <SidebarItem
-              active={logFilter === 'system'}
-              onClick={() => setLogFilter('system')}
-              label="System"
-              count={logs.filter(l => !l.target).length}
-            />
-
-            {/* Separator */}
-            {watchedTargets.length > 0 && <div className="border-t border-slate-200/60 mx-2 my-1" />}
-
-            {/* Scrollable target list */}
-            <div className="flex-1 overflow-y-auto">
-              {watchedTargets.map(t => {
-                const mode = lurkModes[t.id] || 'normal';
-                const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
-                const displayName = targetNames[t.id] || t.id;
-                const isPaused = pausedTargets[t.id] || false;
-                return (
-                  <SidebarItem
-                    key={t.id}
-                    active={logFilter === t.id}
-                    onClick={() => setLogFilter(t.id)}
-                    label={displayName}
-                    count={logCountByTarget[t.id] || 0}
-                    lurkIcon={socialActive ? lurkIcon : null}
-                    onLurkClick={socialActive ? () => {
-                      const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
-                      setTargetLurkMode(t.id, next);
-                    } : null}
-                    paused={isPaused}
-                    onPauseClick={() => toggleTargetPaused(t.id)}
-                  />
-                );
-              })}
-            </div>
-
-            {/* Clear logs */}
-            <div className="border-t border-slate-200/60 p-1.5">
+          <div
+            className="shrink-0 border-r border-slate-200/60 flex flex-col overflow-hidden bg-slate-50/30"
+            style={{ width: leftPanelCollapsed ? 28 : leftPanelWidth }}
+          >
+            {leftPanelCollapsed ? (
               <button
-                onClick={() => { emit('social-clear-logs'); setLogs([]); }}
-                className="w-full text-[10px] text-slate-400 hover:text-red-500 py-1 rounded hover:bg-red-50 transition-colors"
+                onClick={() => setLeftPanelCollapsed(false)}
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 self-center"
+                title="展开 Targets"
               >
-                Clear Logs
+                ▶
               </button>
-            </div>
+            ) : (
+              <>
+                {/* Header: collapse button */}
+                <div className="flex items-center justify-between px-2 py-1 border-b border-slate-200/60 shrink-0 bg-white/40">
+                  <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Targets</span>
+                  <button
+                    onClick={() => setLeftPanelCollapsed(true)}
+                    className="p-0.5 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100"
+                    title="折叠 Targets"
+                  >
+                    ◀
+                  </button>
+                </div>
+
+                {/* Fixed: All + System */}
+                <SidebarItem
+                  active={logFilter === 'all'}
+                  onClick={() => setLogFilter('all')}
+                  label="All"
+                  count={logs.length}
+                />
+                <SidebarItem
+                  active={logFilter === 'system'}
+                  onClick={() => setLogFilter('system')}
+                  label="System"
+                  count={logs.filter(l => !l.target).length}
+                />
+
+                {/* Separator */}
+                {watchedTargets.length > 0 && <div className="border-t border-slate-200/60 mx-2 my-1" />}
+
+                {/* Scrollable target list */}
+                <div className="flex-1 overflow-y-auto">
+                  {watchedTargets.map(t => {
+                    const mode = lurkModes[t.id] || 'normal';
+                    const lurkIcon = mode === 'semi-lurk' ? '👀' : mode === 'full-lurk' ? '🫥' : '💬';
+                    const displayName = targetNames[t.id] || t.id;
+                    const isPaused = pausedTargets[t.id] || false;
+                    const isTrainingEnabled = trainingTargets[t.id] || false;
+                    return (
+                      <SidebarItem
+                        key={t.id}
+                        active={logFilter === t.id}
+                        onClick={() => setLogFilter(t.id)}
+                        label={displayName}
+                        count={logCountByTarget[t.id] || 0}
+                        lurkIcon={socialActive ? lurkIcon : null}
+                        onLurkClick={socialActive ? () => {
+                          const next = mode === 'normal' ? 'semi-lurk' : mode === 'semi-lurk' ? 'full-lurk' : 'normal';
+                          setTargetLurkMode(t.id, next);
+                        } : null}
+                        paused={isPaused}
+                        onPauseClick={() => toggleTargetPaused(t.id)}
+                        trainingEnabled={trainingCollectionEnabled ? isTrainingEnabled : undefined}
+                        onTrainingClick={trainingCollectionEnabled ? () => setTargetTrainingEnabled(t.id, !isTrainingEnabled) : null}
+                      />
+                    );
+                  })}
+                </div>
+
+                {/* Clear logs */}
+                <div className="border-t border-slate-200/60 p-1.5">
+                  <button
+                    onClick={() => { emit('social-clear-logs'); setLogs([]); }}
+                    className="w-full text-[10px] text-slate-400 hover:text-red-500 py-1 rounded hover:bg-red-50 transition-colors"
+                  >
+                    Clear Logs
+                  </button>
+                </div>
+              </>
+            )}
           </div>
+
+          {/* Drag handle: 左栏 ↔ 中栏（折叠时不显示） */}
+          {!leftPanelCollapsed && (
+            <div
+              onMouseDown={startResize('left')}
+              className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-cyan-300/60 transition-colors"
+              title="拖动调整宽度"
+            />
+          )}
 
           {/* ── Right: toolbar + log content ── */}
           <div className="flex-1 min-w-0 flex flex-col">
             {/* Content Toggle Bar + Lurk indicator */}
-            <div className="flex items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 bg-white/60 shrink-0">
+            <div className="flex flex-wrap items-center gap-1.5 px-3 py-1.5 border-b border-slate-100 bg-white/60 shrink-0">
               <span className="text-xs text-slate-400 mr-0.5 shrink-0">Show:</span>
               <ToggleBtn active={showChat} onClick={() => setShowChat(!showChat)} icon="💬" label="Chat" />
               <ToggleBtn active={showLlm} onClick={() => setShowLlm(!showLlm)} icon="🧠" label="LLM" />
               <ToggleBtn active={showTools} onClick={() => setShowTools(!showTools)} icon="🔧" label="Tools" />
               <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
               <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
+              <ToggleBtn active={showSubagent} onClick={() => setShowSubagent(!showSubagent)} icon="🤖" label="Subagent" />
+              <ToggleBtn active={showReflect} onClick={() => setShowReflect(!showReflect)} icon="🪞" label="Reflect" />
+              <ToggleBtn active={showUsage} onClick={() => setShowUsage(!showUsage)} icon="💾" label="Usage" />
               {/* Lurk mode buttons for selected target */}
               {selectedTarget && (() => {
                 const currentMode = lurkModes[selectedTarget] || 'normal';
@@ -1367,6 +1794,12 @@ export default function SocialPage() {
                     >
                       {isPaused ? '⏸️ Paused' : '▶️ Running'}
                     </button>
+                    {socialActive && activeSubagentCount > 0 && (
+                      <span className="ml-1 px-2 py-0.5 text-[10px] font-medium rounded-full bg-blue-100 text-blue-700 border border-blue-200 shrink-0"
+                        title={`${activeSubagentCount} CC subagent(s) running`}>
+                        🤖 {activeSubagentCount}
+                      </span>
+                    )}
                     {socialActive && <>
                       <div className="w-px h-4 bg-slate-200 mx-0.5" />
                       {LURK_OPTIONS.map(opt => {
@@ -1390,6 +1823,92 @@ export default function SocialPage() {
               })()}
             </div>
 
+            {/* Custom Group Rules — editable per target */}
+            {selectedTarget && (
+              <CustomGroupRules
+                target={selectedTarget}
+                value={(config.customGroupRules || {})[selectedTarget] || ''}
+                onChange={async (text) => {
+                  const updated = { ...(config.customGroupRules || {}), [selectedTarget]: text };
+                  // 1. 更新本地 state
+                  setConfig(prev => ({ ...prev, customGroupRules: updated }));
+                  // 2. 立即持久化到 DB（下次重启会自动加载）
+                  if (selectedPetId) {
+                    try {
+                      const configToSave = { ...config, customGroupRules: updated, petId: selectedPetId };
+                      await saveSocialConfig(selectedPetId, configToSave);
+                    } catch (e) {
+                      console.error('Failed to persist custom rules:', e);
+                    }
+                  }
+                }}
+              />
+            )}
+
+            {/* Intent Plan — pinned above logs when a target is selected */}
+            {selectedTarget && (() => {
+              const plan = intentPlans[selectedTarget];
+              const actionLabel = (a) => {
+                if (a.type === 'sticker') return `📎 sticker#${a.id}`;
+                if (a.type === 'image') return `🖼️ ${a.file || 'image'}`;
+                if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
+                if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
+                return `⏸ wait`;
+              };
+              if (!plan) return (
+                <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-3 py-1.5">
+                  <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Plan</span>
+                  <span className="text-[9px] text-slate-400 ml-2">等待 Intent 评估…</span>
+                </div>
+              );
+              const doneStickers = plan.done.filter(d => d.type === 'sticker').length;
+              const doneReplies = plan.done.filter(d => d.type === 'reply').length;
+              const doneImages = plan.done.filter(d => d.type === 'image').length;
+              let stickerIdx = 0, replyIdx = 0, imageIdx = 0;
+              const isDone = (a) => {
+                if (a.type === 'sticker') return stickerIdx++ < doneStickers;
+                if (a.type === 'reply') return replyIdx++ < doneReplies;
+                if (a.type === 'image') return imageIdx++ < doneImages;
+                return false;
+              };
+              const planHasAction = plan.actions.some(a => a.type === 'sticker' || a.type === 'reply' || a.type === 'image');
+              return (
+                <div className="shrink-0 border-b border-slate-200 bg-slate-50/80 px-3 py-1.5 space-y-1">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide shrink-0">Plan</span>
+                    {plan.actions
+                      .filter(a => !(planHasAction && (a.type === 'wait' || a.type === 'intent')))
+                      .map((a, i) => {
+                        const done = isDone(a);
+                        return (
+                          <span key={i} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                            done ? 'text-slate-400 bg-slate-100 border-slate-200 line-through' :
+                            a.type === 'wait' || a.type === 'intent' ? 'text-slate-500 bg-white border-slate-200' :
+                            'text-cyan-700 bg-cyan-50 border-cyan-200'
+                          }`}>
+                            {done ? '✓' : '○'} {actionLabel(a)}
+                          </span>
+                        );
+                      })}
+                    {/* Running subagent tasks for this target */}
+                    {(() => {
+                      const targetRunning = [];
+                      for (const [tid, e] of subagentRegistry) {
+                        if (e.target === selectedTarget && e.status === 'running') {
+                          targetRunning.push({ tid, task: e.task, elapsed: Math.round((Date.now() - e.createdAt) / 1000) });
+                        }
+                      }
+                      return targetRunning.map(r => (
+                        <span key={r.tid} className="text-[10px] font-mono px-1.5 py-0.5 rounded border text-blue-600 bg-blue-50 border-blue-200 animate-pulse">
+                          🤖 {r.task?.substring(0, 30)}{r.task?.length > 30 ? '…' : ''} ({r.elapsed}s)
+                        </span>
+                      ));
+                    })()}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Log Content */}
             <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2 text-xs font-mono space-y-0.5">
               {reversedFilteredLogs.length === 0 ? (
@@ -1400,8 +1919,16 @@ export default function SocialPage() {
                     <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
                   ) : log.level === 'intent' ? (
                     <IntentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'send' ? (
+                    <SendLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'llm' ? (
                     <LlmLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'subagent' ? (
+                    <SubagentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'reflect' ? (
+                    <ReflectLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'usage' ? (
+                    <UsageLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
@@ -1426,17 +1953,242 @@ export default function SocialPage() {
               )}
             </div>
           </div>
+
+          {/* Drag handle: 中栏 ↔ 右栏（折叠时不显示） */}
+          {!rightPanelCollapsed && (
+            <div
+              onMouseDown={startResize('right')}
+              className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-cyan-300/60 transition-colors"
+              title="拖动调整宽度"
+            />
+          )}
+
+          {/* ── Right Sidebar: Inspector (Intent State / Prompt Cache / Training Data) ── */}
+          <div
+            className="shrink-0 border-l border-slate-200/60 flex flex-col bg-slate-50/40"
+            style={{ width: rightPanelCollapsed ? 28 : rightPanelWidth }}
+          >
+            {rightPanelCollapsed ? (
+              <button
+                onClick={() => setRightPanelCollapsed(false)}
+                className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 self-center"
+                title="展开 Inspector"
+              >
+                ◀
+              </button>
+            ) : (
+              <>
+                <div className="flex items-center justify-between px-2.5 py-1.5 border-b border-slate-200/60 shrink-0 bg-white/40">
+                  <span className="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">Inspector</span>
+                  <button
+                    onClick={() => setRightPanelCollapsed(true)}
+                    className="p-0.5 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100"
+                    title="折叠 Inspector"
+                  >
+                    ▶
+                  </button>
+                </div>
+                <div className="flex-1 min-h-0 overflow-y-auto">
+                  {/* Intent State */}
+                  <CollapsibleSection
+                    title={`Intent State${selectedTarget ? ` · ${targetNames[selectedTarget] || selectedTarget}` : ''}`}
+                    expanded={panelStateExpanded}
+                    onToggle={() => setPanelStateExpanded(v => !v)}
+                  >
+                    {selectedTarget && intentPlans[selectedTarget]?.state ? (
+                      <div className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap leading-relaxed">
+                        {intentPlans[selectedTarget].state}
+                      </div>
+                    ) : (
+                      <div className="text-[10px] text-slate-400 font-mono">
+                        {selectedTarget ? '等待 Intent 评估…' : '未选择 target'}
+                      </div>
+                    )}
+                  </CollapsibleSection>
+
+                  {/* Prompt Cache */}
+                  <CollapsibleSection
+                    title="Prompt Cache（本次会话）"
+                    expanded={panelCacheExpanded}
+                    onToggle={() => setPanelCacheExpanded(v => !v)}
+                  >
+                    <PromptCachePanel logs={usageLogsAfterReset} />
+                  </CollapsibleSection>
+
+                  {/* Training Data */}
+                  <CollapsibleSection
+                    title="Training Data Collection"
+                    expanded={panelTrainingExpanded}
+                    onToggle={() => setPanelTrainingExpanded(v => !v)}
+                  >
+                    <TrainingDataCard
+                      petId={selectedPetId}
+                      trainingCollectionEnabled={trainingCollectionEnabled}
+                      trainingTargets={trainingTargets}
+                      onToggleGlobal={async (v) => {
+                        setTrainingCollectionEnabled(v);
+                        await tauri.updateSettings({ trainingCollectionEnabled: v }).catch(() => {});
+                        emit('social-set-training-collection-enabled', { enabled: v });
+                      }}
+                      onOpenFolder={async () => {
+                        try {
+                          await tauri.workspaceOpenSubfolder(selectedPetId, 'social/training/intent');
+                        } catch (e) {
+                          console.error('[TrainingData] open folder failed:', e);
+                        }
+                      }}
+                      onExport={() => setExportModalOpen(true)}
+                    />
+                  </CollapsibleSection>
+                </div>
+              </>
+            )}
+          </div>
         </div>
       </div>
     </div>
+
+    {/* Export Intent Training Data Modal */}
+    {exportModalOpen && (
+      <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50">
+        <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+          <h3 className="font-semibold mb-3">Export Intent Training Data</h3>
+
+          <label className="flex items-center gap-2 text-sm mt-2">
+            <input
+              type="checkbox"
+              checked={exportOptions.redact}
+              onChange={(e) => setExportOptions({ ...exportOptions, redact: e.target.checked })}
+              disabled={exportRunning}
+            />
+            Redact QQ numbers (recommended)
+          </label>
+          <label className="flex items-center gap-2 text-sm mt-2">
+            <input
+              type="checkbox"
+              checked={exportOptions.statusSuccessOnly}
+              onChange={(e) => setExportOptions({ ...exportOptions, statusSuccessOnly: e.target.checked })}
+              disabled={exportRunning}
+            />
+            Only successful evals
+          </label>
+          <label className="flex items-center gap-2 text-sm mt-2">
+            <input
+              type="checkbox"
+              checked={exportOptions.terminationStrict}
+              onChange={(e) => setExportOptions({ ...exportOptions, terminationStrict: e.target.checked })}
+              disabled={exportRunning}
+            />
+            Only evals that reached write_intent_plan
+          </label>
+
+          {exportRunning && (
+            <div className="mt-3 text-xs text-gray-500">Running export…</div>
+          )}
+
+          {exportResult && (
+            <pre className="mt-3 text-xs bg-gray-100 p-2 rounded overflow-auto max-h-40 whitespace-pre-wrap">
+              {exportResult.success ? '✓ Success' : '✗ Failed'}
+              {exportResult.outputPath && `\nOutput: ${exportResult.outputPath}`}
+              {exportResult.stdout && `\n\n${exportResult.stdout}`}
+              {exportResult.stderr && `\n\nErrors:\n${exportResult.stderr}`}
+            </pre>
+          )}
+
+          <div className="flex gap-2 mt-4">
+            <button
+              onClick={runExport}
+              disabled={exportRunning}
+              className="px-3 py-1 bg-blue-500 text-white rounded text-sm disabled:opacity-50"
+            >
+              {exportRunning ? 'Running…' : 'Run'}
+            </button>
+            <button
+              onClick={() => { setExportModalOpen(false); setExportResult(null); }}
+              disabled={exportRunning}
+              className="px-3 py-1 border rounded text-sm"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    )}
+    </>
   );
 }
 
 // ==================== Helper Components ====================
 
+/** Render tool call details — parse JSON and show content fields as readable text */
+function ToolDetailsBlock({ details }) {
+  let parsed = null;
+  if (typeof details === 'string') {
+    try { parsed = JSON.parse(details); } catch { /* raw text */ }
+  } else if (typeof details === 'object') {
+    parsed = details;
+  }
+
+  if (parsed && typeof parsed === 'object') {
+    // Show each field: render 'content'/'newText'/'old_text'/'new_text' as readable text, others as labels
+    const textKeys = ['content', 'newText', 'new_text', 'oldText', 'old_text', 'text', 'query'];
+    const entries = Object.entries(parsed);
+    return (
+      <div className="text-purple-400 text-[10px] space-y-1">
+        {entries.map(([key, val]) => {
+          if (textKeys.includes(key) && typeof val === 'string') {
+            return (
+              <div key={key}>
+                <span className="text-purple-300 font-semibold">{key}:</span>
+                <div className="ml-2 whitespace-pre-wrap break-words text-slate-500">{val}</div>
+              </div>
+            );
+          }
+          const display = typeof val === 'string' ? val : JSON.stringify(val);
+          return (
+            <div key={key} className="truncate">
+              <span className="text-purple-300 font-semibold">{key}:</span>{' '}
+              <span className="text-slate-500">{display}</span>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
+
+  // Fallback: raw text
+  return (
+    <div className="text-purple-400 whitespace-pre-wrap break-words text-[10px]">
+      {typeof details === 'string' ? details : JSON.stringify(details, null, 2)}
+    </div>
+  );
+}
+
 function IntentLogEntry({ log, logFilter }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = !!log.details;
+
+  // Try to parse plan data from details
+  let plan = null;
+  if (hasDetails && typeof log.details === 'string') {
+    try {
+      const parsed = JSON.parse(log.details);
+      if (parsed && (parsed.actions || parsed.state)) plan = parsed;
+    } catch { /* raw text */ }
+  }
+
+  const hasStateToShow = plan?.state && !plan?.actions?.every(a => a.type === 'sticker');
+
+  const actionLabel = (a) => {
+    if (a.type === 'sticker') return `📎 sticker#${a.id}`;
+    if (a.type === 'image') return `🖼️ ${a.file || 'image'}`;
+    if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
+    if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
+    return `⏸ wait`;
+  };
+
+  const hasAction = plan?.actions?.some(a => a.type === 'sticker' || a.type === 'reply');
+
   return (
     <div className="py-0.5 text-purple-500">
       <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
@@ -1447,6 +2199,23 @@ function IntentLogEntry({ log, logFilter }) {
       )}
       {' '}
       {log.message}
+      {/* Running subagent indicator for this target */}
+      {log.target && (() => {
+        let count = 0;
+        const tasks = [];
+        for (const [, e] of subagentRegistry) {
+          if (e.target === log.target && e.status === 'running') {
+            count++;
+            tasks.push(e.task?.substring(0, 20));
+          }
+        }
+        if (count === 0) return null;
+        return (
+          <span className="ml-1.5 text-[9px] text-blue-500 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200" title={tasks.join(', ')}>
+            🤖 {count} task{count > 1 ? 's' : ''} running
+          </span>
+        );
+      })()}
       {hasDetails && (
         <button
           onClick={() => setExpanded(v => !v)}
@@ -1456,10 +2225,213 @@ function IntentLogEntry({ log, logFilter }) {
         </button>
       )}
       {hasDetails && expanded && (
-        <div className="mt-0.5 ml-4 pl-2 border-l-2 border-purple-300/40 text-purple-400 whitespace-pre-wrap break-words">
-          {typeof log.details === 'string' ? log.details : JSON.stringify(log.details, null, 2)}
+        <div className="mt-1 ml-4 pl-2 border-l-2 border-purple-300/40 space-y-1">
+          {plan ? (
+            <>
+              {plan.actions && plan.actions.length > 0 && (
+                <div className="flex flex-wrap gap-1">
+                  {plan.actions
+                    .filter(a => !(hasAction && a.type === 'wait'))
+                    .map((a, i) => (
+                      <span key={i} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
+                        a.type === 'wait'
+                          ? 'text-slate-500 bg-white border-slate-200'
+                          : 'text-cyan-700 bg-cyan-50 border-cyan-200'
+                      }`}>
+                        {actionLabel(a)}
+                      </span>
+                    ))}
+                </div>
+              )}
+              {hasStateToShow && (
+                <div className="text-[9px] text-purple-400 font-mono whitespace-pre-wrap break-words">
+                  {plan.state}
+                </div>
+              )}
+            </>
+          ) : (
+            <ToolDetailsBlock details={log.details} />
+          )}
         </div>
       )}
+    </div>
+  );
+}
+
+function CollapsibleSection({ title, expanded, onToggle, children }) {
+  return (
+    <div className="border-b border-slate-200/60">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between px-2.5 py-1.5 hover:bg-slate-100/60 transition-colors"
+      >
+        <span className="text-[10px] font-semibold text-slate-600 uppercase tracking-wide">{title}</span>
+        {expanded ? <FaChevronUp className="w-2.5 h-2.5 text-slate-400" /> : <FaChevronDown className="w-2.5 h-2.5 text-slate-400" />}
+      </button>
+      {expanded && (
+        <div className="px-2.5 pb-2 pt-0.5">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function UsageLogEntry({ log, logFilter }) {
+  return (
+    <div className="py-0.5 text-slate-600">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold text-emerald-600">[usage]</span>
+      {log.target && logFilter === 'all' && (
+        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+      )}
+      {' '}
+      <span className="font-mono">{log.message}</span>
+    </div>
+  );
+}
+
+function PromptCachePanel({ logs }) {
+  const stats = useMemo(() => {
+    const map = new Map();
+    for (const log of logs) {
+      if (log.level !== 'usage' || !log.details) continue;
+      const d = log.details;
+      const label = d.label;
+      if (!label) continue;
+      const cur = map.get(label) || { label, calls: 0, totalIn: 0, totalCached: 0, totalOut: 0 };
+      cur.calls += 1;
+      cur.totalIn += d.inputTokens || 0;
+      cur.totalCached += d.cachedTokens || 0;
+      cur.totalOut += d.outputTokens || 0;
+      map.set(label, cur);
+    }
+    return Array.from(map.values()).sort((a, b) => b.calls - a.calls);
+  }, [logs]);
+
+  if (stats.length === 0) {
+    return <div className="text-[10px] text-slate-400 font-mono">（暂无 usage 数据）</div>;
+  }
+  return (
+    <div className="text-xs font-mono">
+      <table className="w-full">
+        <tbody>
+          {stats.map(s => {
+            const rate = s.totalIn > 0
+              ? Math.min(100, Math.round((s.totalCached / s.totalIn) * 100)) + '%'
+              : '—';
+            const inK = s.totalIn >= 1000 ? Math.round(s.totalIn / 1000) + 'k' : String(s.totalIn);
+            return (
+              <tr key={s.label}>
+                <td className="pr-3">{s.label}</td>
+                <td className="pr-3 text-slate-500">{s.calls} calls</td>
+                <td className="pr-3 text-slate-500">{inK} in</td>
+                <td className="text-emerald-600">{rate} cached</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function useTrainingStats(petId, globalEnabled) {
+  const [stats, setStats] = useState({ count: 0, bytes: 0 });
+
+  useEffect(() => {
+    if (!globalEnabled || !petId) {
+      setStats({ count: 0, bytes: 0 });
+      return;
+    }
+    const refresh = () => {
+      const date = new Date().toISOString().slice(0, 10);
+      const path = `social/training/intent/${date}.jsonl`;
+      tauri.workspaceRead(petId, path).then(text => {
+        if (!text) { setStats({ count: 0, bytes: 0 }); return; }
+        const lines = text.split('\n').filter(Boolean);
+        setStats({ count: lines.length, bytes: new Blob([text]).size });
+      }).catch(() => setStats({ count: 0, bytes: 0 }));
+    };
+    refresh();
+    const iv = setInterval(refresh, 5000);
+    return () => clearInterval(iv);
+  }, [petId, globalEnabled]);
+
+  return stats;
+}
+
+function TrainingDataCard({ petId, trainingCollectionEnabled, trainingTargets, onToggleGlobal, onOpenFolder, onExport }) {
+  const enabledTargets = Object.entries(trainingTargets || {})
+    .filter(([, v]) => v)
+    .map(([id]) => id);
+
+  const stats = useTrainingStats(petId, trainingCollectionEnabled);
+
+  return (
+    <div className="text-xs font-mono">
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={trainingCollectionEnabled}
+          onChange={(e) => onToggleGlobal(e.target.checked)}
+        />
+        <span>Enable collection (global)</span>
+      </label>
+
+      <div className="text-slate-400 mt-1">
+        Only targets marked below are collected. Raw data — redact at export time.
+      </div>
+
+      {trainingCollectionEnabled && (
+        <>
+          <div className="mt-2">
+            <div className="font-medium text-slate-700">Enabled targets ({enabledTargets.length}):</div>
+            {enabledTargets.length === 0 ? (
+              <div className="text-slate-400 mt-0.5">None — toggle on a target card.</div>
+            ) : (
+              <ul className="text-slate-600 mt-0.5 space-y-0.5">
+                {enabledTargets.map(id => (<li key={id}>· {id}</li>))}
+              </ul>
+            )}
+          </div>
+
+          <div className="text-xs text-gray-500 mt-2">
+            Today: {stats.count} traces · {(stats.bytes / 1024).toFixed(1)} KB
+          </div>
+
+          <div className="mt-2 flex gap-2">
+            <button
+              onClick={onOpenFolder}
+              className="px-2 py-0.5 rounded border border-slate-300 hover:bg-slate-100"
+            >
+              Open folder
+            </button>
+            <button
+              onClick={onExport}
+              className="px-2 py-0.5 rounded border border-slate-300 hover:bg-slate-100"
+            >
+              Export for Qwen
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SendLogEntry({ log, logFilter }) {
+  return (
+    <div className="py-0.5 text-teal-600">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold">[send]</span>
+      {log.target && logFilter === 'all' && (
+        <span className="text-cyan-500 ml-1">[{log.target}]</span>
+      )}
+      {' '}
+      {log.message}
     </div>
   );
 }
@@ -1494,6 +2466,218 @@ function LlmLogEntry({ log, logFilter }) {
   );
 }
 
+function CustomGroupRules({ target, value, onChange }) {
+  const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState(value || '');
+  const [showConfirm, setShowConfirm] = useState(false);
+  const hasContent = value && value.trim();
+  const isDirty = draft !== (value || '');
+
+  // Sync draft when value changes externally (e.g. switching target)
+  useEffect(() => { setDraft(value || ''); }, [value]);
+
+  const handleApply = () => {
+    setShowConfirm(true);
+  };
+
+  const confirmApply = () => {
+    onChange(draft);
+    // 通知运行中的 agent 热更新（立即生效）
+    emit('social-set-custom-rule', { target, rules: draft });
+    setShowConfirm(false);
+  };
+
+  return (
+    <div className="shrink-0 border-b border-slate-100 bg-amber-50/30 px-3 py-1">
+      <div
+        className="flex items-center gap-1 cursor-pointer"
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-[9px] font-semibold text-amber-600 uppercase tracking-wide">⚠️ Custom Rules</span>
+        {hasContent && !expanded && (
+          <span className="text-[9px] text-amber-500 ml-1 truncate max-w-[300px]">{value.trim().split('\n')[0]}</span>
+        )}
+        <span className="text-slate-300 ml-auto text-[10px]">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && (
+        <div className="mt-1">
+          <textarea
+            className="w-full p-2 text-xs font-mono rounded border border-amber-200 bg-white resize-y min-h-[60px] max-h-[200px] focus:outline-none focus:ring-1 focus:ring-amber-300"
+            placeholder="输入该群的自定义规则（最高优先级，bot 必须遵守）&#10;例如：不要主动提起政治话题&#10;对群主要尊敬"
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+          />
+          <div className="flex items-center gap-2 mt-1 mb-0.5">
+            {isDirty && (
+              <span className="text-[9px] text-amber-500">未保存的修改</span>
+            )}
+            <button
+              onClick={handleApply}
+              disabled={!isDirty}
+              className={`ml-auto px-3 py-0.5 text-[10px] font-medium rounded border transition-colors ${
+                isDirty
+                  ? 'bg-amber-500 text-white border-amber-500 hover:bg-amber-600'
+                  : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
+              }`}
+            >
+              应用规则
+            </button>
+          </div>
+        </div>
+      )}
+      {/* 确认弹窗 */}
+      {showConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
+          <div className="bg-white rounded-lg shadow-xl p-4 max-w-md w-full mx-4">
+            <div className="text-sm font-semibold text-slate-800 mb-2">⚠️ 确认应用自定义规则</div>
+            <div className="text-xs text-slate-600 mb-3">以下规则将立即注入到下一轮 Intent 评估中，优先级最高：</div>
+            <div className="p-2 rounded bg-amber-50 border border-amber-200 text-xs font-mono whitespace-pre-wrap max-h-[200px] overflow-y-auto mb-3">
+              {draft.trim() || '（空，将清除所有自定义规则）'}
+            </div>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setShowConfirm(false)}
+                className="px-3 py-1 text-xs rounded border border-slate-300 text-slate-600 hover:bg-slate-50"
+              >
+                取消
+              </button>
+              <button
+                onClick={confirmApply}
+                className="px-3 py-1 text-xs rounded bg-amber-500 text-white hover:bg-amber-600"
+              >
+                确认应用
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ReflectLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const ts = new Date(log.timestamp).toLocaleTimeString();
+
+  let details = {};
+  try { details = typeof log.details === 'string' ? JSON.parse(log.details) : (log.details || {}); } catch { details = {}; }
+
+  const statusColor = details.status === 'failed' ? 'text-red-500'
+    : details.status === 'dispatched' ? 'text-blue-500'
+    : 'text-teal-600';
+
+  return (
+    <div className="py-0.5">
+      <div
+        className={`flex items-start gap-1 cursor-pointer hover:bg-slate-50 rounded px-1 -mx-1 ${statusColor}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-slate-400 shrink-0 tabular-nums">{ts}</span>
+        <span className="text-teal-500 shrink-0">[reflect]</span>
+        {log.target && logFilter === 'all' && (
+          <span className="text-slate-300 shrink-0">[{log.target}]</span>
+        )}
+        <span className="font-medium">🪞</span>
+        <span className="flex-1 break-words">{log.message}</span>
+        <span className="text-slate-300 shrink-0">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && details && (
+        <div className="ml-16 mt-0.5 p-2 rounded bg-teal-50 border border-teal-200 text-[10px] space-y-2">
+          {details.elapsed != null && (
+            <div><span className="text-teal-600 font-semibold">耗时: </span><span className="text-slate-600">{details.elapsed}s</span></div>
+          )}
+          {details.replyCount != null && (
+            <div><span className="text-teal-600 font-semibold">Review 轮数: </span><span className="text-slate-600">{details.replyCount}</span></div>
+          )}
+          {details.lessons && (
+            <div>
+              <div className="text-teal-600 font-semibold mb-1">📋 Lessons 变化:</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">Before:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.lessons.before}</div>
+                </div>
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">After:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.lessons.after}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {details.principles && (
+            <div>
+              <div className="text-teal-600 font-semibold mb-1">⭐ Principles 变化:</div>
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">Before:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.principles.before}</div>
+                </div>
+                <div>
+                  <div className="text-slate-400 text-[9px] mb-0.5">After:</div>
+                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.principles.after}</div>
+                </div>
+              </div>
+            </div>
+          )}
+          {details.error && (
+            <div className="text-red-500"><span className="font-semibold">错误: </span>{details.error}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SubagentLogEntry({ log, logFilter }) {
+  const [expanded, setExpanded] = useState(false);
+  const ts = new Date(log.timestamp).toLocaleTimeString();
+
+  let details = {};
+  try { details = typeof log.details === 'string' ? JSON.parse(log.details) : (log.details || {}); } catch { details = {}; }
+
+  const statusColor = details.status === 'timeout' ? 'text-amber-500'
+    : details.status === 'failed' ? 'text-red-500'
+    : details.status === 'dispatched' ? 'text-blue-500'
+    : 'text-emerald-500';
+
+  return (
+    <div className="py-0.5">
+      <div
+        className={`flex items-start gap-1 cursor-pointer hover:bg-slate-50 rounded px-1 -mx-1 ${statusColor}`}
+        onClick={() => setExpanded(!expanded)}
+      >
+        <span className="text-slate-400 shrink-0 tabular-nums">{ts}</span>
+        <span className="text-slate-400 shrink-0">[subagent]</span>
+        {log.target && logFilter === 'all' && (
+          <span className="text-slate-300 shrink-0">[{log.target}]</span>
+        )}
+        <span className="font-medium">🤖</span>
+        <span className="flex-1 break-words">{log.message}</span>
+        <span className="text-slate-300 shrink-0">{expanded ? '▾' : '▸'}</span>
+      </div>
+      {expanded && details && (
+        <div className="ml-16 mt-0.5 p-2 rounded bg-slate-50 border border-slate-200 text-[10px] space-y-1">
+          {details.task && (
+            <div><span className="text-slate-400 font-semibold">Task: </span><span className="text-slate-600">{details.task}</span></div>
+          )}
+          {details.elapsed != null && (
+            <div><span className="text-slate-400 font-semibold">耗时: </span><span className="text-slate-600">{details.elapsed}s</span></div>
+          )}
+          {details.resultLen != null && (
+            <div><span className="text-slate-400 font-semibold">结果: </span><span className="text-slate-600">{details.resultLen}字</span></div>
+          )}
+          {details.resultPreview && (
+            <div className="mt-1 p-1.5 rounded bg-white border border-slate-150 whitespace-pre-wrap text-slate-600">{details.resultPreview}</div>
+          )}
+          {details.error && (
+            <div className="text-red-500"><span className="font-semibold">错误: </span>{details.error}</div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ToggleRow({ label, hint, checked, onChange }) {
   return (
     <div className="flex items-center justify-between">
@@ -1514,7 +2698,7 @@ function ToggleRow({ label, hint, checked, onChange }) {
   );
 }
 
-function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick }) {
+function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick, trainingEnabled, onTrainingClick }) {
   return (
     <div
       onClick={onClick}
@@ -1541,6 +2725,15 @@ function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, pau
           title="Click to cycle lurk mode"
         >
           {lurkIcon}
+        </button>
+      )}
+      {onTrainingClick && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onTrainingClick(); }}
+          className="shrink-0 hover:scale-125 transition-transform text-sm leading-none"
+          title={trainingEnabled ? 'Training: ON' : 'Training: OFF'}
+        >
+          {trainingEnabled ? '📊' : '📋'}
         </button>
       )}
       <span className="truncate flex-1 font-medium">{label}</span>

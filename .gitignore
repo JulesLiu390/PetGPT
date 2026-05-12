@@ -30,3 +30,6 @@ release/
 # Build documentation
 documents/
 design/.DS_Store
+
+# Git worktrees
+.worktrees/

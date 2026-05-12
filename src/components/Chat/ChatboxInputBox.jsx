@@ -1,7 +1,7 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera } from "react-icons/fa6";
+import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera, FaRobot } from "react-icons/fa6";
 import { AiOutlinePlus } from "react-icons/ai";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { promptSuggestion, callOpenAILib, callOpenAILibStream } from '../../utils/openai';
@@ -11,6 +11,9 @@ import { SiQuicktype } from "react-icons/si";
 import { useMcpTools } from '../../utils/mcp/useMcpTools';
 import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
+import SubagentPanel from './SubagentPanel';
+import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount } from '../../utils/subagentManager';
+import { getSubagentToolDefinition } from '../../utils/workspace/socialToolExecutor';
 import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
 import { listen } from '@tauri-apps/api/event';
@@ -160,6 +163,9 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   // Per-Conversation 工具栏状态
   // 记忆功能开关状态 { [conversationId]: boolean }
   const [memoryEnabledByConversation, setMemoryEnabledByConversation] = useState({});
+  // Subagent 状态
+  const [showSubagentPanel, setShowSubagentPanel] = useState(false);
+  const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   // MCP 服务器启用状态 { [conversationId]: Set<string> }
   const [enabledMcpServersByConversation, setEnabledMcpServersByConversation] = useState({});
   // 追踪每个会话创建时的默认值（用于新 Tab 固化当时的默认值）
@@ -643,6 +649,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   const [petInfo, setPetInfo] = useState(null);
   const [activeModelConfig, setActiveModelConfig] = useState(null);
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
+  const [imageModelInfo, setImageModelInfo] = useState(null);
   const composingRef = useRef(false);
   const ignoreEnterRef = useRef(false);
   const [founctionModel, setFounctionModel] = useState(null);
@@ -723,6 +730,30 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       } catch (error) {
         console.error("Error loading default character ID from settings:", error);
         setCharacterId(null);
+      }
+
+      // 加载图像生成模型配置（generate_image 工具用）
+      try {
+        if (settings && settings.imageModelProviderId && settings.imageModelName) {
+          const providers = await tauri.getApiProviders();
+          if (Array.isArray(providers)) {
+            const provider = providers.find(p => p._id === settings.imageModelProviderId);
+            if (provider) {
+              setImageModelInfo({
+                modelName: settings.imageModelName,
+                baseUrl: provider.baseUrl,
+                apiKey: provider.apiKey,
+              });
+            } else {
+              setImageModelInfo(null);
+            }
+          }
+        } else {
+          setImageModelInfo(null);
+        }
+      } catch (e) {
+        console.error('Error loading image model from settings:', e);
+        setImageModelInfo(null);
       }
 
       // 加载默认功能模型
@@ -926,6 +957,36 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     fetchPetInfo();
   }, [characterId]);
 
+  // Completed subagent notifications (chat-source only)
+  const [subagentNotifications, setSubagentNotifications] = useState([]);
+  const [expandedNotification, setExpandedNotification] = useState(null);
+
+  // Subscribe to subagent changes
+  useEffect(() => {
+    const unsub = onSubagentChange((eventType, payload) => {
+      setActiveSubagentCount(getActiveCount());
+      // When a chat-source subagent finishes, add notification
+      if (payload?.entry?.source === 'chat' && (eventType === 'done' || eventType === 'timeout' || eventType === 'error')) {
+        setSubagentNotifications(prev => [...prev, {
+          taskId: payload.taskId,
+          task: payload.entry.task,
+          status: payload.entry.status,
+          result: payload.entry.result || null,
+          error: payload.entry.error || null,
+          timestamp: Date.now(),
+        }]);
+      }
+    });
+    return unsub;
+  }, []);
+
+  // Initialize subagent listeners when petInfo is available
+  useEffect(() => {
+    if (petInfo?._id) {
+      initSubagentListeners({ petId: petInfo._id, addLog: null, wakeIntent: null });
+    }
+  }, [petInfo]);
+
   // 监听助手更新事件，当当前助手被修改时重新加载 petInfo
   useEffect(() => {
     if (!characterId) return;
@@ -1106,6 +1167,26 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
 
   
 
+  // 注入 subagent 结果到对话
+  const handleInjectSubagentResult = useCallback((notification) => {
+    const resultText = notification.status === 'done' && notification.result
+      ? notification.result
+      : notification.status === 'timeout'
+      ? `（后台任务超时：${notification.task}）`
+      : `（后台任务失败：${notification.error || '未知错误'}）`;
+
+    const injectMsg = `[后台研究结果] 任务：${notification.task}\n\n${resultText}`;
+    setUserText(injectMsg);
+    // Remove this notification
+    setSubagentNotifications(prev => prev.filter(n => n.taskId !== notification.taskId));
+    setExpandedNotification(null);
+  }, []);
+
+  const handleDismissNotification = useCallback((taskId) => {
+    setSubagentNotifications(prev => prev.filter(n => n.taskId !== taskId));
+    if (expandedNotification === taskId) setExpandedNotification(null);
+  }, [expandedNotification]);
+
   // 发送消息
   const handleSend = async () => {
     if (!characterId) {
@@ -1234,7 +1315,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     }
 
     // 新方案: 使用 Rust TabState 添加用户消息
-    const userMsg = { role: "user", content: displayContent };
+    const userMsg = { role: "user", content: displayContent, createdAt: new Date().toISOString() };
     if (!isRunFromHere && sendingConversationId) {
       console.log('[ChatboxInputBox] Adding user message to Rust TabState');
       await tauri.pushTabMessage(sendingConversationId, userMsg);
@@ -1278,7 +1359,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     } else {
       thisModel = petInfo;
     }
-      
+
       // Use llmContent (with base64 data) for sending to LLM
       // If llmContent is an array (multimodal), process it to ensure all images are base64
       let content = llmContent;
@@ -1292,45 +1373,67 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
           setAttachments([]);
       }
 
-      // 检查是否需要注入时间信息
-      const lastInjectionTimestamp = lastTimeInjection[sendingConversationId];
-      const needTimeInjection = shouldInjectTime(lastInjectionTimestamp);
-      const timeContext = needTimeInjection ? buildTimeContext() : '';
-      
-      // 如果注入了时间，更新时间戳
-      if (needTimeInjection) {
-        console.log('[ChatboxInputBox] Injecting time context:', timeContext);
-        dispatch({
-          type: actionType.UPDATE_TIME_INJECTION,
-          conversationId: sendingConversationId,
-          timestamp: Date.now()
-        });
-      }
+      // ── 每条 user 消息注入时间戳 ──
+      // 历史消息：用 createdAt（来自 TabState / 数据库）
+      // 当前消息：用 Date.now()
+      const _fmtTime = (isoStr) => {
+        try {
+          const d = new Date(isoStr);
+          if (isNaN(d.getTime())) return '';
+          return d.toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        } catch { return ''; }
+      };
+      const _prependTimestamp = (msg) => {
+        if (msg.role !== 'user') return msg;
+        const ts = msg.createdAt ? _fmtTime(msg.createdAt) : '';
+        if (!ts) return msg;
+        // 文字消息：直接加前缀；多模态消息：只改第一个 text part
+        if (typeof msg.content === 'string') {
+          return { ...msg, content: `[${ts}]\n${msg.content}` };
+        }
+        if (Array.isArray(msg.content)) {
+          const parts = [...msg.content];
+          const textIdx = parts.findIndex(p => p.type === 'text');
+          if (textIdx >= 0) {
+            parts[textIdx] = { ...parts[textIdx], text: `[${ts}]\n${parts[textIdx].text}` };
+          }
+          return { ...msg, content: parts };
+        }
+        return msg;
+      };
+
+      const timestampedHistory = historyMessages.map(_prependTimestamp);
+      const nowTs = _fmtTime(new Date().toISOString());
+      const timestampedContent = typeof content === 'string'
+        ? `[${nowTs}]\n${content}`
+        : (() => {
+            if (Array.isArray(content)) {
+              const parts = [...content];
+              const textIdx = parts.findIndex(p => p.type === 'text');
+              if (textIdx >= 0) parts[textIdx] = { ...parts[textIdx], text: `[${nowTs}]\n${parts[textIdx].text}` };
+              return parts;
+            }
+            return content;
+          })();
 
       if (!isDefaultPersonality) {
-        // 新方案: 使用 buildSystemPrompt 从 SOUL.md/USER.md/MEMORY.md 构建 system prompt
         const systemContent = await buildSystemPrompt({
           petId: petInfo._id,
           memoryEnabled,
-          timeContext: timeContext || undefined,
         });
         const systemPrompt = { role: "system", content: systemContent };
-        fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content }];
+        fullMessages = [...timestampedHistory, systemPrompt, { role: "user", content: timestampedContent }];
       } else {
-        // Default personality: 简单的 helpful assistant + 时间上下文
-        let systemContent = timeContext ? `${timeContext}\n\n` : '';
+        let systemContent = '';
         if (memoryEnabled) {
-          // 即使是 default personality，记忆 ON 时也读取 USER.md/MEMORY.md
-          const memoryPrompt = await buildSystemPrompt({
+          systemContent = await buildSystemPrompt({
             petId: petInfo._id,
             memoryEnabled: true,
-            timeContext: timeContext || undefined,
           });
-          systemContent = memoryPrompt;
         }
         systemContent += '\nYou are a helpful assistant.';
         const systemPrompt = { role: "system", content: systemContent };
-        fullMessages = [...historyMessages, systemPrompt, { role: "user", content: content }];
+        fullMessages = [...timestampedHistory, systemPrompt, { role: "user", content: timestampedContent }];
       }
       
       if (attachments.length > 0) {
@@ -1348,7 +1451,9 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
 
     // 获取内置工具定义（read/write/edit）
     const builtinTools = getBuiltinToolDefinitions(memoryEnabled);
-    
+    const subagentDef = getSubagentToolDefinition();
+    if (subagentDef) builtinTools.push(subagentDef);
+
     // 合并 MCP 工具和内置工具
     const allMcpTools = [...(mcpEnabled && hasTools ? mcpTools : [])];
     const allToolsForLLM = allMcpTools.length > 0 || builtinTools.length > 0;
@@ -1453,12 +1558,34 @@ When using tools, please follow these guidelines:
           abortSignal: controller.signal,
           builtinToolContext: {
             petId: petInfo._id,
-            memoryEnabled
+            memoryEnabled,
+            subagentRegistry,
+            subagentConfig: { enabled: true, model: 'sonnet', timeoutSecs: 300 },
+            imageModel: imageModelInfo,
           }
         });
-        
+
+        // 桥接：扫 toolCallHistory 里 generate_image 成功结果，把 base64 图片塞进 reply.content
+        const generatedImageParts = [];
+        for (const entry of (toolResult.toolCallHistory || [])) {
+          if (entry?.name !== 'generate_image' || !Array.isArray(entry.images)) continue;
+          for (const img of entry.images) {
+            if (!img?.data) continue;
+            const url = img.data.startsWith('data:') || img.data.startsWith('http')
+              ? img.data
+              : `data:${img.mimeType || 'image/png'};base64,${img.data}`;
+            generatedImageParts.push({ type: 'image_url', image_url: { url } });
+          }
+        }
+        const replyContent = generatedImageParts.length > 0
+          ? [
+              { type: 'text', text: toolResult.content || '' },
+              ...generatedImageParts,
+            ]
+          : toolResult.content;
+
         reply = {
-          content: toolResult.content,
+          content: replyContent,
           mood: 'normal',
           toolCallHistory: toolResult.toolCallHistory
         };
@@ -1517,9 +1644,10 @@ When using tools, please follow these guidelines:
         reply = { content: "Error: No response from AI.", mood: "normal" };
     }
 
-    const botReply = { 
-      role: "assistant", 
+    const botReply = {
+      role: "assistant",
       content: reply.content || "Error: Empty response",
+      createdAt: new Date().toISOString(),
       // 保存 MCP 工具调用历史到消息中
       ...(reply.toolCallHistory && reply.toolCallHistory.length > 0 && { toolCallHistory: reply.toolCallHistory })
     };
@@ -1869,6 +1997,50 @@ const handleStop = async () => {
 
   return (
     <div className="relative w-full max-w-3xl mx-auto px-4 pb-4 no-drag">
+      {/* Subagent 完成通知条 */}
+      {subagentNotifications.length > 0 && (
+        <div className="mb-2 space-y-1.5">
+          {subagentNotifications.map(n => (
+            <div key={n.taskId} className={`rounded-xl border px-3 py-2 text-xs shadow-sm transition-all ${
+              n.status === 'done' ? 'bg-emerald-50 border-emerald-200' :
+              n.status === 'timeout' ? 'bg-amber-50 border-amber-200' :
+              'bg-red-50 border-red-200'
+            }`}>
+              <div className="flex items-center gap-2">
+                <span>{n.status === 'done' ? '✅' : n.status === 'timeout' ? '⏰' : '❌'}</span>
+                <span className="flex-1 font-medium text-gray-700 truncate">
+                  {n.task?.substring(0, 60)}
+                </span>
+                <button
+                  onClick={() => setExpandedNotification(expandedNotification === n.taskId ? null : n.taskId)}
+                  className="text-[10px] text-gray-500 hover:text-gray-700 px-1.5 py-0.5 rounded hover:bg-black/5"
+                >
+                  {expandedNotification === n.taskId ? '收起' : '查看'}
+                </button>
+                <button
+                  onClick={() => handleInjectSubagentResult(n)}
+                  className="text-[10px] text-blue-600 hover:text-blue-800 px-1.5 py-0.5 rounded hover:bg-blue-50 font-medium"
+                >
+                  注入对话
+                </button>
+                <button
+                  onClick={() => handleDismissNotification(n.taskId)}
+                  className="text-gray-400 hover:text-gray-600 text-sm leading-none"
+                >
+                  ×
+                </button>
+              </div>
+              {expandedNotification === n.taskId && (
+                <div className="mt-1.5 p-2 rounded bg-white/80 border border-gray-100 text-[10px] text-gray-600 whitespace-pre-wrap max-h-40 overflow-y-auto">
+                  {n.status === 'done' && n.result
+                    ? n.result
+                    : n.error || '(无内容)'}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
       {/* 主输入框容器：模仿图2的紧凑风格 */}
       <div 
         className={`relative rounded-[20px] p-3 shadow-sm border transition-all no-drag  ${
@@ -1967,7 +2139,29 @@ const handleStop = async () => {
                 >
                     <FaCamera className="w-4 h-4" />
                 </button>
-                
+
+                {/* Subagent 按钮 */}
+                <div className="relative">
+                  <button
+                    onClick={() => setShowSubagentPanel(!showSubagentPanel)}
+                    className={`relative flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
+                      activeSubagentCount > 0
+                        ? 'px-3 py-1.5 text-blue-700 bg-blue-100 border border-blue-300'
+                        : 'p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent'
+                    }`}
+                    title={`CC Subagent (${activeSubagentCount} running)`}
+                  >
+                    <FaRobot className="w-4 h-4" />
+                    {activeSubagentCount > 0 && (
+                      <span className="text-xs">{activeSubagentCount}</span>
+                    )}
+                  </button>
+                  <SubagentPanel
+                    isOpen={showSubagentPanel}
+                    onClose={() => setShowSubagentPanel(false)}
+                  />
+                </div>
+
                 <button
                     onClick={toggleMemory}
                     className={`flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${

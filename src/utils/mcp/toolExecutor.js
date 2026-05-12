@@ -7,22 +7,36 @@
 import { convertToOpenAITools, convertToGeminiTools } from './toolConverter.js';
 import * as openaiAdapter from '../llm/adapters/openaiCompatible.js';
 import * as geminiAdapter from '../llm/adapters/geminiOfficial.js';
+import * as anthropicAdapter from '../llm/adapters/anthropicNative.js';
+
+/** 根据 apiFormat 选择 adapter */
+function pickAdapter(apiFormat) {
+  if (apiFormat === 'gemini_official') return geminiAdapter;
+  if (apiFormat === 'anthropic_native') return anthropicAdapter;
+  return openaiAdapter;
+}
 import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
-import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
- * Gemini: { promptTokenCount, candidatesTokenCount, cachedContentTokenCount }
- * OpenAI: { prompt_tokens, completion_tokens, total_tokens }
+ * Gemini:    { promptTokenCount, candidatesTokenCount, cachedContentTokenCount }
+ * OpenAI:    { prompt_tokens, completion_tokens, prompt_tokens_details?: { cached_tokens } }
+ * Anthropic: { prompt_tokens, completion_tokens, cache_read_input_tokens,
+ *              prompt_tokens_details?: { cached_tokens } } (adapter shim)
  */
 export const normalizeUsage = (usage) => {
   if (!usage) return { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   return {
     inputTokens: usage.promptTokenCount ?? usage.prompt_tokens ?? 0,
     outputTokens: usage.candidatesTokenCount ?? usage.completion_tokens ?? 0,
-    cachedTokens: usage.cachedContentTokenCount ?? 0,
+    cachedTokens:
+      usage.cachedContentTokenCount                // Gemini
+      ?? usage.prompt_tokens_details?.cached_tokens // OpenAI + Anthropic-via-shim
+      ?? usage.cache_read_input_tokens             // Anthropic raw
+      ?? 0,
   };
 };
 
@@ -90,7 +104,7 @@ if (tauri.mcp?.onServersUpdated) {
 }
 
 // 工具执行超时配置 (毫秒)
-const TOOL_EXECUTION_TIMEOUT_MS = 300000; // 5 minutes for individual tool call
+const TOOL_EXECUTION_TIMEOUT_MS = 64000; // 64s for individual tool call
 const DEFAULT_TOOL_TIMEOUT_MS = 60000; // 1 minute default
 
 /**
@@ -487,12 +501,15 @@ export const callLLMWithTools = async ({
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
   builtinToolContext,  // { petId, memoryEnabled } — for builtin tool execution
+  stopAfterTool,    // optional string — stop the tool loop after this tool name is called (no further LLM turns)
   usageLabel,       // optional string label for usage logging (e.g. "Observer", "Intent:idle")
   usageTarget,      // optional string target id for usage logging
   usagePetId,       // optional petId for usage logging (falls back to builtinToolContext.petId)
   maxIterations,    // optional max iterations override (default 100)
+  onUsageLogged,    // optional (record) => void — fires after appendUsageLog with the same record
+  onTrace,          // optional (trace) => void — full trajectory, fires once on exit
 }) => {
-  const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
+  const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
 
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
@@ -509,77 +526,142 @@ export const callLLMWithTools = async ({
   const totalUsage = { inputTokens: 0, outputTokens: 0, cachedTokens: 0 };
   const usageStartTime = Date.now();
 
+  // ── Trace collection (only when onTrace is set) ──
+  const _trace = onTrace ? {
+    systemPrompt: null,
+    tools: null,
+    initialUserMessage: null,
+    iterations: [],
+    toolResults: [],
+    status: 'partial',          // overwritten before onTrace fires
+    termination: 'unknown',
+    error: null,
+    durationMs: 0,
+  } : null;
+
+  if (_trace) {
+    // Capture system + tools + initial user from initialMessages
+    const sys = initialMessages.find(m => m.role === 'system');
+    _trace.systemPrompt = sys ? (typeof sys.content === 'string' ? sys.content : JSON.stringify(sys.content)) : '';
+    _trace.tools = Array.isArray(mcpTools) ? [...mcpTools] : mcpTools;   // raw provider-neutral tool schemas passed in
+    const lastUser = [...initialMessages].reverse().find(m => m.role === 'user');
+    _trace.initialUserMessage = lastUser ? (typeof lastUser.content === 'string' ? lastUser.content : JSON.stringify(lastUser.content)) : '';
+  }
+
+  const _fireTrace = (status, termination, error) => {
+    if (!_trace || !onTrace) return;
+    _trace.status = status;
+    _trace.termination = termination;
+    if (error) _trace.error = typeof error === 'string' ? error : (error?.message || String(error));
+    _trace.durationMs = Date.now() - usageStartTime;
+    try {
+      const r = onTrace(_trace);
+      if (r && typeof r.catch === 'function') r.catch(() => {});
+    } catch { /* ignore */ }
+  };
+
   // 跟踪每个服务器的迭代次数
   const serverIterations = new Map();
   // 总迭代次数（防止无限循环的保险）
   let totalIterations = 0;
   const MAX_TOTAL_ITERATIONS = maxIterations ?? 100;
+  let stopEarly = false; // set by stopAfterTool
 
-  while (totalIterations < MAX_TOTAL_ITERATIONS) {
-    totalIterations++;
-    console.log(`[MCP] Tool loop iteration ${totalIterations}`);
-    
-    // 构建请求
-    const req = await adapter.buildRequest({
-      messages: currentMessages,
-      apiFormat,
-      apiKey,
-      model,
-      baseUrl,
-      options: {
-        ...options,
-        stream: false,
-        tools: llmTools.length > 0 ? llmTools : undefined
-      }
-    });
-    
-    // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
-    let data;
-    try {
-      data = await llmProxyCall(req.endpoint, req.headers, req.body);
-    } catch (proxyErr) {
-      // Tauri invoke 抛的是 string，无法挂属性 → 包装成 Error 对象
-      const err = typeof proxyErr === 'string' ? new Error(proxyErr) : (proxyErr instanceof Error ? proxyErr : new Error(String(proxyErr)));
-      try {
-        const bodyStr = JSON.stringify(req.body);
-        // 从错误信息中提取 column 号，截取报错位置前后 200 字符
-        const colMatch = (err.message || '').match(/column\s+(\d+)/);
-        if (colMatch) {
-          const col = parseInt(colMatch[1], 10);
-          const start = Math.max(0, col - 200);
-          const end = Math.min(bodyStr.length, col + 200);
-          err._debugBody = `…col ${col}, context [${start}..${end}]:\n${bodyStr.substring(start, end)}`;
-        } else {
-          err._debugBody = bodyStr.substring(0, 2000) + (bodyStr.length > 2000 ? '…' : '');
+  const _writeUsage = (record) => {
+    const _petId = usagePetId || builtinToolContext?.petId;
+    if (!_petId || !usageLabel) return;
+    // appendUsageLog is async fire-and-forget; it swallows its own errors internally.
+    appendUsageLog(_petId, record);
+    if (typeof onUsageLogged === 'function') {
+      try { onUsageLogged(record); } catch (_) { /* ignore callback errors */ }
+    }
+  };
+
+  try {
+    while (totalIterations < MAX_TOTAL_ITERATIONS) {
+      totalIterations++;
+      console.log(`[MCP] Tool loop iteration ${totalIterations}`);
+
+      // 构建请求
+      const req = await adapter.buildRequest({
+        messages: currentMessages,
+        apiFormat,
+        apiKey,
+        model,
+        baseUrl,
+        options: {
+          ...options,
+          stream: false,
+          tools: llmTools.length > 0 ? llmTools : undefined
         }
-      } catch (_) { /* ignore */ }
-      throw err;
-    }
-    const result = adapter.parseResponse(data);
-
-    // Accumulate usage from this iteration
-    const iterUsage = normalizeUsage(result.usage);
-    totalUsage.inputTokens += iterUsage.inputTokens;
-    totalUsage.outputTokens += iterUsage.outputTokens;
-    totalUsage.cachedTokens += iterUsage.cachedTokens;
-
-    // Emit LLM text for every iteration (including empty — caller decides what to show)
-    if (onLLMText) {
-      const toolNames = (result.toolCalls || []).map(tc => tc.name);
-      onLLMText({
-        content: result.content || '',
-        reasoning: result.reasoningContent || '',
-        iteration: totalIterations,
-        toolNames,
       });
-    }
-    
-    // 如果没有工具调用，返回结果
-    if (!result.toolCalls || result.toolCalls.length === 0) {
-      // Write usage log
-      const _petId = usagePetId || builtinToolContext?.petId;
-      if (usageLabel && _petId) {
-        appendUsageLog(_petId, {
+
+      // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
+      let data;
+      try {
+        data = await llmProxyCall(req.endpoint, req.headers, req.body);
+      } catch (proxyErr) {
+        // Tauri invoke 抛的是 string，无法挂属性 → 包装成 Error 对象
+        const err = typeof proxyErr === 'string' ? new Error(proxyErr) : (proxyErr instanceof Error ? proxyErr : new Error(String(proxyErr)));
+        try {
+          const bodyStr = JSON.stringify(req.body);
+          // 从错误信息中提取 column 号，截取报错位置前后 200 字符
+          const colMatch = (err.message || '').match(/column\s+(\d+)/);
+          if (colMatch) {
+            const col = parseInt(colMatch[1], 10);
+            const start = Math.max(0, col - 200);
+            const end = Math.min(bodyStr.length, col + 200);
+            err._debugBody = `…col ${col}, context [${start}..${end}]:\n${bodyStr.substring(start, end)}`;
+          } else {
+            err._debugBody = bodyStr.substring(0, 2000) + (bodyStr.length > 2000 ? '…' : '');
+          }
+        } catch (_) { /* ignore */ }
+        throw err;
+      }
+      const result = adapter.parseResponse(data);
+
+      // Accumulate usage from this iteration
+      const iterUsage = normalizeUsage(result.usage);
+      totalUsage.inputTokens += iterUsage.inputTokens;
+      totalUsage.outputTokens += iterUsage.outputTokens;
+      totalUsage.cachedTokens += iterUsage.cachedTokens;
+
+      // Emit LLM text for every iteration (including empty — caller decides what to show)
+      if (onLLMText) {
+        const toolNames = (result.toolCalls || []).map(tc => tc.name);
+        onLLMText({
+          content: result.content || '',
+          reasoning: result.reasoningContent || '',
+          iteration: totalIterations,
+          toolNames,
+        });
+      }
+
+      if (_trace) {
+        // assistant turn for this iteration
+        const toolCallsForTrace = (result.toolCalls || []).map(tc => ({
+          id: tc.id,
+          type: 'function',
+          function: {
+            name: tc.name,
+            // Keep args as JSON string for schema consistency (OpenAI-native shape).
+            // Export script parses to object.
+            arguments: typeof tc.arguments === 'string'
+              ? tc.arguments
+              : JSON.stringify(tc.arguments || {}),
+          },
+        }));
+        _trace.iterations.push({
+          content: result.content || null,
+          reasoning_content: result.reasoningContent || undefined,
+          tool_calls: toolCallsForTrace,
+        });
+      }
+
+      // 如果没有工具调用，返回结果
+      if (!result.toolCalls || result.toolCalls.length === 0) {
+        // Write usage log
+        _writeUsage({
           ts: new Date().toISOString(),
           label: usageLabel,
           target: usageTarget || '',
@@ -592,210 +674,248 @@ export const callLLMWithTools = async ({
           iterations: totalIterations,
           durationMs: Date.now() - usageStartTime,
         });
+        _fireTrace('success', 'end_turn', null);
+        return {
+          content: result.content,
+          reasoningContent: result.reasoningContent,
+          toolCallHistory,
+          usage: totalUsage,
+        };
       }
-      return {
-        content: result.content,
-        reasoningContent: result.reasoningContent,
-        toolCallHistory,
-        usage: totalUsage,
-      };
-    }
-    
-    // 执行工具调用
-    console.log('[MCP] Tool calls detected:', result.toolCalls);
-    
-    // 检查并执行每个工具调用
-    let reachedLimit = false;
-    let limitMessage = '';
-    
-    for (const call of result.toolCalls) {
-      const toolCallId = call.id || `${call.name}-${Date.now()}`;
-      
-      // 提取服务器名称（格式: serverName__toolName）
-      const parts = call.name.split('__');
-      const serverName = parts.length > 1 ? parts[0] : null;
-      
-      // 检查该服务器是否达到限制
-      if (serverName) {
-        const currentCount = serverIterations.get(serverName) || 0;
-        const maxIterations = getServerMaxIterations(serverName);
-        
-        // maxIterations 为 null 表示无限制
-        if (maxIterations !== null && currentCount >= maxIterations) {
-          console.warn(`[MCP] Server ${serverName} reached max iterations (${maxIterations})`);
-          reachedLimit = true;
-          limitMessage = `Server "${serverName}" reached maximum tool call iterations (${maxIterations})`;
-          continue; // 跳过这个工具调用
-        }
-        
-        // 增加计数
-        serverIterations.set(serverName, currentCount + 1);
-        console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
-      }
-      
-      // Apply arg transform before onToolCall notification
-      if (toolArgTransform) {
-        call.arguments = toolArgTransform(call.name, call.arguments) ?? call.arguments;
-      }
-      
-      if (onToolCall) {
-        onToolCall(call.name, call.arguments, toolCallId);
-      }
-      
-      let isError = false;
-      let toolResult;
-      try {
-        // Check toolCallFilter first (allows caller to reject specific calls)
-        if (toolCallFilter) {
-          const filterError = toolCallFilter(call.name, call.arguments);
-          if (filterError) {
-            console.log(`[MCP] Tool call filtered: ${call.name} — ${filterError}`);
-            isError = true;
-            toolResult = { error: filterError };
+
+      // 执行工具调用
+      console.log('[MCP] Tool calls detected:', result.toolCalls);
+
+      // 检查并执行每个工具调用
+      let reachedLimit = false;
+      let limitMessage = '';
+
+      for (const call of result.toolCalls) {
+        const toolCallId = call.id || `${call.name}-${Date.now()}`;
+
+        // 提取服务器名称（格式: serverName__toolName）
+        const parts = call.name.split('__');
+        const serverName = parts.length > 1 ? parts[0] : null;
+
+        // 检查该服务器是否达到限制
+        if (serverName) {
+          const currentCount = serverIterations.get(serverName) || 0;
+          const maxIterations = getServerMaxIterations(serverName);
+
+          // maxIterations 为 null 表示无限制
+          if (maxIterations !== null && currentCount >= maxIterations) {
+            console.warn(`[MCP] Server ${serverName} reached max iterations (${maxIterations})`);
+            reachedLimit = true;
+            limitMessage = `Server "${serverName}" reached maximum tool call iterations (${maxIterations})`;
+            continue; // 跳过这个工具调用
           }
+
+          // 增加计数
+          serverIterations.set(serverName, currentCount + 1);
+          console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
         }
-        
-        if (!toolResult) {
-          // Validate tool name against declared tools to prevent LLM hallucinating undeclared tool calls
-          const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
-          const isBuiltin = isBuiltinTool(call.name);
-          const isSocialFile = isSocialFileTool(call.name);
-          const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
-          const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
-          const isStickerTool = isStickerBuiltinTool(call.name);
-          const isBufferSearch = isBufferSearchTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch;
-          console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch}`);
-          if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
-            console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
-            isError = true;
-            toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
-          } else if (isBuiltin && builtinToolContext) {
-            toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isSocialFile && builtinToolContext) {
-            toolResult = await executeSocialFileTool(call.name, call.arguments, builtinToolContext);
-          } else if (isHistoryBuiltin && builtinToolContext) {
-            toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isGroupLogBuiltin && builtinToolContext) {
-            toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isStickerTool && builtinToolContext) {
-            toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
-          } else if (isBufferSearch && builtinToolContext) {
-            toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
-          } else {
-            toolResult = await executeToolByName(call.name, call.arguments);
+
+        // Apply arg transform before onToolCall notification
+        if (toolArgTransform) {
+          call.arguments = toolArgTransform(call.name, call.arguments) ?? call.arguments;
+        }
+
+        if (onToolCall) {
+          onToolCall(call.name, call.arguments, toolCallId);
+        }
+
+        let isError = false;
+        let toolResult;
+        try {
+          // Check toolCallFilter first (allows caller to reject specific calls)
+          if (toolCallFilter) {
+            const filterError = toolCallFilter(call.name, call.arguments);
+            if (filterError) {
+              console.log(`[MCP] Tool call filtered: ${call.name} — ${filterError}`);
+              isError = true;
+              toolResult = { error: filterError };
+            }
           }
-        }
-        if (toolResult && toolResult.error) {
+
+          if (!toolResult) {
+            // Validate tool name against declared tools to prevent LLM hallucinating undeclared tool calls
+            const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
+            const isBuiltin = isBuiltinTool(call.name);
+            const isSocialFile = isSocialFileTool(call.name);
+            const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
+            const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
+            const isStickerTool = isStickerBuiltinTool(call.name);
+            const isBufferSearch = isBufferSearchTool(call.name);
+            const isIntentPlan = isIntentPlanTool(call.name);
+            const isSubagent = isSubagentTool(call.name);
+            const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent;
+            console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan}`);
+            if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+              console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
+              isError = true;
+              toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
+            } else if (isBuiltin && builtinToolContext) {
+              toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+            } else if (isSocialFile && builtinToolContext) {
+              toolResult = await executeSocialFileTool(call.name, call.arguments, builtinToolContext);
+            } else if (isHistoryBuiltin && builtinToolContext) {
+              toolResult = await executeHistoryBuiltinTool(call.name, call.arguments, builtinToolContext);
+            } else if (isGroupLogBuiltin && builtinToolContext) {
+              toolResult = await executeGroupLogBuiltinTool(call.name, call.arguments, builtinToolContext);
+            } else if (isStickerTool && builtinToolContext) {
+              toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
+            } else if (isBufferSearch && builtinToolContext) {
+              toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
+            } else if (isIntentPlan && builtinToolContext) {
+              toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
+            } else if (isSubagent && builtinToolContext) {
+              toolResult = await executeSubagentTool(call.name, call.arguments, builtinToolContext);
+            } else {
+              toolResult = await executeToolByName(call.name, call.arguments);
+            }
+          }
+          if (toolResult && toolResult.error) {
+            isError = true;
+          }
+        } catch (error) {
           isError = true;
+          toolResult = { error: error.message };
         }
-      } catch (error) {
-        isError = true;
-        toolResult = { error: error.message };
+
+        const formattedResult = formatToolResult(toolResult);
+        const { images: rawImages } = extractMediaFromToolResult(toolResult);
+        const toolImages = await resolveImageUrls(rawImages);
+
+        toolCallHistory.push({
+          id: toolCallId,
+          name: call.name,
+          arguments: call.arguments,
+          result: formattedResult,
+          images: toolImages
+        });
+
+        if (_trace) {
+          _trace.toolResults.push({
+            tool_call_id: toolCallId,
+            name: call.name,
+            content: typeof formattedResult === 'string'
+              ? formattedResult
+              : JSON.stringify(formattedResult),
+          });
+        }
+
+        if (onToolResult) {
+          onToolResult(call.name, formattedResult, toolCallId, isError);
+        }
+
+        const stopAfterToolMatches = stopAfterTool && (
+          typeof stopAfterTool === 'function'
+            ? stopAfterTool(call.name, formattedResult, call.arguments)
+            : call.name === stopAfterTool
+        );
+        if (stopAfterToolMatches) {
+          stopEarly = true;
+          // don't break — let remaining calls in this batch complete so message indices stay correct
+        }
       }
-      
-      const formattedResult = formatToolResult(toolResult);
-      const { images: rawImages } = extractMediaFromToolResult(toolResult);
-      const toolImages = await resolveImageUrls(rawImages);
-      
-      toolCallHistory.push({
-        id: toolCallId,
-        name: call.name,
-        arguments: call.arguments,
-        result: formattedResult,
-        images: toolImages
-      });
-      
-      if (onToolResult) {
-        onToolResult(call.name, formattedResult, toolCallId, isError);
-      }
-    }
-    
-    // 如果所有工具调用都被跳过（达到限制），返回
-    if (reachedLimit && toolCallHistory.length === 0) {
-      const _petId = usagePetId || builtinToolContext?.petId;
-      if (usageLabel && _petId) {
-        appendUsageLog(_petId, {
+
+      // 如果所有工具调用都被跳过（达到限制），返回
+      if (reachedLimit && toolCallHistory.length === 0) {
+        _writeUsage({
           ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
           model: model || '', apiFormat: apiFormat || '',
           inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
           toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
         });
+        _fireTrace('partial', 'server_iteration_limit', null);
+        return {
+          content: `[${limitMessage}]`,
+          toolCallHistory,
+          usage: totalUsage,
+        };
       }
-      return {
-        content: `[${limitMessage}]`,
-        toolCallHistory,
-        usage: totalUsage,
-      };
-    }
-    
-    // 将工具调用和结果添加到消息中
-    if (apiFormat === 'gemini_official') {
-      // Gemini 格式：添加 model 的 functionCall，然后添加 user 的 functionResponse
-      currentMessages.push(geminiAdapter.createModelFunctionCallMessage(result.toolCalls));
-      currentMessages.push(geminiAdapter.createFunctionResponseMessage(
-        result.toolCalls.map((call, i) => ({
-          name: call.name,
-          result: toolCallHistory[toolCallHistory.length - result.toolCalls.length + i]?.result || '[Skipped due to iteration limit]'
-        }))
-      ));
-      
-      // Gemini: 工具结果中的图片需要作为额外的 user 消息注入 (functionResponse 不支持 inline_data)
-      const allToolImages = [];
-      for (let i = 0; i < result.toolCalls.length; i++) {
-        const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
-        const entry = toolCallHistory[historyIndex];
-        if (entry?.images?.length > 0) {
-          allToolImages.push(...entry.images);
-        }
-      }
-      if (allToolImages.length > 0) {
-        const imageParts = [{ text: '以下是上述工具返回的图片：' }];
-        for (const img of allToolImages) {
-          const inlinePart = await toGeminiInlineData(img.data, img.mimeType);
-          if (inlinePart) {
-            imageParts.push(inlinePart);
-          } else {
-            imageParts.push({ text: `[Image failed to load]` });
+
+      // 将工具调用和结果添加到消息中
+      if (apiFormat === 'gemini_official') {
+        // Gemini 格式：添加 model 的 functionCall，然后添加 user 的 functionResponse
+        currentMessages.push(geminiAdapter.createModelFunctionCallMessage(result.toolCalls));
+        currentMessages.push(geminiAdapter.createFunctionResponseMessage(
+          result.toolCalls.map((call, i) => ({
+            name: call.name,
+            result: toolCallHistory[toolCallHistory.length - result.toolCalls.length + i]?.result || '[Skipped due to iteration limit]'
+          }))
+        ));
+
+        // Gemini: 工具结果中的图片需要作为额外的 user 消息注入 (functionResponse 不支持 inline_data)
+        const allToolImages = [];
+        for (let i = 0; i < result.toolCalls.length; i++) {
+          const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
+          const entry = toolCallHistory[historyIndex];
+          if (entry?.images?.length > 0) {
+            allToolImages.push(...entry.images);
           }
         }
-        if (imageParts.length > 1) {
-          currentMessages.push({ role: 'user', parts: imageParts });
+        if (allToolImages.length > 0) {
+          const imageParts = [{ text: '以下是上述工具返回的图片：' }];
+          for (const img of allToolImages) {
+            const inlinePart = await toGeminiInlineData(img.data, img.mimeType);
+            if (inlinePart) {
+              imageParts.push(inlinePart);
+            } else {
+              imageParts.push({ text: `[Image failed to load]` });
+            }
+          }
+          if (imageParts.length > 1) {
+            currentMessages.push({ role: 'user', parts: imageParts });
+          }
+        }
+      } else {
+        // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息（支持多模态）
+        currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls));
+
+        for (let i = 0; i < result.toolCalls.length; i++) {
+          const call = result.toolCalls[i];
+          const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
+          const entry = toolCallHistory[historyIndex];
+          currentMessages.push(openaiAdapter.formatToolResultMessage(
+            call.id,
+            entry?.result || '[Skipped due to iteration limit]',
+            entry?.images
+          ));
         }
       }
-    } else {
-      // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息（支持多模态）
-      currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls));
-      
-      for (let i = 0; i < result.toolCalls.length; i++) {
-        const call = result.toolCalls[i];
-        const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
-        const entry = toolCallHistory[historyIndex];
-        currentMessages.push(openaiAdapter.formatToolResultMessage(
-          call.id,
-          entry?.result || '[Skipped due to iteration limit]',
-          entry?.images
-        ));
+
+      // stopAfterTool was triggered — exit loop after adding tool results to history
+      if (stopEarly) {
+        _writeUsage({
+          ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
+          model: model || '', apiFormat: apiFormat || '',
+          inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
+          toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
+        });
+        _fireTrace('success', typeof stopAfterTool === 'string' ? stopAfterTool : 'stopAfterTool', null);
+        return { content: result.content || '', toolCallHistory, usage: totalUsage };
       }
     }
-  }
-  
-  // 达到最大轮次
-  console.warn('[MCP] Max total iterations reached');
-  const _petId = usagePetId || builtinToolContext?.petId;
-  if (usageLabel && _petId) {
-    appendUsageLog(_petId, {
+
+    // 达到最大轮次
+    console.warn('[MCP] Max total iterations reached');
+    _writeUsage({
       ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
       model: model || '', apiFormat: apiFormat || '',
       inputTokens: totalUsage.inputTokens, outputTokens: totalUsage.outputTokens, cachedTokens: totalUsage.cachedTokens,
       toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
     });
+    _fireTrace('partial', 'max_iterations', null);
+    return {
+      content: '[Maximum tool call iterations reached]',
+      toolCallHistory,
+      usage: totalUsage,
+    };
+  } catch (err) {
+    _fireTrace('failed', 'error', err);
+    throw err;
   }
-  return {
-    content: '[Maximum tool call iterations reached]',
-    toolCallHistory,
-    usage: totalUsage,
-  };
 };
 
 /**
@@ -824,7 +944,7 @@ export const callLLMStreamWithTools = async ({
   abortSignal,
   builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
 }) => {
-  const adapter = apiFormat === 'gemini_official' ? geminiAdapter : openaiAdapter;
+  const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
   
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
@@ -1114,7 +1234,9 @@ export const callLLMStreamWithTools = async ({
           const isGroupLogBuiltin = isGroupLogBuiltinTool(call.name);
           const isStickerTool = isStickerBuiltinTool(call.name);
           const isBufferSearch = isBufferSearchTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch;
+          const isIntentPlan = isIntentPlanTool(call.name);
+          const isSubagent = isSubagentTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent;
           if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
             isError = true;
@@ -1131,11 +1253,15 @@ export const callLLMStreamWithTools = async ({
             toolResult = await executeStickerBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isBufferSearch && builtinToolContext) {
             toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
+          } else if (isIntentPlan && builtinToolContext) {
+            toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSubagent && builtinToolContext) {
+            toolResult = await executeSubagentTool(call.name, call.arguments, builtinToolContext);
           } else {
             toolResult = await executeToolByName(call.name, call.arguments);
           }
         }
-        
+
         if (toolResult && toolResult.error) {
           isError = true;
         }

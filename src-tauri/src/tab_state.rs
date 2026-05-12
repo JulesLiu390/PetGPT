@@ -19,6 +19,9 @@ pub struct Message {
     pub content: MessageContent,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_call_history: Option<Vec<serde_json::Value>>,
+    /// 消息创建时间（ISO 8601），用于给 LLM 注入时间戳
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<String>,
 }
 
 /// Tab 状态快照 - 推送给前端的数据结构

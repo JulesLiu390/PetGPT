@@ -596,9 +596,10 @@ const AssistantsPanel = ({ onNavigate }) => {
   };
 
   const handleSave = async (formData) => {
+    const assistantData = { ...formData, type: 'assistant' };
     if (editingAssistant) {
       // Update existing
-      const updatedAssistant = await tauri.updateAssistant(editingAssistant._id, formData);
+      const updatedAssistant = await tauri.updateAssistant(editingAssistant._id, assistantData);
       // 发送包含 id 的更新事件，确保聊天窗口能匹配到
       tauri.sendPetsUpdate({ 
         action: 'update', 
@@ -610,7 +611,7 @@ const AssistantsPanel = ({ onNavigate }) => {
       tauri.sendCharacterId(editingAssistant._id);
     } else {
       // Create new
-      const newAssistant = await tauri.createAssistant(formData);
+      const newAssistant = await tauri.createAssistant(assistantData);
       if (!newAssistant || !newAssistant._id) {
         throw new Error("Creation failed or no ID returned");
       }
@@ -777,8 +778,8 @@ const firstApiKey = (raw) => parseApiKeys(raw)[0] || '';
 const detectProviderFromKey = (apiKeysRaw) => {
   const apiKey = firstApiKey(apiKeysRaw);
   if (!apiKey) return null;
-  // Anthropic 使用 OpenAI 兼容格式（通过其兼容端点）
-  if (apiKey.startsWith("sk-ant-")) return { format: "openai_compatible", name: "Anthropic", baseUrl: "https://api.anthropic.com/v1" };
+  // Anthropic 原生 Messages API（支持 prompt caching、原生工具调用等）
+  if (apiKey.startsWith("sk-ant-")) return { format: "anthropic_native", name: "Anthropic", baseUrl: "https://api.anthropic.com/v1" };
   if (apiKey.startsWith("AIza")) return { format: "gemini_official", name: "Google Gemini", baseUrl: "https://generativelanguage.googleapis.com" };
   if (apiKey.startsWith("gsk_")) return { format: "openai_compatible", name: "Groq", baseUrl: "https://api.groq.com/openai/v1" };
   if (apiKey.startsWith("sk-or-")) return { format: "openai_compatible", name: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1" };
@@ -819,7 +820,10 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const [isAutoDetecting, setIsAutoDetecting] = useState(false);
   const [autoDetectProgress, setAutoDetectProgress] = useState("");
   const [showApiKey, setShowApiKey] = useState(false);
-  
+  const [manualModelName, setManualModelName] = useState('');
+  const [manualTestResult, setManualTestResult] = useState(null);
+  const [isManualTesting, setIsManualTesting] = useState(false);
+
   // 当 API Key 改变时，尝试检测服务商并自动填充
   useEffect(() => {
     const detected = detectProviderFromKey(formData.apiKey);
@@ -943,6 +947,45 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     }
   };
   
+  // Test a specific model name supplied by the user.
+  // Used when /models endpoint is unavailable.
+  const handleTestManualModel = async () => {
+    const trimmed = manualModelName.trim();
+    const key = firstApiKey(formData.apiKey);
+    if (!trimmed || !formData.baseUrl || !key) {
+      setManualTestResult({ ok: false, msg: 'Fill Base URL, API Key, and model name first' });
+      return;
+    }
+
+    setIsManualTesting(true);
+    setManualTestResult(null);
+
+    try {
+      const response = await callOpenAILib({
+        apiKey: key,
+        baseUrl: formData.baseUrl,
+        apiFormat: formData.apiFormat,
+        model: trimmed,
+        messages: [{ role: 'user', content: 'hi' }],
+        maxTokens: 1,
+      });
+
+      if (response) {
+        // Append to fetchedModels (dedup)
+        setFetchedModels(prev => prev.includes(trimmed) ? prev : [...prev, trimmed]);
+        setManualTestResult({ ok: true, msg: `✓ Model '${trimmed}' works. Added to list — save to keep it.` });
+        setManualModelName('');  // clear input for next add
+      } else {
+        setManualTestResult({ ok: false, msg: '✗ No response from model (empty result)' });
+      }
+    } catch (error) {
+      const msg = (error?.message || String(error));
+      setManualTestResult({ ok: false, msg: `✗ ${msg.length > 200 ? msg.substring(0, 200) + '...' : msg}` });
+    } finally {
+      setIsManualTesting(false);
+    }
+  };
+
   // Auto-detect endpoint by trying known provider URLs (uses first key)
   const handleAutoDetect = async () => {
     const key = firstApiKey(formData.apiKey);
@@ -958,10 +1001,39 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
     
     // Get candidates including local servers
     const candidates = getDetectionCandidates(true);
-    
+
+    // Anthropic native: 用 sk-ant- 前缀检测
+    const isAnthropicKey = key.startsWith("sk-ant-");
+    if (isAnthropicKey) {
+      setAutoDetectProgress("Detected Anthropic API key, using native format...");
+      // Anthropic 没有 /v1/models 端点（且需要不同 header），直接配置不实际探测
+      const knownAnthropicModels = [
+        'claude-opus-4-5',
+        'claude-sonnet-4-5',
+        'claude-haiku-4-5',
+        'claude-opus-4-20250514',
+        'claude-sonnet-4-20250514',
+        'claude-3-7-sonnet-20250219',
+        'claude-3-5-sonnet-20241022',
+        'claude-3-5-haiku-20241022',
+      ];
+      setFormData(prev => ({
+        ...prev,
+        baseUrl: "https://api.anthropic.com/v1",
+        apiFormat: "anthropic_native",
+        name: prev.name || "Anthropic",
+      }));
+      setFetchedModels(knownAnthropicModels);
+      setTestResult(`✓ Configured Anthropic Native (${knownAnthropicModels.length} known models, supports prompt caching)`);
+      setTestSuccess(true);
+      setIsAutoDetecting(false);
+      setAutoDetectProgress("");
+      return;
+    }
+
     // Also try Gemini format for Google keys
     const isGoogleKey = key.startsWith("AIza");
-    
+
     if (isGoogleKey) {
       // For Google keys, directly use Gemini endpoint
       setAutoDetectProgress("Testing Google Gemini...");
@@ -1054,6 +1126,7 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
   const formatOptions = [
     { value: "openai_compatible", label: "OpenAI Compatible" },
     { value: "gemini_official", label: "Google Gemini" },
+    { value: "anthropic_native", label: "Anthropic (Native)" },
   ];
   
   // 预设选项
@@ -1199,6 +1272,42 @@ const ApiProviderForm = ({ provider, onSave, onCancel }) => {
         </div>
       )}
       
+      {/* Manual model entry — shown when fetch failed; stays visible so user can add multiple */}
+      {testResult && !testSuccess && !isFetchingModels && !testing && (
+        <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-2">
+          <div className="text-sm font-medium text-amber-900">
+            Provider's /models endpoint unavailable?
+          </div>
+          <div className="text-xs text-amber-700">
+            Some providers don't expose a model list. Enter a model name manually and test it.
+          </div>
+          <div className="flex gap-2">
+            <Input
+              type="text"
+              value={manualModelName}
+              onChange={(e) => setManualModelName(e.target.value)}
+              placeholder="e.g. Qwen3-32B-thinking"
+              className="flex-1 font-mono text-xs"
+              disabled={isManualTesting}
+            />
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={handleTestManualModel}
+              disabled={isManualTesting || !manualModelName.trim() || !formData.baseUrl || !firstApiKey(formData.apiKey)}
+            >
+              {isManualTesting ? <FaSpinner className="w-4 h-4 animate-spin" /> : <FaCheck className="w-4 h-4" />}
+              Test this model
+            </Button>
+          </div>
+          {manualTestResult && (
+            <div className={`text-xs ${manualTestResult.ok ? 'text-green-700' : 'text-red-700'} whitespace-pre-line`}>
+              {manualTestResult.msg}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Actions */}
       <div className="flex items-center gap-2 pt-2">
         <Button
@@ -3011,9 +3120,9 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
   
   // 获取选中的 provider
   const selectedProvider = apiProviders?.find(p => p._id === settings.functionModelProviderId);
-  
+
   // 获取该 provider 下的可见模型列表
-  const availableModels = selectedProvider 
+  const availableModels = selectedProvider
     ? (selectedProvider.cachedModels || []).filter(model => {
         const hiddenModels = selectedProvider.hiddenModels || [];
         const modelName = typeof model === 'string' ? model : model.name;
@@ -3024,7 +3133,17 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
         return na.localeCompare(nb);
       })
     : [];
-  
+
+  // 图像模型列表：不过滤 hiddenModels（图像模型通常被 hidden 掉了，要全部显示）
+  const selectedImageProvider = apiProviders?.find(p => p._id === settings.imageModelProviderId);
+  const availableImageModels = selectedImageProvider
+    ? [...(selectedImageProvider.cachedModels || [])].sort((a, b) => {
+        const na = typeof a === 'string' ? a : a.name;
+        const nb = typeof b === 'string' ? b : b.name;
+        return na.localeCompare(nb);
+      })
+    : [];
+
   // 处理 provider 变化
   const handleProviderChange = (e) => {
     const providerId = e.target.value;
@@ -3042,7 +3161,7 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
       }
     });
   };
-  
+
   // 处理 model 变化
   const handleModelChange = (e) => {
     onSettingsChange({
@@ -3051,6 +3170,18 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
         value: e.target.value
       }
     });
+  };
+
+  // 图像模型 provider 变化
+  const handleImageProviderChange = (e) => {
+    const providerId = e.target.value;
+    onSettingsChange({ target: { name: 'imageModelProviderId', value: providerId } });
+    onSettingsChange({ target: { name: 'imageModelName', value: '' } });
+  };
+
+  // 图像模型 model 变化
+  const handleImageModelChange = (e) => {
+    onSettingsChange({ target: { name: 'imageModelName', value: e.target.value } });
   };
 
   return (
@@ -3106,6 +3237,40 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
                 >
                   <option value="">Select Model</option>
                   {availableModels.map((model) => {
+                    const modelName = typeof model === 'string' ? model : model.name;
+                    return (
+                      <option key={modelName} value={modelName}>
+                        {modelName}
+                      </option>
+                    );
+                  })}
+                </Select>
+              </FormGroup>
+
+              <FormGroup label="Image Model Provider" hint="Provider for the generate_image tool (OpenAI-compatible /images/generations endpoint)">
+                <Select
+                  name="imageModelProviderId"
+                  value={settings.imageModelProviderId || ""}
+                  onChange={handleImageProviderChange}
+                >
+                  <option value="">Select Provider (leave empty to disable)</option>
+                  {(apiProviders || []).map((provider) => (
+                    <option key={provider._id} value={provider._id}>
+                      {provider.name}
+                    </option>
+                  ))}
+                </Select>
+              </FormGroup>
+
+              <FormGroup label="Image Model" hint="provider 下所有已缓存模型（不过滤）">
+                <Select
+                  name="imageModelName"
+                  value={settings.imageModelName || ""}
+                  onChange={handleImageModelChange}
+                  disabled={!settings.imageModelProviderId}
+                >
+                  <option value="">Select Model</option>
+                  {availableImageModels.map((model) => {
                     const modelName = typeof model === 'string' ? model : model.name;
                     return (
                       <option key={modelName} value={modelName}>

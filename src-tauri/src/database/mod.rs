@@ -5,6 +5,7 @@ pub mod messages;
 pub mod pets;
 pub mod settings;
 pub mod skins;
+pub mod chat_history;
 
 use rusqlite::{Connection, Result};
 use std::path::PathBuf;
@@ -21,6 +22,7 @@ impl Database {
             conn: Mutex::new(conn),
         };
         db.init_tables()?;
+        db.init_chat_history()?;
         Ok(db)
     }
 
@@ -58,6 +60,9 @@ impl Database {
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN api_format TEXT", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN appearance TEXT", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN user_memory TEXT", []);
+        let _ = conn.execute("ALTER TABLE pets ADD COLUMN stats TEXT", []);
+        let _ = conn.execute("ALTER TABLE pets ADD COLUMN image_name TEXT", []);
+        let _ = conn.execute("ALTER TABLE pets ADD COLUMN current_mood TEXT DEFAULT 'normal'", []);
 
         // Conversations table
         conn.execute(
@@ -140,6 +145,9 @@ impl Database {
             "UPDATE pets SET type = 'assistant' WHERE type IS NULL OR type = ''",
             [],
         );
+
+        // Migration: fix existing pets without type
+        let _ = conn.execute("UPDATE pets SET type = 'assistant' WHERE type IS NULL OR type = ''", []);
 
         // API Providers table
         conn.execute(

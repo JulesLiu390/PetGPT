@@ -4,12 +4,15 @@ mod message_cache;
 mod tab_state;
 mod llm;
 mod workspace;
+mod subagent;
 mod platform;
 mod window_layout;
+mod commands;
 #[cfg(target_os = "linux")]
 mod linux_shortcuts;
 
 use database::{Database, pets, conversations, messages, settings, mcp_servers, api_providers, skins};
+use database::chat_history::{InsertChatMessageData, ChatSearchParams, ChatSearchResult, ChatContextResult};
 use mcp::{McpManager, ServerStatus, McpToolInfo, CallToolResponse, ToolContent, SamplingLlmConfig};
 use message_cache::TabMessageCache;
 use tab_state::TabState;
@@ -42,6 +45,9 @@ type McpState = Arc<tokio::sync::RwLock<McpManager>>;
 
 // Type alias for workspace state
 type WorkspaceFileState = Arc<WorkspaceEngine>;
+
+// Type alias for subagent pool state
+type SubagentPoolState = Arc<subagent::SubagentPool>;
 
 // Type alias for window layout state
 type WinState = Arc<WindowState>;
@@ -269,6 +275,33 @@ fn clear_conversation_messages(db: State<DbState>, conversationId: String) -> Re
         Err(e) => println!("[Rust clear_conversation_messages] ❌ ERROR: {:?}", e),
     }
     result.map_err(|e| e.to_string())
+}
+
+// ============ Chat History Commands (QQ 群聊存档) ============
+
+#[tauri::command]
+fn chat_history_insert(db: State<DbState>, msg: InsertChatMessageData) -> Result<bool, String> {
+    db.insert_chat_message(&msg).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chat_history_insert_batch(db: State<DbState>, msgs: Vec<InsertChatMessageData>) -> Result<usize, String> {
+    db.insert_chat_messages_batch(&msgs).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chat_history_search(db: State<DbState>, params: ChatSearchParams) -> Result<ChatSearchResult, String> {
+    db.chat_search(&params).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn chat_history_context(
+    db: State<DbState>,
+    message_id: String,
+    before: i64,
+    after: i64,
+) -> Result<ChatContextResult, String> {
+    db.chat_context(&message_id, before, after).map_err(|e| e.to_string())
 }
 
 // ============ Settings Commands ============
@@ -1507,6 +1540,116 @@ async fn download_url_as_base64(url: String) -> Result<DownloadedImage, String> 
     Ok(DownloadedImage { data, mime_type })
 }
 
+/// 调 ElevenLabs TTS，返回 base64 编码的 MP3 音频。
+/// 由 voice_send 内置工具使用。前端只关心 base64，不暴露给 LLM。
+#[tauri::command]
+async fn elevenlabs_tts(
+    api_key: String,
+    voice_id: String,
+    text: String,
+    model_id: Option<String>,
+) -> Result<String, String> {
+    if api_key.trim().is_empty() {
+        return Err("api_key is empty".to_string());
+    }
+    if voice_id.trim().is_empty() {
+        return Err("voice_id is empty".to_string());
+    }
+    if text.trim().is_empty() {
+        return Err("text is empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let url = format!("https://api.elevenlabs.io/v1/text-to-speech/{}", voice_id);
+    let body = serde_json::json!({
+        "text": text,
+        "model_id": model_id.unwrap_or_else(|| "eleven_multilingual_v2".to_string()),
+        "voice_settings": {
+            "stability": 0.5,
+            "similarity_boost": 0.75
+        }
+    });
+
+    let resp = client
+        .post(&url)
+        .header("xi-api-key", &api_key)
+        .header("accept", "audio/mpeg")
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("ElevenLabs request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("ElevenLabs HTTP {}: {}", status, err_body));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read ElevenLabs response: {}", e))?;
+
+    Ok(BASE64.encode(&bytes))
+}
+
+/// 列出 ElevenLabs 上所有可用 TTS 模型。
+/// 用于前端 TTS 设置面板的下拉框。返回简化结构 [{model_id, name}]。
+#[tauri::command]
+async fn elevenlabs_list_models(api_key: String) -> Result<JsonValue, String> {
+    if api_key.trim().is_empty() {
+        return Err("api_key is empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let resp = client
+        .get("https://api.elevenlabs.io/v1/models")
+        .header("xi-api-key", &api_key)
+        .header("accept", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("ElevenLabs request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        return Err(format!("ElevenLabs HTTP {}: {}", status, err_body));
+    }
+
+    let body: JsonValue = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse ElevenLabs response: {}", e))?;
+
+    // 过滤出支持 TTS 的模型，简化为 [{model_id, name}]
+    let arr = body.as_array().cloned().unwrap_or_default();
+    let simplified: Vec<JsonValue> = arr
+        .into_iter()
+        .filter(|m| {
+            m.get("can_do_text_to_speech")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+        })
+        .map(|m| {
+            serde_json::json!({
+                "model_id": m.get("model_id").and_then(|v| v.as_str()).unwrap_or(""),
+                "name": m.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+            })
+        })
+        .collect();
+
+    Ok(JsonValue::Array(simplified))
+}
+
 // ============ Window Management Commands ============
 
 #[tauri::command]
@@ -2223,6 +2366,9 @@ pub fn run() {
             let workspace_engine: WorkspaceFileState = Arc::new(WorkspaceEngine::new(workspace_dir));
             app.manage(workspace_engine);
 
+            let subagent_pool: SubagentPoolState = Arc::new(subagent::SubagentPool::new());
+            app.manage(subagent_pool);
+
             // Initialize window state (replaces scattered static variables)
             let win_state: WinState = Arc::new(WindowState::new());
             app.manage(win_state.clone());
@@ -2529,6 +2675,11 @@ pub fn run() {
             get_messages,
             create_message,
             clear_conversation_messages,
+            // Chat history commands (QQ 群聊存档)
+            chat_history_insert,
+            chat_history_insert_batch,
+            chat_history_search,
+            chat_history_context,
             // Settings commands
             get_setting,
             set_setting,
@@ -2582,6 +2733,8 @@ pub fn run() {
             get_uploads_path,
             download_url_as_base64,
             convert_gif_to_png,
+            elevenlabs_tts,
+            elevenlabs_list_models,
             // Screenshot commands
             take_screenshot,
             capture_region,
@@ -2649,7 +2802,7 @@ pub fn run() {
             llm_cancel_all_streams,
             llm_reset_cancellation,
             llm::proxy::llm_proxy_call,
-            llm::proxy::fetch_models,
+            llm::proxy::image_gen_proxy_call,
             // Workspace commands
             workspace::workspace_read,
             workspace::workspace_write,
@@ -2665,7 +2818,13 @@ pub fn run() {
             workspace::workspace_get_path,
             workspace::workspace_delete_folder,
             workspace::workspace_open_folder,
+            workspace::workspace_open_subfolder,
             workspace::workspace_open_file,
+            subagent::subagent_spawn,
+            subagent::subagent_kill,
+            subagent::subagent_set_max_concurrent,
+            commands::training_export::run_training_export,
+            commands::training_export::get_home_dir,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

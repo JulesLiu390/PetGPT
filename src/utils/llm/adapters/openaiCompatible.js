@@ -165,6 +165,8 @@ export const convertMessages = async (messages) => {
  * @param {Object} config.options
  * @param {Array} config.options.tools - OpenAI 格式的工具数组 (可选)
  * @param {string} config.options.tool_choice - 工具选择策略: 'auto' | 'none' | 'required' (可选)
+ * @param {boolean} [config.options.explicitCache] - 传 true 时注入 prompt_cache_key + prompt_cache_retention (可选)
+ * @param {string} [config.options.cacheKey] - prompt_cache_key 值，由上游 buildCacheKey 生成 (可选)
  */
 export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl, options = {} }) => {
   const url = getApiUrl(apiFormat, baseUrl);
@@ -182,7 +184,14 @@ export const buildRequest = async ({ messages, apiFormat, apiKey, model, baseUrl
     body.tools = options.tools;
     body.tool_choice = options.tool_choice || 'auto';
   }
-  
+
+  // 显式 prompt caching（仅 OpenAI 官方识别；兼容网关如不识别可能报错）
+  // 由上游 socialAgent 通过 options.explicitCache + options.cacheKey 控制。
+  if (options.explicitCache && options.cacheKey) {
+    body.prompt_cache_key = options.cacheKey;
+    body.prompt_cache_retention = '24h';
+  }
+
   return {
     endpoint: `${url}/chat/completions`,
     headers: {

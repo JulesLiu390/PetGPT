@@ -108,6 +108,8 @@ const DEFAULT_SETTINGS = {
     { id: 'translate', name: '翻译文字', prompt: '请翻译图片中的文字为中文', icon: '🌐' },
   ],
   defaultScreenshotPrompt: null, // null = 显示选择器, 'id' = 直接使用该 prompt
+  trainingCollectionEnabled: false,
+  trainingTargets: {},
 };
 
 export const getSettings = async () => {
@@ -151,15 +153,11 @@ export const createPet = (data) => invoke('create_pet', { data });
 export const updatePet = (id, data) => invoke('update_pet', { id, data });
 export const deletePet = (id) => invoke('delete_pet', { id });
 
-<<<<<<< Updated upstream
-// Alias for consistency
-export const getAssistants = getPets;
-=======
+// Filter to return only assistant-type pets
 export const getAssistants = async () => {
   const pets = await getPets();
   return pets.filter(p => p.type === 'assistant' || p.modelConfigId);
 };
->>>>>>> Stashed changes
 export const getAssistant = getPet;
 export const createAssistant = createPet;
 export const updateAssistant = updatePet;
@@ -366,6 +364,22 @@ export const llmProxyCall = (endpoint, headers, body) => {
 };
 
 /**
+ * 图像生成代理 — 与 llmProxyCall 接口一致，但走独立的 Rust client（10 分钟超时）
+ * 用于 generate_image_send 工具：gpt-image-2 等慢 provider 单次 3-6 分钟，
+ * llm_proxy_call 的 180s 超时不够；JS fetch 又会撞 WKWebView 的"Load failed"。
+ */
+export const imageGenProxyCall = (endpoint, headers, body) => {
+  const jsonStr = JSON.stringify(body)
+    .replace(/\\ud[89ab][0-9a-f]{2}(?!\\ud[cdef][0-9a-f]{2})/gi, '\\ufffd')
+    .replace(/(?<!\\ud[89ab][0-9a-f]{2})\\ud[cdef][0-9a-f]{2}/gi, '\\ufffd');
+  const bytes = new TextEncoder().encode(jsonStr);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  const bodyB64 = btoa(binary);
+  return invoke('image_gen_proxy_call', { endpoint, headers, bodyB64 });
+};
+
+/**
  * 流式 LLM 调用 - 通过事件推送响应块
  * @param {Object} request - LLM 请求配置 (同 llmCall)
  * @returns {Promise<Object>} 完整响应
@@ -502,6 +516,25 @@ export const downloadUrlAsBase64 = (url) => invoke('download_url_as_base64', { u
  * @returns {Promise<{data: string, mime_type: string}>} PNG base64 数据
  */
 export const convertGifToPng = (base64Data) => invoke('convert_gif_to_png', { base64Data });
+
+/**
+ * 调 ElevenLabs TTS，返回 base64 编码的 MP3 音频
+ * @param {Object} params
+ * @param {string} params.apiKey - ElevenLabs xi-api-key
+ * @param {string} params.voiceId - voice id
+ * @param {string} params.text - 要朗读的文字
+ * @param {string} [params.modelId] - 模型 id（默认 eleven_multilingual_v2）
+ * @returns {Promise<string>} base64 字符串（不带 data: 前缀）
+ */
+export const elevenlabsTts = ({ apiKey, voiceId, text, modelId }) =>
+  invoke('elevenlabs_tts', { apiKey, voiceId, text, modelId });
+
+/**
+ * 列出 ElevenLabs 上所有可用 TTS 模型
+ * @param {string} apiKey
+ * @returns {Promise<Array<{model_id: string, name: string}>>}
+ */
+export const elevenlabsListModels = (apiKey) => invoke('elevenlabs_list_models', { apiKey });
 
 // ==================== Screenshot ====================
 
@@ -771,6 +804,66 @@ export const workspaceGetPath = async (petId, path, ensureExists = false) => {
   return invoke('workspace_get_path', { petId, path, ensureExists });
 };
 
+// ==================== Chat History (QQ 群聊存档) ====================
+
+/**
+ * 插入一条聊天消息到 SQLite chat_history 表（去重：message_id 冲突时忽略）
+ * @param {Object} msg - { messageId, targetId, targetType, senderId, content, timestamp, replyToId?, isBot, rawJson? }
+ * @returns {Promise<boolean>} 是否真的插入了（false = 已存在被忽略）
+ */
+export const chatHistoryInsert = (msg) =>
+  invoke('chat_history_insert', { msg });
+
+/**
+ * 批量插入消息（一个事务）
+ * @param {Array<Object>} msgs
+ * @returns {Promise<number>} 实际插入数（不含重复）
+ */
+export const chatHistoryInsertBatch = (msgs) =>
+  invoke('chat_history_insert_batch', { msgs });
+
+/**
+ * 全文搜索 + 多维度过滤
+ * @param {Object} params - { keywords?, sender?, target?, startTs?, endTs?, sort?, botFilter?, replyToMessage?, limit? }
+ *   - keywords: FTS5 语法
+ *   - sender: QQ号
+ *   - target: 群号 / 'all'
+ *   - startTs/endTs: 毫秒时间戳（JS 端解析时间字符串后传入）
+ *   - sort: 'relevance' | 'newest' | 'oldest'
+ *   - botFilter: 'include' | 'exclude' | 'only'
+ *   - replyToMessage: message_id
+ *   - limit: 默认 20
+ * @returns {Promise<{messages: Array, total: number}>}
+ */
+export const chatHistorySearch = (params) =>
+  invoke('chat_history_search', { params });
+
+/**
+ * 获取某条消息前后的同群消息
+ * @param {string} messageId
+ * @param {number} before - 取前几条
+ * @param {number} after - 取后几条
+ * @returns {Promise<{before: Array, anchor: Object|null, after: Array}>}
+ */
+export const chatHistoryContext = (messageId, before = 5, after = 5) =>
+  invoke('chat_history_context', { messageId, before, after });
+
+// ==================== Subagent (CC CLI 子进程) ====================
+
+export const subagentSpawn = (taskId, cwd, model = 'sonnet', timeoutSecs = 300, systemPrompt = null) =>
+  invoke('subagent_spawn', { taskId, cwd, model, timeoutSecs, systemPrompt });
+
+export const subagentKill = (taskId) =>
+  invoke('subagent_kill', { taskId });
+
+export const subagentSetMaxConcurrent = (n) =>
+  invoke('subagent_set_max_concurrent', { n });
+
+export const onSubagentEvent = (eventName, callback) =>
+  listen(eventName, (event) => callback(event.payload));
+
+// ==================== Workspace Management ====================
+
 export const workspaceDeleteFolder = async (petId) => {
   return invoke('workspace_delete_folder', { petId });
 };
@@ -779,9 +872,19 @@ export const workspaceOpenFolder = async (petId) => {
   return invoke('workspace_open_folder', { petId });
 };
 
+export const workspaceOpenSubfolder = async (petId, path) => {
+  return invoke('workspace_open_subfolder', { petId, path });
+};
+
 export const workspaceOpenFile = async (petId, path, defaultContent = '') => {
   return invoke('workspace_open_file', { petId, path, defaultContent });
 };
+
+export const runTrainingExport = async (options) => {
+  return invoke('run_training_export', { options });
+};
+
+export const getHomeDir = () => invoke('get_home_dir');
 
 // Model Configs (alias to pets with model type)
 export const getModelConfigs = async () => {
@@ -1073,8 +1176,27 @@ const tauri = {
   workspaceGetPath,
   workspaceDeleteFolder,
   workspaceOpenFolder,
+  workspaceOpenSubfolder,
   workspaceOpenFile,
+  runTrainingExport,
+  getHomeDir,
+
+  // TTS
+  elevenlabsTts,
+  elevenlabsListModels,
   
+  // Chat History (QQ 群聊存档)
+  chatHistoryInsert,
+  chatHistoryInsertBatch,
+  chatHistorySearch,
+  chatHistoryContext,
+
+  // Subagent
+  subagentSpawn,
+  subagentKill,
+  subagentSetMaxConcurrent,
+  onSubagentEvent,
+
   // Dragging
   startDragging,
   

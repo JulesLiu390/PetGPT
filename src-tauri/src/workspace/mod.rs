@@ -210,6 +210,38 @@ pub fn workspace_open_folder(
     Ok(())
 }
 
+/// Open a subdirectory of the pet's workspace in the system file manager.
+/// Creates the directory if it doesn't exist.
+#[tauri::command]
+pub fn workspace_open_subfolder(
+    workspace: State<'_, WorkspaceState>,
+    pet_id: String,
+    path: String,
+) -> Result<(), String> {
+    let folder = workspace.get_full_path(&pet_id, &path).map_err(|e| e.to_string())?;
+    let _ = std::fs::create_dir_all(&folder);
+
+    #[cfg(target_os = "macos")]
+    StdCommand::new("open")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {}", e))?;
+
+    #[cfg(target_os = "linux")]
+    StdCommand::new("xdg-open")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {}", e))?;
+
+    #[cfg(target_os = "windows")]
+    StdCommand::new("explorer")
+        .arg(&folder)
+        .spawn()
+        .map_err(|e| format!("Failed to open folder: {}", e))?;
+
+    Ok(())
+}
+
 /// Open a workspace file in the system default editor
 #[tauri::command]
 pub fn workspace_open_file(

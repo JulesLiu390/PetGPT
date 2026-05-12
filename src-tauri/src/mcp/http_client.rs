@@ -155,7 +155,7 @@ impl McpHttpClient {
             
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
-            log::debug!("[MCP-HTTP][{}] SSE chunk ({} bytes): {:?}", self.server_name, chunk.len(), text);
+            log::info!("[MCP-HTTP][{}] SSE chunk ({} bytes): {:?}", self.server_name, chunk.len(), &text[..text.len().min(300)]);
 
             // Process complete events
             // SSE events are separated by blank lines, handle both \r\n\r\n and \n\n
@@ -227,6 +227,31 @@ impl McpHttpClient {
             // If we already have a result and the buffer is empty, we can return early
             if result.is_some() && buffer.trim().is_empty() {
                 break;
+            }
+        }
+
+        // Flush remaining buffer — some servers don't send trailing \n\n before closing the stream
+        let remaining = buffer.trim().to_string();
+        if !remaining.is_empty() && result.is_none() {
+            log::info!("[MCP-HTTP][{}] Flushing remaining SSE buffer ({} bytes)", self.server_name, remaining.len());
+            let (event_type, data) = Self::parse_sse_event_full(&remaining);
+            if let Some(et) = event_type {
+                last_event_type = Some(et);
+            }
+            if let Some(data) = data {
+                match last_event_type.as_deref() {
+                    Some("error") => {
+                        return Err(format!("SSE error event: {}", data));
+                    }
+                    _ => {
+                        if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data) {
+                            if let Some(error) = resp.error {
+                                return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
+                            }
+                            result = Some(resp.result.unwrap_or(serde_json::Value::Null));
+                        }
+                    }
+                }
             }
         }
 
@@ -454,7 +479,7 @@ impl McpHttpClient {
             .unwrap_or("")
             .to_lowercase();
 
-        log::debug!("[MCP-HTTP][{}] Response Content-Type: {}", self.server_name, content_type);
+        log::info!("[MCP-HTTP][{}] Response Content-Type: {}, status: {}", self.server_name, content_type, status);
 
         if content_type.contains("text/event-stream") {
             // Parse SSE stream response

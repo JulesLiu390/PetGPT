@@ -38,6 +38,20 @@ impl LlmClient {
                 let base = base_url.unwrap_or("https://generativelanguage.googleapis.com/v1beta");
                 format!("{}/models/{{model}}:streamGenerateContent", base)
             }
+            ApiFormat::AnthropicNative => {
+                let base = base_url.unwrap_or("https://api.anthropic.com/v1");
+                let base = if base == "default" { "https://api.anthropic.com/v1" } else { base };
+                let base = if !base.contains("/v1") {
+                    if base.ends_with('/') {
+                        format!("{}v1", base)
+                    } else {
+                        format!("{}/v1", base)
+                    }
+                } else {
+                    base.to_string()
+                };
+                format!("{}/messages", base.trim_end_matches('/'))
+            }
         }
     }
 
@@ -88,6 +102,7 @@ impl LlmClient {
         match request.api_format {
             ApiFormat::OpenaiCompatible => self.call_openai(request).await,
             ApiFormat::GeminiOfficial => self.call_gemini(request).await,
+            ApiFormat::AnthropicNative => self.call_anthropic(request).await,
         }
     }
 
@@ -249,6 +264,147 @@ impl LlmClient {
         let content = if let Some(parts) = gemini_response["candidates"][0]["content"]["parts"].as_array() {
             parts.iter()
                 .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join("")
+        } else {
+            String::new()
+        };
+
+        Ok(LlmResponse {
+            content,
+            mood: "normal".to_string(),
+            error: None,
+            tool_calls: None,
+        })
+    }
+
+    /// 调用 Anthropic Messages API (非流式)
+    async fn call_anthropic(&self, request: &LlmRequest) -> Result<LlmResponse, String> {
+        let endpoint = self.get_endpoint(&request.api_format, request.base_url.as_deref());
+
+        // 提取 system message（合并所有 system 消息）
+        let system_text: String = request.messages.iter()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.content.as_text())
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        // 构建 messages（user/assistant 交替）
+        let messages: Vec<serde_json::Value> = request.messages.iter()
+            .filter(|m| m.role != Role::System)
+            .map(|msg| {
+                let role = match msg.role {
+                    Role::User | Role::Tool => "user",
+                    Role::Assistant => "assistant",
+                    Role::System => "user", // 已被过滤
+                };
+
+                let content = match &msg.content {
+                    MessageContent::Text(s) => serde_json::json!([{ "type": "text", "text": s }]),
+                    MessageContent::Parts(parts) => {
+                        let blocks: Vec<serde_json::Value> = parts.iter().filter_map(|p| {
+                            match p {
+                                ContentPart::Text { text } => Some(serde_json::json!({
+                                    "type": "text",
+                                    "text": text
+                                })),
+                                ContentPart::ImageUrl { image_url } => {
+                                    let url = &image_url.url;
+                                    if url.starts_with("data:") {
+                                        // 解析 data URI
+                                        if let Some(idx) = url.find(",") {
+                                            let header = &url[5..idx]; // 去掉 "data:"
+                                            let data = &url[idx + 1..];
+                                            let media_type = header.split(';').next().unwrap_or("image/jpeg");
+                                            Some(serde_json::json!({
+                                                "type": "image",
+                                                "source": {
+                                                    "type": "base64",
+                                                    "media_type": media_type,
+                                                    "data": data
+                                                }
+                                            }))
+                                        } else {
+                                            None
+                                        }
+                                    } else if url.starts_with("http") {
+                                        Some(serde_json::json!({
+                                            "type": "image",
+                                            "source": {
+                                                "type": "url",
+                                                "url": url
+                                            }
+                                        }))
+                                    } else {
+                                        None
+                                    }
+                                }
+                                ContentPart::FileUrl { .. } => None,
+                            }
+                        }).collect();
+                        serde_json::json!(blocks)
+                    }
+                };
+
+                serde_json::json!({
+                    "role": role,
+                    "content": content
+                })
+            })
+            .collect();
+
+        let mut body = serde_json::json!({
+            "model": request.model,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+            "messages": messages,
+        });
+
+        if let Some(t) = request.temperature {
+            body["temperature"] = serde_json::json!(t);
+        }
+
+        // System prompt：用 cache_control 启用 prompt caching
+        if !system_text.is_empty() {
+            body["system"] = serde_json::json!([
+                {
+                    "type": "text",
+                    "text": system_text,
+                    "cache_control": { "type": "ephemeral" }
+                }
+            ]);
+        }
+
+        let response = self.http_client
+            .post(&endpoint)
+            .header("x-api-key", &request.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("HTTP error: {}", e))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            return Err(format!("API error {}: {}", status, error_text));
+        }
+
+        let resp_json: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| format!("JSON parse error: {}", e))?;
+
+        // 提取所有 text content blocks
+        let content = if let Some(blocks) = resp_json["content"].as_array() {
+            blocks.iter()
+                .filter_map(|b| {
+                    if b["type"] == "text" {
+                        b["text"].as_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
                 .collect::<Vec<_>>()
                 .join("")
         } else {
