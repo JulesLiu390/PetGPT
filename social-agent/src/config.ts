@@ -1,8 +1,9 @@
-import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
+import { readFile, writeFile, rename, chmod, rm } from 'node:fs/promises';
 import { existsSync, mkdirSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getPaths } from './paths.ts';
+import { withStoreLock } from './storeLock.ts';
 
 const paths = getPaths();
 
@@ -52,10 +53,12 @@ export async function writeSettings(next: Settings): Promise<void> {
 }
 
 export async function patchSettings(partial: Partial<Settings>): Promise<Settings> {
-  const current = await readSettings();
-  const next: Settings = { ...current, ...partial };
-  await writeSettings(next);
-  return next;
+  return withStoreLock(paths.settings, async () => {
+    const current = await readSettings();
+    const next: Settings = { ...current, ...partial };
+    await writeSettings(next);
+    return next;
+  });
 }
 
 // ─────────────────── pets.json ───────────────────
@@ -86,34 +89,53 @@ export async function getPet(id: string): Promise<Pet | undefined> {
 }
 
 export async function createPet(input: { name: string; persona?: string }): Promise<Pet> {
-  const pets = await listPets();
-  const now = Date.now();
-  const pet: Pet = {
-    id: randomUUID(),
-    name: input.name.trim() || 'unnamed',
-    persona: input.persona,
-    createdAt: now,
-    updatedAt: now,
-  };
-  pets.push(pet);
-  await savePets(pets);
-  return pet;
+  return withStoreLock(paths.petsRegistry, async () => {
+    const pets = await listPets();
+    const now = Date.now();
+    const pet: Pet = {
+      id: randomUUID(),
+      name: input.name.trim() || 'unnamed',
+      persona: input.persona,
+      createdAt: now,
+      updatedAt: now,
+    };
+    pets.push(pet);
+    await savePets(pets);
+    return pet;
+  });
 }
 
 export async function updatePet(id: string, partial: Partial<Omit<Pet, 'id' | 'createdAt'>>): Promise<Pet | null> {
-  const pets = await listPets();
-  const idx = pets.findIndex(p => p.id === id);
-  if (idx < 0) return null;
-  const next: Pet = { ...pets[idx], ...partial, id: pets[idx].id, createdAt: pets[idx].createdAt, updatedAt: Date.now() };
-  pets[idx] = next;
-  await savePets(pets);
-  return next;
+  return withStoreLock(paths.petsRegistry, async () => {
+    const pets = await listPets();
+    const idx = pets.findIndex(p => p.id === id);
+    if (idx < 0) return null;
+    const next: Pet = { ...pets[idx], ...partial, id: pets[idx].id, createdAt: pets[idx].createdAt, updatedAt: Date.now() };
+    pets[idx] = next;
+    await savePets(pets);
+    return next;
+  });
 }
 
 export async function deletePet(id: string): Promise<boolean> {
-  const pets = await listPets();
-  const filtered = pets.filter(p => p.id !== id);
-  if (filtered.length === pets.length) return false;
-  await savePets(filtered);
-  return true;
+  return withStoreLock(paths.petsRegistry, async () => {
+    const pets = await listPets();
+    const filtered = pets.filter(p => p.id !== id);
+    if (filtered.length === pets.length) return false;
+    await savePets(filtered);
+    return true;
+  });
+}
+
+/**
+ * Cascade cleanup after deletePet: removes ~/.social-agent/pets/{id}
+ * (social-config.json, workspace, training data, …). Callers must only
+ * invoke this for ids that were actually in the registry — that gate is
+ * what keeps arbitrary path segments out of the rm.
+ */
+export async function deletePetData(id: string): Promise<void> {
+  if (!id || id.includes('/') || id.includes('\\') || id.includes('..')) {
+    throw new Error(`suspicious pet id, refusing to delete data dir: ${id}`);
+  }
+  await rm(join(paths.petsDir, id), { recursive: true, force: true });
 }

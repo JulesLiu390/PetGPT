@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getPaths } from './paths.ts';
+import { withStoreLock } from './storeLock.ts';
 
 /**
  * Plaintext provider store.
@@ -128,49 +129,55 @@ export async function createProvider(input: {
   apiKey: string;
 }): Promise<ProviderPublic> {
   if (!input.apiKey) throw new Error('apiKey required');
-  const data = await load();
-  const now = Date.now();
-  const p: Provider = {
-    id: randomUUID(),
-    type: input.type,
-    name: input.name,
-    baseUrl: input.baseUrl,
-    defaultModel: input.defaultModel,
-    apiKey: input.apiKey,
-    createdAt: now,
-    updatedAt: now,
-  };
-  data.providers.push(p);
-  await save(data);
-  return toPublic(p);
+  return withStoreLock(paths.providers, async () => {
+    const data = await load();
+    const now = Date.now();
+    const p: Provider = {
+      id: randomUUID(),
+      type: input.type,
+      name: input.name,
+      baseUrl: input.baseUrl,
+      defaultModel: input.defaultModel,
+      apiKey: input.apiKey,
+      createdAt: now,
+      updatedAt: now,
+    };
+    data.providers.push(p);
+    await save(data);
+    return toPublic(p);
+  });
 }
 
 export async function updateProvider(
   id: string,
   partial: Partial<Pick<Provider, 'type' | 'name' | 'baseUrl' | 'defaultModel' | 'apiKey'>>,
 ): Promise<ProviderPublic | null> {
-  const data = await load();
-  const idx = data.providers.findIndex(p => p.id === id);
-  if (idx < 0) return null;
-  const cur = data.providers[idx];
-  data.providers[idx] = {
-    ...cur,
-    ...partial,
-    id: cur.id,
-    createdAt: cur.createdAt,
-    updatedAt: Date.now(),
-  };
-  await save(data);
-  return toPublic(data.providers[idx]);
+  return withStoreLock(paths.providers, async () => {
+    const data = await load();
+    const idx = data.providers.findIndex(p => p.id === id);
+    if (idx < 0) return null;
+    const cur = data.providers[idx];
+    data.providers[idx] = {
+      ...cur,
+      ...partial,
+      id: cur.id,
+      createdAt: cur.createdAt,
+      updatedAt: Date.now(),
+    };
+    await save(data);
+    return toPublic(data.providers[idx]);
+  });
 }
 
 export async function deleteProvider(id: string): Promise<boolean> {
-  const data = await load();
-  const before = data.providers.length;
-  data.providers = data.providers.filter(p => p.id !== id);
-  if (data.providers.length === before) return false;
-  await save(data);
-  return true;
+  return withStoreLock(paths.providers, async () => {
+    const data = await load();
+    const before = data.providers.length;
+    data.providers = data.providers.filter(p => p.id !== id);
+    if (data.providers.length === before) return false;
+    await save(data);
+    return true;
+  });
 }
 
 /**
@@ -179,16 +186,18 @@ export async function deleteProvider(id: string): Promise<boolean> {
  * edit — keeps `updatedAt` for UI freshness semantics.
  */
 export async function setCachedModels(id: string, models: string[]): Promise<ProviderPublic | null> {
-  const data = await load();
-  const idx = data.providers.findIndex(p => p.id === id);
-  if (idx < 0) return null;
-  const cur = data.providers[idx];
-  data.providers[idx] = {
-    ...cur,
-    cachedModels: models,
-    cachedModelsAt: Date.now(),
-    updatedAt: Date.now(),
-  };
-  await save(data);
-  return toPublic(data.providers[idx]);
+  return withStoreLock(paths.providers, async () => {
+    const data = await load();
+    const idx = data.providers.findIndex(p => p.id === id);
+    if (idx < 0) return null;
+    const cur = data.providers[idx];
+    data.providers[idx] = {
+      ...cur,
+      cachedModels: models,
+      cachedModelsAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    await save(data);
+    return toPublic(data.providers[idx]);
+  });
 }

@@ -1,7 +1,7 @@
 import { ensureHome } from './paths.ts';
 import {
   readSettings, patchSettings,
-  listPets, createPet, getPet, updatePet, deletePet,
+  listPets, createPet, getPet, updatePet, deletePet, deletePetData,
 } from './config.ts';
 import {
   listProviders, getProvider, createProvider, updateProvider, deleteProvider,
@@ -15,6 +15,7 @@ import { createNodePlatform } from './platform/index.ts';
 import { createLLMClient, LLMError } from './core/llm/index.ts';
 import { runIntentEval } from './core/agent/intentEval.ts';
 import { createAgentManager } from './core/agent/agent.ts';
+import type { SessionConfig } from './core/agent/types.ts';
 import { AGENT_EVENT_CHANNEL, type AgentEvent } from './core/agent/events.ts';
 import dashboardHtml from './web/index.html';
 
@@ -59,6 +60,7 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
     return await fn();
   } catch (e: any) {
     const msg = e?.message ?? String(e);
+    if (e?.code === 'CONFLICT') return err(409, msg);
     if (msg === 'apiKey required') return err(400, msg);
     return err(500, msg);
   }
@@ -137,7 +139,17 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
         });
         if (method === 'DELETE') return safe(async () => {
           const removed = await deletePet(id);
-          return removed ? ok({ ok: true }) : err(404, 'pet not found');
+          if (!removed) return err(404, 'pet not found');
+          // Cascade: stop this pet's running sessions, then drop pets/{id}/
+          // (social-config, workspace, ...) so no orphan data lingers.
+          const stoppedSessions: string[] = [];
+          for (const s of agent.list()) {
+            if (s.config.petId === id && agent.stop(s.config.targetId)) {
+              stoppedSessions.push(s.config.targetId);
+            }
+          }
+          await deletePetData(id);
+          return ok({ ok: true, stoppedSessions });
         });
       }
       // Social config (per-pet) — schema mirrors Tauri's SocialPage config
@@ -197,6 +209,14 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
           return next ? ok(next) : err(404, 'provider not found');
         });
         if (method === 'DELETE') return safe(async () => {
+          // Refuse while running sessions reference this provider — deleting
+          // it out from under them would fail every subsequent eval/reply.
+          const inUse = agent.list()
+            .filter(s => s.config.providerId === id)
+            .map(s => s.config.targetId);
+          if (inUse.length > 0) {
+            return err(409, `provider in use by running session(s): ${inUse.join(', ')} — stop them first`);
+          }
           const removed = await deleteProvider(id);
           return removed ? ok({ ok: true }) : err(404, 'provider not found');
         });
@@ -348,15 +368,32 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
         if (method === 'PATCH') return safe(async () => {
           const body = await readBody<any>(req);
           if (!body) return err(400, 'invalid JSON body');
+          const before = await getMCPServer(id);
+          if (!before) return err(404, 'mcp server not found');
           try {
             const next = await updateMCPServer(id, body);
-            return next ? ok(next) : err(404, 'mcp server not found');
+            if (!next) return err(404, 'mcp server not found');
+            // The registry changed but a live instance (keyed by the OLD name)
+            // would keep running with the old command/env — and after a rename
+            // it would become unreachable by any stop button. Drop it; the next
+            // use lazily respawns from the new config.
+            let stoppedRunningInstance = false;
+            if (platform.mcp.status(before.name) === 'running') {
+              await platform.mcp.shutdown(before.name);
+              stoppedRunningInstance = true;
+            }
+            return ok({ ...next, stoppedRunningInstance });
           } catch (e: any) {
             if (e?.message?.startsWith('MCP server name already exists')) return err(409, e.message);
             throw e;
           }
         });
         if (method === 'DELETE') return safe(async () => {
+          const before = await getMCPServer(id);
+          if (!before) return err(404, 'mcp server not found');
+          // Stop the live instance first so deleting the config doesn't leave
+          // a ghost child process that ensureRunning still finds by name.
+          await platform.mcp.shutdown(before.name);
           const removed = await deleteMCPServer(id);
           return removed ? ok({ ok: true }) : err(404, 'mcp server not found');
         });
@@ -403,12 +440,58 @@ async function safe(fn: () => Promise<Response> | Response): Promise<Response> {
       return safe(async () => {
         const body = await readBody<any>(req);
         if (!body) return err(400, 'invalid JSON body');
-        if (!body.petId)      return err(400, 'petId required');
-        if (!body.targetId)   return err(400, 'targetId required');
-        if (!body.providerId) return err(400, 'providerId required');
-        if (!body.model)      return err(400, 'model required');
+        if (!body.petId)    return err(400, 'petId required');
+        if (!body.targetId) return err(400, 'targetId required');
+
+        // The persisted social config is the base; explicit body fields
+        // override. This keeps sessions consistent with what the config
+        // editor saved instead of trusting whatever copy the client held.
+        const pet = await getPet(body.petId);
+        if (!pet) return err(404, 'pet not found');
+        const cfg = await readSocialConfig(body.petId);
+
+        const targetId = String(body.targetId);
+        const providerId = body.providerId || cfg.apiProviderId;
+        const model      = body.model      || cfg.modelName;
+        if (!providerId) return err(400, 'providerId required (absent from body and social config)');
+        if (!model)      return err(400, 'model required (absent from body and social config)');
+        if (!(await getProviderInternal(providerId))) {
+          return err(404, `provider not found: ${providerId}`);
+        }
+
+        const merged: SessionConfig = {
+          petId: body.petId,
+          targetId,
+          targetType: body.targetType,
+          providerId,
+          model,
+          temperature:   body.temperature,
+          maxTokens:     body.maxTokens,
+          timeoutMs:     body.timeoutMs,
+          maxIterations: body.maxIterations,
+          targetName:          body.targetName,
+          socialPersonaPrompt: body.socialPersonaPrompt ?? (cfg.socialPersonaPrompt || pet.persona || undefined),
+          botQQ:          body.botQQ          ?? (cfg.botQQ          || undefined),
+          ownerQQ:        body.ownerQQ        ?? (cfg.ownerQQ        || undefined),
+          ownerName:      body.ownerName      ?? (cfg.ownerName      || undefined),
+          ownerSecret:    body.ownerSecret    ?? (cfg.ownerSecret    || undefined),
+          nameDelimiterL: body.nameDelimiterL ?? (cfg.nameDelimiterL || undefined),
+          nameDelimiterR: body.nameDelimiterR ?? (cfg.nameDelimiterR || undefined),
+          msgDelimiterL:  body.msgDelimiterL  ?? (cfg.msgDelimiterL  || undefined),
+          msgDelimiterR:  body.msgDelimiterR  ?? (cfg.msgDelimiterR  || undefined),
+          lurkMode:         body.lurkMode         ?? cfg.lurkModes[targetId],
+          voiceEnabled:     body.voiceEnabled     ?? (cfg.ttsConfig.enabled      || undefined),
+          imageGenEnabled:  body.imageGenEnabled  ?? (cfg.imageGenConfig.enabled || undefined),
+          customGroupRules: body.customGroupRules ?? (cfg.customGroupRules[targetId] || undefined),
+          mcpServerName:    body.mcpServerName    ?? (cfg.mcpServerName || undefined),
+          mcpSendTool:      body.mcpSendTool,
+          mcpFetchTool:     body.mcpFetchTool,
+          fetchIntervalMs:  body.fetchIntervalMs,
+          fetchBufferSize:  body.fetchBufferSize,
+        };
+
         try {
-          return ok(agent.start(body), 201);
+          return ok(agent.start(merged), 201);
         } catch (e: any) {
           if (e?.message?.startsWith('session already exists')) return err(409, e.message);
           throw e;

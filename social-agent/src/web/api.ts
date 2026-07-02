@@ -162,6 +162,8 @@ export interface TtsConfig      { enabled: boolean; apiKey: string; voiceId: str
 
 export interface SocialConfig {
   petId: string;
+  /** Optimistic-lock stamp — echo back the loaded value; a stale PUT → 409. */
+  updatedAt: number;
   mcpServerName: string;
   apiProviderId: string;
   modelName: string;

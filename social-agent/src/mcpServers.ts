@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { getPaths } from './paths.ts';
+import { withStoreLock } from './storeLock.ts';
 
 /**
  * MCP server registry.
@@ -85,62 +86,68 @@ export async function createMCPServer(input: MCPServerCreateInput): Promise<MCPS
   if (!name) throw new Error('name is required');
   if (!input.command.trim()) throw new Error('command is required');
 
-  const data = await load();
-  if (data.servers.some(s => s.name === name)) {
-    throw new Error(`MCP server name already exists: ${name}`);
-  }
+  return withStoreLock(paths.mcpServers, async () => {
+    const data = await load();
+    if (data.servers.some(s => s.name === name)) {
+      throw new Error(`MCP server name already exists: ${name}`);
+    }
 
-  const now = Date.now();
-  const server: MCPServer = {
-    id: randomUUID(),
-    name,
-    command: input.command.trim(),
-    args: Array.isArray(input.args) ? input.args : [],
-    env: input.env && typeof input.env === 'object' ? input.env : {},
-    enabled: input.enabled ?? true,
-    createdAt: now,
-    updatedAt: now,
-  };
-  data.servers.push(server);
-  await save(data);
-  return server;
+    const now = Date.now();
+    const server: MCPServer = {
+      id: randomUUID(),
+      name,
+      command: input.command.trim(),
+      args: Array.isArray(input.args) ? input.args : [],
+      env: input.env && typeof input.env === 'object' ? input.env : {},
+      enabled: input.enabled ?? true,
+      createdAt: now,
+      updatedAt: now,
+    };
+    data.servers.push(server);
+    await save(data);
+    return server;
+  });
 }
 
 export async function updateMCPServer(
   id: string,
   partial: Partial<Pick<MCPServer, 'name' | 'command' | 'args' | 'env' | 'enabled'>>,
 ): Promise<MCPServer | null> {
-  const data = await load();
-  const idx = data.servers.findIndex(s => s.id === id);
-  if (idx < 0) return null;
-  const cur = data.servers[idx];
+  return withStoreLock(paths.mcpServers, async () => {
+    const data = await load();
+    const idx = data.servers.findIndex(s => s.id === id);
+    if (idx < 0) return null;
+    const cur = data.servers[idx];
 
-  if (partial.name !== undefined) {
-    const newName = String(partial.name).trim();
-    if (!newName) throw new Error('name cannot be empty');
-    if (newName !== cur.name && data.servers.some(s => s.name === newName)) {
-      throw new Error(`MCP server name already exists: ${newName}`);
+    if (partial.name !== undefined) {
+      const newName = String(partial.name).trim();
+      if (!newName) throw new Error('name cannot be empty');
+      if (newName !== cur.name && data.servers.some(s => s.name === newName)) {
+        throw new Error(`MCP server name already exists: ${newName}`);
+      }
     }
-  }
 
-  data.servers[idx] = {
-    ...cur,
-    ...(partial.name     !== undefined ? { name: String(partial.name).trim() } : {}),
-    ...(partial.command  !== undefined ? { command: String(partial.command).trim() } : {}),
-    ...(partial.args     !== undefined ? { args: Array.isArray(partial.args) ? partial.args : [] } : {}),
-    ...(partial.env      !== undefined ? { env: typeof partial.env === 'object' && partial.env !== null ? partial.env : {} } : {}),
-    ...(partial.enabled  !== undefined ? { enabled: !!partial.enabled } : {}),
-    updatedAt: Date.now(),
-  };
-  await save(data);
-  return data.servers[idx];
+    data.servers[idx] = {
+      ...cur,
+      ...(partial.name     !== undefined ? { name: String(partial.name).trim() } : {}),
+      ...(partial.command  !== undefined ? { command: String(partial.command).trim() } : {}),
+      ...(partial.args     !== undefined ? { args: Array.isArray(partial.args) ? partial.args : [] } : {}),
+      ...(partial.env      !== undefined ? { env: typeof partial.env === 'object' && partial.env !== null ? partial.env : {} } : {}),
+      ...(partial.enabled  !== undefined ? { enabled: !!partial.enabled } : {}),
+      updatedAt: Date.now(),
+    };
+    await save(data);
+    return data.servers[idx];
+  });
 }
 
 export async function deleteMCPServer(id: string): Promise<boolean> {
-  const data = await load();
-  const before = data.servers.length;
-  data.servers = data.servers.filter(s => s.id !== id);
-  if (data.servers.length === before) return false;
-  await save(data);
-  return true;
+  return withStoreLock(paths.mcpServers, async () => {
+    const data = await load();
+    const before = data.servers.length;
+    data.servers = data.servers.filter(s => s.id !== id);
+    if (data.servers.length === before) return false;
+    await save(data);
+    return true;
+  });
 }
