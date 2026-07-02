@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { motion } from 'framer-motion';
+import { motion } from 'motion/react';
 import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
 import { FaPlug, FaUserGroup } from "react-icons/fa6";
 import { CgHello } from "react-icons/cg";
