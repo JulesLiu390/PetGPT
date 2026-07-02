@@ -13,7 +13,7 @@ from here, and vice versa. Connection between them is HTTP + WebSocket only.
 - **TypeScript**
 - **Ink** (React-for-terminals) — TUI mode
 - **Bun.serve** built-in HTTP + WebSocket — service mode
-- **MCP**: `@modelcontextprotocol/sdk` (added when core is migrated)
+- **MCP**: `@modelcontextprotocol/sdk`
 
 ## Getting started
 
@@ -63,19 +63,3 @@ Cross-platform fallback (handled in [src/paths.ts](src/paths.ts)):
 | macOS   | `~/.social-agent`                                         | `$SOCIAL_AGENT_HOME`  |
 | Linux   | `$XDG_CONFIG_HOME/social-agent` or `~/.config/social-agent` | `$SOCIAL_AGENT_HOME` |
 | Windows | `%APPDATA%\social-agent`                                  | `%SOCIAL_AGENT_HOME%` |
-
-## Migration path from Tauri
-
-The Tauri app's social-agent code (currently in `../src/utils/`, `../src/utils/workspace/`,
-`../src/utils/mcp/`) will be ported here in phases:
-
-1. **Scaffolding** ← *current*: paths, CLI, server skeleton
-2. **Core port**: `socialAgent.js`, `socialPromptBuilder.js`, `socialToolExecutor.js` →
-   `src/core/`, with platform abstractions in `src/platform/` (fs / fetch / mcp / events)
-3. **Server wiring**: WS event protocol, REST endpoints for config + control
-4. **Web dashboard**: React app served from `src/web/`, replicates current
-   [`SocialPage.jsx`](../src/pages/SocialPage.jsx) UI
-5. **Tauri viewer**: outer Tauri's `SocialPage` swaps local social loop for WS client
-6. **Migration tool**: Tauri-side button to one-shot push API providers + pet personas
-   to a running social-agent service
-7. **Docker**: package as image, MCP servers handled via sidecar or in-process
