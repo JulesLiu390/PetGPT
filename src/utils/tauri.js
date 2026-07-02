@@ -590,6 +590,8 @@ export const hideWindow = async (label) => {
 
 // Shortcuts
 export const updateWindowSizePreset = (preset) => invoke('update_window_size_preset', { preset });
+// 上报聊天输入工具栏的最小内容宽度（逻辑像素），后端据此更新 chat 窗口最小宽度并按预设比例缩放
+export const reportChatMinWidth = (width, preset) => invoke('report_chat_min_width', { width, preset });
 export const updateShortcuts = (programHotkey, dialogHotkey, screenshotHotkey = '') => 
   invoke('update_shortcuts', { shortcut1: programHotkey, shortcut2: dialogHotkey, shortcut3: screenshotHotkey });
 
@@ -1100,6 +1102,7 @@ const tauri = {
   hideManageWindow,
   hideSettingsWindow,
   updateWindowSizePreset,
+  reportChatMinWidth,
   updateShortcuts,
   updatePreferences,
   
