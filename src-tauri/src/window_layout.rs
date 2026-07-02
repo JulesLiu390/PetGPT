@@ -46,6 +46,12 @@ pub struct WindowState {
     /// Used to filter spurious Moved events on XWayland.
     pub last_char_x: AtomicI32,
     pub last_char_y: AtomicI32,
+    /// Content-driven minimum chat width (logical px), reported by the
+    /// frontend from measuring the input toolbar. None until first report.
+    pub chat_min_width: Mutex<Option<f64>>,
+    /// Last applied window-size preset ("small" | "medium" | "large").
+    /// Kept so a later min-width report can re-derive the preset width.
+    pub chat_size_preset: Mutex<String>,
 }
 
 impl WindowState {
@@ -62,6 +68,8 @@ impl WindowState {
             skip_chat_sync_until: AtomicU64::new(0),
             last_char_x: AtomicI32::new(i32::MIN),
             last_char_y: AtomicI32::new(i32::MIN),
+            chat_min_width: Mutex::new(None),
+            chat_size_preset: Mutex::new("medium".to_string()),
         }
     }
 }
@@ -102,6 +110,30 @@ pub fn get_scale_factor_for_preset(preset: &str) -> f64 {
         "large" => 1.15,
         _ => 1.0,
     }
+}
+
+/// Hard floor for the chat window's content-driven min width.
+/// Matches `minWidth` for the chat window in tauri.conf.json.
+pub const CHAT_MIN_WIDTH_FLOOR: f64 = 460.0;
+
+/// Chat window width scale per preset, applied to the content-driven minimum
+/// width: small IS the minimum; medium/large grow proportionally from it.
+pub fn get_chat_width_scale_for_preset(preset: &str) -> f64 {
+    match preset {
+        "small" => 1.0,
+        "medium" => 1.15,
+        "large" => 1.3,
+        _ => 1.15,
+    }
+}
+
+/// Target chat width for a preset, derived from the reported content minimum
+/// (falls back to the hard floor before any report arrives).
+pub fn compute_chat_width(content_min_width: Option<f64>, preset: &str) -> f64 {
+    let min_w = content_min_width
+        .unwrap_or(CHAT_MIN_WIDTH_FLOOR)
+        .max(CHAT_MIN_WIDTH_FLOOR);
+    (min_w * get_chat_width_scale_for_preset(preset)).round()
 }
 
 // ============ Layout Functions ============

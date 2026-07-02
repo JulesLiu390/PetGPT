@@ -1,5 +1,5 @@
 import React, { useState, useRef, useCallback, useEffect, useReducer } from 'react';
-import { motion, AnimatePresence, Reorder } from 'framer-motion';
+import { motion, AnimatePresence, Reorder } from 'motion/react';
 import { AiOutlineClose, AiOutlineDown } from 'react-icons/ai';
 
 const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onCloseAllTabs, onAddTab, onReorderTabs, compact = false }) => {

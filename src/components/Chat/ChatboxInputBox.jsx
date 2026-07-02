@@ -304,28 +304,41 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     });
   }, [mcpServers, enabledMcpServers, refreshServers]);
   
+  // 按名称找到服务器记录（后端 API 需要 _id，工具栏组件只知道 name）
+  const findMcpServerByName = useCallback((serverName) => {
+    const server = mcpServers.find(s => s.name === serverName);
+    if (!server?._id) {
+      console.error(`[MCP] Server not found by name: "${serverName}"`);
+      return null;
+    }
+    return server;
+  }, [mcpServers]);
+
   // 更新 MCP 服务器配置 (按名称)
   const updateMcpServer = useCallback(async (serverName, updates) => {
     try {
       if (!tauri.mcp.updateServer) {
-        console.error('[MCP] updateServerByName API not available');
+        console.error('[MCP] updateServer API not available');
         return;
       }
-      await tauri.mcp.updateServer(serverName, updates);
+      const server = findMcpServerByName(serverName);
+      if (!server) return;
+      await tauri.mcp.updateServer(server._id, updates);
       await refreshServers();
       console.log(`[MCP] 服务器 "${serverName}" 配置已更新:`, updates);
     } catch (err) {
       console.error('[MCP] Failed to update server:', err);
     }
-  }, [refreshServers]);
-  
+  }, [refreshServers, findMcpServerByName]);
+
   // 批量更新 MCP 服务器顺序
   const batchUpdateMcpOrder = useCallback(async (orderList) => {
     // orderList: [{ name: 'xxx', toolbarOrder: 0 }, ...]
     try {
       for (const item of orderList) {
-        if (tauri.mcp.updateServer) {
-          await tauri.mcp.updateServer(item.name, { toolbarOrder: item.toolbarOrder });
+        const server = findMcpServerByName(item.name);
+        if (server && tauri.mcp.updateServer) {
+          await tauri.mcp.updateServer(server._id, { toolbarOrder: item.toolbarOrder });
         }
       }
       await refreshServers();
@@ -333,28 +346,30 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     } catch (err) {
       console.error('[MCP] Failed to batch update order:', err);
     }
-  }, [refreshServers]);
-  
+  }, [refreshServers, findMcpServerByName]);
+
   // 删除 MCP 服务器 (按名称)
   const deleteMcpServer = useCallback(async (serverName) => {
     try {
       if (!tauri.mcp.deleteServer) {
-        console.error('[MCP] deleteServerByName API not available');
+        console.error('[MCP] deleteServer API not available');
         return;
       }
+      const server = findMcpServerByName(serverName);
+      if (!server) return;
       // 从启用列表中移除
       setEnabledMcpServers(prev => {
         const newSet = new Set(prev);
         newSet.delete(serverName);
         return newSet;
       });
-      await tauri.mcp.deleteServer(serverName);
+      await tauri.mcp.deleteServer(server._id);
       await refreshServers();
       console.log(`[MCP] 服务器 "${serverName}" 已删除`);
     } catch (err) {
       console.error('[MCP] Failed to delete server:', err);
     }
-  }, [refreshServers]);
+  }, [refreshServers, findMcpServerByName]);
   
   // 编辑 MCP 服务器图标 (打开 MCP 设置窗口)
   const editMcpServerIcon = useCallback((server) => {
@@ -1889,6 +1904,44 @@ const handleStop = async () => {
   const [attachments, setAttachments] = useState([]);
   const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
+  const toolbarRowRef = useRef(null);
+  const lastReportedMinWidthRef = useRef(0);
+  const presetSentRef = useRef(false);
+
+  // 测量底部工具栏的最小内容宽度并上报后端：
+  // 后端据此设置 chat 窗口的最小宽度，并按 small/medium/large 比例缩放窗口，
+  // 保证工具栏（MCP 图标、模型选择器等）不被挤压裁切。
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      const el = toolbarRowRef.current;
+      if (!el) return;
+      // 累加直接子元素宽度（左侧工具组 + 右侧发送组；absolute 弹层不计入），
+      // 比 scrollWidth 可靠：内容变窄时也能得到真实最小宽度，窗口才能缩回去。
+      let content = 0;
+      for (const child of el.children) {
+        content += child.getBoundingClientRect().width;
+      }
+      if (content <= 0) return;
+      // 行以外的窗口开销（输入框内边距、窗口边距）= 窗口宽 - 行可用宽
+      const chrome = window.innerWidth - el.clientWidth;
+      const needed = Math.ceil(content + chrome) + 24; // 左右组之间留 24px 呼吸空间
+      // 与上次上报几乎相同（±4px 抖动）时跳过，避免无谓的 IPC 和窗口操作
+      if (Math.abs(needed - lastReportedMinWidthRef.current) <= 4) return;
+      try {
+        // 档位只在首次上报时携带（让后端拿到启动时的用户设置）；
+        // 之后传 undefined，由后端沿用 updateWindowSizePreset 维护的当前档位。
+        let preset;
+        if (!presetSentRef.current) {
+          const settings = await tauri.getSettings();
+          preset = settings?.windowSize || 'medium';
+        }
+        await tauri.reportChatMinWidth(needed, preset);
+        presetSentRef.current = true;
+        lastReportedMinWidthRef.current = needed;
+      } catch { /* 非 Tauri 环境或后端未就绪时静默跳过 */ }
+    }, 300); // 等布局稳定后再测
+    return () => clearTimeout(timer);
+  }, [mcpServers, enabledMcpServers, memoryEnabled, activeSubagentCount, petInfo, overrideModel]);
 
   // 当窗口可见或切换 Tab 时，自动聚焦输入框
   useEffect(() => {
@@ -2113,7 +2166,7 @@ const handleStop = async () => {
 
 
         {/* 底部工具栏：左侧功能开关 + 右侧发送按钮 */}
-        <div className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
+        <div ref={toolbarRowRef} className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
             {/* Left: Tools (Agent, Memory, Search) */}
             <div className="flex items-center gap-1">
                 <button 

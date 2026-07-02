@@ -2167,10 +2167,15 @@ fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<Wi
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
     }
     
-    // Update chat window - positioned to the left of character
-    if let (Some(chat), Some(character), Some(chat_baseline)) = 
+    // Update chat window - positioned to the left of character.
+    // Width derives from the content-driven minimum reported by the frontend
+    // toolbar (small = that minimum, medium/large scale up from it), so the
+    // input toolbar is never squeezed. Height keeps the baseline behaviour.
+    *win_state.chat_size_preset.lock().unwrap() = preset.clone();
+    if let (Some(chat), Some(character), Some(chat_baseline)) =
         (app.get_webview_window("chat"), app.get_webview_window("character"), baselines.get("chat")) {
-        let chat_width = (chat_baseline.width * scale).round();
+        let chat_min = *win_state.chat_min_width.lock().unwrap();
+        let chat_width = window_layout::compute_chat_width(chat_min, &preset);
         let chat_height = (chat_baseline.height * scale).round();
         
         // Skip if sidebar is expanded
@@ -2200,7 +2205,95 @@ fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<Wi
         let height = (baseline.height * scale).round();
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
     }
-    
+
+    Ok(())
+}
+
+/// Frontend reports the chat input toolbar's minimum content width (logical px).
+/// Persists it in WinState, raises the chat window's OS-level min width, and
+/// re-derives the current preset's width from it (right edge stays anchored,
+/// since chat sits to the left of the character window).
+#[tauri::command]
+fn report_chat_min_width(app: AppHandle, width: f64, preset: Option<String>, win_state: State<WinState>) -> Result<(), String> {
+    if !width.is_finite() || width <= 0.0 {
+        return Err(format!("invalid width: {width}"));
+    }
+    // Idempotence: same preset + width within jitter of the stored value →
+    // skip entirely, so repeated reports never touch the window server.
+    let prev_preset = win_state.chat_size_preset.lock().unwrap().clone();
+    let preset_now = preset.unwrap_or_else(|| prev_preset.clone());
+    let floor_w = width.max(window_layout::CHAT_MIN_WIDTH_FLOOR);
+    if preset_now == prev_preset {
+        if let Some(prev) = *win_state.chat_min_width.lock().unwrap() {
+            if (floor_w - prev).abs() <= 2.0 {
+                return Ok(());
+            }
+        }
+    }
+    *win_state.chat_size_preset.lock().unwrap() = preset_now.clone();
+
+    let chat = match app.get_webview_window("chat") {
+        Some(w) => w,
+        None => return Ok(()),
+    };
+    let screen = if let Some(monitor) = chat.current_monitor().ok().flatten() {
+        screen_info_from_tauri_monitor(&monitor)
+    } else {
+        Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
+    };
+
+    // Clamp: never wider than the work area (floor already applied above).
+    let min_w = floor_w.min(screen.work_area.width - 40.0);
+    *win_state.chat_min_width.lock().unwrap() = Some(min_w);
+
+    // Read geometry BEFORE set_min_size: if the current width is below the
+    // new minimum, macOS grows the window rightward immediately (top-left
+    // anchored), so a later read would see an already-shifted right edge.
+    let before = if let (Ok(pos), Ok(size), Ok(sf)) = (chat.outer_position(), chat.outer_size(), chat.scale_factor()) {
+        Some((pos.x as f64 / sf, pos.y as f64 / sf, size.width as f64 / sf, size.height as f64 / sf))
+    } else {
+        None
+    };
+
+    let _ = chat.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize { width: min_w, height: 300.0 })));
+
+    // While the sidebar is expanded the window is temporarily widened; only
+    // record state then — collapse restores a size the preset logic owns.
+    if win_state.sidebar_expanded.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+
+    let target = window_layout::compute_chat_width(Some(min_w), &preset_now)
+        .min(screen.work_area.width - 40.0);
+    if let Some((cur_x, cur_y, cur_w, cur_h)) = before {
+        if (cur_w - target).abs() > 1.0 {
+            // Prefer the authoritative layout: anchor to the character window
+            // (same formula as update_window_size_preset / drag-follow sync),
+            // but only while chat-follows-character is on — otherwise respect
+            // the user's manual placement and just keep the right edge fixed.
+            let char_anchor = if win_state.chat_follows_character.load(Ordering::SeqCst) {
+                app.get_webview_window("character").and_then(|character| {
+                    if !character.is_visible().unwrap_or(false) { return None; }
+                    let sf = character.scale_factor().unwrap_or(1.0);
+                    let (pos, size) = (character.outer_position().ok()?, character.outer_size().ok()?);
+                    Some((pos.x as f64 / sf, pos.y as f64 / sf, size.height as f64 / sf))
+                })
+            } else {
+                None
+            };
+
+            let (new_x, new_y) = match char_anchor {
+                Some((char_x, char_y, char_h)) => window_layout::position_chat_relative_to_character(
+                    char_x, char_y, char_h, target, cur_h,
+                ),
+                // Fallback: keep the pre-resize right edge (chat extends leftward).
+                None => (cur_x + (cur_w - target), cur_y),
+            };
+            let (cx, cy, _) = window_layout::clamp_to_work_area(&screen, new_x, new_y, target, cur_h);
+            let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: target, height: cur_h }));
+            let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x: cx, y: cy }));
+        }
+    }
     Ok(())
 }
 
@@ -2772,6 +2865,7 @@ pub fn run() {
             update_preferences,
             // Window size and shortcuts
             update_window_size_preset,
+            report_chat_min_width,
             update_shortcuts,
             // Event broadcasting
             emit_to_all,
