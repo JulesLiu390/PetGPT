@@ -2,15 +2,14 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion } from 'motion/react';
 import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
 import { FaPlug, FaUserGroup } from "react-icons/fa6";
-import { CgHello } from "react-icons/cg";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
-import { getSafeMood, EMOTION_MOODS, SYSTEM_STATES, ALL_MOODS, getRandomIdleState } from '../utils/moodDetector';
-import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, loadSocialConfig, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
+import { getRandomIdleState } from '../utils/moodDetector';
+import PseudoLive2DCharacter from '../components/Avatar/PseudoLive2DCharacter';
+import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
 
 // 拖动检测配置
-const DRAG_THRESHOLD = 5; // 移动超过 5px 视为拖动
-const CLICK_TIME_THRESHOLD = 200; // 200ms 内释放视为点击
+const DRAG_THRESHOLD = 8; // 留出轻微手抖空间，移动超过 8px 才视为拖动
 
 // ============ 状态系统常量 ============
 
@@ -30,20 +29,6 @@ const CHARACTER_STATE = {
 const IDLE_TIMEOUT_MS = 30000;      // 30秒无操作进入待机
 const IDLE_ANIMATION_INTERVAL_MS = 5000; // 待机动画切换间隔 5秒
 
-/**
- * 获取表情对应的图片文件名后缀
- * 所有内置皮肤均支持完整 mood 集：normal, idle-1/2/3, smile, sad, shocked, thinking
- * @param {string} mood - 表情/状态名称
- * @returns {string} 图片文件名后缀
- */
-const getMoodImageName = (mood) => {
-  return mood || 'normal';
-};
-
-
-
-
-
 export const Character = () => {
   // window.electron?.testOpen("open -a Calculator");
   
@@ -55,7 +40,7 @@ export const Character = () => {
   // 第三层：当前待机动画帧（idle-1/idle-2/idle-3）- 仅在 idle 状态下有效
   const [idleFrame, setIdleFrame] = useState("idle-1");
   
-  // 计算最终显示的表情/状态（用于图片加载）
+  // 计算最终显示的表情/状态（驱动分层皮肤）
   const getDisplayMood = useCallback(() => {
     switch (characterState) {
       case CHARACTER_STATE.THINKING:
@@ -71,21 +56,16 @@ export const Character = () => {
   // 兼容旧代码：characterMood 现在是计算属性
   const characterMood = getDisplayMood();
   
-  // 当前展示的图片路径
-  const [imgSrc, setImgSrc] = useState(null);
-  // 控制是否显示顶部按钮（传统 onMouseEnter/Leave，作为备用）
-  const [isShowOptions, setIsShowOptions] = useState(false);
   // 鼠标是否在窗口上（通过 Rust 轮询检测，即使窗口失去焦点也能工作）
   const [isMouseOver, setIsMouseOver] = useState(false);
   // 控制 Settings/Manage 窗口是否打开
   const [isManageVisible, setIsManageVisible] = useState(false);
   // 控制 Chat 窗口是否打开
   const [isChatVisible, setIsChatVisible] = useState(false);
-  const [imageName, setImageName] = useState("Glitch");
   const [currentPetId, setCurrentPetId] = useState(null);
   
   // 社交代理激活状态
-  const [socialActive, setSocialActive] = useState(false);
+  const [, setSocialActive] = useState(false);
   
   // 当 currentPetId 变化时，同步社交循环状态
   useEffect(() => {
@@ -264,7 +244,7 @@ export const Character = () => {
           // 优先尝试 getAssistant，失败则回退到 getPet
           try {
             foundPet = await tauri.getAssistant(petIdToLoad);
-          } catch (e) {
+          } catch {
             // 忽略，尝试旧 API
           }
           if (!foundPet) {
@@ -294,41 +274,18 @@ export const Character = () => {
         }
       }
       
-      // 设置角色图片和 ID
+      // 设置当前角色 ID。人物渲染已切到新的分层皮肤。
       if (foundPet) {
         setCurrentPetId(foundPet.id || foundPet._id);
-        if (foundPet.imageName) {
-          setImageName(foundPet.imageName);
-          console.log("[CharacterPage] Using character image:", foundPet.imageName);
-        }
       }
     } catch (error) {
       console.error("Error loading character:", error);
     }
   }, []);
 
-  // 启动时加载 + 初始化待机计时器
+  // 启动时加载角色。idle 计时器由上方唯一的初始化 effect 管理。
   useEffect(() => {
     loadCharacter();
-    
-    // 启动初始待机计时器
-    idleTimeoutRef.current = setTimeout(() => {
-      console.log('[Character] Initial idle timeout - entering idle state');
-      setCharacterState(CHARACTER_STATE.IDLE);
-    }, IDLE_TIMEOUT_MS);
-    
-    // 清理函数
-    return () => {
-      if (idleTimeoutRef.current) {
-        clearTimeout(idleTimeoutRef.current);
-      }
-      if (idleAnimationRef.current) {
-        clearInterval(idleAnimationRef.current);
-      }
-      if (moodResetTimerRef.current) {
-        clearTimeout(moodResetTimerRef.current);
-      }
-    };
   }, [loadCharacter]);
 
   // 监听宠物/助手更新事件
@@ -413,33 +370,23 @@ export const Character = () => {
 
   // 监听鼠标是否在 character 窗口上（通过 Rust 轮询，支持失焦状态）
   useEffect(() => {
-    let cleanup;
+    let cleanup = null;
+    let cancelled = false;
     const setupListener = async () => {
       const { listen } = await import('@tauri-apps/api/event');
-      cleanup = await listen('mouse-over-character', (event) => {
-        setIsMouseOver(event.payload);
-        if (event.payload) {
-          // 鼠标进入 → 启动 2 秒定时器
-          hoverIdleTimerRef.current = setTimeout(() => {
-            idleClickReadyRef.current = true;
-            setIdleClickReady(true);
-          }, HOVER_IDLE_DELAY);
-        } else {
-          // 鼠标离开 → 清除定时器并重置
-          if (hoverIdleTimerRef.current) {
-            clearTimeout(hoverIdleTimerRef.current);
-            hoverIdleTimerRef.current = null;
-          }
-          idleClickReadyRef.current = false;
-          setIdleClickReady(false);
-        }
+      const unlisten = await listen('mouse-over-character', (event) => {
+        setIsMouseOver(Boolean(event.payload));
       });
+      if (cancelled) unlisten();
+      else cleanup = unlisten;
     };
-    setupListener();
+    setupListener().catch(error => {
+      console.error('[Character] Failed to listen for mouse hover:', error);
+    });
 
     return () => {
-      if (cleanup) cleanup();
-      if (hoverIdleTimerRef.current) clearTimeout(hoverIdleTimerRef.current);
+      cancelled = true;
+      cleanup?.();
     };
   }, []);
 
@@ -504,9 +451,6 @@ export const Character = () => {
       if (moodResetTimerRef.current) {
         clearTimeout(moodResetTimerRef.current);
       }
-      if (pokeResetTimerRef.current) {
-        clearTimeout(pokeResetTimerRef.current);
-      }
     };
   }, [moodResetDelay, characterState, enterThinkingState, exitThinkingWithMood, resetIdleTimer]);
 
@@ -514,96 +458,21 @@ export const Character = () => {
   useEffect(() => {
     const handleCharacterId = (id) => {
       console.log("📩 Received character ID:", id);
-      const fetchCharacterImageName = async () => {
-        // 优先尝试 getAssistant，失败则回退到 getPet
-        let pet = null;
-        try {
-          pet = await tauri.getAssistant(id);
-        } catch (e) {
-          // 忽略，尝试旧 API
-        }
-        if (!pet) {
-          pet = await tauri.getPet(id);
-        }
-        if (pet && pet.imageName) {
-          setImageName(pet.imageName);
-        }
-      }
-      fetchCharacterImageName();
+      loadCharacter(id);
     };
     const cleanup = tauri.onCharacterId(handleCharacterId);
     return () => {
       if (cleanup) cleanup();
     };
-  }, []);
+  }, [loadCharacter]);
 
-  // onConversationId 已移除：以前用来根据 conversationId 查 petId 再查 imageName，
-  // 但 onCharacterId 已经直接用 petId 做同样的事情，无需多一次 getConversationById IPC。
-
-  // 根据 characterMood 动态加载对应图片
-  useEffect(() => {
-    const loadImage = async () => {
-      const imageNameSuffix = getMoodImageName(characterMood);
-      console.log(`[CharacterPage] Loading image for mood: ${characterMood} -> ${imageNameSuffix}`);
-
-      try {
-        // 内置皮肤：Glitch (default)、Maodie、LittlePony
-        if(imageName === 'default' || imageName === 'Glitch') {
-          const module = await import(`../assets/Glitch-${imageNameSuffix}.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Maodie") {
-          const module = await import(`../assets/Maodie-${imageNameSuffix}.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "LittlePony") {
-          const module = await import(`../assets/LittlePony-${imageNameSuffix}.png`);
-          setImgSrc(module.default);
-        } else if (imageName.startsWith("custom:")) {
-          const skinId = imageName.split(":")[1];
-          const base64Image = await tauri.readSkinImage(skinId, imageNameSuffix);
-          setImgSrc(base64Image);
-        } else {
-          const base64Image = await tauri.readPetImage(`${imageName}-${imageNameSuffix}.png`);
-          setImgSrc(base64Image);
-        }
-
-      } catch (err) {
-        console.error(`Failed to load image for mood: ${characterMood} (${imageNameSuffix})`, err);
-        // 如果失败，回退到 normal
-        try {
-          if(imageName === 'default' || imageName === 'Glitch') {
-            const module = await import(`../assets/Glitch-normal.png`);
-            setImgSrc(module.default);
-          } else if(imageName === "Maodie") {
-            const module = await import(`../assets/Maodie-normal.png`);
-            setImgSrc(module.default);
-          } else if(imageName === "LittlePony") {
-            const module = await import(`../assets/LittlePony-normal.png`);
-            setImgSrc(module.default);
-          } else if (imageName.startsWith("custom:")) {
-            const skinId = imageName.split(":")[1];
-            const base64Image = await tauri.readSkinImage(skinId, "normal");
-            setImgSrc(base64Image);
-          } else {
-            const base64Image = await tauri.readPetImage(`${imageName}-normal.png`);
-            setImgSrc(base64Image);
-          }
-        } catch (fallbackErr) {
-          console.error('Failed to load fallback image:', fallbackErr);
-          try {
-            const module = await import(`../assets/Glitch-normal.png`);
-            setImgSrc(module.default);
-          } catch (_) {}
-        }
-      }
-    };
-    loadImage();
-  }, [characterMood, imageName]);
+  // onConversationId 已移除：onCharacterId 已经直接用 petId 刷新当前角色上下文。
 
   // 各种点击事件 - 都会重置待机计时器
-  const handleClick = () => {
+  const handleClick = useCallback(() => {
     resetIdleTimer();
     tauri.toggleChatWindow();
-  };
+  }, [resetIdleTimer]);
   const handleClickApi = () => {
     resetIdleTimer();
     tauri.changeManageWindow('api');
@@ -723,131 +592,40 @@ export const Character = () => {
     };
   }, []);
 
-  // ========== 混合拖动方案 + 双击打扰系统 ==========
+  // ========== 人物单击与窗口拖动 ==========
   const dragState = useRef({
     isMouseDown: false,
     startX: 0,
     startY: 0,
-    startTime: 0,
     isDragging: false,
   });
-  
-  // 打扰相关状态（保留，待接入其他触发方式）
-  const pokeCountRef = useRef(0);              // 打扰计数
-  const pokeResetTimerRef = useRef(null);      // 打扰计数重置定时器
-  const POKE_ANGRY_THRESHOLD = 5;              // 触发愤怒的打扰次数
-  const POKE_RESET_DELAY = 10000;              // 打扰计数重置延迟（10秒）
-  const POKE_REACTION_DURATION = 1500;         // 被戳反应持续时间（1.5秒）
+  const dragMoveHandlerRef = useRef(null);
+  const dragUpHandlerRef = useRef(null);
+  const dragCancelHandlerRef = useRef(null);
 
-  // 悬浮 2 秒后切换光标，点击切换 idle
-  const HOVER_IDLE_DELAY = 2000;
-  const [idleClickReady, setIdleClickReady] = useState(false);
-  const idleClickReadyRef = useRef(false);
-  const hoverIdleTimerRef = useRef(null);
-  
-  /**
-   * 处理被戳（双击）
-   */
-  const handlePoke = useCallback(() => {
-    console.log('[Character] Poked! Count:', pokeCountRef.current + 1);
-    
-    // 重置待机计时器
-    resetIdleTimer();
-    
-    // 增加打扰计数
-    pokeCountRef.current += 1;
-    
-    // 重置打扰计数的定时器
-    if (pokeResetTimerRef.current) {
-      clearTimeout(pokeResetTimerRef.current);
+  const clearCharacterGestureListeners = useCallback(() => {
+    if (dragMoveHandlerRef.current) {
+      document.removeEventListener('mousemove', dragMoveHandlerRef.current);
     }
-    pokeResetTimerRef.current = setTimeout(() => {
-      console.log('[Character] Poke count reset');
-      pokeCountRef.current = 0;
-    }, POKE_RESET_DELAY);
-    
-    // 检查是否达到愤怒阈值
-    if (pokeCountRef.current >= POKE_ANGRY_THRESHOLD) {
-      console.log('[Character] Too many pokes! Getting angry...');
-      // 显示愤怒（用 sad 表情，因为 angry 图片映射到 sad）
-      setCharacterState(CHARACTER_STATE.ACTIVE);
-      setEmotionMood('sad');  // 使用 sad 作为"不耐烦"的表情
-      
-      // 一段时间后恢复并进入待机
-      setTimeout(() => {
-        setEmotionMood('normal');
-        pokeCountRef.current = 0;  // 重置计数
-      }, POKE_REACTION_DURATION * 2);
-    } else {
-      // 普通戳反应 - 显示 shocked 表情（惊讶）
-      setCharacterState(CHARACTER_STATE.ACTIVE);
-      setEmotionMood('shocked');
-      
-      // 短暂显示后恢复
-      setTimeout(() => {
-        setEmotionMood('normal');
-      }, POKE_REACTION_DURATION);
+    if (dragUpHandlerRef.current) {
+      document.removeEventListener('mouseup', dragUpHandlerRef.current);
     }
-  }, [resetIdleTimer]);
-
-  /**
-   * 切换 idle 状态（悬浮 2 秒后点击触发）
-   */
-  const toggleIdle = useCallback(() => {
-    setCharacterState(prev => {
-      if (prev === CHARACTER_STATE.IDLE) {
-        console.log('[Character] Toggle -> exit idle');
-        if (idleAnimationRef.current) {
-          clearInterval(idleAnimationRef.current);
-          idleAnimationRef.current = null;
-        }
-        setEmotionMood('normal');
-        if (idleTimeoutRef.current) clearTimeout(idleTimeoutRef.current);
-        idleTimeoutRef.current = setTimeout(() => {
-          setCharacterState(p => p !== CHARACTER_STATE.THINKING ? CHARACTER_STATE.IDLE : p);
-        }, IDLE_TIMEOUT_MS);
-        return CHARACTER_STATE.ACTIVE;
-      } else if (prev === CHARACTER_STATE.ACTIVE) {
-        console.log('[Character] Toggle -> enter idle');
-        if (idleTimeoutRef.current) {
-          clearTimeout(idleTimeoutRef.current);
-          idleTimeoutRef.current = null;
-        }
-        return CHARACTER_STATE.IDLE;
-      }
-      return prev;
-    });
-    // 重置悬浮状态，重新开始 2 秒计时
-    idleClickReadyRef.current = false;
-    setIdleClickReady(false);
-    if (hoverIdleTimerRef.current) {
-      clearTimeout(hoverIdleTimerRef.current);
+    if (dragCancelHandlerRef.current) {
+      window.removeEventListener('blur', dragCancelHandlerRef.current);
     }
-    hoverIdleTimerRef.current = setTimeout(() => {
-      idleClickReadyRef.current = true;
-      setIdleClickReady(true);
-    }, HOVER_IDLE_DELAY);
-  }, []);
-
-  const handleCharacterMouseDown = useCallback((e) => {
-    // 忽略右键和中键
-    if (e.button !== 0) return;
-    
-    dragState.current = {
-      isMouseDown: true,
-      startX: e.clientX,
-      startY: e.clientY,
-      startTime: Date.now(),
-      isDragging: false,
-    };
-    
-    // 添加全局事件监听
-    document.addEventListener('mousemove', handleCharacterMouseMove);
-    document.addEventListener('mouseup', handleCharacterMouseUp);
   }, []);
 
   const handleCharacterMouseMove = useCallback((e) => {
     if (!dragState.current.isMouseDown) return;
+
+    // A mouseup outside the webview may not reach document. Cancel as soon as
+    // the pointer returns without the primary button held.
+    if ((e.buttons & 1) === 0) {
+      clearCharacterGestureListeners();
+      dragState.current.isMouseDown = false;
+      dragState.current.isDragging = false;
+      return;
+    }
     
     const dx = e.clientX - dragState.current.startX;
     const dy = e.clientY - dragState.current.startY;
@@ -856,51 +634,58 @@ export const Character = () => {
     // 如果移动超过阈值且还没开始拖动，则开始拖动
     if (distance > DRAG_THRESHOLD && !dragState.current.isDragging) {
       dragState.current.isDragging = true;
-      // 调用 Tauri 的窗口拖动 API
-      tauri.startDragging();
-      
-      // 清理事件监听（拖动由系统接管）
-      document.removeEventListener('mousemove', handleCharacterMouseMove);
-      document.removeEventListener('mouseup', handleCharacterMouseUp);
       dragState.current.isMouseDown = false;
+      clearCharacterGestureListeners();
+      void tauri.startDragging().catch(error => {
+        console.error('[Character] Failed to start window drag:', error);
+      });
     }
-  }, []);
+  }, [clearCharacterGestureListeners]);
 
   const handleCharacterMouseUp = useCallback((e) => {
-    if (!dragState.current.isMouseDown) return;
-    
-    const elapsed = Date.now() - dragState.current.startTime;
+    if (e.button !== 0 || !dragState.current.isMouseDown) return;
+
     const dx = e.clientX - dragState.current.startX;
     const dy = e.clientY - dragState.current.startY;
     const distance = Math.sqrt(dx * dx + dy * dy);
-    
-    // 清理事件监听
-    document.removeEventListener('mousemove', handleCharacterMouseMove);
-    document.removeEventListener('mouseup', handleCharacterMouseUp);
-    
-    // 如果是快速点击且移动距离小，视为点击
-    if (elapsed < CLICK_TIME_THRESHOLD && distance < DRAG_THRESHOLD) {
-      if (idleClickReadyRef.current) {
-        // 光标已切换为 grab → 切换 idle 状态
-        console.log('[Character] Idle toggle click!');
-        toggleIdle();
-      } else {
-        // 普通单击 → 打开聊天窗口
-        handleClick();
-      }
+
+    clearCharacterGestureListeners();
+    if (!dragState.current.isDragging && distance <= DRAG_THRESHOLD) {
+      handleClick();
     }
-    
+
     dragState.current.isMouseDown = false;
     dragState.current.isDragging = false;
-  }, [toggleIdle]);
+  }, [clearCharacterGestureListeners, handleClick]);
 
-  // 清理函数
-  useEffect(() => {
-    return () => {
-      document.removeEventListener('mousemove', handleCharacterMouseMove);
-      document.removeEventListener('mouseup', handleCharacterMouseUp);
+  const cancelCharacterGesture = useCallback(() => {
+    clearCharacterGestureListeners();
+    dragState.current.isMouseDown = false;
+    dragState.current.isDragging = false;
+  }, [clearCharacterGestureListeners]);
+
+  dragMoveHandlerRef.current = handleCharacterMouseMove;
+  dragUpHandlerRef.current = handleCharacterMouseUp;
+  dragCancelHandlerRef.current = cancelCharacterGesture;
+
+  const handleCharacterMouseDown = useCallback((e) => {
+    if (e.button !== 0) return;
+
+    dragState.current = {
+      isMouseDown: true,
+      startX: e.clientX,
+      startY: e.clientY,
+      isDragging: false,
     };
+
+    document.addEventListener('mousemove', dragMoveHandlerRef.current);
+    document.addEventListener('mouseup', dragUpHandlerRef.current);
+    window.addEventListener('blur', dragCancelHandlerRef.current);
   }, []);
+
+  useEffect(() => {
+    return cancelCharacterGesture;
+  }, [cancelCharacterGesture]);
   // ========== 拖动方案结束 ==========
 
   useEffect(() => {
@@ -976,24 +761,10 @@ export const Character = () => {
 
       {/* 角色图片 - 可拖动区域 */}
       <div
-        className={`flex-1 w-full flex items-center justify-center ${idleClickReady ? 'cursor-grab active:cursor-grabbing' : 'cursor-default'}`}
+        className="flex-1 w-full flex items-center justify-center cursor-default"
         onMouseDown={handleCharacterMouseDown}
       >
-        {imgSrc && (
-        <img
-          src={imgSrc}
-          draggable="false"
-          alt=" "
-          className="w-full pointer-events-none
-              will-change-transform
-      transform
-      translate-z-0
-      bg-transparent
-      transition-none
-      select-none
-          "
-        />
-        )}
+        <PseudoLive2DCharacter mood={characterMood} />
       </div>
     </div>
   );

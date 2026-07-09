@@ -16,9 +16,10 @@ function pickAdapter(apiFormat) {
   return openaiAdapter;
 }
 import tauri from '../tauri';
-import { downloadUrlAsBase64, llmProxyCall } from '../tauri';
+import { downloadUrlAsBase64, llmProxyCall, llmProxyStream } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
 import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
+import { isSkillTool, executeSkillTool } from '../skills/index.js';
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
@@ -748,14 +749,23 @@ export const callLLMWithTools = async ({
             const isBufferSearch = isBufferSearchTool(call.name);
             const isIntentPlan = isIntentPlanTool(call.name);
             const isSubagent = isSubagentTool(call.name);
-            const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent;
-            console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan}`);
-            if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+            const isSkill = isSkillTool(call.name);
+            const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent || isSkill;
+            console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan} isSkill=${isSkill}`);
+            if (isSkill && !declaredToolNames.includes(call.name)) {
+              console.warn(`[MCP] ❌ Rejected undeclared Skill tool call: ${call.name}`);
+              isError = true;
+              toolResult = { error: `Skill tool "${call.name}" is not enabled for this turn.` };
+            } else if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
               console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
               isError = true;
               toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
             } else if (isBuiltin && builtinToolContext) {
               toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+            } else if (isSkill) {
+              toolResult = builtinToolContext
+                ? await executeSkillTool(call.name, call.arguments, builtinToolContext)
+                : { error: 'Skill runtime context is unavailable.' };
             } else if (isSocialFile && builtinToolContext) {
               toolResult = await executeSocialFileTool(call.name, call.arguments, builtinToolContext);
             } else if (isHistoryBuiltin && builtinToolContext) {
@@ -983,56 +993,15 @@ export const callLLMStreamWithTools = async ({
       }
     });
     
-    // 发送请求（流式：带超时保护）
-    const timeoutMs = 90000;
-    let timeoutId;
-    let internalAbort;
-    if (!abortSignal) {
-      internalAbort = new AbortController();
-      timeoutId = setTimeout(() => internalAbort.abort(), timeoutMs);
-    }
-    const effectiveSignal = abortSignal || internalAbort?.signal;
-    const response = await fetch(req.endpoint, {
-      method: 'POST',
-      headers: req.headers,
-      body: JSON.stringify(req.body),
-      signal: effectiveSignal,
-    }).catch(e => {
-      if (timeoutId) clearTimeout(timeoutId);
-      if (e.name === 'AbortError' && !abortSignal) {
-        throw new Error(`LLM stream request timed out after ${timeoutMs / 1000}s`);
-      }
-      throw e;
-    });
-    if (timeoutId) clearTimeout(timeoutId);
-    
-    if (!response.ok) {
-      const errorText = await response.text().catch(() => '');
-      let errorMessage = `API Error ${response.status}`;
-      try {
-        const errorData = JSON.parse(errorText);
-        errorMessage = errorData.error?.message || errorData.message || errorText || errorMessage;
-      } catch {
-        errorMessage = errorText || errorMessage;
-      }
-      console.error('[MCP] API Error:', response.status, errorMessage);
-      throw new Error(errorMessage);
-    }
-    
-    // 处理流式响应
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
+    // 处理流式响应。HTTP 请求走 Rust 代理，避免 WKWebView 在局域网/反代下抛 Load failed。
     let buffer = '';
     let iterationContent = '';
     
     // 收集流式工具调用
     const streamToolCalls = new Map(); // index -> {id, name, arguments}
-    
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      
-      buffer += decoder.decode(value, { stream: true });
+
+    const processStreamText = (chunkText) => {
+      buffer += chunkText;
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
       
@@ -1106,6 +1075,11 @@ export const callLLMStreamWithTools = async ({
           }
         }
       }
+    };
+
+    await llmProxyStream(req.endpoint, req.headers, req.body, processStreamText);
+    if (buffer.trim()) {
+      processStreamText('\n');
     }
     
     // 处理收集到的工具调用
@@ -1236,13 +1210,22 @@ export const callLLMStreamWithTools = async ({
           const isBufferSearch = isBufferSearchTool(call.name);
           const isIntentPlan = isIntentPlanTool(call.name);
           const isSubagent = isSubagentTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent;
-          if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
+          const isSkill = isSkillTool(call.name);
+          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent || isSkill;
+          if (isSkill && !declaredToolNames.includes(call.name)) {
+            console.warn(`[MCP] Rejected undeclared Skill tool call: ${call.name}`);
+            isError = true;
+            toolResult = { error: `Skill tool "${call.name}" is not enabled for this turn.` };
+          } else if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
             console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
             isError = true;
             toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
           } else if (isBuiltin && builtinToolContext) {
             toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
+          } else if (isSkill) {
+            toolResult = builtinToolContext
+              ? await executeSkillTool(call.name, call.arguments, builtinToolContext)
+              : { error: 'Skill runtime context is unavailable.' };
           } else if (isSocialFile && builtinToolContext) {
             toolResult = await executeSocialFileTool(call.name, call.arguments, builtinToolContext);
           } else if (isHistoryBuiltin && builtinToolContext) {

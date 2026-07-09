@@ -32,7 +32,7 @@ const HighlightText = ({ text, keyword }) => {
 
 export const Chatbox = () => {
   // 方案 C: 使用 Rust 内存缓存管理消息
-  const [{ navBarChats, updatedConversation, streamingReplies, characterMoods }, dispatch] = useStateValue();
+  const [{ navBarChats, updatedConversation, streamingReplies, characterMoods, suggestText = {} }, dispatch] = useStateValue();
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [windowVisible, setWindowVisible] = useState(true); // 窗口可见性状态，默认为 true
@@ -48,6 +48,11 @@ export const Chatbox = () => {
   const [availableAssistants, setAvailableAssistants] = useState([]);
   const [allAssistants, setAllAssistants] = useState([]); // 所有 assistants 列表
   const [showAssistantDropdown, setShowAssistantDropdown] = useState(false); // 底部 assistant 下拉菜单
+  // Stay disabled until persisted settings load, so an explicitly disabled
+  // preference can never race an eager suggestion request at startup.
+  const [quickReplyEnabled, setQuickReplyEnabled] = useState(false);
+  const [quickReplyRequest, setQuickReplyRequest] = useState(null);
+  const quickReplyRequestIdRef = useRef(0);
   // Per-tab chatbody status for "Memory updating" display
   const [chatbodyStatuses, setChatbodyStatuses] = useState({}); // { conversationId: status }
   
@@ -73,6 +78,21 @@ export const Chatbox = () => {
   
   // chatbodyStatus is for "Memory updating" display - use activeTabId state for immediate reactivity
   const chatbodyStatus = activeTabId ? (chatbodyStatuses[activeTabId] || '') : '';
+
+  const handleQuickReplySelect = useCallback((text, conversationId) => {
+    const reply = String(text || '').trim();
+    if (!quickReplyEnabled || !reply || !conversationId) return;
+    quickReplyRequestIdRef.current += 1;
+    setQuickReplyRequest({
+      id: quickReplyRequestIdRef.current,
+      conversationId,
+      text: reply,
+    });
+  }, [quickReplyEnabled]);
+
+  const handleQuickReplyHandled = useCallback((requestId) => {
+    setQuickReplyRequest(current => current?.id === requestId ? null : current);
+  }, []);
   
   // 切换侧边栏时调整窗口大小
   const handleToggleSidebar = () => {
@@ -174,9 +194,9 @@ export const Chatbox = () => {
     switchTabPrefix: MOD_KEY,
   });
 
-  // 加载快捷键设置
+  // 加载聊天相关设置
   useEffect(() => {
-    const loadHotkeySettings = async () => {
+    const loadChatSettings = async () => {
       try {
         const settings = await tauri.getSettings();
         setHotkeySettings({
@@ -184,20 +204,30 @@ export const Chatbox = () => {
           closeTabHotkey: settings.closeTabHotkey || `${MOD_KEY} + W`,
           switchTabPrefix: settings.switchTabPrefix || MOD_KEY,
         });
+        const enabled = settings.quickReplyEnabled !== false && settings.quickReplyEnabled !== 'false';
+        setQuickReplyEnabled(enabled);
+        if (!enabled) {
+          setQuickReplyRequest(null);
+          dispatch({ type: actionType.CLEAR_SUGGEST_TEXTS });
+        }
       } catch (error) {
-        console.error('[ChatboxBody] Error loading hotkey settings:', error);
+        console.error('[ChatboxBody] Error loading chat settings:', error);
       }
     };
-    loadHotkeySettings();
+    loadChatSettings();
 
     // 监听设置更新
     const cleanup = tauri.onSettingsUpdated?.((payload) => {
-      if (payload?.key?.includes('Hotkey') || payload?.key?.includes('switchTab')) {
-        loadHotkeySettings();
+      if (
+        payload?.key === 'quickReplyEnabled'
+        || payload?.key?.includes('Hotkey')
+        || payload?.key?.includes('switchTab')
+      ) {
+        loadChatSettings();
       }
     });
     return () => { if (cleanup) cleanup(); };
-  }, []);
+  }, [dispatch, MOD_KEY]);
 
   // 初始加载
   useEffect(() => {
@@ -1292,6 +1322,9 @@ export const Chatbox = () => {
                             isActive={tab.id === activeTabId}
                             showTitleBar={showTitleBar}
                             onBranchFromMessage={handleBranchFromMessage}
+                            quickReplies={quickReplyEnabled ? (suggestText[tab.id] || []) : []}
+                            quickReplyEnabled={quickReplyEnabled}
+                            onQuickReplySelect={(text) => handleQuickReplySelect(text, tab.id)}
                         />
                     </div>
                     );
@@ -1306,6 +1339,9 @@ export const Chatbox = () => {
                 sidebarOpen={sidebarOpen}
                 autoFocus={windowVisible}
                 activeTabId={activeTabId}
+                quickReplyEnabled={quickReplyEnabled}
+                quickReplyRequest={quickReplyRequest}
+                onQuickReplyHandled={handleQuickReplyHandled}
             />
         </div>
       </div>

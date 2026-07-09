@@ -5,41 +5,15 @@ import { FaPlus, FaPen } from 'react-icons/fa6';
 import { FaRobot } from 'react-icons/fa';
 import { PageLayout, Button, Badge } from '../components/UI/ui';
 import * as tauri from '../utils/tauri';
+import PseudoLive2DCharacter from '../components/Avatar/PseudoLive2DCharacter';
 
-const CustomImage = ({ imageName }) => {
-  const [imgSrc, setImgSrc] = useState("");
-
-  useEffect(() => {
-    const loadImage = async () => {
-      try {
-        // 内置皮肤：Glitch (default)、Maodie、LittlePony
-        if (imageName === "default" || imageName === "Glitch") {
-          const module = await import(`../assets/Glitch-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "Maodie") {
-          const module = await import(`../assets/Maodie-normal.png`);
-          setImgSrc(module.default);
-        } else if(imageName === "LittlePony") {
-          const module = await import(`../assets/LittlePony-normal.png`);
-          setImgSrc(module.default);
-        } else {
-          // 其他皮肤从文件系统加载
-          const base64Image = await tauri.readPetImage(`${imageName}-normal.png`);
-          setImgSrc(base64Image);
-        }
-      } catch (error) {
-        console.error("Error loading image:", error);
-      }
-    };
-    loadImage();
-  }, [imageName]);
-
-  return (
-    <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-100 shrink-0">
-      <img src={imgSrc} alt="Character" className="w-full h-full object-cover" />
+const AvatarPreview = () => (
+  <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-100 shrink-0">
+    <div className="w-full h-full scale-[1.28] translate-y-1">
+      <PseudoLive2DCharacter mood="normal" animated={false} />
     </div>
-  );
-};
+  </div>
+);
 
 const TruncatedText = ({ label, text }) => {
   const [expanded, setExpanded] = useState(false);
@@ -164,7 +138,7 @@ const SelectCharacterPage = () => {
                 key={assistant._id}
                 className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex items-start gap-3"
               >
-                <CustomImage imageName={assistant.imageName} />
+                <AvatarPreview />
                 <div className="min-w-0 flex-1">
                   <div className="flex items-start justify-between gap-2">
                     <div className="min-w-0">

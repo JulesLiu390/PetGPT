@@ -78,6 +78,43 @@ Extend AI capabilities with external tools:
 - **Server Management** — Start, stop, and configure MCP servers from the UI
 - **Per-Conversation Tools** — Enable/disable tools per chat session
 
+### 🧩 Per-Assistant Skills
+
+Add reusable workflows without loading every instruction into every prompt:
+
+- **Progressive Loading** — Only Skill metadata is injected initially; full instructions and references are loaded on demand
+- **Global Skill Library** — Maintain one shared Skill package and reuse it across assistants
+- **Simple Library Management** — Add and delete shared packages from the dedicated Skills page
+- **Per-Assistant Enablement** — Enable or disable individual Skills from the Assistant editor or directly from the Chat toolbar
+- **Tool Composition** — Skills explain how to combine the built-in tools and enabled MCP servers without granting new permissions
+- **Read-Only Runtime** — Chat can load Skill instructions and text references, but cannot execute arbitrary Skill scripts
+
+Add or delete Skills from **Management → Skills**. Choose which Skills are active
+from an Assistant's edit screen or the puzzle-piece menu in Chat. Both selectors
+share the same per-assistant configuration.
+
+Shared packages live at
+`<app-data>/skills/<skill-id>/SKILL.md`; optional private overrides live at
+`workspace/<pet-id>/skills/<skill-id>/SKILL.md`. If both locations contain the
+same Skill ID, the assistant-private package takes precedence. Each assistant
+still controls its own enabled Skill IDs.
+
+Every `SKILL.md` uses Markdown frontmatter:
+
+```markdown
+---
+name: Meeting Notes
+description: Turn a meeting transcript into decisions and action items.
+version: 1.0.0
+scopes: chat
+---
+
+# Instructions
+
+1. Identify decisions and unresolved questions.
+2. Assign action items only when the transcript names an owner.
+```
+
 ### 💾 Local Memory System
 
 Persistent memory for personalized interactions:

@@ -1,0 +1,713 @@
+{
+  "source": "/Users/jules/Documents/Projects/rss to video/ai_daily_news/card_renderer/live2d_renderer/images/new_images",
+  "canvas_size": [
+    1280,
+    1280
+  ],
+  "output_full": "/Users/jules/Documents/Projects/rss to video/ai_daily_news/card_renderer/live2d_renderer/images/new_images/rebuilt/reconstruction_from_layers.png",
+  "output_cropped": "/Users/jules/Documents/Projects/rss to video/ai_daily_news/card_renderer/live2d_renderer/images/new_images/rebuilt/reconstruction_from_layers_cropped.png",
+  "layers": [
+    {
+      "order": 0.0,
+      "name": "handwear-r",
+      "file": "composed_parts/00_handwear-r.png",
+      "crop_file": "components/00_handwear-r.png",
+      "depth_file": "handwear_depth.png",
+      "bbox": [
+        588,
+        477,
+        589,
+        478
+      ],
+      "origin": [
+        588,
+        477
+      ],
+      "size": [
+        1,
+        1
+      ],
+      "alpha_pixels": 1,
+      "depth_mean": 255.0,
+      "depth_min": 255,
+      "depth_max": 255
+    },
+    {
+      "order": 1.0,
+      "name": "back hair",
+      "file": "composed_parts/01_back hair.png",
+      "crop_file": "components/01_back_hair.png",
+      "depth_file": "back hair_depth.png",
+      "bbox": [
+        425,
+        153,
+        855,
+        653
+      ],
+      "origin": [
+        425,
+        153
+      ],
+      "size": [
+        430,
+        500
+      ],
+      "alpha_pixels": 123640,
+      "depth_mean": 245.41956486573923,
+      "depth_min": 33,
+      "depth_max": 255
+    },
+    {
+      "order": 2.0,
+      "name": "handwear-l",
+      "file": "composed_parts/02_handwear-l.png",
+      "crop_file": "components/02_handwear-l.png",
+      "depth_file": "handwear_depth.png",
+      "bbox": [
+        507,
+        363,
+        764,
+        585
+      ],
+      "origin": [
+        507,
+        363
+      ],
+      "size": [
+        257,
+        222
+      ],
+      "alpha_pixels": 2915,
+      "depth_mean": 235.9186963979417,
+      "depth_min": 83,
+      "depth_max": 255
+    },
+    {
+      "order": 3.0,
+      "name": "legwear",
+      "file": "composed_parts/03_legwear.png",
+      "crop_file": "components/03_legwear.png",
+      "depth_file": "legwear_depth.png",
+      "bbox": [
+        544,
+        683,
+        761,
+        1189
+      ],
+      "origin": [
+        544,
+        683
+      ],
+      "size": [
+        217,
+        506
+      ],
+      "alpha_pixels": 62804,
+      "depth_mean": 211.14680593592766,
+      "depth_min": 195,
+      "depth_max": 255
+    },
+    {
+      "order": 4.0,
+      "name": "footwear",
+      "file": "composed_parts/04_footwear.png",
+      "crop_file": "components/04_footwear.png",
+      "depth_file": "footwear_depth.png",
+      "bbox": [
+        600,
+        1104,
+        774,
+        1244
+      ],
+      "origin": [
+        600,
+        1104
+      ],
+      "size": [
+        174,
+        140
+      ],
+      "alpha_pixels": 11294,
+      "depth_mean": 208.2483619621038,
+      "depth_min": 192,
+      "depth_max": 255
+    },
+    {
+      "order": 5.0,
+      "name": "bottomwear",
+      "file": "composed_parts/05_bottomwear.png",
+      "crop_file": "components/05_bottomwear.png",
+      "depth_file": "bottomwear_depth.png",
+      "bbox": [
+        447,
+        562,
+        796,
+        805
+      ],
+      "origin": [
+        447,
+        562
+      ],
+      "size": [
+        349,
+        243
+      ],
+      "alpha_pixels": 60023,
+      "depth_mean": 190.4925445245989,
+      "depth_min": 175,
+      "depth_max": 255
+    },
+    {
+      "order": 7.0,
+      "name": "topwear",
+      "file": "composed_parts/07_topwear.png",
+      "crop_file": "components/07_topwear.png",
+      "depth_file": "topwear_depth.png",
+      "bbox": [
+        571,
+        331,
+        753,
+        583
+      ],
+      "origin": [
+        571,
+        331
+      ],
+      "size": [
+        182,
+        252
+      ],
+      "alpha_pixels": 38229,
+      "depth_mean": 166.50207957309897,
+      "depth_min": 139,
+      "depth_max": 255
+    },
+    {
+      "order": 7.5,
+      "name": "neck",
+      "file": "composed_parts/06_neck.png",
+      "crop_file": "components/07_5_neck.png",
+      "depth_file": "neck_depth.png",
+      "bbox": [
+        633,
+        295,
+        688,
+        363
+      ],
+      "origin": [
+        633,
+        295
+      ],
+      "size": [
+        55,
+        68
+      ],
+      "alpha_pixels": 2910,
+      "depth_mean": 186.02714776632303,
+      "depth_min": 169,
+      "depth_max": 255
+    },
+    {
+      "order": 8.0,
+      "name": "face",
+      "file": "composed_parts/08_face.png",
+      "crop_file": "components/08_face.png",
+      "depth_file": "face_depth.png",
+      "bbox": [
+        580,
+        199,
+        701,
+        330
+      ],
+      "origin": [
+        580,
+        199
+      ],
+      "size": [
+        121,
+        131
+      ],
+      "alpha_pixels": 11991,
+      "depth_mean": 147.63180718872488,
+      "depth_min": 131,
+      "depth_max": 254
+    },
+    {
+      "order": 9.0,
+      "name": "nose",
+      "file": "composed_parts/09_nose.png",
+      "crop_file": "components/09_nose.png",
+      "depth_file": "nose_depth.png",
+      "bbox": [
+        635,
+        279,
+        644,
+        291
+      ],
+      "origin": [
+        635,
+        279
+      ],
+      "size": [
+        9,
+        12
+      ],
+      "alpha_pixels": 90,
+      "depth_mean": 174.13333333333333,
+      "depth_min": 109,
+      "depth_max": 249
+    },
+    {
+      "order": 10.0,
+      "name": "ears-r",
+      "file": "composed_parts/10_ears-r.png",
+      "crop_file": "components/10_ears-r.png",
+      "depth_file": "ears_depth.png",
+      "bbox": [
+        581,
+        266,
+        612,
+        306
+      ],
+      "origin": [
+        581,
+        266
+      ],
+      "size": [
+        31,
+        40
+      ],
+      "alpha_pixels": 691,
+      "depth_mean": 157.7973950795948,
+      "depth_min": 129,
+      "depth_max": 250
+    },
+    {
+      "order": 11.0,
+      "name": "mouth",
+      "file": "composed_parts/11_mouth.png",
+      "crop_file": "components/11_mouth.png",
+      "depth_file": "mouth_depth.png",
+      "bbox": [
+        635,
+        296,
+        663,
+        310
+      ],
+      "origin": [
+        635,
+        296
+      ],
+      "size": [
+        28,
+        14
+      ],
+      "alpha_pixels": 268,
+      "depth_mean": 164.34328358208955,
+      "depth_min": 96,
+      "depth_max": 255
+    },
+    {
+      "order": 12.0,
+      "name": "ears-l",
+      "file": "composed_parts/12_ears-l.png",
+      "crop_file": "components/12_ears-l.png",
+      "depth_file": "ears_depth.png",
+      "bbox": [
+        688,
+        244,
+        712,
+        287
+      ],
+      "origin": [
+        688,
+        244
+      ],
+      "size": [
+        24,
+        43
+      ],
+      "alpha_pixels": 744,
+      "depth_mean": 149.42069892473117,
+      "depth_min": 128,
+      "depth_max": 250
+    },
+    {
+      "order": 13.0,
+      "name": "eyebrow-l",
+      "file": "composed_parts/13_eyebrow-l.png",
+      "crop_file": "components/13_eyebrow-l.png",
+      "depth_file": "eyebrow_depth.png",
+      "bbox": [
+        646,
+        234,
+        682,
+        242
+      ],
+      "origin": [
+        646,
+        234
+      ],
+      "size": [
+        36,
+        8
+      ],
+      "alpha_pixels": 156,
+      "depth_mean": 155.53846153846155,
+      "depth_min": 70,
+      "depth_max": 255
+    },
+    {
+      "order": 14.0,
+      "name": "eyebrow-r",
+      "file": "composed_parts/14_eyebrow-r.png",
+      "crop_file": "components/14_eyebrow-r.png",
+      "depth_file": "eyebrow_depth.png",
+      "bbox": [
+        590,
+        248,
+        618,
+        259
+      ],
+      "origin": [
+        590,
+        248
+      ],
+      "size": [
+        28,
+        11
+      ],
+      "alpha_pixels": 132,
+      "depth_mean": 160.1969696969697,
+      "depth_min": 65,
+      "depth_max": 255
+    },
+    {
+      "order": 15.0,
+      "name": "objects",
+      "file": "composed_parts/15_objects.png",
+      "crop_file": "components/15_objects.png",
+      "depth_file": "objects_depth.png",
+      "bbox": [
+        488,
+        349,
+        695,
+        658
+      ],
+      "origin": [
+        488,
+        349
+      ],
+      "size": [
+        207,
+        309
+      ],
+      "alpha_pixels": 39761,
+      "depth_mean": 111.4878398430623,
+      "depth_min": 63,
+      "depth_max": 255
+    },
+    {
+      "order": 16.0,
+      "name": "eyelash-r",
+      "file": "composed_parts/16_eyelash-r.png",
+      "crop_file": "components/16_eyelash-r.png",
+      "depth_file": "eyelash_depth.png",
+      "bbox": [
+        592,
+        260,
+        626,
+        284
+      ],
+      "origin": [
+        592,
+        260
+      ],
+      "size": [
+        34,
+        24
+      ],
+      "alpha_pixels": 364,
+      "depth_mean": 148.8131868131868,
+      "depth_min": 67,
+      "depth_max": 255
+    },
+    {
+      "order": 17.0,
+      "name": "eyewhite-r",
+      "file": "composed_parts/17_eyewhite-r.png",
+      "crop_file": "components/17_eyewhite-r.png",
+      "depth_file": "eyewhite_depth.png",
+      "bbox": [
+        598,
+        265,
+        628,
+        285
+      ],
+      "origin": [
+        598,
+        265
+      ],
+      "size": [
+        30,
+        20
+      ],
+      "alpha_pixels": 459,
+      "depth_mean": 105.359477124183,
+      "depth_min": 67,
+      "depth_max": 255
+    },
+    {
+      "order": 18.0,
+      "name": "eyewhite-l",
+      "file": "composed_parts/18_eyewhite-l.png",
+      "crop_file": "components/18_eyewhite-l.png",
+      "depth_file": "eyewhite_depth.png",
+      "bbox": [
+        654,
+        251,
+        685,
+        270
+      ],
+      "origin": [
+        654,
+        251
+      ],
+      "size": [
+        31,
+        19
+      ],
+      "alpha_pixels": 497,
+      "depth_mean": 101.43058350100604,
+      "depth_min": 62,
+      "depth_max": 255
+    },
+    {
+      "order": 19.0,
+      "name": "eyelash-l",
+      "file": "composed_parts/19_eyelash-l.png",
+      "crop_file": "components/19_eyelash-l.png",
+      "depth_file": "eyelash_depth.png",
+      "bbox": [
+        650,
+        247,
+        691,
+        271
+      ],
+      "origin": [
+        650,
+        247
+      ],
+      "size": [
+        41,
+        24
+      ],
+      "alpha_pixels": 484,
+      "depth_mean": 139.02685950413223,
+      "depth_min": 60,
+      "depth_max": 255
+    },
+    {
+      "order": 20.0,
+      "name": "irides-r",
+      "file": "composed_parts/20_irides-r.png",
+      "crop_file": "components/20_irides-r.png",
+      "depth_file": "irides_depth.png",
+      "bbox": [
+        606,
+        265,
+        625,
+        284
+      ],
+      "origin": [
+        606,
+        265
+      ],
+      "size": [
+        19,
+        19
+      ],
+      "alpha_pixels": 317,
+      "depth_mean": 93.96845425867508,
+      "depth_min": 66,
+      "depth_max": 255
+    },
+    {
+      "order": 21.0,
+      "name": "irides-l",
+      "file": "composed_parts/21_irides-l.png",
+      "crop_file": "components/21_irides-l.png",
+      "depth_file": "irides_depth.png",
+      "bbox": [
+        659,
+        251,
+        679,
+        271
+      ],
+      "origin": [
+        659,
+        251
+      ],
+      "size": [
+        20,
+        20
+      ],
+      "alpha_pixels": 349,
+      "depth_mean": 89.64756446991404,
+      "depth_min": 58,
+      "depth_max": 255
+    },
+    {
+      "order": 22.0,
+      "name": "front hair",
+      "file": "composed_parts/22_front hair.png",
+      "crop_file": "components/22_front_hair.png",
+      "depth_file": "front hair_depth.png",
+      "bbox": [
+        552,
+        162,
+        710,
+        415
+      ],
+      "origin": [
+        552,
+        162
+      ],
+      "size": [
+        158,
+        253
+      ],
+      "alpha_pixels": 17211,
+      "depth_mean": 87.86566730579281,
+      "depth_min": 31,
+      "depth_max": 255
+    }
+  ],
+  "generated_layers": [
+    {
+      "order": 14.2,
+      "name": "object-back",
+      "file": "generated/14_2_object_back.png",
+      "crop_file": "generated/14_2_object_back_cropped.png",
+      "depth_file": null,
+      "bbox": [
+        488,
+        349,
+        695,
+        658
+      ],
+      "origin": [
+        488,
+        349
+      ],
+      "size": [
+        207,
+        309
+      ],
+      "alpha_pixels": 21006,
+      "depth_mean": null,
+      "depth_min": null,
+      "depth_max": null
+    },
+    {
+      "order": 15.0,
+      "name": "object-front",
+      "file": "generated/15_0_object_front.png",
+      "crop_file": "generated/15_0_object_front_cropped.png",
+      "depth_file": null,
+      "bbox": [
+        491,
+        351,
+        693,
+        653
+      ],
+      "origin": [
+        491,
+        351
+      ],
+      "size": [
+        202,
+        302
+      ],
+      "alpha_pixels": 18755,
+      "depth_mean": null,
+      "depth_min": null,
+      "depth_max": null
+    },
+    {
+      "order": 5.5,
+      "name": "thigh-fallback",
+      "file": "generated/05_5_thigh_fallback.png",
+      "crop_file": "generated/05_5_thigh_fallback_cropped.png",
+      "depth_file": null,
+      "bbox": [
+        547,
+        752,
+        722,
+        833
+      ],
+      "origin": [
+        547,
+        752
+      ],
+      "size": [
+        175,
+        81
+      ],
+      "alpha_pixels": 7022,
+      "depth_mean": null,
+      "depth_min": null,
+      "depth_max": null
+    },
+    {
+      "order": 14.4,
+      "name": "sleeves-fallback",
+      "file": "generated/14_4_sleeves_fallback.png",
+      "crop_file": "generated/14_4_sleeves_fallback_cropped.png",
+      "depth_file": null,
+      "bbox": [
+        505,
+        362,
+        766,
+        586
+      ],
+      "origin": [
+        505,
+        362
+      ],
+      "size": [
+        261,
+        224
+      ],
+      "alpha_pixels": 28946,
+      "depth_mean": null,
+      "depth_min": null,
+      "depth_max": null
+    },
+    {
+      "order": 15.5,
+      "name": "hands-fallback",
+      "file": "generated/15_5_hands_fallback.png",
+      "crop_file": "generated/15_5_hands_fallback_cropped.png",
+      "depth_file": null,
+      "bbox": [
+        538,
+        479,
+        690,
+        584
+      ],
+      "origin": [
+        538,
+        479
+      ],
+      "size": [
+        152,
+        105
+      ],
+      "alpha_pixels": 5029,
+      "depth_mean": null,
+      "depth_min": null,
+      "depth_max": null
+    }
+  ]
+}

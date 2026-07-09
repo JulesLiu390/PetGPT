@@ -18,6 +18,12 @@ import { isPathAllowed, isSoulFile } from '../promptBuilder';
 
 const BUILTIN_TOOL_NAMES = new Set(['read', 'write', 'edit', 'generate_image']);
 
+function pathDeniedMessage(memoryEnabled) {
+  return memoryEnabled
+    ? '普通聊天只允许访问 SOUL.md、USER.md 和 MEMORY.md；Skills 请使用专用只读工具。'
+    : '记忆功能已关闭，只允许访问 SOUL.md。';
+}
+
 /**
  * 检查工具名是否为内置工具
  */
@@ -57,7 +63,7 @@ async function executeRead(petId, args, memoryEnabled) {
 
   // 权限检查：记忆 OFF 时只允许读取 SOUL.md
   if (!isPathAllowed(path, memoryEnabled)) {
-    return { error: '记忆功能已关闭，无法读取此文件。' };
+    return { error: pathDeniedMessage(memoryEnabled) };
   }
 
   try {
@@ -78,7 +84,7 @@ async function executeWrite(petId, args, memoryEnabled) {
 
   // 权限检查
   if (!isPathAllowed(path, memoryEnabled)) {
-    return { error: '记忆功能已关闭，无法写入此文件。' };
+    return { error: pathDeniedMessage(memoryEnabled) };
   }
 
   // SOUL.md 写入需要用户确认
@@ -108,7 +114,7 @@ async function executeEdit(petId, args, memoryEnabled) {
 
   // 权限检查
   if (!isPathAllowed(path, memoryEnabled)) {
-    return { error: '记忆功能已关闭，无法编辑此文件。' };
+    return { error: pathDeniedMessage(memoryEnabled) };
   }
 
   // SOUL.md 编辑需要用户确认

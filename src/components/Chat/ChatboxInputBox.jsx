@@ -1,22 +1,33 @@
 import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
-import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera, FaRobot } from "react-icons/fa6";
-import { AiOutlinePlus } from "react-icons/ai";
+import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera, FaPaperclip, FaRobot } from "react-icons/fa6";
+import { FiMoreHorizontal } from "react-icons/fi";
 import { BsFillRecordCircleFill } from "react-icons/bs";
 import { promptSuggestion, callOpenAILib, callOpenAILibStream } from '../../utils/openai';
 import { buildSystemPrompt, getBuiltinToolDefinitions, migrateFromOldSystem } from '../../utils/promptBuilder';
 import { MdOutlineCancel } from "react-icons/md";
-import { SiQuicktype } from "react-icons/si";
 import { useMcpTools } from '../../utils/mcp/useMcpTools';
 import { callLLMStreamWithTools } from '../../utils/mcp/toolExecutor';
 import McpToolbar from './McpToolbar';
+import SkillsToolbar from './SkillsToolbar';
 import SubagentPanel from './SubagentPanel';
+import CapabilityDrawer, { CapabilityTag, CapabilityToggleAction } from './CapabilityIsland';
+import { buildActiveCapabilityTags, getCapabilityIslandMinWidth } from './capabilityIslandModel.js';
+import { createQuickReplyRequestGate, getQuickReplySelectionAction, parseQuickReplyResponse } from './quickReplyModel.js';
 import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount } from '../../utils/subagentManager';
 import { getSubagentToolDefinition } from '../../utils/workspace/socialToolExecutor';
 import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
 import { listen } from '@tauri-apps/api/event';
+import { normalizeApiProviders } from '../../utils/apiProviders';
+import { buildSkillCatalogPrompt, createSkillToolContext, getEnabledSkills, getSkillToolDefinitions } from '../../utils/skills/index.js';
+import {
+  captureSubagentPermission,
+  isSubagentEnabledForConversation,
+  isSubagentPermissionCurrent,
+  setSubagentEnabledForConversation,
+} from '../../utils/subagentCapability.js';
 
 // ===== 模块级别全局变量 =====
 // 存储 Preferences 中的默认值，所有组件实例共享
@@ -151,9 +162,24 @@ const processMessagesForLLM = async (messages) => {
   return processedMessages;
 };
 
-export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, activeTabId }) => {
+export const ChatboxInputBox = ({
+  activePetId,
+  autoFocus = false,
+  activeTabId,
+  quickReplyEnabled = false,
+  quickReplyRequest,
+  onQuickReplyHandled,
+}) => {
   // 会话 ID ref（需要先声明，供其他地方引用）
   const conversationIdRef = useRef(null);
+  const quickReplyEnabledRef = useRef(Boolean(quickReplyEnabled));
+  const quickReplyGateRef = useRef(null);
+  const handleSendRef = useRef(null);
+  const lastQuickReplyRequestIdRef = useRef(null);
+  if (quickReplyGateRef.current === null) {
+    quickReplyGateRef.current = createQuickReplyRequestGate();
+  }
+  quickReplyEnabledRef.current = Boolean(quickReplyEnabled);
   
   // 按会话管理生成状态，支持多会话并行
   const [generatingConversations, setGeneratingConversations] = useState(new Set());
@@ -166,6 +192,10 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   // Subagent 状态
   const [showSubagentPanel, setShowSubagentPanel] = useState(false);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
+  const [subagentEnabledByConversation, setSubagentEnabledByConversation] = useState({});
+  const subagentEnabledByConversationRef = useRef({});
+  const subagentCapabilityRevisionsRef = useRef({});
+  const [showCapabilityDrawer, setShowCapabilityDrawer] = useState(false);
   // MCP 服务器启用状态 { [conversationId]: Set<string> }
   const [enabledMcpServersByConversation, setEnabledMcpServersByConversation] = useState({});
   // 追踪每个会话创建时的默认值（用于新 Tab 固化当时的默认值）
@@ -174,6 +204,26 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   
   // 获取当前会话的记忆状态
   const currentConvId = conversationIdRef.current || 'temp';
+  const subagentConversationId = activeTabId || currentConvId;
+  const subagentEnabled = isSubagentEnabledForConversation(
+    subagentEnabledByConversation,
+    subagentConversationId,
+  );
+
+  const setSubagentEnabled = (value) => {
+    const conversationId = activeTabId || conversationIdRef.current || 'temp';
+    const previous = subagentEnabledByConversationRef.current;
+    const current = isSubagentEnabledForConversation(previous, conversationId);
+    const next = typeof value === 'function' ? Boolean(value(current)) : Boolean(value);
+    if (next === current) return;
+
+    const updated = setSubagentEnabledForConversation(previous, conversationId, next);
+    subagentEnabledByConversationRef.current = updated;
+    const revisionKey = String(conversationId);
+    subagentCapabilityRevisionsRef.current[revisionKey] =
+      (subagentCapabilityRevisionsRef.current[revisionKey] || 0) + 1;
+    setSubagentEnabledByConversation(updated);
+  };
   
   // 获取当前会话的记忆状态
   // 逻辑：
@@ -224,14 +274,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       [convId]: typeof value === 'function' ? value(prev[convId] ?? new Set()) : value
     }));
   };
-
-  const [stateReply, setStateReply] = useState(null);
-  const [stateReplyConversationId, setStateReplyConversationId] = useState(null); // Track which conversation the reply belongs to
-  const [stateThisModel, setStateThisModel] = useState(null);
-  const [stateUserText, setStateUserText] = useState(null);
-  let reply = null;
-  let thisModel = null;
-  let _userText = null;
 
   // ============ 截图功能状态 ============
   // 截图功能现在使用独立窗口，不再需要本地选择器状态
@@ -518,7 +560,14 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   const stateValue = useStateValue();
   const [state, dispatch] = stateValue || [{}, () => {}];
   // 新方案: 使用 Rust TabState
-  const { suggestText: allSuggestTexts = {}, currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {}, apiProviders = [] } = state;
+  const { currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {}, apiProviders = [] } = state;
+
+  useEffect(() => {
+    quickReplyGateRef.current.settingsChanged();
+    if (!quickReplyEnabled) {
+      dispatch({ type: actionType.CLEAR_SUGGEST_TEXTS });
+    }
+  }, [quickReplyEnabled, dispatch]);
   
   // 兼容性：当前会话是否在生成
   // 使用 currentConversationId（来自 state）而不是 conversationIdRef.current
@@ -542,8 +591,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   
   // 本地消息状态 - 从 Rust TabState 加载
   const [userMessages, setUserMessages] = useState([]);
-  
-  const suggestText = allSuggestTexts[currentConversationId] || [];
   
   // 新方案: 使用 Rust TabState 订阅
   useEffect(() => {
@@ -596,13 +643,19 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   
   // 监听跨窗口的 API providers 更新事件
   useEffect(() => {
-    const unlisten = tauri.onApiProvidersUpdated((updatedProviders) => {
+    const unlisten = tauri.onApiProvidersUpdated(async (updatedProviders) => {
       console.log('[ChatboxInputBox] Received api-providers-updated event:', updatedProviders);
-      if (Array.isArray(updatedProviders) && dispatch) {
+      if (!dispatch) return;
+      try {
+        const providers = Array.isArray(updatedProviders)
+          ? updatedProviders
+          : await tauri.getApiProviders();
         dispatch({
           type: actionType.SET_API_PROVIDERS,
-          apiProviders: updatedProviders
+          apiProviders: normalizeApiProviders(providers)
         });
+      } catch (error) {
+        console.error('[ChatboxInputBox] Failed to refresh API providers:', error);
       }
     });
     return () => {
@@ -625,11 +678,19 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
         const chatFollows = payload.value !== false && payload.value !== "false";
         tauri.updatePreferences({ chatFollowsCharacter: chatFollows });
       }
+      if (payload?.key === 'quickReplyEnabled') {
+        const enabled = payload.value !== false && payload.value !== "false";
+        quickReplyEnabledRef.current = enabled;
+        quickReplyGateRef.current.settingsChanged();
+        if (!enabled) {
+          dispatch({ type: actionType.CLEAR_SUGGEST_TEXTS });
+        }
+      }
     });
     return () => {
       if (unlisten) unlisten();
     };
-  }, []);
+  }, [dispatch]);
   
   // 计算可见模型列表（当 apiProviders 变化时自动更新）
   const visibleModelsByProvider = useMemo(() => {
@@ -639,7 +700,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       console.warn('[ChatboxInputBox] apiProviders is not an array:', apiProviders);
       return [];
     }
-    return apiProviders.map(provider => {
+    return normalizeApiProviders(apiProviders).map(provider => {
       const models = provider.cachedModels || [];
       const hiddenModels = provider.hiddenModels || [];
       const visibleModels = models.filter(model => {
@@ -662,6 +723,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   const [userText, setUserText] = useState("");
   const [characterId, setCharacterId] = useState(null);
   const [petInfo, setPetInfo] = useState(null);
+  const capabilityPetId = activePetId || petInfo?._id;
   const [activeModelConfig, setActiveModelConfig] = useState(null);
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
   const [imageModelInfo, setImageModelInfo] = useState(null);
@@ -670,6 +732,14 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   const [founctionModel, setFounctionModel] = useState(null);
   const [system, setSystem] = useState(null);
   const [firstCharacter, setFirstCharacter] = useState(null)
+
+  // Reset transient popovers when the active Assistant changes. Skills now stay
+  // mounted in the compact row and keep their own count synchronized.
+  useEffect(() => {
+    setShowCapabilityDrawer(false);
+    setShowSubagentPanel(false);
+    setShowModelSelector(false);
+  }, [capabilityPetId]);
 
   // 启动时加载默认角色ID和偏好设置
   useEffect(() => {
@@ -851,39 +921,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     };
   }, []);
 
-  useEffect(() => {
-    // Use stateReplyConversationId to ensure suggestions go to the correct conversation
-    const conversationId = stateReplyConversationId;
-    const updateSuggestion = async() => {
-      thisModel = stateThisModel;
-      _userText = stateUserText;
-      
-      if (!thisModel || !stateReply || !conversationId) return;
-
-      try {
-        let suggestion = await promptSuggestion(
-            {user:_userText, assistant:stateReply.content},
-            getApiFormat(thisModel),
-            pickApiKey(thisModel.modelApiKey),
-            thisModel.modelName,
-            thisModel.modelUrl
-        )
-        if (suggestion && typeof suggestion === 'string') {
-            suggestion = suggestion.split("|")
-            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: suggestion, conversationId });
-        } else {
-            dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId });
-        }
-      } catch (error) {
-        console.error("Error getting suggestions:", error);
-        dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId });
-      }
-    };
-    if(stateReply != null && stateReplyConversationId != null) {
-      updateSuggestion();
-    }
-  }, [stateReply, stateReplyConversationId]);
-
   // 加载角色信息，并清理或保留对话历史
   useEffect(() => {
     if (!characterId) return;
@@ -932,13 +969,6 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
           // 更新当前 API 格式，用于 MCP 工具转换
           setCurrentApiFormat(getApiFormat(apiConfig));
           
-          thisModel = null;
-          if(functionModelInfo == null) {
-            thisModel = apiConfig;
-          } else {
-            thisModel = functionModelInfo;
-          }
-
           // 确保工作区默认文件存在（SOUL.md, USER.md）并迁移旧数据
           try {
             await migrateFromOldSystem(
@@ -978,12 +1008,20 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
 
   // Subscribe to subagent changes
   useEffect(() => {
+    const refreshActiveCount = () => {
+      setActiveSubagentCount(activeTabId
+        ? getActiveCount({ source: 'chat', conversationId: activeTabId })
+        : 0);
+    };
+    refreshActiveCount();
+
     const unsub = onSubagentChange((eventType, payload) => {
-      setActiveSubagentCount(getActiveCount());
+      refreshActiveCount();
       // When a chat-source subagent finishes, add notification
       if (payload?.entry?.source === 'chat' && (eventType === 'done' || eventType === 'timeout' || eventType === 'error')) {
-        setSubagentNotifications(prev => [...prev, {
+        setSubagentNotifications(prev => [...prev.filter(item => item.taskId !== payload.taskId), {
           taskId: payload.taskId,
+          conversationId: payload.entry.conversationId || null,
           task: payload.entry.task,
           status: payload.entry.status,
           result: payload.entry.result || null,
@@ -993,7 +1031,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
       }
     });
     return unsub;
-  }, []);
+  }, [activeTabId]);
 
   // Initialize subagent listeners when petInfo is available
   useEffect(() => {
@@ -1121,7 +1159,16 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   }, [currentConversationId]);
 
   const handleChange = (e) => {
-    setUserText(e.target.value);
+    const nextText = e.target.value;
+    if (!String(userText).trim() && String(nextText).trim() && currentConversationId) {
+      quickReplyGateRef.current.invalidateConversation(currentConversationId);
+      dispatch({
+        type: actionType.SET_SUGGEST_TEXT,
+        suggestText: [],
+        conversationId: currentConversationId,
+      });
+    }
+    setUserText(nextText);
   };
 
   // 中文/日文输入法事件
@@ -1203,11 +1250,27 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
   }, [expandedNotification]);
 
   // 发送消息
-  const handleSend = async () => {
+  const handleSend = async (
+    textOverride = null,
+    conversationIdOverride = null,
+    { includeAttachments = true, clearComposer = true } = {},
+  ) => {
+    let reply = null;
+    let thisModel = null;
+    let _userText = null;
     if (!characterId) {
       alert("Please select a character first!");
       return;
     }
+
+    // Lock Subagent permission before the first await. A later off → on toggle
+    // must not grant this already-started request a fresh capability token.
+    const subagentConversationIdAtSend = conversationIdOverride || activeTabId || conversationIdRef.current || 'temp';
+    const subagentPermission = captureSubagentPermission(
+      subagentEnabledByConversationRef.current,
+      subagentCapabilityRevisionsRef.current,
+      subagentConversationIdAtSend,
+    );
     
     // 重置 MCP 取消状态（开始新的对话）
     try {
@@ -1219,12 +1282,13 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     }
 
     let isRunFromHere = false;
-    let currentInputText = userText;
+    let currentInputText = typeof textOverride === 'string' ? textOverride : userText;
+    const messageAttachments = includeAttachments ? attachments : [];
     let runFromHereContent = null; // Store original multimodal content for re-run
 
     // 检查是否有内容可发送（文字或附件）
     const hasText = currentInputText.trim().length > 0;
-    const hasAttachments = attachments.length > 0;
+    const hasAttachments = messageAttachments.length > 0;
 
     if (!hasText && !hasAttachments) {
         // 没有文字也没有附件，检查是否是重新生成
@@ -1247,9 +1311,10 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     }
 
     // 🔒 锁定当前对话 ID，防止在等待 AI 回复期间切换标签导致数据错乱
-    let sendingConversationId = conversationIdRef.current || 'temp';
+    let sendingConversationId = subagentConversationIdAtSend;
     // 保存初始 ID 用于状态清理（因为 sendingConversationId 后面可能会变）
     const initialConversationId = sendingConversationId;
+    quickReplyGateRef.current.invalidateConversation(sendingConversationId);
     console.log('[handleSend] ★ sendingConversationId:', sendingConversationId, 'conversationIdRef:', conversationIdRef.current, 'currentConversationId:', currentConversationId);
     
     // 标记该会话正在生成
@@ -1268,13 +1333,13 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
         // RunFromHere content may contain file paths, need to process for LLM
         // We'll process it later with processMessagesForLLM
         llmContent = runFromHereContent;
-    } else if (attachments.length > 0) {
+    } else if (messageAttachments.length > 0) {
         // displayContent uses file paths (for persistence/display)
         displayContent = [{ type: "text", text: _userText }];
         // llmContent uses base64 data (for sending to LLM)
         llmContent = [{ type: "text", text: _userText }];
         
-        attachments.forEach(att => {
+        messageAttachments.forEach(att => {
             if (att.type === 'image_url') {
                 // Display: use saved file path for persistence
                 displayContent.push({ 
@@ -1315,7 +1380,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
         llmContent = _userText;
     }
 
-    setUserText("");
+    if (clearComposer) setUserText("");
     dispatch({ type: actionType.SET_SUGGEST_TEXT, suggestText: [], conversationId: sendingConversationId });
 
     // 【重要】在添加用户消息之前，先记录当前消息数量
@@ -1343,7 +1408,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
     // 同时更新角色窗口的 mood 动画
     tauri.sendMoodUpdate('thinking', initialConversationId);
 
-    if (inputRef.current) {
+    if (clearComposer && inputRef.current) {
       inputRef.current.value = "";
       inputRef.current.style.height = 'auto';
     }
@@ -1384,7 +1449,7 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
         content = processedContent[0]?.content || content;
       }
 
-      if (attachments.length > 0) {
+      if (messageAttachments.length > 0) {
           setAttachments([]);
       }
 
@@ -1431,10 +1496,20 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
             return content;
           })();
 
+      // Skills 采用渐进加载：system prompt 只放目录，完整内容通过 skill_load 按需读取。
+      let enabledSkills = [];
+      try {
+        enabledSkills = await getEnabledSkills(petInfo._id, 'chat');
+      } catch (error) {
+        // Skills 不可用不应阻断普通聊天（例如旧后端尚未注册 commands）。
+        console.warn('[Skills] Failed to load enabled skills:', error);
+      }
+
       if (!isDefaultPersonality) {
         const systemContent = await buildSystemPrompt({
           petId: petInfo._id,
           memoryEnabled,
+          skills: enabledSkills,
         });
         const systemPrompt = { role: "system", content: systemContent };
         fullMessages = [...timestampedHistory, systemPrompt, { role: "user", content: timestampedContent }];
@@ -1444,14 +1519,19 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
           systemContent = await buildSystemPrompt({
             petId: petInfo._id,
             memoryEnabled: true,
+            skills: enabledSkills,
           });
+        } else if (enabledSkills.length > 0) {
+          // Default personality with memory disabled should not accidentally
+          // re-introduce SOUL.md merely because Skills are enabled.
+          systemContent = buildSkillCatalogPrompt(enabledSkills);
         }
         systemContent += '\nYou are a helpful assistant.';
         const systemPrompt = { role: "system", content: systemContent };
         fullMessages = [...timestampedHistory, systemPrompt, { role: "user", content: timestampedContent }];
       }
       
-      if (attachments.length > 0) {
+      if (messageAttachments.length > 0) {
           setAttachments([]);
       }
 
@@ -1466,8 +1546,16 @@ export const ChatboxInputBox = ({ activePetId, sidebarOpen, autoFocus = false, a
 
     // 获取内置工具定义（read/write/edit）
     const builtinTools = getBuiltinToolDefinitions(memoryEnabled);
-    const subagentDef = getSubagentToolDefinition();
+    const exposeSubagentForSend = isSubagentPermissionCurrent(
+      subagentPermission,
+      subagentEnabledByConversationRef.current,
+      subagentCapabilityRevisionsRef.current,
+    );
+    const subagentDef = exposeSubagentForSend ? getSubagentToolDefinition() : null;
     if (subagentDef) builtinTools.push(subagentDef);
+    if (enabledSkills.length > 0) {
+      builtinTools.push(...getSkillToolDefinitions());
+    }
 
     // 合并 MCP 工具和内置工具
     const allMcpTools = [...(mcpEnabled && hasTools ? mcpTools : [])];
@@ -1573,9 +1661,20 @@ When using tools, please follow these guidelines:
           abortSignal: controller.signal,
           builtinToolContext: {
             petId: petInfo._id,
+            conversationId: subagentConversationIdAtSend,
             memoryEnabled,
+            ...createSkillToolContext(petInfo._id, enabledSkills),
             subagentRegistry,
-            subagentConfig: { enabled: true, model: 'sonnet', timeoutSecs: 300 },
+            subagentConfig: {
+              enabled: exposeSubagentForSend,
+              model: 'sonnet',
+              timeoutSecs: 300,
+              isEnabled: () => isSubagentPermissionCurrent(
+                subagentPermission,
+                subagentEnabledByConversationRef.current,
+                subagentCapabilityRevisionsRef.current,
+              ),
+            },
             imageModel: imageModelInfo,
           }
         });
@@ -1751,12 +1850,58 @@ When using tools, please follow these guidelines:
         });
     }
 
-    if (reply) {
-      setStateReply(reply);
-      setStateReplyConversationId(sendingConversationId); // Save the conversation ID with the reply
+    if (
+      quickReplyEnabledRef.current
+      && reply?.content
+      && thisModel
+      && _userText
+      && sendingConversationId
+      && sendingConversationId !== 'temp'
+    ) {
+      const conversationIdSnapshot = sendingConversationId;
+      const requestToken = quickReplyGateRef.current.begin(conversationIdSnapshot);
+      const userTextSnapshot = String(_userText);
+      const assistantTextSnapshot = Array.isArray(reply.content)
+        ? reply.content.filter(part => part?.type === 'text').map(part => part.text).join('\n')
+        : String(reply.content);
+      const suggestionConfig = {
+        apiFormat: getApiFormat(thisModel),
+        apiKey: pickApiKey(thisModel.modelApiKey),
+        model: thisModel.modelName,
+        baseUrl: thisModel.modelUrl,
+      };
+
+      void promptSuggestion(
+        { user: userTextSnapshot, assistant: assistantTextSnapshot },
+        suggestionConfig.apiFormat,
+        suggestionConfig.apiKey,
+        suggestionConfig.model,
+        suggestionConfig.baseUrl,
+      ).then((suggestion) => {
+        if (
+          !quickReplyEnabledRef.current
+          || !quickReplyGateRef.current.isCurrent(requestToken)
+        ) return;
+        const replies = parseQuickReplyResponse(suggestion);
+        dispatch({
+          type: actionType.SET_SUGGEST_TEXT,
+          suggestText: replies,
+          conversationId: conversationIdSnapshot,
+        });
+      }).catch((error) => {
+        console.error('Error getting Quick Reply suggestions:', error);
+        if (
+          quickReplyEnabledRef.current
+          && quickReplyGateRef.current.isCurrent(requestToken)
+        ) {
+          dispatch({
+            type: actionType.SET_SUGGEST_TEXT,
+            suggestText: [],
+            conversationId: conversationIdSnapshot,
+          });
+        }
+      });
     }
-    if (thisModel) setStateThisModel(thisModel);
-    if (_userText) setStateUserText(_userText);
     
     } catch (error) {
       console.error('[handleSend] Error occurred:', error);
@@ -1783,6 +1928,53 @@ When using tools, please follow these guidelines:
       tauri.updateChatbodyStatus?.("", initialConversationId);
     }
   };
+
+  handleSendRef.current = handleSend;
+
+  useEffect(() => {
+    if (!quickReplyRequest || lastQuickReplyRequestIdRef.current === quickReplyRequest.id) return;
+    lastQuickReplyRequestIdRef.current = quickReplyRequest.id;
+
+    const action = getQuickReplySelectionAction({
+      enabled: quickReplyEnabled,
+      request: quickReplyRequest,
+      currentConversationId,
+      isGenerating,
+      draft: userText,
+      attachmentCount: attachmentsRef.current.length,
+    });
+    onQuickReplyHandled?.(quickReplyRequest.id);
+    if (action === 'ignore') return;
+
+    quickReplyGateRef.current.invalidateConversation(quickReplyRequest.conversationId);
+    dispatch({
+      type: actionType.SET_SUGGEST_TEXT,
+      suggestText: [],
+      conversationId: quickReplyRequest.conversationId,
+    });
+
+    if (action === 'draft') {
+      setUserText(current => current.trim()
+        ? `${current.trim()}\n${quickReplyRequest.text}`
+        : quickReplyRequest.text);
+      requestAnimationFrame(() => inputRef.current?.focus());
+      return;
+    }
+
+    void handleSendRef.current?.(
+      quickReplyRequest.text,
+      quickReplyRequest.conversationId,
+      { includeAttachments: false, clearComposer: false },
+    );
+  }, [
+    quickReplyRequest,
+    quickReplyEnabled,
+    currentConversationId,
+    isGenerating,
+    userText,
+    onQuickReplyHandled,
+    dispatch,
+  ]);
 
 
   // Listen for regeneration requests
@@ -1823,24 +2015,6 @@ const handlePaste = async (e) => {
       }
     }
   }
-};
-
-const [showReplyOptions, setShowReplyOptions] = useState(false);
-const replyOptionsTimeoutRef = useRef(null);
-
-// 延迟关闭 Quick Reply 菜单
-const handleReplyOptionsLeave = () => {
-  replyOptionsTimeoutRef.current = setTimeout(() => {
-    setShowReplyOptions(false);
-  }, 300); // 300ms 延迟，给用户时间移动到菜单
-};
-
-const handleReplyOptionsEnter = () => {
-  if (replyOptionsTimeoutRef.current) {
-    clearTimeout(replyOptionsTimeoutRef.current);
-    replyOptionsTimeoutRef.current = null;
-  }
-  setShowReplyOptions(true);
 };
 
 const handleStop = async () => {
@@ -1902,46 +2076,44 @@ const handleStop = async () => {
   };
 
   const [attachments, setAttachments] = useState([]);
+  const attachmentsRef = useRef(attachments);
+  const previousAttachmentCountRef = useRef(attachments.length);
+  attachmentsRef.current = attachments;
   const fileInputRef = useRef(null);
   const [isDragging, setIsDragging] = useState(false);
-  const toolbarRowRef = useRef(null);
-  const lastReportedMinWidthRef = useRef(0);
-  const presetSentRef = useRef(false);
 
-  // 测量底部工具栏的最小内容宽度并上报后端：
-  // 后端据此设置 chat 窗口的最小宽度，并按 small/medium/large 比例缩放窗口，
-  // 保证工具栏（MCP 图标、模型选择器等）不被挤压裁切。
   useEffect(() => {
-    const timer = setTimeout(async () => {
-      const el = toolbarRowRef.current;
-      if (!el) return;
-      // 累加直接子元素宽度（左侧工具组 + 右侧发送组；absolute 弹层不计入），
-      // 比 scrollWidth 可靠：内容变窄时也能得到真实最小宽度，窗口才能缩回去。
-      let content = 0;
-      for (const child of el.children) {
-        content += child.getBoundingClientRect().width;
-      }
-      if (content <= 0) return;
-      // 行以外的窗口开销（输入框内边距、窗口边距）= 窗口宽 - 行可用宽
-      const chrome = window.innerWidth - el.clientWidth;
-      const needed = Math.ceil(content + chrome) + 24; // 左右组之间留 24px 呼吸空间
-      // 与上次上报几乎相同（±4px 抖动）时跳过，避免无谓的 IPC 和窗口操作
-      if (Math.abs(needed - lastReportedMinWidthRef.current) <= 4) return;
+    const previousCount = previousAttachmentCountRef.current;
+    previousAttachmentCountRef.current = attachments.length;
+    if (attachments.length <= previousCount || !currentConversationId) return;
+    quickReplyGateRef.current.invalidateConversation(currentConversationId);
+    dispatch({
+      type: actionType.SET_SUGGEST_TEXT,
+      suggestText: [],
+      conversationId: currentConversationId,
+    });
+  }, [attachments.length, currentConversationId, dispatch]);
+
+  // The persistent action row is designed to fit the 460px window floor. Keep
+  // that minimum stable so status tags, Skills counts, and sidebar changes can
+  // never make the native window jump wider.
+  useEffect(() => {
+    let disposed = false;
+    const reportMinimum = async () => {
       try {
-        // 档位只在首次上报时携带（让后端拿到启动时的用户设置）；
-        // 之后传 undefined，由后端沿用 updateWindowSizePreset 维护的当前档位。
-        let preset;
-        if (!presetSentRef.current) {
-          const settings = await tauri.getSettings();
-          preset = settings?.windowSize || 'medium';
-        }
-        await tauri.reportChatMinWidth(needed, preset);
-        presetSentRef.current = true;
-        lastReportedMinWidthRef.current = needed;
-      } catch { /* 非 Tauri 环境或后端未就绪时静默跳过 */ }
-    }, 300); // 等布局稳定后再测
-    return () => clearTimeout(timer);
-  }, [mcpServers, enabledMcpServers, memoryEnabled, activeSubagentCount, petInfo, overrideModel]);
+        const settings = await tauri.getSettings();
+        if (disposed) return;
+        await tauri.reportChatMinWidth(
+          getCapabilityIslandMinWidth(0),
+          settings?.windowSize || 'medium',
+        );
+      } catch { /* Non-Tauri previews do not report native window constraints. */ }
+    };
+    reportMinimum();
+    return () => {
+      disposed = true;
+    };
+  }, []);
 
   // 当窗口可见或切换 Tab 时，自动聚焦输入框
   useEffect(() => {
@@ -2048,12 +2220,53 @@ const handleStop = async () => {
     }
   };
 
+  const activeCapabilityTags = useMemo(() => buildActiveCapabilityTags({
+    enabledMcpServers,
+    activeSubagentCount,
+  }), [enabledMcpServers, activeSubagentCount]);
+
+  const visibleSubagentNotifications = useMemo(() => subagentNotifications.filter(notification => (
+    String(notification.conversationId || '') === String(subagentConversationId || '')
+  )), [subagentNotifications, subagentConversationId]);
+
+  const sendDisabled = !String(userText).trim()
+    && !isGenerating
+    && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user');
+
+  const showAssistantIdentity = Boolean(
+    petInfo?._id
+    && activePetId
+    && String(petInfo._id) === String(activePetId)
+  );
+
+  const closeCapabilityDrawer = useCallback(() => {
+    setShowCapabilityDrawer(false);
+  }, []);
+
+  const handleCapabilityToggle = useCallback(() => {
+    setShowModelSelector(false);
+    setShowSubagentPanel(false);
+    setShowCapabilityDrawer(open => !open);
+  }, []);
+
+  const openCapabilityDrawer = useCallback(() => {
+    setShowModelSelector(false);
+    setShowSubagentPanel(false);
+    setShowCapabilityDrawer(true);
+  }, []);
+
+  const openSubagentPanel = useCallback(() => {
+    setShowModelSelector(false);
+    setShowCapabilityDrawer(false);
+    setShowSubagentPanel(true);
+  }, []);
+
   return (
-    <div className="relative w-full max-w-3xl mx-auto px-4 pb-4 no-drag">
+    <div className="relative mx-auto w-full max-w-[32rem] px-4 pb-4 no-drag">
       {/* Subagent 完成通知条 */}
-      {subagentNotifications.length > 0 && (
+      {visibleSubagentNotifications.length > 0 && (
         <div className="mb-2 space-y-1.5">
-          {subagentNotifications.map(n => (
+          {visibleSubagentNotifications.map(n => (
             <div key={n.taskId} className={`rounded-xl border px-3 py-2 text-xs shadow-sm transition-all ${
               n.status === 'done' ? 'bg-emerald-50 border-emerald-200' :
               n.status === 'timeout' ? 'bg-amber-50 border-amber-200' :
@@ -2094,14 +2307,12 @@ const handleStop = async () => {
           ))}
         </div>
       )}
-      {/* 主输入框容器：模仿图2的紧凑风格 */}
+      {/* Compact translucent input panel. */}
       <div 
-        className={`relative rounded-[20px] p-3 shadow-sm border transition-all no-drag  ${
+        className={`relative rounded-[20px] border p-2.5 shadow-[0_10px_28px_rgba(15,23,42,0.09)] backdrop-blur-xl transition-all no-drag ${
           isDragging 
-            ? 'border-blue-400 bg-blue-50' 
-            : sidebarOpen
-              ? 'bg-[#e8e8e8] border-[#d0d0d0]'
-              : 'bg-[#c5c5c5] border-[#b0b0b0]'
+            ? 'border-blue-300 bg-blue-50/90'
+            : 'border-white/80 bg-white/75'
         }`}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}
@@ -2110,7 +2321,7 @@ const handleStop = async () => {
       >
         {/* Drag overlay */}
         {isDragging && (
-          <div className="absolute inset-0 flex items-center justify-center bg-blue-100/80 rounded-[26px] z-10 pointer-events-none">
+          <div className="absolute inset-0 flex items-center justify-center bg-blue-100/80 rounded-[20px] z-10 pointer-events-none">
             <div className="text-blue-500 font-medium text-sm">
               Drop files here
             </div>
@@ -2148,6 +2359,14 @@ const handleStop = async () => {
                 </div>
             ))}
         </div>
+        <input
+          type="file"
+          ref={fileInputRef}
+          onChange={handleFileSelect}
+          className="hidden"
+          multiple
+        />
+
         <textarea
           ref={inputRef}
           value={userText}
@@ -2156,266 +2375,296 @@ const handleStop = async () => {
           onCompositionStart={handleCompositionStart}
           onCompositionEnd={handleCompositionEnd}
           onInput={autoResize}
+          onFocus={closeCapabilityDrawer}
           placeholder="Ask anything"
           rows={1}
-          className="w-full bg-transparent outline-none text-gray-700 placeholder-gray-500 mb-8 no-drag resize-none overflow-y-auto" 
+          className="mb-0 mt-1 w-full resize-none overflow-y-auto bg-transparent text-sm text-gray-700 outline-none placeholder-gray-400 no-drag"
           style={{ maxHeight: '200px', minHeight: '24px' }}
           onChange={handleChange}
         />
 
+        <CapabilityDrawer
+          id="chat-capabilities-drawer"
+          isOpen={showCapabilityDrawer}
+          onClose={closeCapabilityDrawer}
+        >
+          <div className="grid grid-cols-1 gap-2">
+            <CapabilityToggleAction
+              icon={<FaRobot className="h-4 w-4" />}
+              label="CC Subagents"
+              description="Allow delegated background research"
+              checked={subagentEnabled}
+              runningCount={activeSubagentCount}
+              onChange={setSubagentEnabled}
+              onView={openSubagentPanel}
+            />
+          </div>
 
+          <div className="mt-2 rounded-xl border border-white/70 bg-white/60 p-2">
+            <div className="flex items-center justify-between px-1">
+              <div>
+                <div className="text-xs font-semibold text-slate-600">MCP tools</div>
+                <div className="text-[10px] text-slate-400">External capability servers</div>
+              </div>
+              <span className="rounded-full bg-blue-50 px-2 py-1 text-[9px] font-semibold text-blue-600">
+                {enabledMcpServers.size} enabled
+              </span>
+            </div>
+            <div className="mt-1 overflow-x-auto">
+              <McpToolbar
+                servers={mcpServers}
+                enabledServers={enabledMcpServers}
+                onToggleServer={toggleMcpServer}
+                onUpdateServer={updateMcpServer}
+                onDeleteServer={deleteMcpServer}
+                onEditIcon={editMcpServerIcon}
+                onBatchUpdateOrder={batchUpdateMcpOrder}
+                maxVisible={5}
+              />
+            </div>
+          </div>
+        </CapabilityDrawer>
 
-        {/* 底部工具栏：左侧功能开关 + 右侧发送按钮 */}
-        <div ref={toolbarRowRef} className="absolute bottom-2 left-3 right-2 flex items-center justify-between">
-            {/* Left: Tools (Agent, Memory, Search) */}
-            <div className="flex items-center gap-1">
-                <button 
-                    onClick={() => fileInputRef.current?.click()}
-                    className="p-2 text-gray-500 hover:bg-gray-400/50 rounded-full transition-colors"
-                    title="Add Attachment"
-                >
-                    <AiOutlinePlus className="w-5 h-5" />
-                </button>
-                <input 
-                    type="file" 
-                    ref={fileInputRef} 
-                    onChange={handleFileSelect} 
-                    className="hidden" 
-                    multiple 
-                />
-                
-                {/* 截图按钮 */}
-                <button 
-                    onClick={handleScreenshot}
-                    className="p-2 text-gray-500 hover:bg-gray-400/50 rounded-full transition-colors"
-                    title="Screenshot"
-                >
-                    <FaCamera className="w-4 h-4" />
-                </button>
+        {/* Compact bottom line: capabilities and send blend into the input panel. */}
+        <div
+          className="mt-1.5 flex items-center gap-2 px-0.5 pb-0.5"
+        >
+          <div className="flex min-w-0 flex-1 items-center gap-1">
+            <button
+              type="button"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Attach files"
+              title="Attach files"
+              className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-transparent text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+            >
+              <FaPaperclip className="h-4 w-4" />
+              {attachments.length > 0 && (
+                <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-white bg-amber-500 px-1 text-[9px] font-bold leading-none text-white">
+                  {attachments.length > 99 ? '99+' : attachments.length}
+                </span>
+              )}
+            </button>
 
-                {/* Subagent 按钮 */}
-                <div className="relative">
-                  <button
-                    onClick={() => setShowSubagentPanel(!showSubagentPanel)}
-                    className={`relative flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
-                      activeSubagentCount > 0
-                        ? 'px-3 py-1.5 text-blue-700 bg-blue-100 border border-blue-300'
-                        : 'p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent'
-                    }`}
-                    title={`CC Subagent (${activeSubagentCount} running)`}
-                  >
-                    <FaRobot className="w-4 h-4" />
-                    {activeSubagentCount > 0 && (
-                      <span className="text-xs">{activeSubagentCount}</span>
-                    )}
-                  </button>
-                  <SubagentPanel
-                    isOpen={showSubagentPanel}
-                    onClose={() => setShowSubagentPanel(false)}
+            <button
+              type="button"
+              onClick={() => {
+                closeCapabilityDrawer();
+                handleScreenshot();
+              }}
+              aria-label="Take screenshot"
+              title="Take screenshot"
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-transparent text-slate-500 transition-colors hover:bg-white/80 hover:text-slate-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400"
+            >
+              <FaCamera className="h-4 w-4" />
+            </button>
+
+            <button
+              type="button"
+              onClick={toggleMemory}
+              aria-label={memoryEnabled ? 'Disable Memory' : 'Enable Memory'}
+              aria-pressed={memoryEnabled}
+              title={memoryEnabled ? 'Memory enabled' : 'Memory disabled'}
+              className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full border transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${memoryEnabled
+                ? 'border-slate-200 bg-slate-200 text-slate-700'
+                : 'border-transparent text-slate-500 hover:bg-white/80 hover:text-slate-700'
+              }`}
+            >
+              <FaBrain className="h-4 w-4" />
+            </button>
+
+            <div className="shrink-0" onPointerDown={closeCapabilityDrawer}>
+              <SkillsToolbar petId={capabilityPetId} />
+            </div>
+
+            <div className="relative shrink-0">
+              <button
+                type="button"
+                onClick={handleCapabilityToggle}
+                aria-label={showCapabilityDrawer ? 'Close more capabilities' : 'Open more capabilities'}
+                aria-expanded={showCapabilityDrawer}
+                aria-controls="chat-capabilities-drawer"
+                title="More capabilities"
+                className={`flex h-8 w-8 items-center justify-center rounded-full border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-400 ${showCapabilityDrawer
+                  ? 'border-violet-200 bg-violet-100 text-violet-600'
+                  : 'border-transparent text-slate-500 hover:bg-white/80 hover:text-slate-700'
+                }`}
+              >
+                <FiMoreHorizontal className="h-5 w-5" />
+              </button>
+              <SubagentPanel
+                isOpen={showSubagentPanel}
+                onClose={() => setShowSubagentPanel(false)}
+                conversationId={subagentConversationId}
+              />
+            </div>
+
+            {activeCapabilityTags.length > 0 && (
+              <div
+                className="ml-0.5 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+                aria-label="Enabled chat capabilities"
+                aria-live="polite"
+              >
+                {activeCapabilityTags.map(tag => (
+                  <CapabilityTag
+                    key={tag.id}
+                    tag={tag}
+                    onClick={tag.id === 'subagents' ? openSubagentPanel : openCapabilityDrawer}
+                    actionLabel={tag.id === 'subagents' ? 'Open Subagent tasks' : undefined}
                   />
-                </div>
+                ))}
+              </div>
+            )}
+          </div>
 
+          <div className="ml-auto flex shrink-0 items-center gap-1.5">
+            {showAssistantIdentity && (
+              <div className="relative z-30 shrink-0">
                 <button
-                    onClick={toggleMemory}
-                    className={`flex items-center gap-1.5 rounded-full transition-all duration-200 text-sm font-medium ${
-                        memoryEnabled 
-                            ? "px-3 py-1.5 text-gray-700 bg-gray-300/80 border border-gray-400" 
-                            : "p-2 text-gray-500 hover:bg-gray-300/50 border border-transparent"
+                  type="button"
+                  onClick={() => {
+                    closeCapabilityDrawer();
+                    setShowSubagentPanel(false);
+                    setShowModelSelector(open => !open);
+                  }}
+                  aria-label={`Assistant ${petInfo.name}; model ${overrideModel ? overrideModel.modelName : (petInfo.modelName || '3.0')}`}
+                  aria-expanded={showModelSelector}
+                  aria-haspopup="listbox"
+                  title={`${petInfo.name} · ${overrideModel ? overrideModel.modelName : (petInfo.modelName || '3.0')}`}
+                  className={`flex h-8 max-w-[104px] select-none items-center gap-1.5 rounded-full border border-slate-200/80 bg-white/75 px-2.5 text-left text-[11px] font-medium text-gray-500 shadow-sm backdrop-blur-md transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400 ${showModelSelector
+                    ? 'scale-[0.98] border-blue-200'
+                    : 'hover:border-slate-300 hover:bg-white'
+                  }`}
+                >
+                  <span
+                    className={`h-1.5 w-1.5 shrink-0 rounded-full ${isGenerating
+                      ? 'animate-pulse bg-amber-400'
+                      : overrideModel ? 'bg-blue-400' : 'bg-violet-400'
                     }`}
-                    title="Memory"
-                >
-                    <FaBrain className="w-4 h-4" />
-                    {memoryEnabled && <span className="hidden sm:inline">Memory</span>}
+                    aria-hidden="true"
+                  />
+                  <span className="min-w-0 flex-1 truncate font-semibold text-slate-600">
+                    {petInfo.name}
+                  </span>
+                  <svg className={`h-2.5 w-2.5 shrink-0 text-gray-400 transition-transform duration-200 ${showModelSelector ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
                 </button>
-                
-                {/* MCP 工具栏 - 每个服务器单独的图标 */}
-                <McpToolbar
-                    servers={mcpServers}
-                    enabledServers={enabledMcpServers}
-                    onToggleServer={toggleMcpServer}
-                    onUpdateServer={updateMcpServer}
-                    onDeleteServer={deleteMcpServer}
-                    onEditIcon={editMcpServerIcon}
-                    onBatchUpdateOrder={batchUpdateMcpOrder}
-                    maxVisible={5}
-                />
 
-                {/* Model Info / Status with Custom Dropdown */}
-                {petInfo && (
-                    <div className="relative ml-2">
-                        {/* Trigger Button */}
-                        <div 
-                            onClick={() => setShowModelSelector(prev => !prev)}
-                            className={`px-2 py-1 rounded-md text-xs font-medium text-gray-500 flex flex-col justify-center select-none min-w-[60px] cursor-pointer transition-all duration-150 ${
-                                showModelSelector 
-                                    ? 'bg-gray-300/70 scale-[0.98]' 
-                                    : 'bg-gray-200/50 hover:bg-gray-300/50'
-                            }`}
-                        >
-                            <div className="font-bold text-gray-600 leading-tight truncate max-w-[100px] flex items-center gap-1">
-                                {petInfo.name}
-                                <svg className={`w-2.5 h-2.5 text-gray-400 transition-transform duration-200 ${showModelSelector ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-                                </svg>
-                            </div>
-                            <div className="text-[10px] text-gray-400 leading-tight truncate max-w-[100px] flex items-center gap-1">
-                                {isGenerating ? (
-                                    <span className="animate-pulse text-gray-500">Thinking...</span>
-                                ) : (
-                                    <span>{overrideModel ? overrideModel.modelName : (petInfo.modelName || "3.0")}</span>
-                                )}
-                            </div>
-                        </div>
-
-                        {/* Custom Popover Menu */}
-                        {showModelSelector && (
-                            <>
-                                {/* Backdrop to close menu */}
-                                <div 
-                                    className="fixed inset-0 z-40" 
-                                    onClick={() => setShowModelSelector(false)}
-                                />
-                                {/* Menu */}
-                                <div className="absolute bottom-full right-0 mb-2 w-64 max-h-[min(320px,50vh)] overflow-y-auto bg-white/95 backdrop-blur-md border border-gray-100 rounded-xl shadow-xl z-50 animate-in fade-in slide-in-from-bottom-2 duration-150">
-                                    {/* Default Option */}
-                                    <div className="p-1.5">
-                                        <div
-                                            onClick={() => {
-                                                setOverrideModel(null);
-                                                setShowModelSelector(false);
-                                            }}
-                                            className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors ${
-                                                !overrideModel 
-                                                    ? 'bg-blue-50 text-blue-600' 
-                                                    : 'hover:bg-gray-50 text-gray-700'
-                                            }`}
-                                        >
-                                            <span className="text-xs font-medium truncate">{petInfo.modelName || "Default"}</span>
-                                            {!overrideModel && (
-                                                <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                                </svg>
-                                            )}
-                                        </div>
-                                    </div>
-
-                                    {/* Divider */}
-                                    {visibleModelsByProvider.length > 0 && <div className="border-t border-gray-100 mx-2" />}
-
-                                    {/* Provider Groups */}
-                                    {visibleModelsByProvider.map(provider => {
-                                        return (
-                                            <div key={provider._id || provider.name} className="p-1.5">
-                                                <div className="text-[10px] text-gray-400 font-bold px-3 py-1 uppercase tracking-wide">
-                                                    {provider.name}
-                                                </div>
-                                                {provider.visibleModels.map(model => {
-                                                    const modelName = typeof model === 'string' ? model : model.name;
-                                                    const isSelected = overrideModel && 
-                                                        overrideModel._sourceId === provider._id && 
-                                                        overrideModel.modelName === modelName;
-                                                    return (
-                                                        <div
-                                                            key={`${provider._id}:${modelName}`}
-                                                            onClick={() => {
-                                                                setOverrideModel({
-                                                                    modelName: modelName,
-                                                                    modelUrl: provider.baseUrl,
-                                                                    modelApiKey: provider.apiKey,
-                                                                    apiFormat: provider.apiFormat || 'openai_compatible',
-                                                                    modelProvider: provider.name,
-                                                                    _sourceId: provider._id
-                                                                });
-                                                                setShowModelSelector(false);
-                                                            }}
-                                                            className={`flex items-center justify-between px-3 py-2 rounded-lg cursor-pointer transition-colors ${
-                                                                isSelected 
-                                                                    ? 'bg-blue-50 text-blue-600' 
-                                                                    : 'hover:bg-gray-50 text-gray-700'
-                                                            }`}
-                                                        >
-                                                            <span className="text-xs font-medium truncate">{modelName}</span>
-                                                            {isSelected && (
-                                                                <svg className="w-4 h-4 text-blue-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
-                                                                </svg>
-                                                            )}
-                                                        </div>
-                                                    );
-                                                })}
-                                            </div>
-                                        );
-                                    })}
-
-                                    {/* Empty State */}
-                                    {apiProviders.every(p => !Array.isArray(p.cachedModels) || p.cachedModels.length === 0) && (
-                                        <div className="p-3 text-center text-xs text-gray-400">
-                                            No models available. Add API providers in Settings.
-                                        </div>
-                                    )}
-                                </div>
-                            </>
-                        )}
-                    </div>
-                )}
-            </div>
-
-            {/* Right: Quick Reply & Send */}
-            <div className="flex items-center gap-2">
-                {/* Quick Reply Button */}
-                <div 
-                    className="relative"
-                    onMouseEnter={handleReplyOptionsEnter}
-                    onMouseLeave={handleReplyOptionsLeave}
-                >
+                {showModelSelector && (
+                  <>
                     <button
-                        onClick={() => setShowReplyOptions(prev => !prev)}
-                        className="p-2 rounded-full hover:bg-gray-300/50 transition-colors text-gray-400"
+                      type="button"
+                      tabIndex={-1}
+                      aria-label="Close model selector"
+                      className="fixed inset-0 z-40 cursor-default"
+                      onClick={() => setShowModelSelector(false)}
+                    />
+                    <div
+                      role="listbox"
+                      aria-label="Choose chat model"
+                      className="absolute bottom-full right-0 z-50 mb-2 max-h-[min(320px,50vh)] w-64 overflow-y-auto rounded-xl border border-gray-100 bg-white/95 shadow-xl backdrop-blur-md animate-in fade-in slide-in-from-bottom-2 duration-150"
                     >
-                        <SiQuicktype className="w-5 h-5" style={{ color:(suggestText.length == 0) ? "#c1c1c1" : "#555" }} />
-                    </button>
-                    
-                    {showReplyOptions && suggestText.length !== 0 && (
-                        <div 
-                            className="absolute bottom-full right-0 mb-2 w-48 bg-white border border-gray-200 rounded-xl shadow-xl p-2 z-50"
-                            onMouseEnter={handleReplyOptionsEnter}
-                            onMouseLeave={handleReplyOptionsLeave}
+                      <div className="p-1.5">
+                        <button
+                          type="button"
+                          role="option"
+                          aria-selected={!overrideModel}
+                          onClick={() => {
+                            setOverrideModel(null);
+                            setShowModelSelector(false);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors ${!overrideModel
+                            ? 'bg-blue-50 text-blue-600'
+                            : 'text-gray-700 hover:bg-gray-50'
+                          }`}
                         >
-                        <div className="font-bold mb-2 text-xs text-gray-400 px-1">Quick reply</div>
-                        <ul className="space-y-1">
-                            {suggestText.map((item, index) => (
-                            <li key={index} className="cursor-pointer hover:bg-gray-100 p-2 rounded-lg text-xs text-gray-700 transition-colors"
-                            onClick={() => {
-                                setUserText(userText + suggestText[index]);
-                                setShowReplyOptions(false);
-                            }}>
-                                {item}
-                            </li>
-                            ))}
-                        </ul>
-                        </div>
-                    )}
-                </div>
+                          <span className="truncate text-xs font-medium">{petInfo.modelName || 'Default'}</span>
+                          {!overrideModel && (
+                            <svg className="h-4 w-4 shrink-0 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                            </svg>
+                          )}
+                        </button>
+                      </div>
 
-                {/* Send Button */}
-                <button
-                    onClick={isGenerating ? handleStop : handleSend}
-                    disabled={!String(userText).trim() && !isGenerating && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')}
-                    className={`p-2.5 rounded-full transition-all duration-100 transform ${
-                        buttonAnimating ? 'scale-0' : 'scale-100'
-                    } ${
-                        !String(userText).trim() && !isGenerating && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')
-                        ? "bg-gray-400 cursor-not-allowed" 
-                        : "bg-black hover:bg-gray-900 shadow-lg"
-                    }`}
-                >
-                    {!isGenerating ? (
-                    <FaArrowUp className="w-4 h-4 text-white" />
-                    ) : (
-                    <FaStop className="w-4 h-4 text-white" />
-                    )}
-                </button>
-            </div>
+                      {visibleModelsByProvider.length > 0 && <div className="mx-2 border-t border-gray-100" />}
+
+                      {visibleModelsByProvider.map(provider => (
+                        <div key={provider._id || provider.name} className="p-1.5">
+                          <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wide text-gray-400">
+                            {provider.name}
+                          </div>
+                          {provider.visibleModels.map(model => {
+                            const modelName = typeof model === 'string' ? model : model.name;
+                            const isSelected = overrideModel
+                              && overrideModel._sourceId === provider._id
+                              && overrideModel.modelName === modelName;
+                            return (
+                              <button
+                                type="button"
+                                role="option"
+                                aria-selected={Boolean(isSelected)}
+                                key={`${provider._id}:${modelName}`}
+                                onClick={() => {
+                                  setOverrideModel({
+                                    modelName,
+                                    modelUrl: provider.baseUrl,
+                                    modelApiKey: provider.apiKey,
+                                    apiFormat: provider.apiFormat || 'openai_compatible',
+                                    modelProvider: provider.name,
+                                    _sourceId: provider._id,
+                                  });
+                                  setShowModelSelector(false);
+                                }}
+                                className={`flex w-full items-center justify-between rounded-lg px-3 py-2 text-left transition-colors ${isSelected
+                                  ? 'bg-blue-50 text-blue-600'
+                                  : 'text-gray-700 hover:bg-gray-50'
+                                }`}
+                              >
+                                <span className="truncate text-xs font-medium">{modelName}</span>
+                                {isSelected && (
+                                  <svg className="h-4 w-4 shrink-0 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ))}
+
+                      {apiProviders.every(p => !Array.isArray(p.cachedModels) || p.cachedModels.length === 0) && (
+                        <div className="p-3 text-center text-xs text-gray-400">
+                          No models available. Add API providers in Settings.
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                closeCapabilityDrawer();
+                setShowSubagentPanel(false);
+                if (isGenerating) handleStop();
+                else handleSend();
+              }}
+              disabled={sendDisabled}
+              aria-label={isGenerating ? 'Stop generating' : 'Send message'}
+              title={isGenerating ? 'Stop generating' : 'Send message'}
+              className={`rounded-full p-2.5 transition-all duration-100 transform focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 ${buttonAnimating ? 'scale-0' : 'scale-100'} ${sendDisabled
+                ? 'cursor-not-allowed bg-gray-400'
+                : 'bg-black shadow-lg hover:bg-gray-900 focus-visible:ring-gray-800'
+              }`}
+            >
+              {!isGenerating
+                ? <FaArrowUp className="h-4 w-4 text-white" />
+                : <FaStop className="h-4 w-4 text-white" />}
+            </button>
+          </div>
         </div>
       </div>
     </div>

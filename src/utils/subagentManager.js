@@ -6,6 +6,9 @@
  */
 
 import * as tauri from './tauri';
+import { matchesSubagentScope } from './subagentCapability.js';
+
+export { matchesSubagentScope } from './subagentCapability.js';
 
 /** taskId → { status, task, target, targetType, dir, outputPath, source, createdAt, readByIntent, error, result } */
 export const subagentRegistry = new Map();
@@ -23,6 +26,10 @@ function _notify(eventType, payload) {
   }
 }
 
+export function notifySubagentChange(eventType, payload) {
+  _notify(eventType, payload);
+}
+
 let _unlisteners = [];
 let _initialized = false;
 
@@ -38,6 +45,7 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
     if (!entry) return;
 
     const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
+    const workspacePetId = entry.petId || petId;
 
     // === Reflect (lessons review) subagent: special handling ===
     if (entry.source === 'lessons') {
@@ -46,11 +54,11 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
         const scratchPath = `social/${dir}/scratch_${entry.target}`;
 
         // 读取旧内容（用于 diff）
-        const oldLessons = await tauri.workspaceRead(petId, `${scratchPath}/lessons.json`).catch(() => '');
-        const oldPrinciples = await tauri.workspaceRead(petId, `${scratchPath}/principles.md`).catch(() => '');
+        const oldLessons = await tauri.workspaceRead(workspacePetId, `${scratchPath}/lessons.json`).catch(() => '');
+        const oldPrinciples = await tauri.workspaceRead(workspacePetId, `${scratchPath}/principles.md`).catch(() => '');
 
-        const lessonsOut = await tauri.workspaceRead(petId, `subagents/${taskId}/output/lessons.json`).catch(() => '');
-        const principlesOut = await tauri.workspaceRead(petId, `subagents/${taskId}/output/principles.md`).catch(() => '');
+        const lessonsOut = await tauri.workspaceRead(workspacePetId, `subagents/${taskId}/output/lessons.json`).catch(() => '');
+        const principlesOut = await tauri.workspaceRead(workspacePetId, `subagents/${taskId}/output/principles.md`).catch(() => '');
 
         if (lessonsOut || principlesOut) {
           if (lessonsOut) {
@@ -60,11 +68,11 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
               addLog?.('warn', `🪞 Reflect: lessons.json invalid, skipping`, null, entry.target);
             }
             if (lessonsValid) {
-              await tauri.workspaceWrite(petId, `${scratchPath}/lessons.json`, lessonsOut);
+              await tauri.workspaceWrite(workspacePetId, `${scratchPath}/lessons.json`, lessonsOut);
             }
           }
           if (principlesOut) {
-            await tauri.workspaceWrite(petId, `${scratchPath}/principles.md`, principlesOut);
+            await tauri.workspaceWrite(workspacePetId, `${scratchPath}/principles.md`, principlesOut);
           }
           entry.status = 'done';
           addLog?.('reflect', `🪞 Reflect done (${elapsed}s)`,
@@ -88,17 +96,17 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
           JSON.stringify({ taskId, elapsed, status: 'failed', error: entry.error }),
           entry.target);
       }
-      _cleanupWorkspace(petId, taskId);
+      _cleanupWorkspace(workspacePetId, taskId);
       _notify('done', { taskId, entry });
       return;
     }
 
     // === Normal CC subagent handling ===
     try {
-      const result = await tauri.workspaceRead(petId, `subagents/${taskId}/output/result.md`).catch(() => '');
+      const result = await tauri.workspaceRead(workspacePetId, `subagents/${taskId}/output/result.md`).catch(() => '');
       if (result && result.trim()) {
         if (entry.outputPath) {
-          await tauri.workspaceWrite(petId, entry.outputPath, result);
+          await tauri.workspaceWrite(workspacePetId, entry.outputPath, result);
         }
         entry.status = 'done';
         entry.result = result;
@@ -106,7 +114,7 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
           JSON.stringify({ taskId, task: entry.task, elapsed, resultPreview: result.substring(0, 500), resultLen: result.length, status: 'done' }),
           entry.target);
         // Append to cc_index.jsonl
-        _appendIndex(petId, entry, { status: 'done', elapsed, resultLen: result.length });
+        _appendIndex(workspacePetId, entry, { status: 'done', elapsed, resultLen: result.length });
       } else {
         entry.status = 'failed';
         const stderrPreview = stderr ? stderr.substring(0, 500) : '';
@@ -114,16 +122,16 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
         addLog?.('subagent', `❌ subagent error: ${taskId}: ${entry.error}`,
           JSON.stringify({ taskId, task: entry.task, status: 'failed', error: entry.error, stderr: stderrPreview }),
           entry.target);
-        _appendIndex(petId, entry, { status: 'failed', elapsed, error: entry.error });
+        _appendIndex(workspacePetId, entry, { status: 'failed', elapsed, error: entry.error });
       }
     } catch (e) {
       entry.status = 'failed';
       entry.error = e.message || String(e);
       addLog?.('error', `❌ subagent error: ${taskId}: ${entry.error}`, null, entry.target);
-      _appendIndex(petId, entry, { status: 'failed', elapsed, error: entry.error });
+      _appendIndex(workspacePetId, entry, { status: 'failed', elapsed, error: entry.error });
     }
 
-    _cleanupWorkspace(petId, taskId);
+    _cleanupWorkspace(workspacePetId, taskId);
     _notify('done', { taskId, entry });
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
   });
@@ -132,13 +140,14 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
   const ul2 = await tauri.onSubagentEvent('subagent-timeout', async ({ taskId }) => {
     const entry = subagentRegistry.get(taskId);
     if (!entry) return;
+    const workspacePetId = entry.petId || petId;
     entry.status = 'timeout';
     const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
     addLog?.('subagent', `⏰ subagent timeout: ${taskId} (${elapsed}s)`,
       JSON.stringify({ taskId, task: entry.task, status: 'timeout' }),
       entry.target);
-    _appendIndex(petId, entry, { status: 'timeout', elapsed });
-    _cleanupWorkspace(petId, taskId);
+    _appendIndex(workspacePetId, entry, { status: 'timeout', elapsed });
+    _cleanupWorkspace(workspacePetId, taskId);
     _notify('timeout', { taskId, entry });
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
   });
@@ -147,14 +156,15 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
   const ul3 = await tauri.onSubagentEvent('subagent-error', async ({ taskId, error }) => {
     const entry = subagentRegistry.get(taskId);
     if (!entry) return;
+    const workspacePetId = entry.petId || petId;
     entry.status = 'failed';
     entry.error = error;
     const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
     addLog?.('subagent', `❌ subagent error: ${taskId}: ${error}`,
       JSON.stringify({ taskId, task: entry.task, status: 'failed', error }),
       entry.target);
-    _appendIndex(petId, entry, { status: 'failed', elapsed, error });
-    _cleanupWorkspace(petId, taskId);
+    _appendIndex(workspacePetId, entry, { status: 'failed', elapsed, error });
+    _cleanupWorkspace(workspacePetId, taskId);
     _notify('error', { taskId, entry });
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
   });
@@ -187,10 +197,10 @@ export function killBySource(source) {
   _notify('clear', { source });
 }
 
-export function getActiveCount() {
+export function getActiveCount(scope = {}) {
   let n = 0;
   for (const entry of subagentRegistry.values()) {
-    if (entry.status === 'running') n++;
+    if (entry.status === 'running' && matchesSubagentScope(entry, scope)) n++;
   }
   return n;
 }

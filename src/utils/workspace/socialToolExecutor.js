@@ -11,6 +11,8 @@
 
 import * as tauri from '../tauri';
 import { downloadUrlAsBase64 } from '../tauri';
+import { notifySubagentChange } from '../subagentManager.js';
+import { isSubagentRuntimeEnabled } from '../subagentCapability.js';
 
 // ============ 常量 ============
 
@@ -1648,9 +1650,9 @@ export async function executeSubagentTool(toolName, args, context) {
   if (toolName === 'voice_send') return executeVoiceSend(args, context);
   if (toolName !== 'dispatch_subagent') return { error: `未知工具: ${toolName}` };
 
-  const { petId, targetId, targetType, subagentRegistry, subagentConfig } = context;
+  const { petId, targetId, targetType, conversationId, subagentRegistry, subagentConfig } = context;
   if (!petId) return { error: '缺少 petId' };
-  if (!subagentConfig?.enabled) return { error: 'Subagent 功能未启用' };
+  if (!isSubagentRuntimeEnabled(subagentConfig)) return { error: 'Subagent 功能未启用' };
 
   const { task, maxLen = 500 } = args;
   if (!task || typeof task !== 'string' || task.trim().length === 0) {
@@ -1679,11 +1681,47 @@ ${task.trim()}
 - 必须附上信息来源 URL（每个关键结论标注出处链接）
 `;
 
+  // 生成描述性文件名: cc_{task前20字}_{taskId}.md
+  const safeName = task.trim().substring(0, 20).replace(/[\\:*?"<>|\s/]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  const resultFileName = `cc_${safeName}_${taskId}.md`;
+  const outputPath = source === 'social' && targetId
+    ? `social/${dir}/scratch_${targetId}/${resultFileName}`
+    : null;
+  let registryEntry = null;
+
   try {
     await tauri.workspaceWrite(petId, `subagents/${taskId}/CLAUDE.md`, claudeMd);
     await tauri.workspaceWrite(petId, `subagents/${taskId}/output/.gitkeep`, '');
 
     const cwd = await tauri.workspaceGetPath(petId, `subagents/${taskId}`, false);
+
+    // Re-check immediately before spawning. A chat can disable Subagents while
+    // the model is still preparing this tool call.
+    if (!isSubagentRuntimeEnabled(subagentConfig)) {
+      await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/output/.gitkeep`).catch(() => {});
+      await tauri.workspaceDeleteFile(petId, `subagents/${taskId}/CLAUDE.md`).catch(() => {});
+      return { error: 'Subagent 功能已关闭，未启动后台任务' };
+    }
+
+    registryEntry = {
+      status: 'running',
+      task: task.trim(),
+      petId,
+      conversationId: conversationId || null,
+      target: targetId || 'chat',
+      targetType: targetType || 'chat',
+      dir,
+      outputPath,
+      resultFileName,
+      source,
+      createdAt: Date.now(),
+    };
+    if (subagentRegistry) {
+      // Register before spawn so an immediately completing process cannot beat
+      // the event listener and disappear from the task panel.
+      subagentRegistry.set(taskId, registryEntry);
+      notifySubagentChange('started', { taskId, entry: registryEntry });
+    }
 
     await tauri.subagentSpawn(
       taskId,
@@ -1693,31 +1731,15 @@ ${task.trim()}
       claudeMd,
     );
 
-    // 生成描述性文件名: cc_{task前20字}_{taskId}.md
-    const safeName = task.trim().substring(0, 20).replace(/[\/\\:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
-    const resultFileName = `cc_${safeName}_${taskId}.md`;
-    const outputPath = source === 'social' && targetId
-      ? `social/${dir}/scratch_${targetId}/${resultFileName}`
-      : null;
-
-    if (subagentRegistry) {
-      subagentRegistry.set(taskId, {
-        status: 'running',
-        task: task.trim(),
-        target: targetId || 'chat',
-        targetType: targetType || 'chat',
-        dir,
-        outputPath,
-        resultFileName,
-        source,
-        createdAt: Date.now(),
-      });
-    }
-
     return {
       content: [{ type: 'text', text: `✓ 后台任务已发起: ${taskId}\n任务: ${task.trim()}${outputPath ? `\n结果将写入 ${outputPath}` : ''}` }],
     };
   } catch (e) {
+    if (registryEntry) {
+      registryEntry.status = 'failed';
+      registryEntry.error = e.message || String(e);
+      notifySubagentChange('error', { taskId, entry: registryEntry });
+    }
     return { error: `Subagent 发起失败: ${e.message || e}` };
   }
 }

@@ -1,0 +1,400 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  color: #27221d;
+  background: #efece5;
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+body {
+  margin: 0;
+  min-width: 100vw;
+  min-height: 100vh;
+}
+
+.page {
+  display: grid;
+  grid-template-columns: minmax(560px, 1fr) 360px;
+  min-height: 100vh;
+}
+
+.preview-panel {
+  display: grid;
+  place-items: center;
+  padding: 40px;
+  background:
+    linear-gradient(45deg, rgba(42, 37, 33, 0.055) 25%, transparent 25%),
+    linear-gradient(-45deg, rgba(42, 37, 33, 0.055) 25%, transparent 25%),
+    linear-gradient(45deg, transparent 75%, rgba(42, 37, 33, 0.055) 75%),
+    linear-gradient(-45deg, transparent 75%, rgba(42, 37, 33, 0.055) 75%);
+  background-color: #f8f6f0;
+  background-position: 0 0, 0 16px, 16px -16px, -16px 0;
+  background-size: 32px 32px;
+}
+
+.stage-shell {
+  width: min(82vh, 620px);
+  aspect-ratio: 1;
+  position: relative;
+  border-radius: 18px;
+  border: 1px solid rgba(69, 58, 48, 0.14);
+  background: rgba(255, 255, 255, 0.4);
+  box-shadow: 0 24px 80px rgba(65, 51, 40, 0.16);
+  overflow: hidden;
+}
+
+.avatar-scale {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1280px;
+  height: 1280px;
+  transform: translate(-50%, -50%) scale(0.484375);
+  transform-origin: center;
+}
+
+.avatar-stage {
+  position: relative;
+  width: var(--canvas-size);
+  height: var(--canvas-size);
+  animation: avatar-float 4.8s ease-in-out infinite;
+}
+
+.avatar-layer-slot {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: var(--w);
+  height: var(--h);
+  transform-origin: var(--pivot-x) var(--pivot-y);
+  will-change: transform, opacity, filter;
+}
+
+.avatar-layer-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+  pointer-events: none;
+  transform-origin: center;
+  will-change: transform, opacity, clip-path;
+  image-rendering: auto;
+}
+
+.motion-body {
+  animation: body-breath 3.6s ease-in-out infinite;
+}
+
+.motion-head,
+.motion-eye {
+  animation: head-sway 4.2s ease-in-out infinite;
+}
+
+.motion-frontHair {
+  animation: front-hair-sway 4.2s ease-in-out infinite;
+}
+
+.motion-backHair {
+  animation: back-hair-sway 4.8s ease-in-out infinite;
+}
+
+.motion-object {
+  animation: object-breath 3.6s ease-in-out infinite;
+}
+
+.motion-mouth {
+  animation: head-sway 4.2s ease-in-out infinite;
+}
+
+.motion-eye {
+  animation: head-sway 4.2s ease-in-out infinite;
+}
+
+.detail-mouth {
+  animation: mouth-talk 0.48s ease-in-out infinite;
+}
+
+.mouth-sequence {
+  animation: head-sway 4.2s ease-in-out infinite;
+}
+
+.mouth-frame {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  animation-duration: 0.72s;
+  animation-timing-function: steps(1, end);
+  animation-iteration-count: infinite;
+}
+
+.mouth-sequence.audio-driven .mouth-frame {
+  animation: none;
+}
+
+.mouth-frame-0 {
+  animation-name: mouth-frame-0;
+}
+
+.mouth-frame-1 {
+  animation-name: mouth-frame-1;
+}
+
+.mouth-frame-2 {
+  animation-name: mouth-frame-2;
+}
+
+.mouth-frame-3 {
+  animation-name: mouth-frame-3;
+}
+
+.detail-eye {
+  transform:
+    translateY(var(--blink-shift, 0))
+    rotate(var(--blink-angle, 0deg))
+    scaleY(var(--blink-scale, 1))
+    rotate(var(--blink-angle-inverse, 0deg));
+}
+
+.control-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 34px;
+  border-left: 1px solid rgba(69, 58, 48, 0.12);
+  background: #fbfaf7;
+}
+
+h1 {
+  margin: 0;
+  color: #b66b4c;
+  font-size: 27px;
+  line-height: 1.1;
+  letter-spacing: 0;
+}
+
+p {
+  margin: 0;
+  color: #62594f;
+  font-size: 15px;
+  line-height: 1.65;
+}
+
+dl {
+  display: grid;
+  gap: 12px;
+  margin: 0;
+}
+
+dl div {
+  padding: 14px;
+  border: 1px solid rgba(69, 58, 48, 0.12);
+  border-radius: 8px;
+  background: #fff;
+}
+
+dt {
+  color: #9d563c;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+dd {
+  margin: 5px 0 0;
+  color: #2f2a25;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.audio-test {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(69, 58, 48, 0.12);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.audio-test button {
+  width: 100%;
+  border: 0;
+  border-radius: 8px;
+  padding: 11px 14px;
+  color: #fff;
+  background: #b66b4c;
+  font-size: 14px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.audio-test button:hover {
+  background: #9f573d;
+}
+
+.level-meter {
+  height: 8px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(69, 58, 48, 0.12);
+}
+
+.level-meter span {
+  display: block;
+  height: 100%;
+  min-width: 2px;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #dcb35a, #b66b4c);
+  transition: width 80ms linear;
+}
+
+.error-text {
+  color: #9f3d3d;
+  font-size: 13px;
+}
+
+.export-panel {
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+  border: 1px solid rgba(69, 58, 48, 0.12);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.export-panel h2 {
+  margin: 0;
+  color: #9d563c;
+  font-size: 14px;
+}
+
+#layered-export-canvas {
+  width: 128px;
+  height: 192px;
+  border-radius: 8px;
+  background: #25c928;
+  border: 1px solid rgba(69, 58, 48, 0.12);
+}
+
+#layered-audio-file {
+  width: 100%;
+  font-size: 12px;
+}
+
+.export-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.export-actions button,
+.download-link {
+  flex: 1;
+  border: 0;
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: #fff;
+  background: #b66b4c;
+  font-size: 13px;
+  font-weight: 800;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.export-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.download-link {
+  display: block;
+  background: #55715f;
+}
+
+.export-status {
+  color: #62594f;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.status {
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  color: #6d5d51;
+  font-size: 16px;
+}
+
+@keyframes avatar-float {
+  0%, 100% { translate: 0 0; }
+  50% { translate: 0 -5px; }
+}
+
+@keyframes body-breath {
+  0%, 100% { transform: translateY(0) scaleY(1); }
+  50% { transform: translateY(-3px) scaleY(1.006); }
+}
+
+@keyframes object-breath {
+  0%, 100% { transform: translateY(0) rotate(0deg); }
+  50% { transform: translateY(-3px) rotate(-0.35deg); }
+}
+
+@keyframes head-sway {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  25% { transform: translate(2px, -2px) rotate(0.65deg); }
+  75% { transform: translate(-2px, 1px) rotate(-0.5deg); }
+}
+
+@keyframes front-hair-sway {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  25% { transform: translate(1px, -1px) rotate(0.28deg); }
+  75% { transform: translate(-1px, 0) rotate(-0.22deg); }
+}
+
+@keyframes back-hair-sway {
+  0%, 100% { transform: translate(0, 0) rotate(0deg); }
+  35% { transform: translate(1px, 0) rotate(0.36deg); }
+  80% { transform: translate(-1px, 1px) rotate(-0.3deg); }
+}
+
+@keyframes mouth-talk {
+  0%, 100% { clip-path: inset(0 0 8% 0); }
+  50% { clip-path: inset(0 0 0 0); transform: translateY(1px) scaleY(1.18); }
+}
+
+@keyframes mouth-frame-0 {
+  0%, 21% { opacity: 1; }
+  22%, 100% { opacity: 0; }
+}
+
+@keyframes mouth-frame-1 {
+  0%, 21%, 48%, 100% { opacity: 0; }
+  22%, 47% { opacity: 1; }
+}
+
+@keyframes mouth-frame-2 {
+  0%, 48%, 74%, 100% { opacity: 0; }
+  49%, 73% { opacity: 1; }
+}
+
+@keyframes mouth-frame-3 {
+  0%, 74% { opacity: 0; }
+  75%, 100% { opacity: 1; }
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 1; transform: translate(0, 0) rotate(0deg) scaleY(1); }
+  48% { opacity: 0.18; transform: translate(0, 1px) rotate(0deg) scaleY(0.08); }
+}
+
+@media (max-width: 980px) {
+  .page {
+    grid-template-columns: 1fr;
+  }
+
+  .control-panel {
+    border-left: 0;
+    border-top: 1px solid rgba(69, 58, 48, 0.12);
+  }
+}

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaShirt, FaSliders, FaEye, FaEyeSlash, FaFile, FaDownload, FaCamera, FaUserGroup } from "react-icons/fa6";
+import { FaPlus, FaTrash, FaPen, FaCheck, FaSpinner, FaList, FaServer, FaKey, FaChevronDown, FaChevronUp, FaRobot, FaPlug, FaPalette, FaGear, FaKeyboard, FaSliders, FaEye, FaEyeSlash, FaFile, FaDownload, FaCamera, FaUserGroup, FaPuzzlePiece } from "react-icons/fa6";
 import { FiRefreshCw } from 'react-icons/fi';
 import { MdClose } from "react-icons/md";
 import { LuMaximize2 } from "react-icons/lu";
@@ -8,6 +8,7 @@ import TitleBar from "../components/UI/TitleBar";
 import { PageLayout, Surface, Card, FormGroup, Input, Select, Textarea, Button, Alert, Label, Badge, Checkbox } from "../components/UI/ui";
 import { IconSelectorTrigger } from "../components/UI/IconSelector";
 import { fetchModels, callOpenAILib } from "../utils/openai";
+import { normalizeApiProviders } from "../utils/apiProviders";
 import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl, getDetectionCandidates } from "../utils/llm/presets";
 import * as tauri from "../utils/tauri";
 import { useSettings } from "../utils/useSettings";
@@ -17,82 +18,19 @@ import { actionType } from "../context/reducer";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
 import { emit, listen } from '@tauri-apps/api/event';
-
-// 预加载所有内置皮肤图片
-import GlitchNormal from "../assets/Glitch-normal.png";
-import MaodieNormal from "../assets/Maodie-normal.png";
-import LittlePonyNormal from "../assets/LittlePony-normal.png";
-
-// 内置皮肤图片映射
-const BUILTIN_SKIN_IMAGES = {
-  'Glitch': GlitchNormal,
-  'default': GlitchNormal,
-  'Maodie': MaodieNormal,
-  'LittlePony': LittlePonyNormal,
-};
+import PseudoLive2DCharacter from "../components/Avatar/PseudoLive2DCharacter";
+import SkillsPanel from "../components/Settings/SkillsPanel";
+import AssistantSkillsSelector from "../components/Settings/AssistantSkillsSelector";
 
 // ==================== Shared Components ====================
 
-const CustomImage = ({ imageName }) => {
-  const [imgSrc, setImgSrc] = useState("");
-
-  useEffect(() => {
-    const loadImage = async () => {
-      try {
-        const skinName = imageName === "default" ? "Glitch" : imageName;
-        
-        // 处理 custom: 前缀的自定义皮肤
-        if (skinName && skinName.startsWith("custom:")) {
-          const skinId = skinName.split(":")[1];
-          try {
-            const base64Image = await tauri.readSkinImage(skinId, "normal");
-            if (base64Image) {
-              setImgSrc(base64Image);
-              return;
-            }
-          } catch (e) {
-            console.warn("Custom skin not found, falling back to default:", e);
-          }
-          // 回退到默认皮肤
-          setImgSrc(BUILTIN_SKIN_IMAGES['Glitch']);
-          return;
-        }
-        
-        // 检查是否是预加载的内置皮肤
-        if (BUILTIN_SKIN_IMAGES[skinName]) {
-          setImgSrc(BUILTIN_SKIN_IMAGES[skinName]);
-          return;
-        }
-        
-        // 尝试从旧的 readPetImage 加载（兼容旧数据）
-        if (skinName) {
-          try {
-            const base64Image = await tauri.readPetImage(`${skinName}-normal.png`);
-            if (base64Image) {
-              setImgSrc(base64Image);
-              return;
-            }
-          } catch (e) {
-            // ignore
-          }
-        }
-        
-        // 最终回退到默认 Jules
-        setImgSrc(BUILTIN_SKIN_IMAGES['Glitch']);
-      } catch (error) {
-        console.error("Error loading image:", error);
-        setImgSrc(BUILTIN_SKIN_IMAGES['Glitch']);
-      }
-    };
-    loadImage();
-  }, [imageName]);
-
-  return (
-    <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-100 shrink-0">
-      <img src={imgSrc} alt="Character" className="w-full h-full object-cover" />
+const AvatarPreview = () => (
+  <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-100 shrink-0">
+    <div className="w-full h-full scale-[1.28] translate-y-1">
+      <PseudoLive2DCharacter mood="normal" animated={false} />
     </div>
-  );
-};
+  </div>
+);
 
 const TruncatedText = ({ label, text }) => {
   const [expanded, setExpanded] = useState(false);
@@ -124,7 +62,7 @@ const TruncatedText = ({ label, text }) => {
  * 根据 apiFormat 获取默认图片名
  */
 const getDefaultImageForApi = (apiFormat) => {
-  return 'Glitch';
+  return 'pseudo_live2d';
 };
 
 /**
@@ -134,8 +72,6 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [apiProviders, setApiProviders] = useState([]);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [availableModels, setAvailableModels] = useState([]);
-  const [builtinSkins, setBuiltinSkins] = useState([]);
-  const [customSkins, setCustomSkins] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
 
@@ -147,7 +83,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [formData, setFormData] = useState({
     name: assistant?.name || "",
     appearance: assistant?.appearance || "",
-    imageName: assistant?.imageName || "default",
+    imageName: assistant?.imageName || "pseudo_live2d",
     hasMood: assistant?.hasMood !== false,
     modelName: assistant?.modelName || "",
     modelUrl: assistant?.modelUrl || "",
@@ -156,50 +92,13 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     modelConfigId: "", // Clear legacy config ID to ensure local settings take precedence
   });
   
-  // 加载皮肤列表（区分内置和自定义）
-  const loadSkins = async () => {
-    try {
-      const skins = await tauri.getSkins();
-      const skinsList = Array.isArray(skins) ? skins : [];
-      // 分离内置皮肤和自定义皮肤
-      const builtin = skinsList.filter(s => s.isBuiltin);
-      const custom = skinsList.filter(s => !s.isBuiltin);
-      setBuiltinSkins(builtin);
-      setCustomSkins(custom);
-    } catch (err) {
-      console.error('[AssistantForm] Failed to load skins:', err);
-    }
-  };
-  
-  useEffect(() => {
-    loadSkins();
-  }, []);
-  
-  // 监听皮肤更新事件
-  useEffect(() => {
-    const cleanup = tauri.onSkinsUpdated?.(() => {
-      console.log('[AssistantForm] Skins updated, refreshing list...');
-      loadSkins();
-    });
-    return () => {
-      if (cleanup) cleanup();
-    };
-  }, []);
-
   // 加载可用的 API Providers
   useEffect(() => {
     const loadApiProviders = async () => {
       try {
         const rawProviders = await tauri.apiProviders.getAll();
         if (Array.isArray(rawProviders)) {
-          // Normalize providers: ensure id exists and cachedModels is parsed
-          const providers = rawProviders.map(p => ({
-            ...p,
-            id: p.id || p._id, // Ensure ID is consistent
-            cachedModels: typeof p.cachedModels === 'string' 
-              ? JSON.parse(p.cachedModels) 
-              : (p.cachedModels || [])
-          }));
+          const providers = normalizeApiProviders(rawProviders);
           
           setApiProviders(providers);
           
@@ -450,41 +349,14 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
         </Button>
       </FormGroup>
 
+      {assistant?._id && <AssistantSkillsSelector petId={assistant._id} />}
+
       <FormGroup>
-        <Label>Avatar Style</Label>
+        <Label>Avatar</Label>
         <div className="flex items-start gap-3">
-          {/* 实时预览 */}
-          <CustomImage imageName={formData.imageName} />
-          <div className="flex-1">
-            <Select
-              name="imageName"
-              value={formData.imageName}
-              onChange={handleChange}
-            >
-              {builtinSkins.length > 0 && (
-                <optgroup label="Built-in">
-                  {builtinSkins.map(skin => (
-                    <option key={skin.id} value={skin.name}>
-                      {skin.name}{skin.name === 'Glitch' ? ' (Default)' : ''}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-              {customSkins.length > 0 && (
-                <optgroup label="Custom Skins">
-                  {customSkins.map(skin => (
-                    <option key={skin.id} value={`custom:${skin.id}`}>
-                      {skin.name}{skin.author ? ` (by ${skin.author})` : ''}
-                    </option>
-                  ))}
-                </optgroup>
-              )}
-            </Select>
-            {builtinSkins.length === 0 && customSkins.length === 0 && (
-              <div className="text-xs text-slate-400 mt-1">
-                No skins available.
-              </div>
-            )}
+          <AvatarPreview />
+          <div className="flex-1 min-w-0 pt-1">
+            <Badge tone="blue">Layered Avatar</Badge>
           </div>
         </div>
       </FormGroup>
@@ -685,7 +557,7 @@ const AssistantsPanel = ({ onNavigate }) => {
               key={assistant._id}
               className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex items-start gap-3"
             >
-              <CustomImage imageName={assistant.imageName} />
+              <AvatarPreview />
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -1440,12 +1312,7 @@ const ApiProvidersPanel = () => {
   const loadProviders = useCallback(async () => {
     try {
       const data = await tauri.getApiProviders();
-      const normalized = (data || []).map(p => ({ 
-        ...p, 
-        _id: p._id || p.id,
-        // Parse cachedModels JSON string to array
-        cachedModels: typeof p.cachedModels === 'string' ? JSON.parse(p.cachedModels) : (p.cachedModels || [])
-      }));
+      const normalized = normalizeApiProviders(data || []);
       setProviders(normalized);
     } catch (error) {
       console.error("Failed to load API providers:", error);
@@ -1471,7 +1338,7 @@ const ApiProvidersPanel = () => {
       // 通知其他窗口（SocialPage / AssistantForm）刷新 providers
       try {
         const updated = await tauri.getApiProviders();
-        if (updated) await tauri.sendApiProvidersUpdate(updated);
+        if (updated) await tauri.sendApiProvidersUpdate(normalizeApiProviders(updated));
       } catch { /* non-fatal */ }
     } catch (error) {
       console.error("Save failed:", error);
@@ -1494,7 +1361,7 @@ const ApiProvidersPanel = () => {
       // 通知其他窗口刷新 providers
       try {
         const updated = await tauri.getApiProviders();
-        if (updated) await tauri.sendApiProvidersUpdate(updated);
+        if (updated) await tauri.sendApiProvidersUpdate(normalizeApiProviders(updated));
       } catch { /* non-fatal */ }
     } catch (error) {
       console.error("Delete failed:", error);
@@ -2105,13 +1972,7 @@ const ModelsPanel = () => {
   const loadProviders = useCallback(async () => {
     try {
       const data = await tauri.getApiProviders();
-      const normalized = (data || []).map(p => ({ 
-        ...p, 
-        _id: p._id || p.id,
-        // Parse cachedModels and hiddenModels JSON strings
-        cachedModels: typeof p.cachedModels === 'string' ? JSON.parse(p.cachedModels) : (p.cachedModels || []),
-        hiddenModels: typeof p.hiddenModels === 'string' ? JSON.parse(p.hiddenModels) : (p.hiddenModels || [])
-      }));
+      const normalized = normalizeApiProviders(data || []);
       setProviders(normalized);
     } catch (error) {
       console.error("Failed to load providers:", error);
@@ -2138,15 +1999,7 @@ const ModelsPanel = () => {
       // 重新拉取完整的 providers 数据
       const updatedProviders = await tauri.getApiProviders();
       if (updatedProviders) {
-        const normalizedProviders = updatedProviders.map(p => ({
-          ...p,
-          cachedModels: typeof p.cachedModels === 'string' 
-            ? JSON.parse(p.cachedModels) 
-            : (p.cachedModels || []),
-          hiddenModels: typeof p.hiddenModels === 'string'
-            ? JSON.parse(p.hiddenModels)
-            : (p.hiddenModels || [])
-        }));
+        const normalizedProviders = normalizeApiProviders(updatedProviders);
         
         // 更新本地状态
         setProviders(normalizedProviders);
@@ -2596,59 +2449,7 @@ const SkinForm = ({ onSave, onCancel }) => {
 /**
  * 皮肤预览图组件 - 先尝试从 assets 加载，失败后从自定义目录加载
  */
-const SkinPreview = ({ skinId, skinName, isBuiltin }) => {
-  const [imageUrl, setImageUrl] = useState(null);
-  const [loading, setLoading] = useState(true);
-  
-  useEffect(() => {
-    const loadImage = async () => {
-      try {
-        const assetName = skinName === 'default' ? 'Glitch' : skinName;
-        // 先尝试从 assets 加载
-        try {
-          const module = await import(`../assets/${assetName}-normal.png`);
-          setImageUrl(module.default);
-          setLoading(false);
-          return;
-        } catch {
-          // assets 中没有，从自定义目录加载
-        }
-        // 从自定义目录加载
-        const url = await tauri.readSkinImage(skinId, 'normal');
-        setImageUrl(url);
-      } catch (err) {
-        console.error('Failed to load skin preview:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    loadImage();
-  }, [skinId, skinName, isBuiltin]);
-  
-  if (loading) {
-    return (
-      <div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
-        <FaSpinner className="w-4 h-4 text-slate-400 animate-spin" />
-      </div>
-    );
-  }
-  
-  if (imageUrl) {
-    return (
-      <img 
-        src={imageUrl} 
-        alt={skinName} 
-        className="w-12 h-12 rounded-lg object-cover shrink-0 bg-slate-100"
-      />
-    );
-  }
-  
-  return (
-    <div className="w-12 h-12 rounded-lg bg-slate-100 flex items-center justify-center shrink-0">
-      <FaShirt className="w-6 h-6 text-slate-400" />
-    </div>
-  );
-};
+const SkinPreview = () => <AvatarPreview />;
 
 /**
  * 皮肤状态预览组件 - 动态显示心情状态
@@ -2657,13 +2458,11 @@ const SkinPreview = ({ skinId, skinName, isBuiltin }) => {
  * @param {boolean} isBuiltin - 是否内置皮肤
  * @param {string[]} moods - 动态表情列表 e.g. ["normal", "smile", "sad", "shocked", "thinking"]
  */
-const SkinMoodPreview = ({ skinId, skinName, isBuiltin, moods: propMoods }) => {
+const SkinMoodPreview = ({ moods: propMoods }) => {
   // 固定表情系统: 情绪表情 + 系统状态
   const DEFAULT_MOODS = ['normal', 'smile', 'sad', 'shocked', 'thinking', 'idle-1', 'idle-2', 'idle-3'];
   
-  // 内置皮肤总是使用完整的表情列表（因为数据库中的旧记录可能不完整）
-  // 自定义皮肤使用传入的 moods，如果没有则使用默认值
-  const moods = isBuiltin ? DEFAULT_MOODS : (propMoods && propMoods.length > 0 ? propMoods : DEFAULT_MOODS);
+  const moods = propMoods && propMoods.length > 0 ? propMoods : DEFAULT_MOODS;
   
   // 生成显示标签：处理 idle-1 等特殊格式
   const getMoodLabel = (mood) => {
@@ -2673,58 +2472,12 @@ const SkinMoodPreview = ({ skinId, skinName, isBuiltin, moods: propMoods }) => {
     }
     return mood.charAt(0).toUpperCase() + mood.slice(1);
   };
-  const [images, setImages] = useState({});
-  const [loading, setLoading] = useState(true);
-  
-  useEffect(() => {
-    const loadImages = async () => {
-      const loaded = {};
-      setLoading(true);
-      
-      for (const mood of moods) {
-        try {
-          if (isBuiltin) {
-            // 内置皮肤：从 assets 加载
-            const assetName = skinName === 'default' ? 'Glitch' : skinName;
-            try {
-              const module = await import(`../assets/${assetName}-${mood}.png`);
-              loaded[mood] = module.default;
-              continue;
-            } catch {
-              console.warn(`[SkinMoodPreview] Asset not found: ${assetName}-${mood}.png`);
-            }
-          }
-          
-          // 自定义皮肤或内置皮肤加载失败：从文件系统加载
-          const url = await tauri.readSkinImage(skinId, mood);
-          loaded[mood] = url;
-        } catch (err) {
-          console.error(`[SkinMoodPreview] Failed to load ${mood} image for skin ${skinId}:`, err);
-        }
-      }
-      
-      setImages(loaded);
-      setLoading(false);
-    };
-    loadImages();
-  }, [skinId, skinName, isBuiltin, moods]);
-  
   return (
     <div className="grid grid-cols-4 gap-3 p-3 bg-slate-50 rounded-lg">
       {moods.map(mood => (
         <div key={mood} className="flex flex-col items-center gap-1">
           <div className="w-16 h-16 rounded-lg overflow-hidden bg-white border border-slate-200 shadow-sm">
-            {images[mood] ? (
-              <img src={images[mood]} alt={mood} className="w-full h-full object-cover" />
-            ) : loading ? (
-              <div className="w-full h-full flex items-center justify-center">
-                <FaSpinner className="w-4 h-4 text-slate-300 animate-spin" />
-              </div>
-            ) : (
-              <div className="w-full h-full flex items-center justify-center">
-                <FaShirt className="w-6 h-6 text-slate-200" />
-              </div>
-            )}
+            <AvatarPreview />
           </div>
           <span className="text-xs text-slate-500">{getMoodLabel(mood)}</span>
         </div>
@@ -2903,7 +2656,7 @@ const SkinsPanel = () => {
           </div>
         ) : visibleSkins.length === 0 && hiddenSkins.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
-            <FaShirt className="w-12 h-12 text-slate-300 mb-4" />
+            <FaRobot className="w-12 h-12 text-slate-300 mb-4" />
             <div className="text-slate-600 font-medium">No custom skins yet</div>
             <div className="text-slate-400 text-sm mb-4">Import a 2x2 sprite sheet to get started</div>
             <Button variant="primary" onClick={() => setIsCreating(true)}>
@@ -3347,6 +3100,28 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                   type="checkbox"
                   name="memoryEnabledByDefault"
                   checked={settings.memoryEnabledByDefault !== false}
+                  onChange={handleCheckboxChange}
+                  className="sr-only peer"
+                />
+                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+              </label>
+            </div>
+          </Card>
+
+          {/* Quick Reply Settings */}
+          <Card title="Quick Reply" description="Configure suggested replies in chat">
+            <div className="flex items-center justify-between gap-4">
+              <div className="flex-1">
+                <div className="text-sm font-medium text-slate-700">Enable Quick Reply Suggestions</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  When enabled, the assistant can generate short reply suggestions for the current conversation.
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  name="quickReplyEnabled"
+                  checked={settings.quickReplyEnabled !== false && settings.quickReplyEnabled !== 'false'}
                   onChange={handleCheckboxChange}
                   className="sr-only peer"
                 />
@@ -4593,8 +4368,8 @@ const tabGroups = [
       { id: 'api', label: 'API', icon: FaKey },
       { id: 'models', label: 'Models', icon: FaList },
       { id: 'mcp', label: 'MCP', icon: FaPlug },
+      { id: 'skills', label: 'Skills', icon: FaPuzzlePiece },
       { id: 'social', label: 'Social', icon: FaUserGroup },
-      { id: 'skins', label: 'Skins', icon: FaShirt },
     ]
   },
   {
@@ -4724,17 +4499,7 @@ const ManagementPage = () => {
           setModelConfigs(modelData);
         }
         if (Array.isArray(providerData)) {
-          // 规范化 providers 数据
-          const normalizedProviders = providerData.map(p => ({
-            ...p,
-            cachedModels: typeof p.cachedModels === 'string' 
-              ? JSON.parse(p.cachedModels) 
-              : (p.cachedModels || []),
-            hiddenModels: typeof p.hiddenModels === 'string'
-              ? JSON.parse(p.hiddenModels)
-              : (p.hiddenModels || [])
-          }));
-          setApiProviders(normalizedProviders);
+          setApiProviders(normalizeApiProviders(providerData));
         }
       } catch (error) {
         console.error("Failed to load data:", error);
@@ -4782,7 +4547,7 @@ const ManagementPage = () => {
         
         console.log('[ManagementPage] Setting up check_current_tab listener');
         unlisten = await listen('check_current_tab', (event) => {
-          const targetTab = event.payload;
+          const targetTab = allTabs.includes(event.payload) ? event.payload : 'assistants';
           const currentTab = activeTabRef.current;
           
           console.log('[ManagementPage] check_current_tab event:', { targetTab, currentTab });
@@ -4863,13 +4628,13 @@ const ManagementPage = () => {
       case 'api': return 'API Providers';
       case 'models': return 'Models';
       case 'mcp': return 'MCP Servers';
+      case 'skills': return 'Skills';
       case 'social': return 'Social Agent';
       case 'defaults': return 'Defaults';
       case 'preferences': return 'Preferences';
       case 'hotkeys': return 'Keyboard Shortcuts';
       case 'screenshot': return 'Screenshot';
       case 'ui': return 'UI Settings';
-      case 'skins': return 'Skins';
       default: return 'Settings';
     }
   };
@@ -4901,7 +4666,7 @@ const ManagementPage = () => {
             {activeTab === 'api' && <ApiProvidersPanel />}
             {activeTab === 'models' && <ModelsPanel />}
             {activeTab === 'mcp' && <McpServersPanel />}
-            {activeTab === 'skins' && <SkinsPanel />}
+            {activeTab === 'skills' && <SkillsPanel />}
             {activeTab === 'social' && <SocialPanel assistants={assistants} apiProviders={apiProviders} />}
             {activeTab === 'defaults' && (
               <DefaultsPanel 

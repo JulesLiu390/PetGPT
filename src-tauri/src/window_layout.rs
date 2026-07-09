@@ -95,9 +95,18 @@ pub struct BaselineSize {
     pub height: f64,
 }
 
+/// Character dimensions are 1.3× the previous 200×300 logical baseline.
+pub const CHARACTER_BASELINE_WIDTH: f64 = 260.0;
+pub const CHARACTER_BASELINE_HEIGHT: f64 = 390.0;
+pub const CHARACTER_MIN_WIDTH: f64 = 234.0;
+pub const CHARACTER_MIN_HEIGHT: f64 = 351.0;
+
 pub fn get_baseline_sizes() -> HashMap<&'static str, BaselineSize> {
     let mut sizes = HashMap::new();
-    sizes.insert("character", BaselineSize { width: 200.0, height: 300.0 });
+    sizes.insert("character", BaselineSize {
+        width: CHARACTER_BASELINE_WIDTH,
+        height: CHARACTER_BASELINE_HEIGHT,
+    });
     sizes.insert("chat", BaselineSize { width: 500.0, height: 400.0 });
     sizes.insert("manage", BaselineSize { width: 640.0, height: 680.0 });
     sizes
@@ -295,4 +304,25 @@ pub fn is_cursor_in_window(
         && cursor_x <= window_x + window_width
         && cursor_y >= window_y
         && cursor_y <= window_y + window_height
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn character_presets_use_the_enlarged_minimum() {
+        assert_eq!(
+            apply_size_preset("character", "small"),
+            Some((CHARACTER_MIN_WIDTH, CHARACTER_MIN_HEIGHT))
+        );
+        assert_eq!(
+            apply_size_preset("character", "medium"),
+            Some((260.0, 390.0))
+        );
+        assert_eq!(
+            apply_size_preset("character", "large"),
+            Some((299.0, 448.0))
+        );
+    }
 }

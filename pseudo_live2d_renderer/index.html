@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Live2D WebM Renderer</title>
+  </head>
+  <body>
+    <main class="shell">
+      <section class="stage-wrap">
+        <canvas id="live2d-stage" width="512" height="768"></canvas>
+      </section>
+
+      <aside class="panel">
+        <h1>Live2D WebM Renderer</h1>
+        <p class="hint">
+          输入一段音频，渲染透明背景人物层，并在浏览器中导出 WebM。
+        </p>
+
+        <label>
+          音频文件
+          <input id="audio-file" type="file" accept="audio/*" />
+        </label>
+
+        <label>
+          Live2D model3.json URL
+          <input id="model-url" placeholder="/live2d/character/model.model3.json" />
+        </label>
+
+        <label>
+          图片主播 URL
+          <input id="image-url" value="/live2d/sailor-girl/preview.jpg" />
+        </label>
+
+        <label>
+          嘴型序列目录
+          <input id="mouth-dir" value="/live2d_renderer/images/green_cleaned" />
+        </label>
+
+        <div class="row">
+          <button id="load-model" type="button">加载模型</button>
+          <button id="load-image" type="button">加载图片主播</button>
+        </div>
+
+        <div class="row">
+          <button id="load-mouth-sequence" type="button">加载嘴型序列</button>
+          <button id="use-fallback" type="button">使用占位主播</button>
+        </div>
+
+        <label class="checkbox">
+          <input id="include-audio" type="checkbox" />
+          WebM 内包含音频
+        </label>
+
+        <label class="checkbox">
+          <input id="green-screen" type="checkbox" checked />
+          使用绿幕背景导出
+        </label>
+
+        <div class="row">
+          <button id="record" type="button" disabled>开始导出 WebM</button>
+          <button id="stop" type="button" disabled>停止</button>
+        </div>
+
+        <audio id="audio" controls></audio>
+        <a id="download" class="download" hidden>下载 WebM</a>
+        <pre id="status">等待音频输入。</pre>
+      </aside>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

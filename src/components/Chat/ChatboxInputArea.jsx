@@ -1,11 +1,27 @@
-import React, { useState } from 'react'
+import React from 'react'
 
 import ChatboxInputBox from './ChatboxInputBox'
 
-export const ChatboxInputArea = ({ activePetId, sidebarOpen, autoFocus, activeTabId }) => {
+export const ChatboxInputArea = ({
+  activePetId,
+  sidebarOpen,
+  autoFocus,
+  activeTabId,
+  quickReplyEnabled,
+  quickReplyRequest,
+  onQuickReplyHandled,
+}) => {
   return (
     <div className='w-full'>
-        <ChatboxInputBox activePetId={activePetId} sidebarOpen={sidebarOpen} autoFocus={autoFocus} activeTabId={activeTabId}></ChatboxInputBox>
+        <ChatboxInputBox
+          activePetId={activePetId}
+          sidebarOpen={sidebarOpen}
+          autoFocus={autoFocus}
+          activeTabId={activeTabId}
+          quickReplyEnabled={quickReplyEnabled}
+          quickReplyRequest={quickReplyRequest}
+          onQuickReplyHandled={onQuickReplyHandled}
+        />
     </div>
   )
 }

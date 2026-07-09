@@ -95,6 +95,7 @@ const DEFAULT_SETTINGS = {
   screenshotHotkey: 'Cmd + Shift + A',
   launchAtStartup: false,
   theme: 'light',
+  quickReplyEnabled: true,
   moodResetDelay: 30,  // 表情恢复到 normal 的延迟时间（秒）
   // Chat Tab 快捷键（窗口内快捷键）- 根据平台自动选择 Ctrl/Cmd
   newTabHotkey: `${MOD_KEY} + N`,
@@ -352,6 +353,54 @@ export const llmProxyCall = (endpoint, headers, body) => {
   for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
   const bodyB64 = btoa(binary);
   return invoke('llm_proxy_call', { endpoint, headers, bodyB64 });
+};
+
+/**
+ * LLM HTTP GET 代理调用
+ * 用于 /models 这类端点，绕过 WKWebView/CORS 对本地或局域网 HTTP endpoint 的限制。
+ */
+export const llmProxyGet = (endpoint, headers = {}) => {
+  return invoke('llm_proxy_get', { endpoint, headers });
+};
+
+const encodeJsonBody = (body) => {
+  const jsonStr = JSON.stringify(body)
+    .replace(/\\ud[89ab][0-9a-f]{2}(?!\\ud[cdef][0-9a-f]{2})/gi, '\\ufffd')
+    .replace(/(?<!\\ud[89ab][0-9a-f]{2})\\ud[cdef][0-9a-f]{2}/gi, '\\ufffd');
+  const bytes = new TextEncoder().encode(jsonStr);
+  let binary = '';
+  for (let i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+  return btoa(binary);
+};
+
+export const llmProxyStream = async (endpoint, headers, body, onChunk) => {
+  const requestId = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const eventName = `llm-proxy-chunk:${requestId}`;
+  let callbackError = null;
+  const unlisten = await listen(eventName, (event) => {
+    const payload = event.payload || {};
+    if (payload.chunk && onChunk) {
+      try {
+        onChunk(payload.chunk);
+      } catch (error) {
+        callbackError = error;
+      }
+    }
+  });
+
+  try {
+    await invoke('llm_proxy_stream', {
+      requestId,
+      endpoint,
+      headers,
+      bodyB64: encodeJsonBody(body)
+    });
+    if (callbackError) {
+      throw callbackError;
+    }
+  } finally {
+    unlisten();
+  }
 };
 
 /**
@@ -797,6 +846,35 @@ export const workspaceGetPath = async (petId, path, ensureExists = false) => {
   return invoke('workspace_get_path', { petId, path, ensureExists });
 };
 
+// ==================== Skills (read-only runtime) ====================
+
+export const skillsList = (petId) =>
+  invoke('skills_list', { petId });
+
+export const skillsListGlobal = () =>
+  invoke('skills_list_global');
+
+export const skillsRead = (petId, skillId) =>
+  invoke('skills_read', { petId, skillId });
+
+export const skillsReadResource = (petId, skillId, path) =>
+  invoke('skills_read_resource', { petId, skillId, path });
+
+export const skillsCreateTemplate = (petId, skillId, name, description) =>
+  invoke('skills_create_template', { petId, skillId, name, description });
+
+export const skillsCreateGlobalTemplate = (skillId, name, description) =>
+  invoke('skills_create_global_template', { skillId, name, description });
+
+export const skillsDeleteGlobal = (skillId) =>
+  invoke('skills_delete_global', { skillId });
+
+export const skillsOpenFolder = (petId) =>
+  invoke('skills_open_folder', { petId });
+
+export const skillsOpenGlobalFolder = () =>
+  invoke('skills_open_global_folder');
+
 // ==================== Chat History (QQ 群聊存档) ====================
 
 /**
@@ -1044,6 +1122,10 @@ const tauri = {
   
   // LLM
   llmCall,
+  llmProxyCall,
+  llmProxyGet,
+  llmProxyStream,
+  imageGenProxyCall,
   llmStream,
   llmCancelStream,
   llmCancelAllStreams,
@@ -1171,6 +1253,15 @@ const tauri = {
   workspaceOpenFolder,
   workspaceOpenSubfolder,
   workspaceOpenFile,
+  skillsList,
+  skillsListGlobal,
+  skillsRead,
+  skillsReadResource,
+  skillsCreateTemplate,
+  skillsCreateGlobalTemplate,
+  skillsDeleteGlobal,
+  skillsOpenFolder,
+  skillsOpenGlobalFolder,
   runTrainingExport,
   getHomeDir,
 

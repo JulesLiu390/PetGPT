@@ -6,6 +6,7 @@
  */
 
 import * as tauri from './tauri';
+import { buildSkillCatalogPrompt } from './skills/index.js';
 
 // ============ 常量 ============
 
@@ -121,9 +122,10 @@ function memoryGuidance(memoryContent) {
  * @param {string} params.petId - 宠物 ID
  * @param {boolean} params.memoryEnabled - 记忆开关是否开启
  * @param {string} [params.timeContext] - 时间注入上下文（可选）
+ * @param {Array} [params.skills] - 本轮已启用的 Skill 元数据（只注入目录，不注入全文）
  * @returns {Promise<string>} 完整的 system prompt 内容
  */
-export async function buildSystemPrompt({ petId, memoryEnabled, timeContext }) {
+export async function buildSystemPrompt({ petId, memoryEnabled, timeContext, skills = [] }) {
   const sections = [];
 
   // === 时间上下文 ===
@@ -166,6 +168,12 @@ export async function buildSystemPrompt({ petId, memoryEnabled, timeContext }) {
       sections.push('（空）');
     }
     sections.push(memoryGuidance(memoryContent));
+  }
+
+  // === Skills：只注入 name/description/version 目录，正文由 skill_load 渐进读取 ===
+  const skillCatalog = buildSkillCatalogPrompt(skills);
+  if (skillCatalog) {
+    sections.push(skillCatalog);
   }
 
   return sections.join('\n\n');
@@ -291,13 +299,23 @@ export function isSoulFile(path) {
   return path === 'SOUL.md' || path === './SOUL.md';
 }
 
+const CHAT_WORKSPACE_FILES = new Set(['SOUL.md', 'USER.md', 'MEMORY.md']);
+
+function normalizeChatWorkspacePath(path) {
+  const value = String(path || '');
+  return value.startsWith('./') ? value.slice(2) : value;
+}
+
 /**
  * 判断指定路径在当前记忆开关状态下是否允许操作
  * 记忆 OFF 时，只允许操作 SOUL.md
  */
 export function isPathAllowed(path, memoryEnabled) {
-  if (memoryEnabled) return true; // 记忆 ON：所有文件都可操作
-  return isSoulFile(path); // 记忆 OFF：仅 SOUL.md
+  const normalized = normalizeChatWorkspacePath(path);
+  if (!memoryEnabled) return normalized === 'SOUL.md';
+  // 普通聊天的文件工具只服务人格/记忆文件。Skills 必须走专用只读工具，
+  // 防止不可信 Skill 指令借 write/edit 修改自身或其他 Skill。
+  return CHAT_WORKSPACE_FILES.has(normalized);
 }
 
 // ============ 迁移 ============

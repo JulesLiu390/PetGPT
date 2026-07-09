@@ -11,6 +11,9 @@ use std::time::Duration;
 use reqwest::Client;
 use tokio::sync::Semaphore;
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use futures::StreamExt;
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
 
 /// LLM 代理的全局状态
 pub struct LlmProxy {
@@ -21,6 +24,13 @@ pub struct LlmProxy {
     image_gen_client: Client,
     /// 图像生成专用 semaphore（独立并发额度，不挤占 LLM）
     image_gen_semaphore: Semaphore,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProxyStreamChunk {
+    pub request_id: String,
+    pub chunk: String,
+    pub done: bool,
 }
 
 /// 单次请求的超时秒数
@@ -120,6 +130,129 @@ pub async fn llm_proxy_call(
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
     Ok(data)
+}
+
+/// 代理 LLM HTTP GET 请求（用于 /models 等浏览器 fetch 可能被 CORS/ATS 拦截的端点）
+#[tauri::command]
+pub async fn llm_proxy_get(
+    proxy: tauri::State<'_, Arc<LlmProxy>>,
+    endpoint: String,
+    headers: HashMap<String, String>,
+) -> Result<serde_json::Value, String> {
+    let _permit = proxy.semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore closed: {}", e))?;
+
+    let mut req = proxy.http_client.get(&endpoint);
+
+    for (key, value) in &headers {
+        req = req.header(key.as_str(), value.as_str());
+    }
+
+    let response = req
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("LLM GET request timed out after {}s", REQUEST_TIMEOUT_SECS)
+            } else {
+                format!("HTTP error: {}", e)
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status.as_u16(), error_text));
+    }
+
+    let data: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+
+    Ok(data)
+}
+
+/// 代理 LLM HTTP POST 流式请求。
+///
+/// 前端仍使用各 adapter 原有的 SSE 解析逻辑；Rust 侧只负责发送 HTTP 请求，
+/// 并把原始响应字节按文本块通过 Tauri event 转发回来，避免 WKWebView fetch
+/// 在局域网/反代/CORS 场景下抛 "Load failed"。
+#[tauri::command]
+pub async fn llm_proxy_stream(
+    app: AppHandle,
+    proxy: tauri::State<'_, Arc<LlmProxy>>,
+    request_id: String,
+    endpoint: String,
+    headers: HashMap<String, String>,
+    body_b64: String,
+) -> Result<(), String> {
+    let body_bytes = BASE64.decode(&body_b64)
+        .map_err(|e| format!("Base64 decode error: {}", e))?;
+    let body_str = String::from_utf8(body_bytes)
+        .map_err(|e| format!("UTF-8 decode error: {}", e))?;
+    let body_value: serde_json::Value = serde_json::from_str(&body_str)
+        .map_err(|e| format!("Body JSON parse error: {}", e))?;
+
+    let _permit = proxy.semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore closed: {}", e))?;
+
+    let mut req = proxy.http_client
+        .post(&endpoint)
+        .header("Content-Type", "application/json");
+
+    for (key, value) in &headers {
+        if key.to_lowercase() == "content-type" {
+            continue;
+        }
+        req = req.header(key.as_str(), value.as_str());
+    }
+
+    let response = req
+        .json(&body_value)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("LLM stream request timed out after {}s", REQUEST_TIMEOUT_SECS)
+            } else {
+                format!("HTTP error: {}", e)
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        return Err(format!("API error {}: {}", status.as_u16(), error_text));
+    }
+
+    let event_name = format!("llm-proxy-chunk:{}", request_id);
+    let mut stream = response.bytes_stream();
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
+        let payload = ProxyStreamChunk {
+            request_id: request_id.clone(),
+            chunk: String::from_utf8_lossy(&chunk).to_string(),
+            done: false,
+        };
+        app.emit(&event_name, &payload)
+            .map_err(|e| format!("Event emit error: {}", e))?;
+    }
+
+    let done_payload = ProxyStreamChunk {
+        request_id,
+        chunk: String::new(),
+        done: true,
+    };
+    app.emit(&event_name, &done_payload)
+        .map_err(|e| format!("Event emit error: {}", e))?;
+
+    Ok(())
 }
 
 /// 代理图像生成 HTTP POST 请求

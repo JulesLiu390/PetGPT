@@ -1,0 +1,33 @@
+{
+  "source": "ai_daily_news/card_renderer/live2d_renderer/images/new_images/rebuilt/mouth_shapes",
+  "source_model": "user-cropped green_cleaned mouth patches, opaque crop",
+  "edge_cleanup": "none; direct opaque crops to preserve mouth and skin color",
+  "origin": [
+    634,
+    294
+  ],
+  "size": [
+    30,
+    17
+  ],
+  "anchor_source_mouth_origin": [
+    635,
+    296
+  ],
+  "anchor_source_mouth_size": [
+    28,
+    14
+  ],
+  "shapes": [
+    "closed",
+    "small",
+    "medium",
+    "large"
+  ],
+  "files": {
+    "closed": "closed.png",
+    "small": "small.png",
+    "medium": "medium.png",
+    "large": "large.png"
+  }
+}

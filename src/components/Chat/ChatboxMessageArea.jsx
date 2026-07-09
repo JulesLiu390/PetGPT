@@ -7,6 +7,8 @@ import remarkGfm from 'remark-gfm';
 import hljs from 'highlight.js';
 import 'highlight.js/styles/atom-one-dark.css'; // 引入暗色主题
 import { LiveToolCalls, ToolCallHistory } from './ToolCallDisplay';
+import QuickReplySuggestions from './QuickReplySuggestions';
+import { getQuickReplyPresentation } from './quickReplyModel.js';
 
 // 紧凑 Markdown 样式（行间距、段间距大幅缩小）
 const CompactMarkdownStyles = () => (
@@ -366,7 +368,16 @@ const MessagePartContent = ({ part, isUser }) => {
   return null;
 };
 
-const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTitleBar = true, onBranchFromMessage }) => {
+const ChatboxMessageArea = ({
+  conversationId,
+  streamingContent,
+  isActive,
+  showTitleBar = true,
+  onBranchFromMessage,
+  quickReplies = [],
+  quickReplyEnabled = true,
+  onQuickReplySelect,
+}) => {
   const stateValue = useStateValue();
   const [state, dispatch] = stateValue || [{}, () => {}];
   const { currentConversationId, liveToolCalls = {}, searchHighlight } = state;
@@ -378,6 +389,13 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
   
   // 使用传入的 conversationId 或回退到全局 currentConversationId
   const activeConvId = conversationId || currentConversationId;
+  const quickReplyPresentation = getQuickReplyPresentation({
+    enabled: quickReplyEnabled,
+    messages,
+    suggestions: quickReplies,
+    isThinking,
+    streamingContent,
+  });
   
   // Get tool calls for current conversation
   const activeToolCalls = liveToolCalls[activeConvId] || [];
@@ -966,6 +984,9 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
         const parts = Array.isArray(msg.content) 
             ? msg.content 
             : [{ type: 'text', text: msg.content }];
+        const messageQuickReplies = quickReplyPresentation?.messageIndex === index
+          ? quickReplyPresentation.replies
+          : [];
 
         return (
           <div
@@ -1092,6 +1113,12 @@ const ChatboxMessageArea = ({ conversationId, streamingContent, isActive, showTi
                 </div>
               </div>
             ))}
+            {!isUser && messageQuickReplies.length > 0 && (
+              <QuickReplySuggestions
+                suggestions={messageQuickReplies}
+                onSelect={onQuickReplySelect}
+              />
+            )}
           </div>
         );
       })}

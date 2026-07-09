@@ -4,6 +4,7 @@ mod message_cache;
 mod tab_state;
 mod llm;
 mod workspace;
+mod skills;
 mod subagent;
 mod platform;
 mod window_layout;
@@ -18,6 +19,7 @@ use message_cache::TabMessageCache;
 use tab_state::TabState;
 use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation, LlmProxy};
 use workspace::WorkspaceEngine;
+use skills::SkillEngine;
 use platform::{Platform, PlatformProvider, WindowEffect};
 use window_layout::{WindowState, screen_info_from_tauri_monitor};
 use std::sync::Arc;
@@ -45,6 +47,9 @@ type McpState = Arc<tokio::sync::RwLock<McpManager>>;
 
 // Type alias for workspace state
 type WorkspaceFileState = Arc<WorkspaceEngine>;
+
+// Type alias for the read-only Skill package state
+type SkillFileState = Arc<SkillEngine>;
 
 // Type alias for subagent pool state
 type SubagentPoolState = Arc<subagent::SubagentPool>;
@@ -1870,7 +1875,10 @@ fn position_character_window(app: &AppHandle) {
         if let Some(monitor) = character.current_monitor().ok().flatten() {
             let screen = screen_info_from_tauri_monitor(&monitor);
             let scale_factor = monitor.scale_factor();
-            let char_size = character.outer_size().unwrap_or(tauri::PhysicalSize { width: 160, height: 240 });
+            let char_size = character.outer_size().unwrap_or(tauri::PhysicalSize {
+                width: (window_layout::CHARACTER_BASELINE_WIDTH * scale_factor).round() as u32,
+                height: (window_layout::CHARACTER_BASELINE_HEIGHT * scale_factor).round() as u32,
+            });
             let char_w = char_size.width as f64 / scale_factor;
             let char_h = char_size.height as f64 / scale_factor;
             
@@ -2163,6 +2171,10 @@ fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<Wi
         let width = (baseline.width * scale).round();
         let height = (baseline.height * scale).round();
         let (x, y) = window_layout::position_character_bottom_right(&screen, width, height);
+        let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+            width: window_layout::CHARACTER_MIN_WIDTH,
+            height: window_layout::CHARACTER_MIN_HEIGHT,
+        })));
         let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
         let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
     }
@@ -2456,8 +2468,17 @@ pub fn run() {
 
             // Initialize workspace engine for file-based personality/memory
             let workspace_dir = app_data_dir.join("workspace");
-            let workspace_engine: WorkspaceFileState = Arc::new(WorkspaceEngine::new(workspace_dir));
+            let workspace_engine: WorkspaceFileState = Arc::new(WorkspaceEngine::new(workspace_dir.clone()));
             app.manage(workspace_engine);
+
+            // Initialize the inherited global Skill library plus per-assistant
+            // private libraries. Skill commands apply stricter path checks.
+            let global_skills_dir = app_data_dir.join("skills");
+            let skill_engine: SkillFileState = Arc::new(SkillEngine::new(
+                workspace_dir,
+                global_skills_dir,
+            ));
+            app.manage(skill_engine);
 
             let subagent_pool: SubagentPoolState = Arc::new(subagent::SubagentPool::new());
             app.manage(subagent_pool);
@@ -2896,6 +2917,8 @@ pub fn run() {
             llm_cancel_all_streams,
             llm_reset_cancellation,
             llm::proxy::llm_proxy_call,
+            llm::proxy::llm_proxy_get,
+            llm::proxy::llm_proxy_stream,
             llm::proxy::image_gen_proxy_call,
             // Workspace commands
             workspace::workspace_read,
@@ -2914,6 +2937,16 @@ pub fn run() {
             workspace::workspace_open_folder,
             workspace::workspace_open_subfolder,
             workspace::workspace_open_file,
+            // Skill commands (read-only runtime + user-triggered template creation)
+            skills::skills_list,
+            skills::skills_list_global,
+            skills::skills_read,
+            skills::skills_read_resource,
+            skills::skills_create_template,
+            skills::skills_create_global_template,
+            skills::skills_delete_global,
+            skills::skills_open_folder,
+            skills::skills_open_global_folder,
             subagent::subagent_spawn,
             subagent::subagent_kill,
             subagent::subagent_set_max_concurrent,

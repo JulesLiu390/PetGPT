@@ -17,7 +17,7 @@
 import * as openaiAdapter from './adapters/openaiCompatible.js';
 import * as geminiAdapter from './adapters/geminiOfficial.js';
 import * as anthropicAdapter from './adapters/anthropicNative.js';
-import { llmCall, llmStream, subscribeLlmStream } from '../tauri.js';
+import { llmCall, llmStream, subscribeLlmStream, llmProxyGet } from '../tauri.js';
 
 // 是否使用 Rust 后端 (可通过环境变量控制，默认启用)
 const USE_RUST_BACKEND = true;
@@ -384,26 +384,52 @@ export const fetchModels = async ({ apiFormat, apiKey, baseUrl }) => {
     return geminiAdapter.fetchModels(apiKey);
   }
   
-  // OpenAI-compatible: 需要传入 baseUrl
-  let url = baseUrl;
-  if (url === 'default' || !url) {
-    url = 'https://api.openai.com/v1';
-  } else if (!url.endsWith('/v1')) {
-    url = url.endsWith('/') ? url + 'v1' : url + '/v1';
-  }
-  
-  const response = await fetch(`${url}/models`, {
-    headers: {
-      'Authorization': `Bearer ${apiKey}`
+  // OpenAI-compatible providers are not consistent about whether users should
+  // configure the API root or the /v1 root. Try the configured /models first,
+  // then fall back to /v1/models when the plain endpoint is unavailable.
+  const configuredBaseUrl = (baseUrl || '').trim();
+  const rawBaseUrl = (configuredBaseUrl && configuredBaseUrl !== 'default')
+    ? configuredBaseUrl
+    : 'https://api.openai.com/v1';
+  const base = rawBaseUrl.replace(/\/+$/, '');
+  const v1Base = base.endsWith('/v1') ? base : `${base}/v1`;
+  const modelUrls = [...new Set([
+    `${base}/models`,
+    `${v1Base}/models`,
+  ])];
+
+  let lastError = null;
+
+  for (let i = 0; i < modelUrls.length; i++) {
+    const url = modelUrls[i];
+    let data;
+    try {
+      data = await llmProxyGet(url, {
+        Authorization: `Bearer ${apiKey}`
+      });
+    } catch (error) {
+      lastError = error;
+      const message = error?.message || String(error);
+      const statusMatch = message.match(/API error (\d+)/);
+      const status = statusMatch ? Number(statusMatch[1]) : null;
+      const shouldTryNext = i < modelUrls.length - 1 && (!status || [404, 405, 501].includes(status));
+      if (!shouldTryNext) {
+        throw error;
+      }
+      continue;
     }
-  });
-  
-  if (!response.ok) {
-    throw new Error(`API Error: ${response.statusText}`);
+
+    if (data) {
+      return Array.isArray(data) ? data : (data.data || []);
+    }
+
+    lastError = new Error(`Empty response from ${url}`);
+    if (i < modelUrls.length - 1) {
+      continue;
+    }
   }
-  
-  const data = await response.json();
-  return data.data || [];
+
+  throw lastError || new Error('Failed to fetch models');
 };
 
 export default {

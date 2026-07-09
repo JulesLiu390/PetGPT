@@ -7,6 +7,7 @@ import * as tauri from "../utils/tauri";
 import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
 import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/subagentManager";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
+import { normalizeApiProviders } from "../utils/apiProviders";
 import { listen, emit } from "@tauri-apps/api/event";
 
 // ==================== SocialPage ====================
@@ -237,14 +238,7 @@ export default function SocialPage() {
         ]);
         if (Array.isArray(assistantData)) setAssistants(assistantData);
         if (Array.isArray(providerData)) {
-          const normalized = providerData.map(p => ({
-            ...p,
-            cachedModels: typeof p.cachedModels === 'string'
-              ? JSON.parse(p.cachedModels) : (p.cachedModels || []),
-            hiddenModels: typeof p.hiddenModels === 'string'
-              ? JSON.parse(p.hiddenModels) : (p.hiddenModels || [])
-          }));
-          setApiProviders(normalized);
+          setApiProviders(normalizeApiProviders(providerData));
         }
       } catch (e) {
         console.error("SocialPage: Failed to load data:", e);

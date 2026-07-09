@@ -3,6 +3,7 @@
 export const actionType = {
 
     SET_SUGGEST_TEXT:"SET_SUGGEST_TEXT",
+    CLEAR_SUGGEST_TEXTS:"CLEAR_SUGGEST_TEXTS",
     // Tab-based message management (方案 B)
     SET_TAB_MESSAGES: "SET_TAB_MESSAGES",       // 设置特定 tab 的消息
     ADD_TAB_MESSAGE: "ADD_TAB_MESSAGE",         // 添加消息到特定 tab
@@ -151,6 +152,11 @@ const reducer = (state, action) => {
                     ...state.suggestText,
                     [action.conversationId]: action.suggestText
                 }
+            };
+        case actionType.CLEAR_SUGGEST_TEXTS:
+            return {
+                ...state,
+                suggestText: {},
             };
         // ============ Tab-based Message Management (方案 B) ============
         case actionType.SET_TAB_MESSAGES:

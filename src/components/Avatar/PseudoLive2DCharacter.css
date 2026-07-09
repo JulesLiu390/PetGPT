@@ -1,0 +1,166 @@
+.pl2d-character {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+  user-select: none;
+}
+
+.pl2d-stage {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: var(--pl2d-canvas-size);
+  height: var(--pl2d-canvas-size);
+  transform:
+    translate3d(var(--pl2d-offset-x), var(--pl2d-offset-y), 0)
+    scale(var(--pl2d-scale));
+  transform-origin: 0 0;
+  animation: pl2d-stage-float 4.8s ease-in-out infinite;
+  will-change: transform, filter;
+}
+
+.pl2d-layer {
+  position: absolute;
+  left: var(--x);
+  top: var(--y);
+  width: var(--w);
+  height: var(--h);
+  transform-origin: var(--pivot-x) var(--pivot-y);
+  will-change: transform, opacity, filter;
+}
+
+.pl2d-layer-image {
+  display: block;
+  width: 100%;
+  height: 100%;
+  user-select: none;
+  pointer-events: none;
+  transform-origin: center;
+  image-rendering: auto;
+  will-change: transform, opacity;
+}
+
+.pl2d-motion-body {
+  animation: pl2d-body-breath 3.6s ease-in-out infinite;
+}
+
+.pl2d-motion-head,
+.pl2d-motion-eye,
+.pl2d-motion-mouth {
+  animation: pl2d-head-sway 4.2s ease-in-out infinite;
+}
+
+.pl2d-motion-frontHair {
+  animation: pl2d-front-hair-sway 4.2s ease-in-out infinite;
+}
+
+.pl2d-motion-backHair {
+  animation: pl2d-back-hair-sway 4.8s ease-in-out infinite;
+}
+
+.pl2d-motion-object {
+  animation: pl2d-object-breath 3.6s ease-in-out infinite;
+}
+
+.pl2d-static .pl2d-stage,
+.pl2d-static .pl2d-layer {
+  animation: none;
+}
+
+.pl2d-mouth-frame {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transform-origin: 50% 58%;
+  transition: opacity 80ms linear;
+}
+
+.pl2d-mouth-frame-active {
+  transform: scaleY(var(--mouth-scale, 1));
+}
+
+.pl2d-detail-eye {
+  transform:
+    translateY(var(--blink-shift, 0))
+    rotate(var(--blink-angle, 0deg))
+    scaleY(var(--blink-scale, 1))
+    rotate(var(--blink-angle-inverse, 0deg));
+}
+
+.pl2d-mood-thinking .pl2d-stage {
+  filter: drop-shadow(0 10px 18px rgba(54, 86, 160, 0.18)) saturate(1.05);
+}
+
+.pl2d-mood-smile .pl2d-stage {
+  filter: brightness(1.04) saturate(1.08);
+}
+
+.pl2d-mood-sad .pl2d-stage {
+  filter: brightness(0.94) saturate(0.86);
+}
+
+.pl2d-mood-shocked .pl2d-stage {
+  filter: brightness(1.08) saturate(1.12);
+}
+
+@keyframes pl2d-stage-float {
+  0%,
+  100% {
+    margin-top: 0;
+  }
+  50% {
+    margin-top: -3px;
+  }
+}
+
+@keyframes pl2d-body-breath {
+  0%,
+  100% {
+    transform: translateY(0) scaleY(1);
+  }
+  50% {
+    transform: translateY(-3px) scaleY(1.006);
+  }
+}
+
+@keyframes pl2d-head-sway {
+  0%,
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate(2px, -1px) rotate(0.58deg);
+  }
+}
+
+@keyframes pl2d-front-hair-sway {
+  0%,
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate(1px, -0.5px) rotate(0.25deg);
+  }
+}
+
+@keyframes pl2d-back-hair-sway {
+  0%,
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  50% {
+    transform: translate(1px, 0.5px) rotate(0.32deg);
+  }
+}
+
+@keyframes pl2d-object-breath {
+  0%,
+  100% {
+    transform: translateY(0) rotate(-0.18deg);
+  }
+  50% {
+    transform: translateY(-3px) rotate(-0.35deg);
+  }
+}

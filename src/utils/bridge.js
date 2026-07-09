@@ -86,6 +86,7 @@ const DEFAULT_SETTINGS = {
   dialogHotkey: 'Alt + Space',
   launchAtStartup: false,
   theme: 'light',
+  quickReplyEnabled: true,
 };
 
 export const getSettings = async () => {

@@ -8,6 +8,7 @@ import ScreenshotOverlay from '../pages/ScreenshotOverlay';
 import { useStateValue } from '../context/StateProvider';
 import { actionType } from '../context/reducer';
 import * as tauri from '../utils/tauri';
+import { normalizeApiProviders } from '../utils/apiProviders';
 
 
 function App() {
@@ -18,19 +19,9 @@ function App() {
       try {
         const providers = await tauri.getApiProviders();
         if (providers) {
-          // 解析 cachedModels 和 hiddenModels JSON 字符串为数组
-          const normalizedProviders = providers.map(p => ({
-            ...p,
-            cachedModels: typeof p.cachedModels === 'string' 
-              ? JSON.parse(p.cachedModels) 
-              : (p.cachedModels || []),
-            hiddenModels: typeof p.hiddenModels === 'string'
-              ? JSON.parse(p.hiddenModels)
-              : (p.hiddenModels || [])
-          }));
           dispatch({
             type: actionType.SET_API_PROVIDERS,
-            apiProviders: normalizedProviders
+            apiProviders: normalizeApiProviders(providers)
           });
         }
       } catch (error) {
