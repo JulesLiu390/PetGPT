@@ -17,6 +17,7 @@ import { useStateValue } from "../context/StateProvider";
 import { actionType } from "../context/reducer";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
+import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
 import { emit, listen } from '@tauri-apps/api/event';
 import PseudoLive2DCharacter from "../components/Avatar/PseudoLive2DCharacter";
 import SkillsPanel from "../components/Settings/SkillsPanel";
@@ -3538,24 +3539,16 @@ const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
 
 const SocialPanel = ({ assistants, apiProviders }) => {
   const [selectedPetId, setSelectedPetId] = useState('');
-  const [config, setConfig] = useState({
-    petId: '',
-    mcpServerName: '',
-    apiProviderId: '',
-    modelName: '',
-    replyInterval: 0,
-    observerInterval: 180,
-    watchedGroups: [],
-    watchedFriends: [],
-    socialPersonaPrompt: '',
-    replyStrategyPrompt: '',
-    agentCanEditStrategy: false,
-    atMustReply: true,
-    botQQ: '',
-  });
+  const selectedPetIdRef = React.useRef(selectedPetId);
+  const [config, setConfig] = useState(() => createDefaultSocialConfig());
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
   const [socialActive, setSocialActive] = useState(false);
+  const [socialStarting, setSocialStarting] = useState(false);
+
+  useEffect(() => {
+    selectedPetIdRef.current = selectedPetId;
+  }, [selectedPetId]);
   const [logs, setLogs] = useState([]);
   const [showLogs, setShowLogs] = useState(false);
   const [showAdvancedLLM, setShowAdvancedLLM] = useState(false);
@@ -3578,40 +3571,42 @@ const SocialPanel = ({ assistants, apiProviders }) => {
   // Listen for social status changes from character window
   useEffect(() => {
     let unlisten;
+    let disposed = false;
+    setSocialActive(false);
+    setSocialStarting(false);
     const setup = async () => {
-      unlisten = await listen('social-status-changed', (event) => {
-        const { active, petId } = event.payload;
-        if (petId === selectedPetId || !selectedPetId) {
-          setSocialActive(active);
-        }
+      const off = await listen('social-status-changed', (event) => {
+        if (disposed) return;
+        const { active, starting, petId } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
+        setSocialActive(Boolean(active));
+        setSocialStarting(Boolean(starting));
       });
+      if (disposed) {
+        off();
+        return;
+      }
+      unlisten = off;
       // Query current status on mount
-      emit('social-query-status');
+      if (selectedPetId) await emit('social-query-status', { petId: selectedPetId });
     };
     setup();
-    return () => { unlisten?.(); };
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [selectedPetId]);
-
-  // Listen for full log responses (initial load / clear)
-  useEffect(() => {
-    let unlisten;
-    const setup = async () => {
-      unlisten = await listen('social-logs-response', (event) => {
-        setLogs(event.payload || []);
-      });
-    };
-    setup();
-    return () => { unlisten?.(); };
-  }, []);
 
   // Incremental log listening — replaces 3s full polling
   // Only active when log panel is visible; batches updates via RAF to avoid render storms
   useEffect(() => {
     if (!showLogs) return;
-    // One-time full load on open
-    emit('social-query-logs');
+    if (!selectedPetId) return;
+    setLogs([]);
 
-    let unlisten;
+    let unlistenFull;
+    let unlistenEntry;
+    let disposed = false;
     let pending = [];
     let rafId = null;
     const UI_MAX_LOGS = 500;
@@ -3628,60 +3623,87 @@ const SocialPanel = ({ assistants, apiProviders }) => {
     };
 
     const setup = async () => {
-      unlisten = await listen('social-log-entry', (event) => {
+      const offFullPromise = listen('social-logs-response', (event) => {
+        if (disposed) return;
+        const { petId, logs: payload = [], cleared = false } = event.payload || {};
+        if (petId !== selectedPetId) return;
+        if (cleared) {
+          pending = [];
+          setLogs([]);
+          return;
+        }
+        setLogs(prev => {
+          const seen = new Set(payload.map(log => log.id).filter(id => id != null));
+          const merged = [
+            ...payload,
+            ...prev.filter(log => log.id == null || !seen.has(log.id)),
+          ].sort((a, b) =>
+            String(a.timestamp || '').localeCompare(String(b.timestamp || '')));
+          return merged.slice(-UI_MAX_LOGS);
+        });
+      });
+      const offEntryPromise = listen('social-log-entry', (event) => {
+        if (disposed) return;
         const entry = event.payload;
-        if (!entry) return;
+        if (!entry || entry.petId !== selectedPetId) return;
         pending.push(entry);
         if (rafId == null) rafId = requestAnimationFrame(flush);
       });
+      const [offFull, offEntry] = await Promise.all([offFullPromise, offEntryPromise]);
+      if (disposed) {
+        offFull();
+        offEntry();
+        return;
+      }
+      unlistenFull = offFull;
+      unlistenEntry = offEntry;
+      await emit('social-query-logs', { petId: selectedPetId });
     };
     setup();
     return () => {
-      unlisten?.();
+      disposed = true;
+      unlistenFull?.();
+      unlistenEntry?.();
       if (rafId != null) cancelAnimationFrame(rafId);
     };
-  }, [showLogs]);
+  }, [showLogs, selectedPetId]);
 
   // Load config when pet changes
   useEffect(() => {
     if (!selectedPetId) return;
+    let cancelled = false;
+    const petId = selectedPetId;
+    setConfig(createDefaultSocialConfig(petId));
+    setGroupsText('');
+    setFriendsText('');
     const load = async () => {
-      const saved = await loadSocialConfig(selectedPetId);
-      if (saved) {
-        setConfig({ ...saved, petId: selectedPetId });
-        const serverTargets = saved.targetsByServer?.[saved.mcpServerName];
-        if (serverTargets) {
-          setGroupsText((serverTargets.groups || []).join(', '));
-          setFriendsText((serverTargets.friends || []).join(', '));
+      try {
+        const saved = await loadSocialConfig(petId);
+        if (cancelled) return;
+        if (saved) {
+          setConfig({ ...createDefaultSocialConfig(petId), ...saved, petId });
+          const serverTargets = saved.targetsByServer?.[saved.mcpServerName];
+          if (serverTargets) {
+            setGroupsText((serverTargets.groups || []).join(', '));
+            setFriendsText((serverTargets.friends || []).join(', '));
+          } else {
+            setGroupsText((saved.watchedGroups || []).join(', '));
+            setFriendsText((saved.watchedFriends || []).join(', '));
+          }
         } else {
-          setGroupsText((saved.watchedGroups || []).join(', '));
-          setFriendsText((saved.watchedFriends || []).join(', '));
+          setConfig(createDefaultSocialConfig(petId));
         }
-      } else {
-        setConfig(prev => ({
-          ...prev,
-          petId: selectedPetId,
-          mcpServerName: '',
-          apiProviderId: '',
-          modelName: '',
-          replyInterval: 0,
-          observerInterval: 180,
-          watchedGroups: [],
-          watchedFriends: [],
-          socialPersonaPrompt: '',
-          atMustReply: true,
-          botQQ: '',
-          ownerQQ: '',
-          ownerName: '',
-          enabledMcpServers: [],
-        }));
-        setGroupsText('');
-        setFriendsText('');
+        await emit('social-query-status', { petId });
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to load social config:', error);
+        }
       }
-      // Query status from character window
-      emit('social-query-status');
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPetId]);
 
   // Auto-select first assistant
@@ -3726,14 +3748,18 @@ const SocialPanel = ({ assistants, apiProviders }) => {
   };
 
   const handleSave = async () => {
+    const operationPetId = selectedPetId;
     setSaving(true);
     try {
-      const configToSave = buildConfigToSave();
-      await saveSocialConfig(selectedPetId, configToSave);
-      setConfig(configToSave);
+      const configToSave = { ...buildConfigToSave(), petId: operationPetId };
+      await saveSocialConfig(operationPetId, configToSave);
+      if (selectedPetIdRef.current === operationPetId) {
+        setConfig(configToSave);
+      }
       // 如果循环正在运行，通知 character 窗口用新配置重启
-      if (socialActive) {
-        emit('social-config-updated', configToSave);
+      if (socialActive || socialStarting) {
+        const appSettings = await tauri.getSettings().catch(() => ({}));
+        await emit('social-config-updated', withSocialTrainingConfig(configToSave, appSettings));
       }
       alert('Social configuration saved successfully!');
     } catch (e) {
@@ -3745,13 +3771,25 @@ const SocialPanel = ({ assistants, apiProviders }) => {
   };
 
   const handleToggle = async () => {
-    if (socialActive) {
-      emit('social-stop');
-    } else {
-      const configToStart = buildConfigToSave();
-      await saveSocialConfig(selectedPetId, configToStart);
-      setConfig(configToStart);
-      emit('social-start', configToStart);
+    if (socialStarting) return;
+    try {
+      if (socialActive) {
+        await emit('social-stop', { petId: selectedPetId });
+      } else {
+        const operationPetId = selectedPetId;
+        setSocialStarting(true);
+        const configToStart = { ...buildConfigToSave(), petId: operationPetId };
+        await saveSocialConfig(operationPetId, configToStart);
+        if (selectedPetIdRef.current === operationPetId) {
+          setConfig(configToStart);
+        }
+        const appSettings = await tauri.getSettings().catch(() => ({}));
+        await emit('social-start', withSocialTrainingConfig(configToStart, appSettings));
+      }
+    } catch (error) {
+      setSocialStarting(false);
+      console.error('Failed to toggle social agent:', error);
+      alert('Failed to toggle social agent: ' + (error?.message || error));
     }
   };
 
@@ -3788,14 +3826,14 @@ const SocialPanel = ({ assistants, apiProviders }) => {
           </button>
           <button
             onClick={handleToggle}
-            disabled={!selectedPetId}
+            disabled={!selectedPetId || socialStarting}
             className={`px-3 py-1.5 text-xs font-medium rounded-lg ${
               socialActive 
                 ? 'bg-red-500 text-white hover:bg-red-600' 
                 : 'bg-cyan-500 text-white hover:bg-cyan-600'
             } disabled:opacity-50`}
           >
-            {socialActive ? 'Stop' : 'Start'}
+            {socialStarting ? 'Starting…' : socialActive ? 'Stop' : 'Start'}
           </button>
         </div>
       </div>
@@ -3810,7 +3848,10 @@ const SocialPanel = ({ assistants, apiProviders }) => {
               description="Recent social agent activity"
               action={
                 <button 
-                  onClick={() => { emit('social-clear-logs'); setLogs([]); }}
+                  onClick={() => {
+                    emit('social-clear-logs', { petId: selectedPetId });
+                    setLogs([]);
+                  }}
                   className="text-xs text-slate-500 hover:text-red-500"
                 >
                   Clear

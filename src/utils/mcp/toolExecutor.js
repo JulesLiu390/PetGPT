@@ -20,6 +20,7 @@ import { downloadUrlAsBase64, llmProxyCall, llmProxyStream } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
 import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
 import { isSkillTool, executeSkillTool } from '../skills/index.js';
+import { appendToolResultAnnotation } from './toolResultAnnotation.js';
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
@@ -109,6 +110,23 @@ const TOOL_EXECUTION_TIMEOUT_MS = 64000; // 64s for individual tool call
 const DEFAULT_TOOL_TIMEOUT_MS = 60000; // 1 minute default
 
 /**
+ * Build the exact set of tool names exposed to the model for this turn.
+ *
+ * This is intentionally the only authorization source. Recognising a name as a
+ * builtin/Skill merely selects its executor after authorization; it must never
+ * grant permission by itself.
+ */
+const getDeclaredToolNames = (mcpTools) => new Set(
+  (Array.isArray(mcpTools) ? mcpTools : [])
+    .filter(tool => tool?.name)
+    .map(tool => tool.serverName ? `${tool.serverName}__${tool.name}` : tool.name),
+);
+
+const undeclaredToolResult = (toolName) => ({
+  error: `Tool "${toolName}" is not available in this turn. Only use the tools provided to you.`,
+});
+
+/**
  * 获取可用的 MCP 工具列表
  * 
  * @returns {Promise<Array>} MCP 工具数组
@@ -123,14 +141,15 @@ export const getMcpTools = async () => {
     const rawTools = await tauri.mcp.getAllTools();
     
     // 扁平化 Rust 返回的嵌套结构
-    // Rust 返回: { serverId, serverName, tool: { name, description, inputSchema } }
-    // 前端需要: { serverId, serverName, name, description, inputSchema }
+    // Rust 返回: { serverId, serverName, tool: { name, description, inputSchema, annotations } }
+    // 前端需要保留 annotations，供调用方根据 readOnlyHint 等元数据收窄工具权限。
     const tools = rawTools.map(item => ({
       serverId: item.serverId,
       serverName: item.serverName,
       name: item.tool?.name,
       description: item.tool?.description,
-      inputSchema: item.tool?.inputSchema
+      inputSchema: item.tool?.inputSchema,
+      annotations: item.tool?.annotations
     })).filter(tool => tool.name); // 过滤掉没有 name 的工具
     
     console.log('[MCP] Available tools:', tools.length);
@@ -265,7 +284,20 @@ export const formatToolResult = (result) => {
   if (result === null || result === undefined) {
     return 'null';
   }
-  
+
+  // MCP implementations commonly use either `isError: true` or `success: false`.
+  // Handle failures before the content-array branch so an empty content array cannot hide an error.
+  if (result.error || result.isError === true || result.success === false) {
+    const contentError = Array.isArray(result.content)
+      ? result.content
+        .filter(item => item?.type === 'text' && item.text)
+        .map(item => item.text)
+        .join('\n')
+      : '';
+    const detail = result.error || contentError || result.message || 'Tool execution failed';
+    return `Error: ${detail}`;
+  }
+
   // 如果是 MCP 标准响应格式
   if (result.content && Array.isArray(result.content)) {
     return result.content
@@ -276,11 +308,6 @@ export const formatToolResult = (result) => {
         return JSON.stringify(item);
       })
       .join('\n');
-  }
-  
-  // 如果有 error 字段
-  if (result.error) {
-    return `Error: ${result.error}`;
   }
   
   // 其他情况直接 JSON 序列化
@@ -485,6 +512,8 @@ export const executeToolCalls = async (toolCalls) => {
  * @param {Object} config.options
  * @param {Function} config.onToolCall - 工具调用回调 (toolName, args) => void
  * @param {Function} config.onToolResult - 工具结果回调 (toolName, result) => void
+ * @param {Function} config.toolResultAnnotation - 同步返回仅追加到模型可见工具结果的运行时注释
+ * @param {Function} config.llmTransport - 可选 LLM 传输实现（默认使用 Rust proxy，便于集成测试）
  * @param {Function} config.toolArgTransform - (name, args) => args — transform tool args before execution
  * @returns {Promise<{content: string, toolCallHistory: Array}>}
  */
@@ -498,6 +527,8 @@ export const callLLMWithTools = async ({
   options = {},
   onToolCall,
   onToolResult,
+  toolResultAnnotation, // ({ name, args, result, isError, toolCallId, iteration }) => string
+  llmTransport = llmProxyCall,
   onLLMText,        // (text, iterationIndex) => void — called with LLM text each iteration (including intermediate rounds with tool calls)
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
@@ -512,6 +543,7 @@ export const callLLMWithTools = async ({
 }) => {
   const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
+  const declaredToolNames = getDeclaredToolNames(mcpTools);
 
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
   let initialMessages = [...messages];
@@ -600,7 +632,7 @@ export const callLLMWithTools = async ({
       // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
       let data;
       try {
-        data = await llmProxyCall(req.endpoint, req.headers, req.body);
+        data = await llmTransport(req.endpoint, req.headers, req.body);
       } catch (proxyErr) {
         // Tauri invoke 抛的是 string，无法挂属性 → 包装成 Error 对象
         const err = typeof proxyErr === 'string' ? new Error(proxyErr) : (proxyErr instanceof Error ? proxyErr : new Error(String(proxyErr)));
@@ -620,6 +652,13 @@ export const callLLMWithTools = async ({
         throw err;
       }
       const result = adapter.parseResponse(data);
+      if (Array.isArray(result.toolCalls)) {
+        result.toolCalls.forEach((call, index) => {
+          if (!call.id) {
+            call.id = `${call.name || 'tool'}-${Date.now()}-${totalIterations}-${index}`;
+          }
+        });
+      }
 
       // Accumulate usage from this iteration
       const iterUsage = normalizeUsage(result.usage);
@@ -690,16 +729,59 @@ export const callLLMWithTools = async ({
       // 检查并执行每个工具调用
       let reachedLimit = false;
       let limitMessage = '';
+      let batchExecutionCount = 0;
+      let terminalToolName = '';
+      const batchResults = [];
+      const pushTraceToolResult = (entry) => {
+        if (!_trace) return;
+        _trace.toolResults.push({
+          tool_call_id: entry.id,
+          name: entry.name,
+          content: typeof entry.modelResult === 'string'
+            ? entry.modelResult
+            : JSON.stringify(entry.modelResult),
+        });
+      };
+      const addSkippedBatchResult = (call, message) => {
+        const entry = {
+          id: call.id,
+          name: call.name,
+          arguments: call.arguments,
+          result: message,
+          modelResult: message,
+          annotation: '',
+          images: [],
+          isError: true,
+          skipped: true,
+        };
+        batchResults.push(entry);
+        pushTraceToolResult(entry);
+      };
 
       for (const call of result.toolCalls) {
-        const toolCallId = call.id || `${call.name}-${Date.now()}`;
+        const toolCallId = call.id;
+
+        // stopAfterTool 表示本批已经到达终点。后续调用不再产生真实副作用，
+        // 但仍为 provider 补齐一一对应的 synthetic tool result。
+        if (stopEarly) {
+          addSkippedBatchResult(
+            call,
+            `[Skipped: ${call.name} was not executed because terminal tool "${terminalToolName}" already completed.]`,
+          );
+          continue;
+        }
+
+        // Tool recognition is not authorization. Every executor — external,
+        // builtin, social, Intent, subagent, sticker and Skill — is gated by
+        // the exact tool list exposed for this turn, including when it is empty.
+        const isDeclared = declaredToolNames.has(call.name);
 
         // 提取服务器名称（格式: serverName__toolName）
         const parts = call.name.split('__');
         const serverName = parts.length > 1 ? parts[0] : null;
 
         // 检查该服务器是否达到限制
-        if (serverName) {
+        if (isDeclared && serverName) {
           const currentCount = serverIterations.get(serverName) || 0;
           const maxIterations = getServerMaxIterations(serverName);
 
@@ -708,13 +790,15 @@ export const callLLMWithTools = async ({
             console.warn(`[MCP] Server ${serverName} reached max iterations (${maxIterations})`);
             reachedLimit = true;
             limitMessage = `Server "${serverName}" reached maximum tool call iterations (${maxIterations})`;
-            continue; // 跳过这个工具调用
+            addSkippedBatchResult(call, `[Skipped: ${limitMessage}]`);
+            continue;
           }
 
           // 增加计数
           serverIterations.set(serverName, currentCount + 1);
           console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
         }
+        if (isDeclared) batchExecutionCount += 1;
 
         // Apply arg transform before onToolCall notification
         if (toolArgTransform) {
@@ -726,10 +810,19 @@ export const callLLMWithTools = async ({
         }
 
         let isError = false;
-        let toolResult;
+        let toolResult = null;
         try {
+          if (!isDeclared) {
+            console.warn(
+              `[MCP] Rejected undeclared tool call: ${call.name} `
+              + `(allowed: ${Array.from(declaredToolNames).join(', ') || 'none'})`,
+            );
+            isError = true;
+            toolResult = undeclaredToolResult(call.name);
+          }
+
           // Check toolCallFilter first (allows caller to reject specific calls)
-          if (toolCallFilter) {
+          if (!toolResult && toolCallFilter) {
             const filterError = toolCallFilter(call.name, call.arguments);
             if (filterError) {
               console.log(`[MCP] Tool call filtered: ${call.name} — ${filterError}`);
@@ -739,8 +832,6 @@ export const callLLMWithTools = async ({
           }
 
           if (!toolResult) {
-            // Validate tool name against declared tools to prevent LLM hallucinating undeclared tool calls
-            const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
             const isBuiltin = isBuiltinTool(call.name);
             const isSocialFile = isSocialFileTool(call.name);
             const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
@@ -750,17 +841,8 @@ export const callLLMWithTools = async ({
             const isIntentPlan = isIntentPlanTool(call.name);
             const isSubagent = isSubagentTool(call.name);
             const isSkill = isSkillTool(call.name);
-            const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent || isSkill;
-            console.log(`[MCP] Tool validation: call="${call.name}" declared=[${declaredToolNames.join(',')}] isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan} isSkill=${isSkill}`);
-            if (isSkill && !declaredToolNames.includes(call.name)) {
-              console.warn(`[MCP] ❌ Rejected undeclared Skill tool call: ${call.name}`);
-              isError = true;
-              toolResult = { error: `Skill tool "${call.name}" is not enabled for this turn.` };
-            } else if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
-              console.warn(`[MCP] ❌ Rejected undeclared tool call: ${call.name}`);
-              isError = true;
-              toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
-            } else if (isBuiltin && builtinToolContext) {
+            console.log(`[MCP] Tool validation: call="${call.name}" declared=true isBuiltin=${isBuiltin} isSocialFile=${isSocialFile} isHistory=${isHistoryBuiltin} isGroupLog=${isGroupLogBuiltin} isSticker=${isStickerTool} isBufferSearch=${isBufferSearch} isIntentPlan=${isIntentPlan} isSkill=${isSkill}`);
+            if (isBuiltin && builtinToolContext) {
               toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
             } else if (isSkill) {
               toolResult = builtinToolContext
@@ -784,7 +866,11 @@ export const callLLMWithTools = async ({
               toolResult = await executeToolByName(call.name, call.arguments);
             }
           }
-          if (toolResult && toolResult.error) {
+          if (toolResult && (
+            toolResult.error
+            || toolResult.isError === true
+            || toolResult.success === false
+          )) {
             isError = true;
           }
         } catch (error) {
@@ -793,44 +879,75 @@ export const callLLMWithTools = async ({
         }
 
         const formattedResult = formatToolResult(toolResult);
+        let modelFacingResult = formattedResult;
+        let annotation = '';
+        if (typeof toolResultAnnotation === 'function') {
+          try {
+            annotation = toolResultAnnotation({
+              name: call.name,
+              args: call.arguments,
+              result: formattedResult,
+              isError,
+              toolCallId,
+              iteration: totalIterations,
+            });
+            modelFacingResult = appendToolResultAnnotation(formattedResult, annotation);
+          } catch (annotationError) {
+            console.warn('[MCP] toolResultAnnotation failed:', annotationError);
+          }
+        }
         const { images: rawImages } = extractMediaFromToolResult(toolResult);
         const toolImages = await resolveImageUrls(rawImages);
 
-        toolCallHistory.push({
+        const historyEntry = {
           id: toolCallId,
           name: call.name,
           arguments: call.arguments,
           result: formattedResult,
           images: toolImages
-        });
+        };
+        toolCallHistory.push(historyEntry);
 
-        if (_trace) {
-          _trace.toolResults.push({
-            tool_call_id: toolCallId,
-            name: call.name,
-            content: typeof formattedResult === 'string'
-              ? formattedResult
-              : JSON.stringify(formattedResult),
-          });
-        }
+        const batchEntry = {
+          ...historyEntry,
+          modelResult: modelFacingResult,
+          annotation,
+          isError,
+          skipped: false,
+        };
+        batchResults.push(batchEntry);
+        pushTraceToolResult(batchEntry);
 
         if (onToolResult) {
-          onToolResult(call.name, formattedResult, toolCallId, isError);
+          try {
+            onToolResult(call.name, formattedResult, toolCallId, isError);
+          } catch (callbackError) {
+            console.warn('[MCP] onToolResult callback failed:', callbackError);
+          }
         }
 
-        const stopAfterToolMatches = stopAfterTool && (
-          typeof stopAfterTool === 'function'
-            ? stopAfterTool(call.name, formattedResult, call.arguments)
-            : call.name === stopAfterTool
-        );
+        let stopAfterToolMatches = false;
+        if (!isError && stopAfterTool) {
+          try {
+            stopAfterToolMatches = typeof stopAfterTool === 'function'
+              ? stopAfterTool(call.name, formattedResult, call.arguments, {
+                isError,
+                toolCallId,
+                iteration: totalIterations,
+              })
+              : call.name === stopAfterTool;
+          } catch (callbackError) {
+            console.warn('[MCP] stopAfterTool callback failed:', callbackError);
+          }
+        }
         if (stopAfterToolMatches) {
           stopEarly = true;
-          // don't break — let remaining calls in this batch complete so message indices stay correct
+          terminalToolName = call.name;
         }
       }
 
       // 如果所有工具调用都被跳过（达到限制），返回
-      if (reachedLimit && toolCallHistory.length === 0) {
+      if (reachedLimit && batchExecutionCount === 0) {
         _writeUsage({
           ts: new Date().toISOString(), label: usageLabel, target: usageTarget || '',
           model: model || '', apiFormat: apiFormat || '',
@@ -849,18 +966,24 @@ export const callLLMWithTools = async ({
       if (apiFormat === 'gemini_official') {
         // Gemini 格式：添加 model 的 functionCall，然后添加 user 的 functionResponse
         currentMessages.push(geminiAdapter.createModelFunctionCallMessage(result.toolCalls));
-        currentMessages.push(geminiAdapter.createFunctionResponseMessage(
-          result.toolCalls.map((call, i) => ({
-            name: call.name,
-            result: toolCallHistory[toolCallHistory.length - result.toolCalls.length + i]?.result || '[Skipped due to iteration limit]'
-          }))
-        ));
+        const functionResponseMessage = geminiAdapter.createFunctionResponseMessage(
+          batchResults.map(entry => ({
+            name: entry.name,
+            result: entry.result,
+          })),
+        );
+        // 保持 Gemini functionResponse 的原始结构；账本作为同一 user turn 的额外文本注入。
+        const annotations = batchResults
+          .map(entry => entry.annotation)
+          .filter(Boolean);
+        if (annotations.length > 0) {
+          functionResponseMessage.parts.push({ text: annotations.join('\n\n') });
+        }
+        currentMessages.push(functionResponseMessage);
 
         // Gemini: 工具结果中的图片需要作为额外的 user 消息注入 (functionResponse 不支持 inline_data)
         const allToolImages = [];
-        for (let i = 0; i < result.toolCalls.length; i++) {
-          const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
-          const entry = toolCallHistory[historyIndex];
+        for (const entry of batchResults) {
           if (entry?.images?.length > 0) {
             allToolImages.push(...entry.images);
           }
@@ -883,13 +1006,10 @@ export const callLLMWithTools = async ({
         // OpenAI 格式：添加 assistant 的 tool_calls，然后添加 tool 消息（支持多模态）
         currentMessages.push(openaiAdapter.createAssistantToolCallMessage(result.toolCalls));
 
-        for (let i = 0; i < result.toolCalls.length; i++) {
-          const call = result.toolCalls[i];
-          const historyIndex = toolCallHistory.length - result.toolCalls.length + i;
-          const entry = toolCallHistory[historyIndex];
+        for (const entry of batchResults) {
           currentMessages.push(openaiAdapter.formatToolResultMessage(
-            call.id,
-            entry?.result || '[Skipped due to iteration limit]',
+            entry.id,
+            entry.modelResult,
             entry?.images
           ));
         }
@@ -949,13 +1069,17 @@ export const callLLMStreamWithTools = async ({
   onChunk,
   onToolCall,
   onToolResult,
+  toolResultAnnotation, // same model-only annotation hook as callLLMWithTools
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
   abortSignal,
-  builtinToolContext  // { petId, memoryEnabled } — for builtin tool execution
+  builtinToolContext,  // { petId, memoryEnabled } — for builtin tool execution
+  stopAfterTool, // optional string/function — stop after a successful terminal tool
+  streamTransport = llmProxyStream, // injectable for integration tests
 }) => {
   const adapter = pickAdapter(apiFormat);
   const llmTools = convertToolsForLLM(mcpTools, apiFormat);
+  const declaredToolNames = getDeclaredToolNames(mcpTools);
   
   // 对于 Gemini，清理历史消息中缺少 thought_signature 的工具调用
   // 这些消息来自数据库历史，没有签名会导致 API 报错
@@ -1077,7 +1201,7 @@ export const callLLMStreamWithTools = async ({
       }
     };
 
-    await llmProxyStream(req.endpoint, req.headers, req.body, processStreamText);
+    await streamTransport(req.endpoint, req.headers, req.body, processStreamText);
     if (buffer.trim()) {
       processStreamText('\n');
     }
@@ -1124,6 +1248,43 @@ export const callLLMStreamWithTools = async ({
     // 检查并执行每个工具调用
     let reachedLimit = false;
     let limitMessage = '';
+    let batchExecutionCount = 0;
+    let stopEarly = false;
+    let terminalToolName = '';
+    const batchResults = [];
+
+    const addBatchResult = ({
+      call,
+      result,
+      modelResult = result,
+      annotation = '',
+      images = [],
+      isError = false,
+      skipped = false,
+    }) => {
+      const entry = {
+        id: call.id || `${call.name}-${Date.now()}`,
+        name: call.name,
+        arguments: call.arguments,
+        result,
+        modelResult,
+        annotation,
+        images,
+        isError,
+        skipped,
+      };
+      batchResults.push(entry);
+      if (!skipped) {
+        toolCallHistory.push({
+          id: entry.id,
+          name: entry.name,
+          arguments: entry.arguments,
+          result: entry.result,
+          images: entry.images,
+        });
+      }
+      return entry;
+    };
     
     for (const call of collectedToolCalls) {
       // 检查是否已中断
@@ -1137,13 +1298,28 @@ export const callLLMStreamWithTools = async ({
       }
       
       const toolCallId = call.id || `${call.name}-${Date.now()}`;
+
+      // A provider requires one function result for every call in the batch.
+      // Once a terminal tool succeeds, synthesize results for the remaining
+      // calls without allowing any further side effects.
+      if (stopEarly) {
+        addBatchResult({
+          call: { ...call, id: toolCallId },
+          result: `[Skipped: ${call.name} was not executed because terminal tool "${terminalToolName}" already completed.]`,
+          isError: true,
+          skipped: true,
+        });
+        continue;
+      }
+
+      const isDeclared = declaredToolNames.has(call.name);
       
       // 提取服务器名称（格式: serverName__toolName）
       const parts = call.name.split('__');
       const serverName = parts.length > 1 ? parts[0] : null;
       
       // 检查该服务器是否达到限制
-      if (serverName) {
+      if (isDeclared && serverName) {
         const currentCount = serverIterations.get(serverName) || 0;
         const maxIterations = getServerMaxIterations(serverName);
         
@@ -1153,12 +1329,11 @@ export const callLLMStreamWithTools = async ({
           reachedLimit = true;
           limitMessage = `Server "${serverName}" reached maximum tool call iterations (${maxIterations})`;
           
-          // 记录跳过的工具调用
-          toolCallHistory.push({
-            id: toolCallId,
-            name: call.name,
-            arguments: call.arguments,
-            result: `[Skipped: ${limitMessage}]`
+          addBatchResult({
+            call: { ...call, id: toolCallId },
+            result: `[Skipped: ${limitMessage}]`,
+            isError: true,
+            skipped: true,
           });
           
           if (onToolResult) {
@@ -1171,6 +1346,7 @@ export const callLLMStreamWithTools = async ({
         serverIterations.set(serverName, currentCount + 1);
         console.log(`[MCP] Server ${serverName} iteration: ${currentCount + 1}/${maxIterations ?? '∞'}`);
       }
+      if (isDeclared) batchExecutionCount += 1;
       
       // Apply arg transform before onToolCall notification
       if (toolArgTransform) {
@@ -1182,15 +1358,24 @@ export const callLLMStreamWithTools = async ({
       }
       
       let isError = false;
-      let toolResult;
+      let toolResult = null;
       try {
         // 再次检查中断状态
         if (abortSignal?.aborted) {
           throw new Error('Tool execution cancelled');
         }
         
+        if (!isDeclared) {
+          console.warn(
+            `[MCP] Rejected undeclared stream tool call: ${call.name} `
+            + `(allowed: ${Array.from(declaredToolNames).join(', ') || 'none'})`,
+          );
+          isError = true;
+          toolResult = undeclaredToolResult(call.name);
+        }
+
         // Check toolCallFilter first (allows caller to reject specific calls)
-        if (toolCallFilter) {
+        if (!toolResult && toolCallFilter) {
           const filterError = toolCallFilter(call.name, call.arguments);
           if (filterError) {
             console.log(`[MCP] Tool call filtered: ${call.name} — ${filterError}`);
@@ -1200,8 +1385,6 @@ export const callLLMStreamWithTools = async ({
         }
         
         if (!toolResult) {
-          // Validate tool name against declared tools
-          const declaredToolNames = mcpTools?.map(t => t.serverName ? `${t.serverName}__${t.name}` : t.name) || [];
           const isBuiltin = isBuiltinTool(call.name);
           const isSocialFile = isSocialFileTool(call.name);
           const isHistoryBuiltin = isHistoryBuiltinTool(call.name);
@@ -1211,16 +1394,7 @@ export const callLLMStreamWithTools = async ({
           const isIntentPlan = isIntentPlanTool(call.name);
           const isSubagent = isSubagentTool(call.name);
           const isSkill = isSkillTool(call.name);
-          const isAnyBuiltin = isBuiltin || isSocialFile || isHistoryBuiltin || isGroupLogBuiltin || isStickerTool || isBufferSearch || isIntentPlan || isSubagent || isSkill;
-          if (isSkill && !declaredToolNames.includes(call.name)) {
-            console.warn(`[MCP] Rejected undeclared Skill tool call: ${call.name}`);
-            isError = true;
-            toolResult = { error: `Skill tool "${call.name}" is not enabled for this turn.` };
-          } else if (!isAnyBuiltin && declaredToolNames.length > 0 && !declaredToolNames.includes(call.name)) {
-            console.warn(`[MCP] Rejected undeclared tool call: ${call.name} (allowed: ${declaredToolNames.join(', ')})`);
-            isError = true;
-            toolResult = { error: `Tool "${call.name}" is not available. Only use the tools provided to you.` };
-          } else if (isBuiltin && builtinToolContext) {
+          if (isBuiltin && builtinToolContext) {
             toolResult = await executeBuiltinTool(call.name, call.arguments, builtinToolContext);
           } else if (isSkill) {
             toolResult = builtinToolContext
@@ -1266,31 +1440,82 @@ export const callLLMStreamWithTools = async ({
       }
       
       const formattedResult = formatToolResult(toolResult);
+      let modelFacingResult = formattedResult;
+      let annotation = '';
+      if (typeof toolResultAnnotation === 'function') {
+        try {
+          annotation = toolResultAnnotation({
+            name: call.name,
+            args: call.arguments,
+            result: formattedResult,
+            isError,
+            toolCallId,
+            iteration: totalIterations,
+          });
+          modelFacingResult = appendToolResultAnnotation(formattedResult, annotation);
+        } catch (annotationError) {
+          console.warn('[MCP] stream toolResultAnnotation failed:', annotationError);
+        }
+      }
       const { images: rawImages } = extractMediaFromToolResult(toolResult);
       const toolImages = await resolveImageUrls(rawImages);
       
-      toolCallHistory.push({
-        id: toolCallId,
-        name: call.name,
-        arguments: call.arguments,
+      addBatchResult({
+        call: { ...call, id: toolCallId },
         result: formattedResult,
-        images: toolImages
+        modelResult: modelFacingResult,
+        annotation,
+        images: toolImages,
+        isError,
       });
       
       if (onToolResult) {
         onToolResult(call.name, formattedResult, toolCallId, isError);
       }
+
+      let stopAfterToolMatches = false;
+      if (!isError && stopAfterTool) {
+        try {
+          stopAfterToolMatches = typeof stopAfterTool === 'function'
+            ? stopAfterTool(call.name, formattedResult, call.arguments, {
+              isError,
+              toolCallId,
+              iteration: totalIterations,
+            })
+            : call.name === stopAfterTool;
+        } catch (callbackError) {
+          console.warn('[MCP] stream stopAfterTool callback failed:', callbackError);
+        }
+      }
+      if (stopAfterToolMatches) {
+        stopEarly = true;
+        terminalToolName = call.name;
+      }
+    }
+
+    if (reachedLimit && batchExecutionCount === 0) {
+      return {
+        content: fullContent + `[${limitMessage}]`,
+        toolCallHistory,
+      };
     }
     
     // 将工具调用和结果添加到消息中
     if (apiFormat === 'gemini_official') {
       const modelMessage = geminiAdapter.createModelFunctionCallMessage(collectedToolCalls);
       const responseMessage = geminiAdapter.createFunctionResponseMessage(
-        collectedToolCalls.map((call, i) => ({
-          name: call.name,
-          result: toolCallHistory[toolCallHistory.length - collectedToolCalls.length + i].result
+        batchResults.map(entry => ({
+          name: entry.name,
+          result: entry.result,
         }))
       );
+
+      const annotations = batchResults
+        .map(entry => entry.annotation)
+        .filter(Boolean);
+      if (annotations.length > 0) {
+        responseMessage.parts.push({ text: annotations.join('\n\n') });
+      }
       
       console.log('[MCP] Gemini model message:', JSON.stringify(modelMessage, null, 2));
       console.log('[MCP] Gemini response message:', JSON.stringify(responseMessage, null, 2));
@@ -1300,9 +1525,7 @@ export const callLLMStreamWithTools = async ({
       
       // Gemini: 工具结果中的图片需要作为额外的 user 消息注入 (functionResponse 不支持 inline_data)
       const allToolImages = [];
-      for (let i = 0; i < collectedToolCalls.length; i++) {
-        const historyIndex = toolCallHistory.length - collectedToolCalls.length + i;
-        const entry = toolCallHistory[historyIndex];
+      for (const entry of batchResults) {
         if (entry?.images?.length > 0) {
           allToolImages.push(...entry.images);
         }
@@ -1325,16 +1548,17 @@ export const callLLMStreamWithTools = async ({
       // OpenAI 格式：支持多模态 tool 消息（图片作为 image_url parts）
       currentMessages.push(openaiAdapter.createAssistantToolCallMessage(collectedToolCalls));
       
-      for (let i = 0; i < collectedToolCalls.length; i++) {
-        const call = collectedToolCalls[i];
-        const historyIndex = toolCallHistory.length - collectedToolCalls.length + i;
-        const entry = toolCallHistory[historyIndex];
+      for (const entry of batchResults) {
         currentMessages.push(openaiAdapter.formatToolResultMessage(
-          call.id,
-          entry.result,
+          entry.id,
+          entry.modelResult,
           entry.images
         ));
       }
+    }
+
+    if (stopEarly) {
+      return { content: fullContent, toolCallHistory };
     }
   }
   

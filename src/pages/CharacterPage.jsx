@@ -7,6 +7,7 @@ import * as tauri from '../utils/tauri';
 import { getRandomIdleState } from '../utils/moodDetector';
 import PseudoLive2DCharacter from '../components/Avatar/PseudoLive2DCharacter';
 import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
+import { scopeSocialStatus, shouldApplySocialCommand } from '../utils/socialControlScope';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 8; // 留出轻微手抖空间，移动超过 8px 才视为拖动
@@ -498,87 +499,197 @@ export const Character = () => {
   // 监听来自其他窗口的社交控制事件（ManagementPage SocialPanel）
   useEffect(() => {
     let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenSetCustomRule, unlistenSetTargetPaused, unlistenQueryTargetNames;
+    let configRestartRunning = false;
+    let configRestartPetId = null;
+    let configRestartCancelled = false;
+    let pendingConfigUpdate = null;
     let cancelled = false;
     const setup = async () => {
       const { listen: listenEvent, emit: emitEvent } = await import('@tauri-apps/api/event');
       if (cancelled) return;
-      
-      unlistenStart = await listenEvent('social-start', async (event) => {
+      const safeListen = async (eventName, handler) => {
+        const off = await listenEvent(eventName, handler);
+        if (cancelled) {
+          off();
+          return null;
+        }
+        return off;
+      };
+
+      unlistenStart = await safeListen('social-start', async (event) => {
         const config = event.payload;
         if (!config?.petId) return;
-        const started = await startSocialLoop(config, (active) => {
-          setSocialActive(active);
-          emitEvent('social-status-changed', { active, petId: config.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
-        });
-        setSocialActive(started);
-        emitEvent('social-status-changed', { active: started, petId: config.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
+        configRestartCancelled = true;
+        pendingConfigUpdate = null;
+        const previousStatus = getSocialStatus();
+        try {
+          const startPromise = startSocialLoop(config, () => {
+            const current = getSocialStatus();
+            setSocialActive(Boolean(current.active));
+            emitEvent('social-status-changed', scopeSocialStatus(current, config.petId));
+          });
+          const startingStatus = getSocialStatus();
+          emitEvent('social-status-changed', scopeSocialStatus(startingStatus, config.petId));
+          if (
+            previousStatus.active
+            && previousStatus.petId
+            && previousStatus.petId !== config.petId
+          ) {
+            emitEvent('social-status-changed', scopeSocialStatus({
+              ...previousStatus,
+              active: false,
+            }, previousStatus.petId));
+          }
+          await startPromise;
+          const current = getSocialStatus();
+          setSocialActive(Boolean(current.active));
+          emitEvent('social-status-changed', scopeSocialStatus(current, config.petId));
+        } catch (error) {
+          console.error('[SocialAgent] Failed to start:', error);
+          const current = getSocialStatus();
+          setSocialActive(Boolean(current.active));
+          emitEvent('social-status-changed', scopeSocialStatus(current, config.petId));
+        }
       });
 
-      unlistenStop = await listenEvent('social-stop', () => {
+      unlistenStop = await safeListen('social-stop', (event) => {
+        const requestedPetId = event.payload?.petId;
         const status = getSocialStatus();
+        if (!shouldApplySocialCommand(status.petId, requestedPetId)) {
+          emitEvent('social-status-changed', scopeSocialStatus(status, requestedPetId));
+          return;
+        }
+        if (configRestartPetId === requestedPetId) {
+          configRestartCancelled = true;
+          pendingConfigUpdate = null;
+        }
         stopSocialLoop();
         setSocialActive(false);
-        emitEvent('social-status-changed', { active: false, petId: status.petId, lurkModes: {} });
+        emitEvent('social-status-changed', scopeSocialStatus({
+          ...status,
+          active: false,
+          starting: false,
+        }, requestedPetId));
       });
 
-      unlistenQuery = await listenEvent('social-query-status', () => {
+      unlistenQuery = await safeListen('social-query-status', (event) => {
+        const requestedPetId = event.payload?.petId;
         const status = getSocialStatus();
-        emitEvent('social-status-changed', { active: status.active, petId: status.petId, lurkModes: status.lurkModes, pausedTargets: status.pausedTargets });
+        emitEvent('social-status-changed', scopeSocialStatus(status, requestedPetId));
       });
 
-      unlistenQueryLogs = await listenEvent('social-query-logs', () => {
-        emitEvent('social-logs-response', getSocialLogs());
+      unlistenQueryLogs = await safeListen('social-query-logs', (event) => {
+        const requestedPetId = event.payload?.petId;
+        if (!requestedPetId) return;
+        const logs = getSocialLogs(requestedPetId);
+        emitEvent('social-logs-response', { petId: requestedPetId, logs });
       });
 
-      unlistenClearLogs = await listenEvent('social-clear-logs', () => {
-        clearSocialLogs();
-        emitEvent('social-logs-response', []);
+      unlistenClearLogs = await safeListen('social-clear-logs', (event) => {
+        const requestedPetId = event.payload?.petId;
+        if (!requestedPetId) return;
+        clearSocialLogs(requestedPetId);
+        emitEvent('social-logs-response', { petId: requestedPetId, logs: [], cleared: true });
       });
 
       // 潜水模式切换（per-target）
-      unlistenSetLurkMode = await listenEvent('social-set-lurk-mode', (event) => {
-        const { target, mode } = event.payload || {};
+      unlistenSetLurkMode = await safeListen('social-set-lurk-mode', (event) => {
+        const { petId, target, mode } = event.payload || {};
+        if (!shouldApplySocialCommand(getSocialStatus().petId, petId)) return;
         setLurkMode(target, mode);
-        emitEvent('social-lurk-mode-changed', { target, lurkModes: getLurkModes() });
+        emitEvent('social-lurk-mode-changed', { petId, target, lurkModes: getLurkModes() });
       });
 
       // 用户自定义群规则热更新（per-target）
-      unlistenSetCustomRule = await listenEvent('social-set-custom-rule', (event) => {
-        const { target, rules } = event.payload || {};
+      unlistenSetCustomRule = await safeListen('social-set-custom-rule', (event) => {
+        const { petId, target, rules } = event.payload || {};
+        if (!shouldApplySocialCommand(getSocialStatus().petId, petId)) return;
         setCustomGroupRule(target, rules);
       });
 
       // 暂停/恢复单群处理（per-target）
-      unlistenSetTargetPaused = await listenEvent('social-set-target-paused', (event) => {
-        const { target, paused } = event.payload || {};
+      unlistenSetTargetPaused = await safeListen('social-set-target-paused', (event) => {
+        const { petId, target, paused } = event.payload || {};
+        if (!shouldApplySocialCommand(getSocialStatus().petId, petId)) return;
         setTargetPaused(target, paused);
-        emitEvent('social-target-paused-changed', { target, pausedTargets: getPausedTargets() });
+        emitEvent('social-target-paused-changed', { petId, target, pausedTargets: getPausedTargets() });
       });
 
       // target 名称查询
-      unlistenQueryTargetNames = await listenEvent('social-query-target-names', () => {
-        emitEvent('social-target-names-response', getTargetNames());
+      unlistenQueryTargetNames = await safeListen('social-query-target-names', (event) => {
+        const requestedPetId = event.payload?.petId;
+        const status = getSocialStatus();
+        const names = shouldApplySocialCommand(status.petId, requestedPetId)
+          ? getTargetNames()
+          : {};
+        emitEvent('social-target-names-response', { petId: requestedPetId, names });
       });
 
       // 配置更新时热重启循环
-      unlistenConfigUpdated = await listenEvent('social-config-updated', async (event) => {
+      unlistenConfigUpdated = await safeListen('social-config-updated', async (event) => {
         const newConfig = event.payload;
         if (!newConfig?.petId) return;
         const status = getSocialStatus();
-        if (!status.active || status.petId !== newConfig.petId) return;
-        // 用新配置重启循环
-        const started = await startSocialLoop(newConfig, (active) => {
-          setSocialActive(active);
-          emitEvent('social-status-changed', { active, petId: newConfig.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
-        });
-        setSocialActive(started);
-        emitEvent('social-status-changed', { active: started, petId: newConfig.petId, lurkModes: getLurkModes(), pausedTargets: getPausedTargets() });
+        const belongsToQueuedRestart = (
+          configRestartRunning
+          && !configRestartCancelled
+          && configRestartPetId === newConfig.petId
+        );
+        if (
+          !belongsToQueuedRestart
+          && (!(status.active || status.starting) || status.petId !== newConfig.petId)
+        ) return;
+
+        // 同一 pet 的连续 Save 合并进串行队列，避免前一次重启把后一次配置更新吞掉。
+        pendingConfigUpdate = newConfig;
+        if (configRestartRunning) return;
+        configRestartRunning = true;
+        configRestartPetId = newConfig.petId;
+        configRestartCancelled = false;
+        try {
+          while (pendingConfigUpdate && !cancelled && !configRestartCancelled) {
+            const configToApply = pendingConfigUpdate;
+            pendingConfigUpdate = null;
+            const restartPromise = startSocialLoop(configToApply, () => {
+              const current = getSocialStatus();
+              setSocialActive(Boolean(current.active));
+              emitEvent('social-status-changed', scopeSocialStatus(current, configToApply.petId));
+            });
+            const startingStatus = getSocialStatus();
+            emitEvent('social-status-changed', scopeSocialStatus(startingStatus, configToApply.petId));
+            await restartPromise;
+            const current = getSocialStatus();
+            setSocialActive(Boolean(current.active));
+            emitEvent('social-status-changed', scopeSocialStatus(current, configToApply.petId));
+
+            // 显式 Start 已经切到了别的 pet 时，丢弃旧 pet 尚未应用的更新。
+            if (
+              current.petId
+              && current.petId !== configRestartPetId
+              && (current.active || current.starting)
+            ) {
+              pendingConfigUpdate = null;
+            }
+          }
+        } catch (error) {
+          console.error('[SocialAgent] Failed to apply updated config:', error);
+          // 丢弃失败重启期间合并进来的配置，避免它在未来无关事件中意外复活。
+          pendingConfigUpdate = null;
+          const current = getSocialStatus();
+          setSocialActive(Boolean(current.active));
+          emitEvent('social-status-changed', scopeSocialStatus(current, newConfig.petId));
+        } finally {
+          configRestartRunning = false;
+          configRestartPetId = null;
+          configRestartCancelled = false;
+        }
       });
     };
     setup();
 
     return () => {
       cancelled = true;
+      pendingConfigUpdate = null;
       unlistenStart?.();
       unlistenStop?.();
       unlistenQuery?.();

@@ -51,9 +51,14 @@ export function isSubagentRuntimeEnabled(config) {
   }
 }
 
-export function matchesSubagentScope(entry, { source, conversationId } = {}) {
+export function matchesSubagentScope(entry, { source, conversationId, petId } = {}) {
   if (!entry) return false;
   if (source && entry.source !== source) return false;
+  if (
+    petId !== undefined
+    && petId !== null
+    && String(entry.petId || '') !== String(petId)
+  ) return false;
   if (
     conversationId !== undefined
     && conversationId !== null

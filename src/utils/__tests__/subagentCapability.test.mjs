@@ -50,12 +50,14 @@ test('off → on invalidates the permission captured by an older request', () =>
   ), true);
 });
 
-test('task scope separates chat tabs and social tasks', () => {
+test('task scope separates chat tabs, social tasks, and pets', () => {
   const chatA = { source: 'chat', conversationId: 'chat-a' };
   const chatB = { source: 'chat', conversationId: 'chat-b' };
-  const socialA = { source: 'social', conversationId: 'chat-a' };
+  const socialA = { source: 'social', conversationId: 'chat-a', petId: 'pet-a' };
 
   assert.equal(matchesSubagentScope(chatA, { source: 'chat', conversationId: 'chat-a' }), true);
   assert.equal(matchesSubagentScope(chatB, { source: 'chat', conversationId: 'chat-a' }), false);
   assert.equal(matchesSubagentScope(socialA, { source: 'chat', conversationId: 'chat-a' }), false);
+  assert.equal(matchesSubagentScope(socialA, { source: 'social', petId: 'pet-a' }), true);
+  assert.equal(matchesSubagentScope(socialA, { source: 'social', petId: 'pet-b' }), false);
 });

@@ -8,6 +8,7 @@ import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPaus
 import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/subagentManager";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { normalizeApiProviders } from "../utils/apiProviders";
+import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
 import { listen, emit } from "@tauri-apps/api/event";
 
 // ==================== SocialPage ====================
@@ -19,37 +20,8 @@ export default function SocialPage() {
   const [assistants, setAssistants] = useState([]);
   const [apiProviders, setApiProviders] = useState([]);
   const [selectedPetId, setSelectedPetId] = useState('');
-  const [config, setConfig] = useState({
-    petId: '',
-    mcpServerName: '',
-    apiProviderId: '',
-    modelName: '',
-    replyInterval: 0,
-    observerInterval: 180,
-    watchedGroups: [],
-    watchedFriends: [],
-    socialPersonaPrompt: '',
-    replyStrategyPrompt: '',
-    agentCanEditStrategy: false,
-    atMustReply: true,
-    enableImages: true,
-    imageDescMode: 'off',
-    imageDescProviderId: '',
-    imageDescModelName: '',
-    botQQ: '',
-    intentModelName: '',
-    // 独立 API 配置
-    observerApiProviderId: '',
-    observerModelName: '',
-    intentApiProviderId: '',
-    compressApiProviderId: '',
-    compressModelName: '',
-    // Subagent
-    subagentEnabled: true,
-    subagentMaxConcurrent: 5,
-    subagentTimeoutSecs: 300,
-    subagentModel: 'sonnet',
-  });
+  const selectedPetIdRef = React.useRef(selectedPetId);
+  const [config, setConfig] = useState(() => createDefaultSocialConfig());
   const [mcpServers, setMcpServers] = useState([]);
   const [saving, setSaving] = useState(false);
   const [socialActive, setSocialActive] = useState(false);
@@ -76,6 +48,10 @@ export default function SocialPage() {
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
   const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
+
+  useEffect(() => {
+    selectedPetIdRef.current = selectedPetId;
+  }, [selectedPetId]);
 
   // ── MCP target picker ──
   const [mcpGroups, setMcpGroups] = useState(null); // [{ group_id, group_name, member_count }] or null
@@ -276,86 +252,133 @@ export default function SocialPage() {
   // ── Listen for social status changes ──
   useEffect(() => {
     let unlisten;
+    let disposed = false;
+    setSocialActive(false);
+    setIsStarting(false);
+    setActiveSubagentCount(0);
+    setLurkModes({});
+    setPausedTargets({});
     const setup = async () => {
-      unlisten = await listen('social-status-changed', (event) => {
-        const { active, petId, lurkModes: lm, pausedTargets: pt } = event.payload;
-        if (petId === selectedPetId || !selectedPetId) {
-          setSocialActive(active);
-          if (active) setIsStarting(false);
-          if (!active) setActiveSubagentCount(0);
-          if (lm) setLurkModes(lm);
-          if (pt) setPausedTargets(pt);
-        }
+      const off = await listen('social-status-changed', (event) => {
+        if (disposed) return;
+        const { active, starting, petId, lurkModes: lm, pausedTargets: pt } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
+        setSocialActive(Boolean(active));
+        setIsStarting(Boolean(starting));
+        if (!active) setActiveSubagentCount(0);
+        if (lm) setLurkModes(lm);
+        if (pt) setPausedTargets(pt);
       });
-      emit('social-query-status');
+      if (disposed) {
+        off();
+        return;
+      }
+      unlisten = off;
+      if (selectedPetId) await emit('social-query-status', { petId: selectedPetId });
     };
     setup();
-    return () => { unlisten?.(); };
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [selectedPetId]);
 
   // ── Listen for lurk mode changes ──
   useEffect(() => {
     let unlisten;
+    let disposed = false;
     const setup = async () => {
-      unlisten = await listen('social-lurk-mode-changed', (event) => {
-        const { lurkModes: lm } = event.payload || {};
+      const off = await listen('social-lurk-mode-changed', (event) => {
+        if (disposed) return;
+        const { petId, lurkModes: lm } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
         if (lm) setLurkModes(lm);
       });
+      if (disposed) off();
+      else unlisten = off;
     };
     setup();
-    return () => { unlisten?.(); };
-  }, []);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [selectedPetId]);
 
   // ── Listen for target paused changes ──
   useEffect(() => {
     let unlisten;
+    let disposed = false;
     const setup = async () => {
-      unlisten = await listen('social-target-paused-changed', (event) => {
-        const { pausedTargets: pt } = event.payload || {};
+      const off = await listen('social-target-paused-changed', (event) => {
+        if (disposed) return;
+        const { petId, pausedTargets: pt } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
         if (pt) setPausedTargets(pt);
       });
+      if (disposed) off();
+      else unlisten = off;
     };
     setup();
-    return () => { unlisten?.(); };
-  }, []);
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [selectedPetId]);
 
   // ── Subscribe to subagent registry changes ──
   useEffect(() => {
-    const unsub = onSubagentChange(() => setActiveSubagentCount(getActiveCount()));
+    const refreshCount = () => setActiveSubagentCount(
+      selectedPetId
+        ? getActiveCount({ source: 'social', petId: selectedPetId })
+        : 0,
+    );
+    refreshCount();
+    const unsub = onSubagentChange(refreshCount);
     return unsub;
-  }, []);
+  }, [selectedPetId]);
 
   // ── Listen for full log responses (initial load / clear) ──
   // ── Dedup set for incremental log entries ──
   const seenLogIdsRef = React.useRef(new Set());
 
-  // ── Listen for full log responses (initial load / clear) ──
+  // ── Register snapshot + incremental listeners before requesting current logs ──
   useEffect(() => {
-    let unlisten;
-    const setup = async () => {
-      unlisten = await listen('social-logs-response', (event) => {
-        const payload = event.payload || [];
-        // Rebuild dedup set from full load
-        const ids = seenLogIdsRef.current;
-        ids.clear();
-        for (const log of payload) {
-          if (log.id != null) ids.add(log.id);
-        }
-        setLogs(payload);
-      });
-    };
-    setup();
-    return () => { unlisten?.(); };
-  }, []);
-
-  // ── Listen for incremental log entries (real-time push) ──
-  useEffect(() => {
-    let unlisten;
+    let unlistenFull;
+    let unlistenEntry;
+    let disposed = false;
     const UI_MAX_LOGS = 2000;
     const setup = async () => {
-      unlisten = await listen('social-log-entry', (event) => {
+      const offFullPromise = listen('social-logs-response', (event) => {
+        if (disposed) return;
+        const { petId, logs: payload = [], cleared = false } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
+        if (cleared) {
+          seenLogIdsRef.current.clear();
+          setLogs([]);
+          return;
+        }
+        setLogs(prev => {
+          const keyed = new Map();
+          const unkeyed = [];
+          for (const log of [...payload, ...prev]) {
+            if (log.id == null) unkeyed.push(log);
+            else if (!keyed.has(log.id)) keyed.set(log.id, log);
+          }
+          const merged = [...keyed.values(), ...unkeyed]
+            .sort((a, b) => String(a.timestamp || '').localeCompare(String(b.timestamp || '')))
+            .slice(-UI_MAX_LOGS);
+          const ids = seenLogIdsRef.current;
+          ids.clear();
+          for (const log of merged) {
+            if (log.id != null) ids.add(log.id);
+          }
+          return merged;
+        });
+      });
+      const offEntryPromise = listen('social-log-entry', (event) => {
+        if (disposed) return;
         const entry = event.payload;
-        if (!entry) return;
+        if (!entry || !selectedPetId || entry.petId !== selectedPetId) return;
         // O(1) dedup via Set
         const ids = seenLogIdsRef.current;
         if (entry.id != null && ids.has(entry.id)) return; // already seen
@@ -397,105 +420,148 @@ export default function SocialPage() {
           return next;
         });
       });
+      const [offFull, offEntry] = await Promise.all([offFullPromise, offEntryPromise]);
+      if (disposed) {
+        offFull();
+        offEntry();
+        return;
+      }
+      unlistenFull = offFull;
+      unlistenEntry = offEntry;
+      await emit('social-query-logs', { petId: selectedPetId });
     };
     setup();
-    return () => { unlisten?.(); };
-  }, []);
+    return () => {
+      disposed = true;
+      unlistenFull?.();
+      unlistenEntry?.();
+    };
+  }, [selectedPetId]);
 
   // ── Listen for cache stats reset (agent start) ──
   useEffect(() => {
     let unlisten = null;
+    let disposed = false;
     (async () => {
-      unlisten = await listen('social-cache-stats-reset', () => {
+      const off = await listen('social-cache-stats-reset', (event) => {
+        if (disposed) return;
+        if (!selectedPetId || event.payload?.petId !== selectedPetId) return;
         setCacheResetAt(Date.now());
       });
+      if (disposed) off();
+      else unlisten = off;
     })();
-    return () => { if (unlisten) unlisten(); };
-  }, []);
+    return () => {
+      disposed = true;
+      if (unlisten) unlisten();
+    };
+  }, [selectedPetId]);
 
   // ── Listen for target names ──
   useEffect(() => {
     let unlisten;
+    let interval;
+    let disposed = false;
     const setup = async () => {
-      unlisten = await listen('social-target-names-response', (event) => {
-        const names = event.payload;
+      const off = await listen('social-target-names-response', (event) => {
+        if (disposed) return;
+        const { petId, names } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
         if (names && typeof names === 'object') {
           setTargetNames(prev => ({ ...prev, ...names }));
         }
       });
+      if (disposed) {
+        off();
+        return;
+      }
+      unlisten = off;
+      if (!selectedPetId) return;
+      await emit('social-query-target-names', { petId: selectedPetId });
+      interval = setInterval(() => {
+        emit('social-query-target-names', { petId: selectedPetId });
+      }, 10000);
     };
     setup();
-    return () => { unlisten?.(); };
-  }, []);
+    return () => {
+      disposed = true;
+      unlisten?.();
+      if (interval) clearInterval(interval);
+    };
+  }, [selectedPetId]);
 
-  // ── Initial full log load + periodic target names refresh ──
+  // ── Reset pet-scoped display state immediately on selection ──
   useEffect(() => {
-    emit('social-query-logs'); // one-time full load on mount
-    emit('social-query-target-names');
-    const interval = setInterval(() => {
-      emit('social-query-target-names'); // only names, logs are pushed incrementally
-    }, 10000);
-    return () => clearInterval(interval);
-  }, []);
+    seenLogIdsRef.current.clear();
+    setLogs([]);
+    setTargetNames({});
+    setLogFilter('all');
+    setIntentPlans({});
+    setCacheResetAt(0);
+  }, [selectedPetId]);
 
   // ── Load config when pet changes ──
   useEffect(() => {
     if (!selectedPetId) return;
+    let cancelled = false;
+    const petId = selectedPetId;
+    setConfig(createDefaultSocialConfig(petId));
+    setGroupsText('');
+    setFriendsText('');
+    setTargetNames({});
+    setPausedTargets({});
     const load = async () => {
-      const saved = await loadSocialConfig(selectedPetId);
-      if (saved) {
-        // Restore per-server config if available
-        const serverConfig = saved.configByServer?.[saved.mcpServerName] || {};
-        setConfig({ ...saved, ...serverConfig, petId: selectedPetId });
-        // Load targets for current server from targetsByServer, or fall back to watchedGroups/watchedFriends
-        const serverTargets = saved.targetsByServer?.[saved.mcpServerName];
-        if (serverTargets) {
-          setGroupsText((serverTargets.groups || []).join(', '));
-          setFriendsText((serverTargets.friends || []).join(', '));
+      try {
+        const saved = await loadSocialConfig(petId);
+        if (cancelled) return;
+        if (saved) {
+          // Restore per-server config if available
+          const serverConfig = saved.configByServer?.[saved.mcpServerName] || {};
+          setConfig({
+            ...createDefaultSocialConfig(petId),
+            ...saved,
+            ...serverConfig,
+            petId,
+          });
+          // Load targets for current server from targetsByServer, or fall back to watchedGroups/watchedFriends
+          const serverTargets = saved.targetsByServer?.[saved.mcpServerName];
+          if (serverTargets) {
+            setGroupsText((serverTargets.groups || []).join(', '));
+            setFriendsText((serverTargets.friends || []).join(', '));
+          } else {
+            setGroupsText((saved.watchedGroups || []).join(', '));
+            setFriendsText((saved.watchedFriends || []).join(', '));
+          }
         } else {
-          setGroupsText((saved.watchedGroups || []).join(', '));
-          setFriendsText((saved.watchedFriends || []).join(', '));
+          setConfig(createDefaultSocialConfig(petId));
         }
-      } else {
-        setConfig(prev => ({
-          ...prev,
-          petId: selectedPetId,
-          mcpServerName: '',
-          apiProviderId: '',
-          modelName: '',
-          replyInterval: 0,
-          observerInterval: 180,
-          watchedGroups: [],
-          watchedFriends: [],
-          socialPersonaPrompt: '',
-          atMustReply: true,
-          botQQ: '',
-          ownerQQ: '',
-          ownerName: '',
-          enabledMcpServers: [],
-          observerApiProviderId: '',
-          observerModelName: '',
-          intentApiProviderId: '',
-          intentModelName: '',
-          compressApiProviderId: '',
-          compressModelName: '',
-        }));
-        setGroupsText('');
-        setFriendsText('');
+        // 预加载群名缓存（即使 agent 未启动）
+        const savedNames = await loadSavedTargetNames(petId);
+        if (cancelled) return;
+        setTargetNames(
+          savedNames && typeof savedNames === 'object'
+            ? savedNames
+            : {},
+        );
+        // 预加载 paused 状态（即使 agent 未启动）
+        const savedPaused = await loadSavedPausedTargets(petId);
+        if (cancelled) return;
+        setPausedTargets(
+          savedPaused && typeof savedPaused === 'object'
+            ? savedPaused
+            : {},
+        );
+        await emit('social-query-status', { petId });
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to load social config:', error);
+        }
       }
-      // 预加载群名缓存（即使 agent 未启动）
-      const savedNames = await loadSavedTargetNames(selectedPetId);
-      if (savedNames && Object.keys(savedNames).length > 0) {
-        setTargetNames(prev => ({ ...prev, ...savedNames }));
-      }
-      // 预加载 paused 状态（即使 agent 未启动）
-      const savedPaused = await loadSavedPausedTargets(selectedPetId);
-      if (savedPaused && typeof savedPaused === 'object') {
-        setPausedTargets(savedPaused);
-      }
-      emit('social-query-status');
     };
     load();
+    return () => {
+      cancelled = true;
+    };
   }, [selectedPetId]);
 
   // ── Auto-select last used assistant (or first) ──
@@ -603,13 +669,20 @@ export default function SocialPage() {
   }, [config, selectedPetId, groupsText, friendsText]);
 
   const handleSave = async () => {
+    const operationPetId = selectedPetId;
     setSaving(true);
     try {
-      const configToSave = buildConfigToSave();
-      await saveSocialConfig(selectedPetId, configToSave);
-      setConfig(configToSave);
-      if (socialActive) {
-        emit('social-config-updated', configToSave);
+      const configToSave = { ...buildConfigToSave(), petId: operationPetId };
+      await saveSocialConfig(operationPetId, configToSave);
+      if (selectedPetIdRef.current === operationPetId) {
+        setConfig(configToSave);
+      }
+      if (socialActive || isStarting) {
+        const appSettings = await tauri.getSettings().catch(() => ({}));
+        await emit(
+          'social-config-updated',
+          withSocialTrainingConfig(configToSave, appSettings, trainingTargets),
+        );
       }
       alert('Social configuration saved successfully!');
     } catch (e) {
@@ -622,18 +695,31 @@ export default function SocialPage() {
 
   const handleToggle = async () => {
     if (socialActive) {
-      emit('social-stop');
+      try {
+        await emit('social-stop', { petId: selectedPetId });
+      } catch (error) {
+        console.error('Failed to stop social agent:', error);
+        alert('Failed to stop social agent: ' + (error?.message || error));
+      }
     } else {
+      const operationPetId = selectedPetId;
       setIsStarting(true);
-      const configToStart = buildConfigToSave();
-      await saveSocialConfig(selectedPetId, configToStart);
-      setConfig(configToStart);
-      const appSettings = await tauri.getSettings().catch(() => ({}));
-      emit('social-start', {
-        ...configToStart,
-        trainingCollectionEnabled: appSettings?.trainingCollectionEnabled || false,
-        trainingTargets,
-      });
+      try {
+        const configToStart = { ...buildConfigToSave(), petId: operationPetId };
+        await saveSocialConfig(operationPetId, configToStart);
+        if (selectedPetIdRef.current === operationPetId) {
+          setConfig(configToStart);
+        }
+        const appSettings = await tauri.getSettings().catch(() => ({}));
+        await emit(
+          'social-start',
+          withSocialTrainingConfig(configToStart, appSettings, trainingTargets),
+        );
+      } catch (error) {
+        setIsStarting(false);
+        console.error('Failed to start social agent:', error);
+        alert('Failed to start social agent: ' + (error?.message || error));
+      }
     }
   };
 
@@ -758,10 +844,10 @@ export default function SocialPage() {
     { mode: 'full-lurk', icon: '🫥', label: 'Full-Lurk', cls: 'bg-slate-50 text-slate-600 border-slate-300',  activeCls: 'bg-slate-500 text-white border-slate-500' },
   ];
   const setTargetLurkMode = (target, mode) => {
-    emit('social-set-lurk-mode', { target, mode });
+    emit('social-set-lurk-mode', { petId: selectedPetId, target, mode });
   };
   const setTargetTrainingEnabled = (target, enabled) => {
-    emit('social-set-training-enabled', { target, enabled });
+    emit('social-set-training-enabled', { petId: selectedPetId, target, enabled });
     setTrainingTargets(prev => {
       const next = { ...prev, [target]: enabled };
       tauri.updateSettings({ trainingTargets: next }).catch(() => {});
@@ -773,7 +859,7 @@ export default function SocialPage() {
     const newPaused = !isPaused;
     if (socialActive) {
       // agent 运行时：通过事件通知 agent（agent 会同时持久化）
-      emit('social-set-target-paused', { target, paused: newPaused });
+      emit('social-set-target-paused', { petId: selectedPetId, target, paused: newPaused });
     } else {
       // agent 未启动：直接更新 UI 状态 + 持久化到 DB
       setPausedTargets(prev => ({ ...prev, [target]: newPaused }));
@@ -1739,7 +1825,11 @@ export default function SocialPage() {
                 {/* Clear logs */}
                 <div className="border-t border-slate-200/60 p-1.5">
                   <button
-                    onClick={() => { emit('social-clear-logs'); setLogs([]); }}
+                    onClick={() => {
+                      emit('social-clear-logs', { petId: selectedPetId });
+                      seenLogIdsRef.current.clear();
+                      setLogs([]);
+                    }}
                     className="w-full text-[10px] text-slate-400 hover:text-red-500 py-1 rounded hover:bg-red-50 transition-colors"
                   >
                     Clear Logs
@@ -1820,6 +1910,7 @@ export default function SocialPage() {
             {/* Custom Group Rules — editable per target */}
             {selectedTarget && (
               <CustomGroupRules
+                petId={selectedPetId}
                 target={selectedTarget}
                 value={(config.customGroupRules || {})[selectedTarget] || ''}
                 onChange={async (text) => {
@@ -1888,7 +1979,12 @@ export default function SocialPage() {
                     {(() => {
                       const targetRunning = [];
                       for (const [tid, e] of subagentRegistry) {
-                        if (e.target === selectedTarget && e.status === 'running') {
+                        if (
+                          e.petId === selectedPetId
+                          && e.target === selectedTarget
+                          && e.status === 'running'
+                          && (e.source === 'social' || e.source === 'lessons')
+                        ) {
                           targetRunning.push({ tid, task: e.task, elapsed: Math.round((Date.now() - e.createdAt) / 1000) });
                         }
                       }
@@ -1912,7 +2008,12 @@ export default function SocialPage() {
                   log.level === 'poll' ? (
                     <PollEntry key={log.id ?? log.timestamp} log={log} showChat={showChat} showLlm={showLlm} showTools={showTools} logFilter={logFilter} />
                   ) : log.level === 'intent' ? (
-                    <IntentLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                    <IntentLogEntry
+                      key={log.id ?? log.timestamp}
+                      log={log}
+                      logFilter={logFilter}
+                      petId={selectedPetId}
+                    />
                   ) : log.level === 'send' ? (
                     <SendLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'llm' ? (
@@ -2022,7 +2123,7 @@ export default function SocialPage() {
                       onToggleGlobal={async (v) => {
                         setTrainingCollectionEnabled(v);
                         await tauri.updateSettings({ trainingCollectionEnabled: v }).catch(() => {});
-                        emit('social-set-training-collection-enabled', { enabled: v });
+                        emit('social-set-training-collection-enabled', { petId: selectedPetId, enabled: v });
                       }}
                       onOpenFolder={async () => {
                         try {
@@ -2158,7 +2259,7 @@ function ToolDetailsBlock({ details }) {
   );
 }
 
-function IntentLogEntry({ log, logFilter }) {
+function IntentLogEntry({ log, logFilter, petId }) {
   const [expanded, setExpanded] = useState(false);
   const hasDetails = !!log.details;
 
@@ -2181,7 +2282,9 @@ function IntentLogEntry({ log, logFilter }) {
     return `⏸ wait`;
   };
 
-  const hasAction = plan?.actions?.some(a => a.type === 'sticker' || a.type === 'reply');
+  const hasAction = plan?.actions?.some(
+    a => a.type === 'sticker' || a.type === 'reply' || a.type === 'image',
+  );
 
   return (
     <div className="py-0.5 text-purple-500">
@@ -2198,7 +2301,12 @@ function IntentLogEntry({ log, logFilter }) {
         let count = 0;
         const tasks = [];
         for (const [, e] of subagentRegistry) {
-          if (e.target === log.target && e.status === 'running') {
+          if (
+            e.petId === petId
+            && e.target === log.target
+            && e.status === 'running'
+            && (e.source === 'social' || e.source === 'lessons')
+          ) {
             count++;
             tasks.push(e.task?.substring(0, 20));
           }
@@ -2460,7 +2568,7 @@ function LlmLogEntry({ log, logFilter }) {
   );
 }
 
-function CustomGroupRules({ target, value, onChange }) {
+function CustomGroupRules({ petId, target, value, onChange }) {
   const [expanded, setExpanded] = useState(false);
   const [draft, setDraft] = useState(value || '');
   const [showConfirm, setShowConfirm] = useState(false);
@@ -2477,7 +2585,7 @@ function CustomGroupRules({ target, value, onChange }) {
   const confirmApply = () => {
     onChange(draft);
     // 通知运行中的 agent 热更新（立即生效）
-    emit('social-set-custom-rule', { target, rules: draft });
+    emit('social-set-custom-rule', { petId, target, rules: draft });
     setShowConfirm(false);
   };
 

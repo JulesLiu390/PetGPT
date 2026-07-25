@@ -8,6 +8,8 @@
 import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
 import { buildCacheKey, shouldUseExplicitCache, formatUsageLogMessage } from './promptCache';
 import { writeIntentTrace } from './intentTraining';
+import { createIntentOptionalToolLedger, formatIntentOptionalToolLedgerResume, recordIntentOptionalToolUse } from './intentToolLedger';
+import { socialTargetDir } from './socialTargetType.js';
 import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
@@ -20,6 +22,13 @@ import * as tauri from './tauri';
 
 /** 当前活跃的社交循环（同一时间只有一个） */
 let activeLoop = null;
+
+/**
+ * 单调递增的 runtime generation。start/stop 都会推进它，因此即使 stop 发生在
+ * startSocialLoop 的异步初始化阶段，旧启动流程和旧 LLM 闭包也会立即失效。
+ */
+let socialLoopGeneration = 0;
+let startingPetId = null;
 
 /** 每个 target 的潜水模式 Map<target, 'normal'|'semi-lurk'|'full-lurk'> */
 const lurkModes = new Map();
@@ -61,6 +70,78 @@ let _unlistenTrainingGlobal = null;
 
 /** LLM 调用指数重试 delays: 5s → 25s → 125s */
 const LLM_RETRY_DELAYS = [5000, 25000, 125000];
+
+/**
+ * MCP/内置工具的失败形状并不统一：有的 reject，有的 resolve
+ * `{ error }` / `{ isError: true }` / `{ success: false }`，还有的把 JSON
+ * 包在 content[0].text 中。发送类动作必须统一按失败处理。
+ */
+function isToolResultFailure(result, isError = false) {
+  if (isError || result == null) return true;
+  const inspect = (value, depth = 0) => {
+    if (depth > 3 || value == null) return false;
+    if (typeof value === 'string') {
+      const text = value.trim();
+      if (!text) return false;
+      try {
+        return inspect(JSON.parse(text), depth + 1);
+      } catch {
+        return /(^|\W)(error|failed|failure)(\W|$)/i.test(text)
+          && !/(no errors?|without errors?)/i.test(text);
+      }
+    }
+    if (Array.isArray(value)) return value.some(item => inspect(item, depth + 1));
+    if (typeof value !== 'object') return false;
+    if (value.isError === true || value.success === false || value.ok === false) return true;
+    if (value.error != null && value.error !== false && value.error !== '') return true;
+    if (Array.isArray(value.content) && value.content.some(item => inspect(item?.text ?? item, depth + 1))) {
+      return true;
+    }
+    return false;
+  };
+  return inspect(result);
+}
+
+function canonicalSocialPath(value) {
+  const segments = String(value || '').replace(/\\/g, '/').split('/');
+  const canonical = [];
+  for (const segment of segments) {
+    if (!segment || segment === '.') continue;
+    if (segment === '..') return null;
+    canonical.push(segment.toLowerCase());
+  }
+  return canonical.join('/');
+}
+
+const INTENT_READ_ONLY_EXTERNAL_TOOL_BASE_NAMES = new Set([
+  'tavily_search',
+  'search',
+  'fetch',
+  'read',
+  'get',
+  'list',
+  'query',
+  'lookup',
+]);
+
+/**
+ * Intent 只允许显式只读的外部 MCP 工具。
+ *
+ * 优先信任 MCP 标准 annotations.readOnlyHint；对于尚未提供 annotations 的
+ * 老服务器，仅兼容一组完整 base-name allowlist。名称判断是精确匹配，
+ * 不使用 includes，未知工具一律 fail-closed。
+ */
+export function isReadOnlyIntentExternalTool(tool) {
+  if (!tool || typeof tool !== 'object') return false;
+  if (tool.annotations?.readOnlyHint === true) return true;
+  if (tool.annotations?.readOnlyHint === false) return false;
+
+  const rawName = typeof tool.name === 'string' ? tool.name.trim().toLowerCase() : '';
+  if (!rawName) return false;
+  const separatorIndex = rawName.lastIndexOf('__');
+  const baseName = separatorIndex >= 0 ? rawName.slice(separatorIndex + 2) : rawName;
+  return INTENT_READ_ONLY_EXTERNAL_TOOL_BASE_NAMES.has(baseName);
+}
 
 /**
  * 带指数重试的 LLM 调用包装器
@@ -118,6 +199,7 @@ function addLog(level, message, details = null, target = undefined) {
     message,
     details,
     target,
+    petId: activeLoop?.petId || startingPetId || null,
   };
   if (target) {
     if (!targetLogs.has(target)) targetLogs.set(target, []);
@@ -166,7 +248,7 @@ const INTENT_HISTORY_LIMIT = 5;
  */
 async function appendIntentHistory(petId, targetId, targetType, entry) {
   if (!petId || !targetId || !entry) return;
-  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const dir = socialTargetDir(targetType);
   const path = `social/${dir}/scratch_${targetId}/intent_history.jsonl`;
   let existing = '';
   try { existing = await tauri.workspaceRead(petId, path); } catch { /* file may not exist */ }
@@ -255,7 +337,7 @@ function _buildPlanDetails(args = {}) {
  */
 async function writeRecentSelfFile(petId, targetId, targetType, lastPlan, prevEvalTime) {
   if (!petId || !targetId) return;
-  const dir = targetType === 'friend' ? 'friend' : 'group';
+  const dir = socialTargetDir(targetType);
   const path = `social/${dir}/scratch_${targetId}/recent_self.md`;
   const cached = sentMessagesCache.get(targetId) || [];
   const recent = cached.slice(-5);
@@ -410,21 +492,35 @@ async function writeRecentSelfFile(petId, targetId, targetType, lastPlan, prevEv
 
 /**
  * 获取社交日志
+ * @param {string} [petId] - 可选；仅返回指定宠物的日志
  * @returns {Array} 日志条目数组
  */
-export function getSocialLogs() {
-  const all = [...systemLogs];
-  for (const arr of targetLogs.values()) all.push(...arr);
+export function getSocialLogs(petId) {
+  const matchesPet = (entry) => petId == null || entry.petId === petId;
+  const all = systemLogs.filter(matchesPet);
+  for (const arr of targetLogs.values()) all.push(...arr.filter(matchesPet));
   all.sort((a, b) => a.timestamp.localeCompare(b.timestamp));
   return all;
 }
 
 /**
  * 清空社交日志
+ * @param {string} [petId] - 可选；仅清空指定宠物，不传则清空全部
  */
-export function clearSocialLogs() {
-  systemLogs.length = 0;
-  targetLogs.clear();
+export function clearSocialLogs(petId) {
+  if (petId == null) {
+    systemLogs.length = 0;
+    targetLogs.clear();
+    return;
+  }
+  for (let i = systemLogs.length - 1; i >= 0; i--) {
+    if (systemLogs[i].petId === petId) systemLogs.splice(i, 1);
+  }
+  for (const [target, entries] of targetLogs) {
+    const kept = entries.filter(entry => entry.petId !== petId);
+    if (kept.length > 0) targetLogs.set(target, kept);
+    else targetLogs.delete(target);
+  }
 }
 
 // ============ 配置加载 ============
@@ -910,6 +1006,8 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
  * @param {'normal'|'semi-lurk'|'full-lurk'} [params.lurkMode='normal'] - 潜水模式
  * @param {'observer'|'reply'} [params.role='reply'] - 角色
  * @param {Object|null} [params.intentPlan=null] - 最新 write_intent_plan 结果 { state, actions[] }
+ * @param {string} [params.replyBriefOverride=''] - Reply 派发瞬间的 brief 快照
+ * @param {Function|null} [params.dispatchGuard=null] - 副作用执行前的 runtime 状态检查
  * @param {boolean} [params.enableImages=true] - 是否向 LLM 发送图片
  * @param {'off'|'self'|'other'} [params.imageDescMode='off'] - 图片预描述模式：off=关闭, self=用主模型, other=用独立模型
  * @param {Object|null} [params.visionLLMConfig=null] - vision LLM 配置 { apiKey, baseUrl, apiFormat, modelName }
@@ -932,6 +1030,8 @@ async function pollTarget({
   lurkMode: pollLurkMode = 'normal',
   role = 'reply',
   intentPlan: pollIntentPlan = null,
+  replyBriefOverride = '',
+  dispatchGuard = null,
   enableImages = true,
   imageDescMode = 'off',
   visionLLMConfig = null,
@@ -941,6 +1041,10 @@ async function pollTarget({
 }) {
   const groupName = gName || target;
   const compressedSummary = compSummary;
+
+  if (dispatchGuard && !dispatchGuard()) {
+    return { action: 'cancelled', detail: 'runtime no longer allows this task' };
+  }
   
   // ── 0. 快照水位线：记录 LLM 开始前 buffer 的最后一条消息 ID ──
   // 防止 LLM 异步调用期间 fetcherLoop 追加新消息导致水位线跳过未处理的消息
@@ -1135,6 +1239,7 @@ async function pollTarget({
     lurkMode: pollLurkMode,
     role,
     intentPlan: pollIntentPlan,
+    replyBriefOverride,
   });
   
   // 消毒已消费的 @me：让 LLM 不再看到旧 @me 触发信号
@@ -1225,6 +1330,7 @@ async function pollTarget({
       intentBlock += (pollIntentPlan.state || '').trim() + '\n';
       if (replyAction) {
         if (replyAction.atTarget && replyAction.atTarget !== '无') intentBlock += `【需要 @${replyAction.atTarget}】\n`;
+        if (replyAction.replyTo) intentBlock += `【发送参数：引用回复消息 ID ${replyAction.replyTo}】\n`;
       }
       intentBlock += '以上是你对当前对话的想法和行为倾向，自然体现在回复风格和话题选择中。不要直接说出这些想法。';
     } else {
@@ -1266,7 +1372,9 @@ async function pollTarget({
     mcpTools = [
       ...toMcp(getSocialFileToolDefinitions()),
       ...toMcp(getHistoryToolDefinitions()),
-      ...toMcp(getStickerToolDefinitions()),
+      ...toMcp(getStickerToolDefinitions().filter(t =>
+        ['sticker_save', 'sticker_list'].includes(t.function.name)
+      )),
       ...(fullBufferMessages ? toMcp(getBufferSearchToolDefinitions()) : []),
     ];
   } else {
@@ -1364,10 +1472,38 @@ async function pollTarget({
       builtinToolContext: { petId, targetId: target, targetType, mcpServerName, memoryEnabled: true, imageUrlMap, sentCache: sentMessagesCache, bufferMessages: fullBufferMessages || undefined, subagentRegistry },
       maxIterations: role === 'observer' ? 25 : undefined,
       stopAfterTool: role === 'reply' ? (name) => name.includes('send_message') : undefined,
+      toolCallFilter: (name, args) => {
+        // Reply 可能在 LLM 思考期间被 stop / pause / 切到 full-lurk。
+        // 真正执行任意工具前再检查一次，避免旧闭包继续产生外部副作用。
+        if (dispatchGuard && !dispatchGuard()) {
+          return `${role === 'reply' ? 'Reply' : 'Observer'} 已取消：Social Agent 已停止、目标已暂停或进入禁止状态。`;
+        }
+        if (
+          role === 'observer'
+          && /(send_message|send_image|sticker_send|image_send|webshot_send|voice_send|generate_image_send)/i.test(name)
+        ) {
+          return `Observer 是只观察角色，禁止调用发送工具 ${name}。`;
+        }
+        // REPLY_STRATEGY 是显式用户策略文件；关闭编辑权限时，不依赖 prompt。
+        if (promptConfig.agentCanEditStrategy !== true) {
+          const mutationTools = new Set(['social_write', 'social_edit', 'social_delete', 'social_rename']);
+          const touchesStrategy = [args?.path, args?.from, args?.to]
+            .some(path => path != null && (
+              canonicalSocialPath(path) == null
+              || canonicalSocialPath(path) === 'social/reply_strategy.md'
+            ));
+          if (mutationTools.has(name) && touchesStrategy) {
+            return '当前配置禁止 Agent 修改 social/REPLY_STRATEGY.md。';
+          }
+        }
+        return null;
+      },
       usageLabel: role === 'observer' ? 'Observer' : 'Reply',
       usageTarget: target,
       usagePetId: petId,
-      onUsageLogged: logUsageRecord,
+      onUsageLogged: (record) => {
+        if (!dispatchGuard || dispatchGuard()) logUsageRecord(record);
+      },
       // 强制覆盖 send_message 的 target/target_type，防止 LLM 用群名代替群号
       toolArgTransform: (name, args) => {
         if (name.includes('send_message')) {
@@ -1389,9 +1525,11 @@ async function pollTarget({
       },
 
       onLLMText: (iter) => {
+        if (dispatchGuard && !dispatchGuard()) return;
         pollLlmIters.push(iter);
       },
       onToolCall: (name, args) => {
+        if (dispatchGuard && !dispatchGuard()) return;
         pollToolCalls.push({ name, args: JSON.stringify(args).substring(0, 300) });
         // 社交文件写入用特殊 level 标记
         if ((name === 'social_write' || name === 'social_edit') && args?.path) {
@@ -1405,6 +1543,7 @@ async function pollTarget({
         }
       },
       onToolResult: (name, result, _id, isError) => {
+        if (dispatchGuard && !dispatchGuard()) return;
         const preview = typeof result === 'string' ? result.substring(0, 100) : JSON.stringify(result).substring(0, 100);
         // Track tool result in poll collector
         if (pollToolCalls.length > 0 && pollToolCalls[pollToolCalls.length - 1].name === name) {
@@ -1417,9 +1556,7 @@ async function pollTarget({
           addLog(isError ? 'error' : 'info', `Tool result: ${name}`, preview, target);
         }
         // 追踪 send_message 是否真正成功（结果中不含 error/失败标记）
-        if (name.includes('send_message') && !isError) {
-          const resultStr = typeof result === 'string' ? result : JSON.stringify(result);
-          if (!resultStr.includes('"success": false') && !resultStr.includes('"success":false')) {
+        if (name.includes('send_message') && !isToolResultFailure(result, isError)) {
             sendMessageSuccess = true;
             sendCount++;
             // Record sent content for poll log
@@ -1442,7 +1579,6 @@ async function pollTarget({
               addLog('info', `Cached sent message for ${target}: ${pendingSendContent.substring(0, 50)}...`, null, target);
             }
             pendingSendContent = null; // 重置
-          }
         }
       },
     }), { label: `${role === 'observer' ? 'Observer' : 'Reply'} ${target}`, target });
@@ -1499,7 +1635,16 @@ async function pollTarget({
         const sendToolName = `${mcpServerName}__send_message`;
         for (let autoAttempt = 0; autoAttempt < 2; autoAttempt++) {
           try {
+            if (dispatchGuard && !dispatchGuard()) {
+              throw new Error('Reply 已取消：Social Agent 已停止、目标已暂停或进入 full-lurk');
+            }
             const autoSendResult = await executeToolByName(sendToolName, { content: cleanText, target, target_type: targetType }, { timeout: 10000 });
+            if (dispatchGuard && !dispatchGuard()) {
+              return { action: 'cancelled', detail: 'runtime stopped while send was in flight' };
+            }
+            if (isToolResultFailure(autoSendResult)) {
+              throw new Error('send_message returned an error result');
+            }
             sendMessageSuccess = true;
             if (newWatermarkId) watermarks.set(target, newWatermarkId);
             let autoMsgId = null;
@@ -1537,6 +1682,9 @@ async function pollTarget({
       return { action: 'silent', detail: result.content };
     }
   } catch (e) {
+    if (dispatchGuard && !dispatchGuard()) {
+      return { action: 'cancelled', detail: 'runtime stopped while LLM was in flight' };
+    }
     // Plan B: 带图片的 LLM 调用失败 → 剥离图片后重试一次
     if (_imgRetry === 0 && totalImageCount > 0) {
       addLog('warn', `LLM failed with ${totalImageCount} image(s), retrying without images for ${target}`, e.message || e, target);
@@ -1658,7 +1806,9 @@ function parseBufferByDate(content) {
  * 执行每日压缩
  * 读取所有群缓冲文件 → 按天分组 → 逐天 LLM 压缩 → 写入 DAILY → 清空已压缩内容
  */
-async function runDailyCompress(petId, llmConfig, targetSet, socialConfig = null) {
+async function runDailyCompress(petId, llmConfig, targetSet, socialConfig = null, runtimeGuard = null) {
+  const stillActive = () => !runtimeGuard || runtimeGuard();
+  if (!stillActive()) return;
   addLog('info', '📦 Starting daily compression...');
   const today = new Date().toISOString().split('T')[0]; // YYYY-MM-DD
 
@@ -1667,22 +1817,28 @@ async function runDailyCompress(petId, llmConfig, targetSet, socialConfig = null
   const dayGroups = new Map();
 
   for (const target of targetSet) {
-    const bufferPath = `social/group/LOG_${target}.md`;
-    let content;
-    try {
-      content = await tauri.workspaceRead(petId, bufferPath);
-    } catch { continue; } // 文件不存在
-    if (!content || !content.trim()) continue;
+    if (!stillActive()) return;
+    // 历史 targets.json 没有保存 targetType；同时探测两个命名空间，
+    // 兼容旧版曾把 private 错写进 group 的数据。
+    for (const dir of ['group', 'friend']) {
+      const bufferPath = `social/${dir}/LOG_${target}.md`;
+      let content;
+      try {
+        content = await tauri.workspaceRead(petId, bufferPath);
+      } catch { continue; } // 文件不存在
+      if (!content || !content.trim()) continue;
 
-    const dateMap = parseBufferByDate(content);
-    for (const [dateStr, entries] of dateMap) {
-      if (dateStr === today) continue; // 今天的不压缩
-      if (!dayGroups.has(dateStr)) dayGroups.set(dateStr, []);
-      dayGroups.get(dateStr).push({ target, entries });
+      const dateMap = parseBufferByDate(content);
+      for (const [dateStr, entries] of dateMap) {
+        if (dateStr === today) continue; // 今天的不压缩
+        if (!dayGroups.has(dateStr)) dayGroups.set(dateStr, []);
+        dayGroups.get(dateStr).push({ target, entries, bufferPath });
+      }
     }
   }
 
   if (dayGroups.size === 0) {
+    if (!stillActive()) return;
     addLog('info', 'No past-day data to compress');
     return;
   }
@@ -1725,18 +1881,23 @@ ${groupContent}`;
           usageLabel: 'Compress:daily',
           usageTarget: target,
           usagePetId: petId,
-          onUsageLogged: logUsageRecord,
+          onUsageLogged: (record) => {
+            if (stillActive()) logUsageRecord(record);
+          },
         }), { label: `DailyCompress:${target}` });
+        if (!stillActive()) return;
 
         const summary = result.content || '（压缩失败）';
         const perGroupContent = `# ${dateStr} ${groupName}\n\n${summary}\n`;
         const perGroupPath = `social/daily/${dateStr}/${target}.md`;
         await tauri.workspaceWrite(petId, perGroupPath, perGroupContent);
+        if (!stillActive()) return;
         addLog('info', `📝 Per-group daily: ${perGroupPath}`, null, target);
 
         groupSummaries.push({ target, groupName, summary });
         anyGroupCompressed = true;
       } catch (e) {
+        if (!stillActive()) return;
         addLog('error', `Failed to compress daily log for ${target} on ${dateStr}`, e.message, target);
       }
     }
@@ -1777,20 +1938,25 @@ ${globalInput}`;
         usageLabel: 'Compress:global',
         usageTarget: '',
         usagePetId: petId,
-        onUsageLogged: logUsageRecord,
+        onUsageLogged: (record) => {
+          if (stillActive()) logUsageRecord(record);
+        },
       }), { label: 'DailyCompressGlobal' });
+      if (!stillActive()) return;
 
       const dailyContent = `# ${dateStr} 社交日报\n\n${globalResult.content || '（压缩失败）'}\n`;
       const dailyPath = `social/daily/${dateStr}.md`;
       await tauri.workspaceWrite(petId, dailyPath, dailyContent);
+      if (!stillActive()) return;
       addLog('info', `📝 Global daily: ${dailyPath}`);
     } catch (e) {
+      if (!stillActive()) return;
       addLog('error', `Failed to compress global daily log for ${dateStr}`, e.message);
     }
 
     // ── 第三步：从各群缓冲中删除已压缩日期的条目 ──
-    for (const { target } of targetEntries) {
-      const bufferPath = `social/group/LOG_${target}.md`;
+    for (const { target, bufferPath } of targetEntries) {
+      if (!stillActive()) return;
       try {
         const content = await tauri.workspaceRead(petId, bufferPath);
         const dateMap = parseBufferByDate(content);
@@ -1805,6 +1971,7 @@ ${globalInput}`;
   }
 
   // 更新压缩元数据
+  if (!stillActive()) return;
   await saveCompressMeta(petId, { lastCompressTime: new Date().toISOString() });
   addLog('info', '📦 Daily compression completed');
 }
@@ -1830,20 +1997,33 @@ ${globalInput}`;
  * @param {Function} [onStatusChange] - 状态变化回调 (active: boolean) => void
  */
 export async function startSocialLoop(config, onStatusChange) {
+  const restartingSamePet = activeLoop?.petId === config.petId;
+  const carriedKnownTargets = restartingSamePet ? new Set(knownTargets) : new Set();
+  const carriedLurkModes = restartingSamePet ? new Map(lurkModes) : new Map();
+  const carriedPausedTargets = restartingSamePet ? new Map(pausedTargets) : new Map();
   // 先停止现有循环
   stopSocialLoop();
+  const loopGeneration = ++socialLoopGeneration;
+  startingPetId = config.petId;
+  const startupStillCurrent = () => socialLoopGeneration === loopGeneration;
+  const abortStartup = () => {
+    if (startupStillCurrent()) startingPetId = null;
+    return false;
+  };
 
   // 通知 SocialPage 重置 PromptCachePanel 的会话累计
   tauri.emitToLabels(['social', 'management'], 'social-cache-stats-reset', { petId: config.petId });
 
   // Seed 工具详细说明 .md 文件（仅当不存在时写入默认版本）
   try { await seedToolDocs(config.petId); } catch (e) { console.warn('[seedToolDocs] failed:', e); }
+  if (!startupStillCurrent()) return false;
 
   addLog('info', `Starting social loop for pet: ${config.petId}`);
   
   // 恢复持久化的 lurk modes
   try {
     const savedModes = await loadLurkModes(config.petId);
+    if (!startupStillCurrent()) return false;
     if (savedModes && typeof savedModes === 'object') {
       for (const [target, mode] of Object.entries(savedModes)) {
         if (['semi-lurk', 'full-lurk'].includes(mode)) {
@@ -1856,6 +2036,10 @@ export async function startSocialLoop(config, onStatusChange) {
     }
   } catch (e) {
     addLog('warn', 'Failed to restore lurk modes', e.message);
+  }
+  if (restartingSamePet) {
+    for (const target of carriedKnownTargets) lurkModes.delete(target);
+    for (const [target, mode] of carriedLurkModes) lurkModes.set(target, mode);
   }
 
   // 初始化用户自定义群规则（从 config 加载）
@@ -1888,6 +2072,7 @@ export async function startSocialLoop(config, onStatusChange) {
     const INTENT_INITIAL = '# 当前状态感知\n\n（本次会话开始，尚无记录）\n';
     const watchedGroupSet = new Set((config.watchedGroups || []).map(g => g.trim()).filter(Boolean));
     for (const t of allTargetIds) {
+      if (!startupStillCurrent()) return false;
       const dir = watchedGroupSet.has(t) ? 'group' : 'friend';
       await tauri.workspaceWrite(config.petId, `social/${dir}/INTENT_${t}.md`, INTENT_INITIAL);
       // 清空 scratch 文件夹
@@ -1911,6 +2096,7 @@ export async function startSocialLoop(config, onStatusChange) {
   // 恢复持久化的 paused targets（首次启动时全部暂停）
   try {
     const savedPaused = await loadPausedTargets(config.petId);
+    if (!startupStillCurrent()) return false;
     if (savedPaused && typeof savedPaused === 'object') {
       // 有保存的状态 → 恢复（已知 target 使用保存的值；全新 target 默认暂停）
       for (const t of allTargetIds) {
@@ -1938,6 +2124,13 @@ export async function startSocialLoop(config, onStatusChange) {
       pausedTargets.set(t, true);
     }
   }
+  if (restartingSamePet) {
+    for (const target of carriedKnownTargets) {
+      pausedTargets.delete(target);
+      if (carriedPausedTargets.get(target)) pausedTargets.set(target, true);
+    }
+  }
+  if (!startupStillCurrent()) return false;
   
   // 确保 MCP 服务器已启动
   try {
@@ -1953,18 +2146,19 @@ export async function startSocialLoop(config, onStatusChange) {
       }
     } else {
       addLog('error', `MCP server "${config.mcpServerName}" not found`);
-      return false;
+      return abortStartup();
     }
   } catch (e) {
     addLog('error', `Failed to start MCP server "${config.mcpServerName}"`, typeof e === 'string' ? e : e.message);
-    return false;
+    return abortStartup();
   }
+  if (!startupStillCurrent()) return false;
   
   // 解析 API provider — Reply (主模型)
   const replyLLMConfig = await resolveApiProvider(config.apiProviderId, config.modelName);
   if (!replyLLMConfig) {
     addLog('error', 'Cannot start: API provider not resolved');
-    return false;
+    return abortStartup();
   }
 
   // 解析 Observer API provider（独立时用独立配置，否则用 Reply）
@@ -2060,6 +2254,7 @@ export async function startSocialLoop(config, onStatusChange) {
   // 启动额外的 MCP 服务器
   const extraMcpServers = config.enabledMcpServers || [];
   for (const extraName of extraMcpServers) {
+    if (!startupStillCurrent()) return false;
     if (extraName === config.mcpServerName) continue; // 跳过主 MCP
     try {
       const extraServer = await tauri.mcp.getServerByName(extraName);
@@ -2078,6 +2273,7 @@ export async function startSocialLoop(config, onStatusChange) {
       addLog('warn', `Failed to start extra MCP server "${extraName}"`, e.message || e);
     }
   }
+  if (!startupStillCurrent()) return false;
 
   // 构建目标列表
   const targets = [];
@@ -2090,7 +2286,7 @@ export async function startSocialLoop(config, onStatusChange) {
   
   if (targets.length === 0) {
     addLog('warn', 'No watched targets configured');
-    return false;
+    return abortStartup();
   }
   
   addLog('info', `Watching ${targets.length} targets, reply: ${config.replyInterval ?? 0}s, observer: ${config.observerInterval || 180}s`);
@@ -2129,9 +2325,14 @@ export async function startSocialLoop(config, onStatusChange) {
   const BUFFER_COMPRESS_THRESHOLD = 30; // 旧消息超过此数触发 compress
   // Fetcher 的定时器 ID
   let fetcherTimeoutId = null;
-  // 用于区分新旧循环的 generation ID，stopSocialLoop 后立即 start 时防止旧闭包继续调度
-  const loopGeneration = Symbol('loopGen');
+  // loopGeneration 在异步启动前生成；stop 即使发生在 STARTING 阶段也会使其失效。
   let dailyCompressTimeoutId = null; // 每日压缩定时器
+  const isRuntimeGenerationCurrent = () =>
+    socialLoopGeneration === loopGeneration && activeLoop?._generation === loopGeneration;
+  const canTargetDispatch = (target, { allowFullLurk = false } = {}) =>
+    isRuntimeGenerationCurrent()
+    && !pausedTargets.get(target)
+    && (allowFullLurk || (lurkModes.get(target) || 'normal') !== 'full-lurk');
   
   // ============ 层4: Intent Loop 状态（每群独立） ============
   const intentMap = new Map();                // target → IntentState { lastPlan, lastEvalTime, loopTimeoutId, _wake, forceEval }
@@ -2164,8 +2365,10 @@ export async function startSocialLoop(config, onStatusChange) {
    */
   const snapshotForReview = async (target, targetType) => {
     try {
-      const intentDir = targetType === 'friend' ? 'friend' : 'group';
+      if (!isRuntimeGenerationCurrent()) return;
+      const intentDir = socialTargetDir(targetType);
       const intentContent = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`).catch(() => '');
+      if (!isRuntimeGenerationCurrent()) return;
       const buf = dataBuffer.get(target);
       const messages = buf ? buf.messages.slice(-30) : []; // 最近 30 条作为上下文
       const chatSnapshot = messages.map(m => {
@@ -2190,6 +2393,7 @@ export async function startSocialLoop(config, onStatusChange) {
         lessonsReviewTimers.set(target, timerId);
       }
     } catch (e) {
+      if (!isRuntimeGenerationCurrent()) return;
       addLog('warn', `Lessons snapshot failed: ${e.message}`, null, target);
     }
   };
@@ -2198,6 +2402,7 @@ export async function startSocialLoop(config, onStatusChange) {
    * 发起 Lessons Review Subagent
    */
   const dispatchLessonsReview = async (target, targetType) => {
+    if (!isRuntimeGenerationCurrent() || pausedTargets.get(target)) return;
     const reviews = pendingReviews.get(target);
     if (!reviews || reviews.length === 0) return;
 
@@ -2209,7 +2414,7 @@ export async function startSocialLoop(config, onStatusChange) {
     const timerId = lessonsReviewTimers.get(target);
     if (timerId) { clearTimeout(timerId); lessonsReviewTimers.delete(target); }
 
-    const dir = targetType === 'friend' ? 'friend' : 'group';
+    const dir = socialTargetDir(targetType);
     const taskId = `lr_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`;
 
     try {
@@ -2339,6 +2544,7 @@ JSON 数组格式，每条：
 
       const cwd = await tauri.workspaceGetPath(config.petId, `subagents/${taskId}`, false);
 
+      if (!isRuntimeGenerationCurrent() || pausedTargets.get(target)) return;
       await tauri.subagentSpawn(
         taskId,
         cwd,
@@ -2351,6 +2557,7 @@ JSON 数组格式，每条：
       subagentRegistry.set(taskId, {
         status: 'running',
         task: `Lessons review (${batch.length} replies)`,
+        petId: config.petId,
         target,
         targetType,
         dir,
@@ -2360,6 +2567,7 @@ JSON 数组格式，每条：
 
       addLog('reflect', `🪞 Reflect dispatched (${batch.length} replies)`, JSON.stringify({ taskId, replyCount: batch.length, status: 'dispatched' }), target);
     } catch (e) {
+      if (!isRuntimeGenerationCurrent()) return;
       addLog('warn', `Reflect dispatch failed: ${e.message}`, null, target);
     }
   };
@@ -2529,6 +2737,16 @@ JSON 数组格式，每条：
     return { changed, hasAtMe, atMeIds, newCount: newMessages.length, isFirstRun };
   };
 
+  /** 当前 buffer 内仍未被任何 Reply 消费/预留的 @me。 */
+  const getUnconsumedAtMeIds = (target) => {
+    const buf = dataBuffer.get(target);
+    if (!buf) return [];
+    const consumed = consumedAtMe.get(target) || new Set();
+    return buf.messages
+      .filter(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id))
+      .map(m => m.message_id);
+  };
+
   /** 检查 intentWatermarks 之后是否有非自身的新消息（不更新水位线）*/
   const hasNewNonSelfMessages = (target) => {
     const buf = dataBuffer.get(target);
@@ -2571,6 +2789,7 @@ JSON 数组格式，每条：
     // fire-and-forget — 不阻塞调用者
     (async () => {
       try {
+        if (!isRuntimeGenerationCurrent()) return;
         // 只给 social_read 和 social_edit 工具
         const readDef = getSocialFileToolDefinitions().find(t => t.function.name === 'social_read');
         const editDef = getSocialFileToolDefinitions().find(t => t.function.name === 'social_edit');
@@ -2608,19 +2827,27 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             cacheKey: buildCacheKey(config.petId, '', 'MdOrganizer'),
           },
           builtinToolContext: { petId: config.petId },
+          toolCallFilter: () => isRuntimeGenerationCurrent()
+            ? null
+            : 'Markdown organizer 已取消：Social Agent 已停止。',
           maxIterations: 10,
           usageLabel: 'MdOrganizer',
           usagePetId: config.petId,
-          onUsageLogged: logUsageRecord,
+          onUsageLogged: (record) => {
+            if (isRuntimeGenerationCurrent()) logUsageRecord(record);
+          },
         });
+        if (!isRuntimeGenerationCurrent()) return;
         addLog('info', `📝 md_organize done: ${file}`, null);
       } catch (e) {
+        if (!isRuntimeGenerationCurrent()) return;
         addLog('warn', `md_organize error: ${file}: ${e.message || e}`, null);
       }
     })();
   };
 
   const updatePeopleCache = async (target, targetType) => {
+    if (!isRuntimeGenerationCurrent()) return;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return;
     const qqs = [...new Set(
@@ -2639,8 +2866,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       } catch { return null; }
     }));
     const combined = profiles.filter(Boolean).join('\n\n');
-    if (!combined) return;
-    const dir = targetType === 'friend' ? 'friend' : 'group';
+    if (!combined || !isRuntimeGenerationCurrent()) return;
+    const dir = socialTargetDir(targetType);
     await tauri.workspaceWrite(config.petId, `social/${dir}/PEOPLE_CACHE_${target}.md`, combined);
   };
 
@@ -2880,7 +3107,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
         // 构建工具集（get_situation + write_intent_plan + social_read + history + groupLog + 外部 MCP 只读工具）
         const intentPlanDefs = getIntentPlanToolDefinitions();
-        const intentFileDefs = getSocialFileToolDefinitions().filter(t => ['social_read', 'social_edit', 'social_write'].includes(t.function.name));
+        const intentFileDefs = getSocialFileToolDefinitions().filter(t => t.function.name === 'social_read');
         const intentToolDefs = [getSituationToolDefinition(), ...intentPlanDefs, ...intentFileDefs, ...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
         if (config.subagentEnabled !== false) {
           intentToolDefs.push(getSubagentToolDefinition());
@@ -2889,20 +3116,30 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           intentToolDefs.push(getMdOrganizeToolDefinition());
         }
         intentToolDefs.push(getScreenshotToolDefinition());
-        intentToolDefs.push(getImageSendToolDefinition());
         intentToolDefs.push(getImageListToolDefinition());
         intentToolDefs.push(getWebshotToolDefinition());
-        intentToolDefs.push(getWebshotSendToolDefinition());
         intentToolDefs.push(getChatSearchToolDefinition());
         intentToolDefs.push(getChatContextToolDefinition());
-        // voice_send 仅在 ttsConfig 启用时暴露给 LLM
-        if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
-          intentToolDefs.push(getVoiceSendToolDefinition());
+        // full-lurk 下只观察：不向模型暴露任何即时发送工具。
+        if (intentLurkMode !== 'full-lurk') {
+          intentToolDefs.push(getImageSendToolDefinition());
+          intentToolDefs.push(getWebshotSendToolDefinition());
+          // voice_send 仅在 ttsConfig 启用时暴露给 LLM
+          if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
+            intentToolDefs.push(getVoiceSendToolDefinition());
+          }
+          // generate_image_send 仅在 imageGenConfig 启用且 provider 解析成功时暴露
+          if (imageGenLLMConfig) {
+            intentToolDefs.push(getGenerateImageSendToolDefinition());
+          }
         }
-        // generate_image_send 仅在 imageGenConfig 启用且 provider 解析成功时暴露
-        if (imageGenLLMConfig) {
-          intentToolDefs.push(getGenerateImageSendToolDefinition());
-        }
+        const intentImmediateSendToolNames = new Set([
+          'image_send',
+          'webshot_send',
+          'voice_send',
+          'generate_image_send',
+        ]);
+        const intentExternalToolNames = new Set();
         let intentMcpTools = intentToolDefs.map(t => ({
           name: t.function.name,
           description: t.function.description,
@@ -2914,9 +3151,14 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           const allTools = await getMcpTools();
           const extraServers = new Set(promptConfig.enabledMcpServers || []);
           const externalTools = allTools.filter(t =>
-            extraServers.has(t.serverName) && t.serverName !== config.mcpServerName
+            extraServers.has(t.serverName)
+            && t.serverName !== config.mcpServerName
+            && isReadOnlyIntentExternalTool(t)
           );
-          if (externalTools.length > 0) {
+          for (const tool of externalTools) {
+            intentExternalToolNames.add(tool.serverName ? `${tool.serverName}__${tool.name}` : tool.name);
+          }
+          if (intentLurkMode !== 'full-lurk' && externalTools.length > 0) {
             intentMcpTools = [...intentMcpTools, ...externalTools];
           }
         } catch { /* 非致命：外部工具不可用不影响 Intent 评估 */ }
@@ -2949,7 +3191,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // ── 写 recent_self.md（Intent 系统提示要求 LLM 必须先 social_read 这个文件） ──
         // 文件包含：最近 sentCache 原文 + 在途/已完成 brief + 上轮发出的图片
         // 数据从 prompt 内联注入改为强制工具读取，迫使 LLM 处理"我刚说过什么"再决定 plan
-        const intentDir = targetType === 'friend' ? 'friend' : 'group';
+        const intentDir = socialTargetDir(targetType);
         const recentSelfPath = `social/${intentDir}/scratch_${target}/recent_self.md`;
         await writeRecentSelfFile(config.petId, target, targetType, state.lastPlan, prevEvalTime);
 
@@ -2986,6 +3228,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         const _onTraceFn = _shouldCollectTraining
           ? (trace) => { _latestTrace = trace; }
           : undefined;
+        // 单次 Intent eval 级账本：固定流程工具不计数；跨本 eval 的外层 LLM retry 保留。
+        const optionalToolLedger = createIntentOptionalToolLedger();
 
         for (let attempt = 0; ; attempt++) {
           // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
@@ -3018,6 +3262,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             msgDelimiterL: eph?.msgL || '',
             msgDelimiterR: eph?.msgR || '',
             lurkMode: targetLurkMode,
+            atMustReply: promptConfig.atMustReply,
+            agentCanEditStrategy: promptConfig.agentCanEditStrategy,
             subagentRegistry,
             customGroupRules: customGroupRulesMap.get(target) || '',
             voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
@@ -3031,14 +3277,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             intentInjectionWatermarks.set(target, lastInitMsg?.message_id || '');
             intentInterceptCounts.set(target, 0);
           }
+          const intentSituationSeen = { current: false };
 
           try {
+            const ledgerResume = formatIntentOptionalToolLedgerResume(optionalToolLedger);
             const raw = await callLLMWithTools({
               messages: [
                 { role: 'system', content: intentPrompt },
                 // chat 历史不再作为 turns 注入——LLM 用 get_situation 工具一次性拿到
                 // intentTurns 仍生成（保留 ephemeral 安全令牌给 buildIntentSystemPrompt 用），但不推到对话里
-                { role: 'user', content: intentEvalPrompt },
+                { role: 'user', content: ledgerResume ? `${intentEvalPrompt}\n\n${ledgerResume}` : intentEvalPrompt },
               ],
               apiFormat: intentLLMConfig.apiFormat,
               apiKey: intentLLMConfig.apiKey,
@@ -3050,7 +3298,40 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
                 cacheKey: buildCacheKey(config.petId, target, 'Intent:msg'),
               },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: config.botQQ, intentInjectionWatermarks, intentInterceptCounts, addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, inFlightReplies },
+              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: promptConfig.botQQ, ownerQQ: promptConfig.ownerQQ, ownerName: promptConfig.ownerName, ownerSecret: eph?.ownerSecret || '', intentInjectionWatermarks, intentInterceptCounts, intentSituationSeen, consumedAtMeIds: consumedAtMe.get(target) || new Set(), addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, inFlightReplies, lurkMode: targetLurkMode, hasUnconsumedAtMe: getUnconsumedAtMeIds(target).length > 0, runtimeGuard: () => canTargetDispatch(target) },
+              toolCallFilter: (name, args) => {
+                if (
+                  socialLoopGeneration !== loopGeneration
+                  || activeLoop?._generation !== loopGeneration
+                  || pausedTargets.get(target)
+                ) {
+                  return 'Intent 已取消：Social Agent 已停止或目标已暂停。';
+                }
+                if (
+                  lurkModes.get(target) === 'full-lurk'
+                  && (intentImmediateSendToolNames.has(name) || intentExternalToolNames.has(name))
+                ) {
+                  return `full-lurk 禁止调用可能产生外部副作用的工具 ${name}。`;
+                }
+                if (
+                  lurkModes.get(target) === 'semi-lurk'
+                  && (intentImmediateSendToolNames.has(name) || intentExternalToolNames.has(name))
+                  && getUnconsumedAtMeIds(target).length === 0
+                ) {
+                  return `semi-lurk 只有存在当前未消费的 @me 时才允许调用发送/外部工具 ${name}。`;
+                }
+                if (
+                  promptConfig.agentCanEditStrategy !== true
+                  && name === 'md_organize'
+                  && (
+                    canonicalSocialPath(args?.file) == null
+                    || canonicalSocialPath(args?.file) === 'social/reply_strategy.md'
+                  )
+                ) {
+                  return '当前配置禁止 Agent 修改 social/REPLY_STRATEGY.md。';
+                }
+                return null;
+              },
               // 拦截时（formattedResult 含"write_intent_plan 暂缓"）不退出循环，让 LLM 重新评估再次提交
               stopAfterTool: (name, formattedResult) => {
                 if (name !== 'write_intent_plan') return false;
@@ -3061,9 +3342,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               usageLabel: 'Intent:msg',
               usageTarget: target,
               usagePetId: config.petId,
-              onUsageLogged: logUsageRecord,
+              onUsageLogged: (record) => {
+                if (isRuntimeGenerationCurrent()) logUsageRecord(record);
+              },
               onTrace: _onTraceFn,
+              // 每次 optional 工具执行完成后，把短账本附到该工具结果末尾，供同一 eval 的下一次 LLM 调用查看。
+              // get_situation / write_intent_plan 由 ledger 模块精确排除，不显示也不计数。
+              toolResultAnnotation: ({ name, args, isError }) =>
+                recordIntentOptionalToolUse(optionalToolLedger, { name, args, isError }),
               onToolCall: (name, args) => {
+                if (!isRuntimeGenerationCurrent()) return;
                 if (name === 'write_intent_plan') {
                   // 与 executor 同步应用 auto-fix（brief 非空但 actions 缺 reply → 自动补 reply）
                   // 这样 capturedPlan / 日志和 executor 实际写入的文件保持一致
@@ -3099,6 +3387,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args, null, 2), target);
               },
               onToolResult: (name, result, _toolCallId, isError) => {
+                if (!isRuntimeGenerationCurrent()) return;
+                if (
+                  lurkModes.get(target) === 'semi-lurk'
+                  && intentImmediateSendToolNames.has(name)
+                  && !isToolResultFailure(result, isError)
+                ) {
+                  const consumed = consumedAtMe.get(target) || new Set();
+                  for (const id of getUnconsumedAtMeIds(target)) consumed.add(id);
+                  consumedAtMe.set(target, consumed);
+                }
                 if (name === 'get_situation') {
                   // 把 bot 看到的快照（chat 记录 + recent_self）作为 details，前端展开即显示
                   const text = typeof result === 'string' ? result : (result == null ? '' : JSON.stringify(result, null, 2));
@@ -3139,6 +3437,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             intentResult = { content: raw.content, error: null };
             break;
           } catch (e) {
+            if (!isRuntimeGenerationCurrent()) return;
             if (attempt < INTENT_LLM_MAX_RETRIES) {
               // 上游 503/UNAVAILABLE（Gemini high demand 等）用更长退避让上游恢复
               const errStr = String(e.message || e);
@@ -3152,6 +3451,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             intentResult = { content: e.message || e, error: true };
           }
         }
+
+        if (!isRuntimeGenerationCurrent()) return;
 
         // Write training trace exactly once per eval (final attempt outcome only)
         if (_shouldCollectTraining && _latestTrace) {
@@ -3178,7 +3479,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // ── 处理 Intent 计划（并发执行动作） ──
         if (capturedPlan) {
           // 读取 LLM 已通过 social_edit 更新的 INTENT 文件，作为 state 供 Reply 读取
-          const intentDir = targetType === 'friend' ? 'friend' : 'group';
+          const intentDir = socialTargetDir(targetType);
           try {
             capturedPlan.state = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`) || '';
           } catch { capturedPlan.state = ''; }
@@ -3193,6 +3494,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 config.petId,
                 `social/${intentDir}/scratch_${target}/reply_brief.md`,
               ).catch(() => '');
+              // 与 digest 同时冻结 Reply brief，避免后续 Intent 覆盖共享文件。
+              capturedPlan.briefSnapshot = brief || '';
               briefDigest = (brief || '').replace(/\s+/g, ' ').trim().slice(0, 200);
             }
             await appendIntentHistory(config.petId, target, targetType, {
@@ -3204,9 +3507,31 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             addLog('warn', `Intent history append failed: ${e.message || e}`, null, target);
           }
         }
-        const actions = capturedPlan?.actions || [];
+        let actions = capturedPlan?.actions || [];
+        const liveLurkMode = lurkModes.get(target) || 'normal';
+        const plannedActionAtMeIds = liveLurkMode === 'semi-lurk'
+          ? getUnconsumedAtMeIds(target)
+          : [];
+        if (liveLurkMode === 'full-lurk') {
+          const blockedCount = actions.filter(a => ['reply', 'sticker', 'image'].includes(a?.type)).length;
+          if (blockedCount > 0) {
+            addLog('warn', `full-lurk 硬拦截 ${blockedCount} 个 Intent 发送动作`, null, target);
+          }
+          actions = actions.filter(a => !['reply', 'sticker', 'image'].includes(a?.type));
+        } else if (liveLurkMode === 'semi-lurk' && plannedActionAtMeIds.length === 0) {
+          const blockedCount = actions.filter(a => ['reply', 'sticker', 'image'].includes(a?.type)).length;
+          if (blockedCount > 0) {
+            addLog('warn', `semi-lurk 且无未消费 @me，硬拦截 ${blockedCount} 个 Intent 发送动作`, null, target);
+          }
+          actions = actions.filter(a => !['reply', 'sticker', 'image'].includes(a?.type));
+        }
         const replyAction = actions.find(a => a.type === 'reply');
         const stickerActions = actions.filter(a => a.type === 'sticker');
+        const canPlannedActionDispatch = () => {
+          if (!canTargetDispatch(target)) return false;
+          const mode = lurkModes.get(target) || 'normal';
+          return mode !== 'semi-lurk' || plannedActionAtMeIds.length > 0;
+        };
 
         // 更新 intent 水位线到 buffer 最新消息，并检测 eval 期间是否有新消息被跳过
         const bufAfterEval = dataBuffer.get(target);
@@ -3237,63 +3562,93 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           || 'wait';
         addLog('intent', `🧠 [${tName()}] ${actionDesc}`, JSON.stringify({ state: capturedPlan?.state || '', actions: capturedPlan?.actions || [] }), target);
 
-        // 并发执行：sticker 立即发送，reply 唤醒 Reply 模块
-        const dispatchPromises = stickerActions.map(sa =>
-          executeStickerBuiltinTool('sticker_send', { sticker_id: sa.id },
-            { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, sentCache: sentMessagesCache })
-            .then(() => {
-              addLog('intent-action-done', '', JSON.stringify({ type: 'sticker', id: sa.id }), target);
-              addLog('send', `📎 sticker#${sa.id} → ${tName()}`, null, target);
-            })
-            .catch(e => addLog('warn', `sticker_send failed`, e.message, target))
-        );
+        // 并发执行：sticker 立即发送，reply 唤醒 Reply 模块。
+        // 每个副作用前都重查 generation / pause / full-lurk。
+        const successfulStickers = [];
+        const dispatchPromises = stickerActions.map(async (sa) => {
+          if (!canPlannedActionDispatch()) return;
+          try {
+            const result = await executeStickerBuiltinTool('sticker_send', { sticker_id: sa.id },
+              { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, sentCache: sentMessagesCache });
+            if (!isRuntimeGenerationCurrent()) return;
+            if (isToolResultFailure(result)) throw new Error('sticker_send returned an error result');
+            successfulStickers.push(sa);
+            addLog('intent-action-done', '', JSON.stringify({ type: 'sticker', id: sa.id }), target);
+            addLog('send', `📎 sticker#${sa.id} → ${tName()}`, null, target);
+          } catch (e) {
+            if (!isRuntimeGenerationCurrent()) return;
+            addLog('warn', 'sticker_send failed', e.message || e, target);
+          }
+        });
         if (dispatchPromises.length > 0) {
           await Promise.all(dispatchPromises);
           // 发完 sticker 后立刻回写 INTENT 文件的【我刚做了】，防止下次 eval 不知道刚发过表情包
-          const intentDir = targetType === 'friend' ? 'friend' : 'group';
+          const intentDir = socialTargetDir(targetType);
           const intentPath = `social/${intentDir}/INTENT_${target}.md`;
           try {
             const current = await tauri.workspaceRead(config.petId, intentPath) || '';
-            const stickerDesc = stickerActions.map(sa => `#${sa.id}`).join('、');
-            const updated = current.replace(/【我刚做了】[^\n]*/, `【我刚做了】发了表情包 ${stickerDesc}`);
+            const stickerDesc = successfulStickers.map(sa => `#${sa.id}`).join('、');
+            const updated = stickerDesc
+              ? current.replace(/【我刚做了】[^\n]*/, `【我刚做了】发了表情包 ${stickerDesc}`)
+              : current;
             if (updated !== current) await tauri.workspaceWrite(config.petId, intentPath, updated);
           } catch { /* 非致命 */ }
         }
 
         // Image actions: 发送已保存的图片（和 sticker 类似，fire-and-forget）
         const imageActions = actions.filter(a => a.type === 'image');
+        const successfulImages = [];
         if (imageActions.length > 0) {
           const imagePromises = imageActions.map(async (ia) => {
             try {
+              if (!canPlannedActionDispatch()) return;
               const base64Data = await tauri.workspaceReadBinary(config.petId, `social/images/${ia.file}`);
               if (!base64Data) {
                 addLog('warn', `image_send failed: file empty ${ia.file}`, null, target);
                 return;
               }
+              if (!canPlannedActionDispatch()) return;
               const sendToolName = `${config.mcpServerName}__send_image`;
-              await tauri.mcp.callToolByName(sendToolName, {
+              const result = await tauri.mcp.callToolByName(sendToolName, {
                 target,
                 target_type: targetType,
                 image: base64Data,
               });
+              if (!isRuntimeGenerationCurrent()) return;
+              if (isToolResultFailure(result)) throw new Error('send_image returned an error result');
+              successfulImages.push(ia);
               addLog('intent-action-done', '', JSON.stringify({ type: 'image', file: ia.file }), target);
               addLog('send', `🖼️ image → ${tName()}: ${ia.file}`, null, target);
             } catch (e) {
+              if (!isRuntimeGenerationCurrent()) return;
               addLog('warn', `image_send failed: ${e.message}`, null, target);
             }
           });
           await Promise.all(imagePromises);
           // 发完图片后回写 INTENT 文件的【我刚做了】
-          const intentDir2 = targetType === 'friend' ? 'friend' : 'group';
+          const intentDir2 = socialTargetDir(targetType);
           const intentPath2 = `social/${intentDir2}/INTENT_${target}.md`;
           try {
             const current2 = await tauri.workspaceRead(config.petId, intentPath2) || '';
-            const imageDesc = imageActions.map(ia => ia.file).join('、');
-            const prefix = current2.includes('发了表情包') ? current2.match(/【我刚做了】[^\n]*/)?.[0] + '，并发了图片 ' + imageDesc
-              : `【我刚做了】发了图片 ${imageDesc}`;
-            const updated2 = current2.replace(/【我刚做了】[^\n]*/, prefix);
+            const imageDesc = successfulImages.map(ia => ia.file).join('、');
+            const prefix = imageDesc
+              ? (current2.includes('发了表情包') ? current2.match(/【我刚做了】[^\n]*/)?.[0] + '，并发了图片 ' + imageDesc
+                : `【我刚做了】发了图片 ${imageDesc}`)
+              : '';
+            const updated2 = prefix ? current2.replace(/【我刚做了】[^\n]*/, prefix) : current2;
             if (updated2 !== current2) await tauri.workspaceWrite(config.petId, intentPath2, updated2);
           } catch { /* 非致命 */ }
+        }
+
+        // semi-lurk 的任意成功直接发送动作都会消费本次 @；若同时有 Reply，
+        // Reply 仍通过显式 reservation 快照看到该 @，但其他并发任务看不到。
+        if (
+          liveLurkMode === 'semi-lurk'
+          && (successfulStickers.length > 0 || successfulImages.length > 0)
+        ) {
+          const consumed = consumedAtMe.get(target) || new Set();
+          for (const id of plannedActionAtMeIds) consumed.add(id);
+          consumedAtMe.set(target, consumed);
         }
 
         // 并行预取当前对话人物档案，供下次 eval 注入（fire-and-forget）
@@ -3302,12 +3657,19 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         if (replyAction) {
           addLog('send', `💬 reply → ${tName()}`, null, target);
           // 直接派发 Reply 任务（fire-and-forget，并发上限 3 由 spawnReplyTask 内部管理）
-          spawnReplyTask(target, targetType).catch(e => {
+          spawnReplyTask(target, targetType, {
+            briefSnapshot: capturedPlan?.briefSnapshot || '',
+            intentPlanSnapshot: capturedPlan,
+            atMeIds: plannedActionAtMeIds,
+            keepAtMeConsumedOnFailure: successfulStickers.length > 0 || successfulImages.length > 0,
+          }).catch(e => {
+            if (!isRuntimeGenerationCurrent()) return;
             addLog('error', `spawnReplyTask 启动失败 ${tName()}`, e?.message || e, target);
           });
         }
         await sleepInterruptible(state, 500);
       } catch (e) {
+        if (!isRuntimeGenerationCurrent()) return;
         addLog('intent', `Intent loop error [${tName()}]`, e.message || e, target);
         await sleepInterruptible(state, 2000);
       }
@@ -3334,8 +3696,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         limit: dynamicLimit,
       };
       const rawResult = await executeToolByName(batchToolName, batchArgs, { timeout: 10000 });
+      if (!isRuntimeGenerationCurrent()) return;
       targetResults = parseBatchResult(rawResult);
     } catch (e) {
+      if (!isRuntimeGenerationCurrent()) return;
       addLog('error', 'Fetcher: batch poll failed', e.message);
       scheduleFetcher();
       return;
@@ -3423,7 +3787,9 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           delta = targetData.compressed_summary.slice(prevSummary.length).replace(/^\n+/, '');
         }
         if (delta) {
-          const bufferPath = `social/group/LOG_${target}.md`;
+          const configuredTarget = targets.find(t => t.target === target);
+          const fetchedTargetType = targetData.target_type || (targetData.friend_name ? 'private' : configuredTarget?.targetType);
+          const bufferPath = `social/${socialTargetDir(fetchedTargetType)}/LOG_${target}.md`;
           const timestamp = new Date().toISOString();
           const entry = `\n## ${timestamp}\n${delta}\n`;
           try {
@@ -3560,6 +3926,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           lurkMode: 'full-lurk',      // Observer 始终使用观察模式
           role: 'observer',
           intentPlan: getIntentState(target).lastPlan,
+          dispatchGuard: () => isRuntimeGenerationCurrent() && !pausedTargets.get(target),
           enableImages: config.enableImages !== false,
           imageDescMode: config.imageDescMode || 'off',
           visionLLMConfig,
@@ -3567,6 +3934,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           fullBufferMessages: allMsgs,
           socialConfig: config,
         }).then(result => {
+          if (!isRuntimeGenerationCurrent()) return;
           // 无论成功失败都更新冷却时间，防止错误时 2s 重试风暴
           lastObserveTime.set(target, Date.now());
           if (result.action === 'error') {
@@ -3586,7 +3954,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 }
               }
               const oldCount = earlierWmIdx >= 0 ? earlierWmIdx : 0;
-              if (oldCount > BUFFER_COMPRESS_THRESHOLD) {
+              if (oldCount > BUFFER_COMPRESS_THRESHOLD && isRuntimeGenerationCurrent() && !pausedTargets.get(target)) {
                 const compressToolName = `${config.mcpServerName}__compress_context`;
                 const tt = targetType || 'group';
                 executeToolByName(compressToolName, { target, target_type: tt }, { timeout: 15000 })
@@ -3596,6 +3964,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             }
           }
         }).catch(e => {
+          if (!isRuntimeGenerationCurrent()) return;
           lastObserveTime.set(target, Date.now());
           consecutiveErrors++;
           addLog('error', `Observer ${label} error (consecutive: ${consecutiveErrors})`, e.message || e, target);
@@ -3622,9 +3991,14 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
    * - 检查 lurk mode / paused / replyIntervalMs 冷却 / 并发上限
    * - 通过即扣减计数 → 调 pollTarget → finally 减计数
    */
-  const spawnReplyTask = async (target, targetType) => {
+  const spawnReplyTask = async (target, targetType, {
+    briefSnapshot: providedBriefSnapshot,
+    intentPlanSnapshot: providedIntentPlanSnapshot,
+    atMeIds: providedAtMeIds,
+    keepAtMeConsumedOnFailure = false,
+  } = {}) => {
     const label = `${targetType}:${target}`;
-    if (pausedTargets.get(target)) {
+    if (!isRuntimeGenerationCurrent() || pausedTargets.get(target)) {
       addLog('info', `${label} paused → skip reply`, null, target);
       return;
     }
@@ -3633,6 +4007,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       addLog('info', `${label} full-lurk → skip reply`, null, target);
       return;
     }
+
     if (replyIntervalMs > 0) {
       const sinceLastReply = Date.now() - (lastReplyTime.get(target) || 0);
       if (sinceLastReply < replyIntervalMs) {
@@ -3646,12 +4021,40 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       return;
     }
 
+    // semi-lurk 必须由“当前仍未消费的 @me”触发。所有会提前 return 的
+    // admission checks 通过后再预留，防止冷却/并发拒绝误吞 @。
+    const reservedAtMeIds = targetLurkMode === 'semi-lurk'
+      ? (Array.isArray(providedAtMeIds) && providedAtMeIds.length > 0
+        ? [...providedAtMeIds]
+        : getUnconsumedAtMeIds(target))
+      : [];
+    if (targetLurkMode === 'semi-lurk' && reservedAtMeIds.length === 0) {
+      addLog('info', `${label} semi-lurk 且无未消费 @me → skip reply`, null, target);
+      return;
+    }
+    const consumedBeforeReservation = new Set(consumedAtMe.get(target) || []);
+    for (const id of reservedAtMeIds) consumedBeforeReservation.delete(id);
+    if (reservedAtMeIds.length > 0) {
+      const consumed = consumedAtMe.get(target) || new Set();
+      for (const id of reservedAtMeIds) consumed.add(id);
+      consumedAtMe.set(target, consumed);
+    }
+    const replyDispatchGuard = () => {
+      if (!canTargetDispatch(target)) return false;
+      const liveMode = lurkModes.get(target) || 'normal';
+      return liveMode !== 'semi-lurk' || reservedAtMeIds.length > 0;
+    };
+
     // 派发瞬间快照 brief——后续若有第二个 Intent 覆盖 reply_brief.md，本任务携带的 brief 不受影响
-    const briefDir = targetType === 'friend' ? 'friend' : 'group';
-    let briefSnapshot = '';
-    try {
-      briefSnapshot = (await tauri.workspaceRead(config.petId, `social/${briefDir}/scratch_${target}/reply_brief.md`).catch(() => '')) || '';
-    } catch { /* ignore */ }
+    const briefDir = socialTargetDir(targetType);
+    let briefSnapshot = providedBriefSnapshot;
+    if (briefSnapshot === undefined) {
+      try {
+        briefSnapshot = (await tauri.workspaceRead(config.petId, `social/${briefDir}/scratch_${target}/reply_brief.md`).catch(() => '')) || '';
+      } catch {
+        briefSnapshot = '';
+      }
+    }
     const inFlightEntry = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       brief: briefSnapshot.trim(),
@@ -3664,12 +4067,13 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     // ── Lessons Review: 在下一次 Reply 启动前 review 上一次 ──
     dispatchLessonsReview(target, targetType).catch(() => {});
 
+    let replySucceeded = false;
     try {
+      if (!replyDispatchGuard()) return;
       const buf = dataBuffer.get(target);
       if (!buf || buf.messages.length === 0) {
         return;
       }
-      const allConsumed = consumedAtMe.get(target) || new Set();
 
       const result = await pollTarget({
         target,
@@ -3683,10 +4087,13 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         bufferMessages: buf.messages,
         compressedSummary: buf.compressedSummary,
         groupName: buf.metadata?.group_name || buf.metadata?.friend_name || target,
-        consumedAtMeIds: allConsumed,
-        lurkMode: 'normal',
+        // 本任务预留的 @ 对当前 Reply 仍可见；其他历史已消费 @ 会被消毒。
+        consumedAtMeIds: consumedBeforeReservation,
+        lurkMode: targetLurkMode,
         role: 'reply',
-        intentPlan: getIntentState(target).lastPlan,
+        intentPlan: providedIntentPlanSnapshot || getIntentState(target).lastPlan,
+        replyBriefOverride: inFlightEntry.brief,
+        dispatchGuard: replyDispatchGuard,
         enableImages: config.enableImages !== false,
         imageDescMode: config.imageDescMode || 'off',
         visionLLMConfig,
@@ -3694,15 +4101,36 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         socialConfig: config,
       });
 
+      if (!isRuntimeGenerationCurrent()) return;
       if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
       if (result && result.action === 'replied') {
+        replySucceeded = true;
         addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
-        getIntentState(target).postReplyRestUntil = Date.now() + 1000;
+        const intentState = getIntentState(target);
+        intentState.postReplyRestUntil = Date.now() + 1000;
+        intentState.forceEval = 'reply';
+        if (intentState._wake) {
+          intentState._wake();
+          intentState._wake = null;
+        }
         snapshotForReview(target, targetType).catch(() => {});
       }
     } catch (e) {
+      if (!isRuntimeGenerationCurrent()) return;
       addLog('error', `Reply ${label} LLM error`, e.message || e, target);
     } finally {
+      if (
+        isRuntimeGenerationCurrent()
+        && !replySucceeded
+        && !keepAtMeConsumedOnFailure
+        && reservedAtMeIds.length > 0
+      ) {
+        const consumed = consumedAtMe.get(target);
+        if (consumed) {
+          for (const id of reservedAtMeIds) consumed.delete(id);
+          if (consumed.size === 0) consumedAtMe.delete(target);
+        }
+      }
       const cur = inFlightReplies.get(target) || [];
       const idx = cur.findIndex(e => e.id === inFlightEntry.id);
       if (idx >= 0) {
@@ -3781,6 +4209,9 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     addLog('debug', `Reply ${label} stopped`, null, target);
   };
   
+  // 异步初始化期间可能收到 stop；旧启动流程不得重新“复活” runtime。
+  if (!startupStillCurrent()) return false;
+
   // 设置 activeLoop
   activeLoop = {
     petId: config.petId,
@@ -3801,8 +4232,12 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           iState.loopTimeoutId = null;
         }
       }
+      for (const timerId of lessonsReviewTimers.values()) clearTimeout(timerId);
+      lessonsReviewTimers.clear();
+      pendingReviews.clear();
     },
   };
+  startingPetId = null;
   
   // === 启动时：加载已知 targets + 检查并执行待处理的每日压缩 ===
   (async () => {
@@ -3814,7 +4249,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       
       // 检查是否有过去日期的群缓冲需要压缩
       if (knownTargets.size > 0) {
-        await runDailyCompress(config.petId, compressLLMConfig, knownTargets, config);
+        await runDailyCompress(config.petId, compressLLMConfig, knownTargets, config, isRuntimeGenerationCurrent);
       }
     } catch (e) {
       addLog('warn', 'Startup compression check failed', e.message);
@@ -3846,7 +4281,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       if (!activeLoop || activeLoop._generation !== loopGeneration) return;
       addLog('info', '⏰ 23:55 daily compression triggered');
       try {
-        await runDailyCompress(config.petId, compressLLMConfig, knownTargets, config);
+        await runDailyCompress(config.petId, compressLLMConfig, knownTargets, config, isRuntimeGenerationCurrent);
       } catch (e) {
         addLog('error', 'Daily compression timer failed', e.message);
       }
@@ -3870,6 +4305,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         }
       },
     });
+    if (!isRuntimeGenerationCurrent()) {
+      destroySubagentListeners();
+      return false;
+    }
     if (config.subagentMaxConcurrent) {
       tauri.subagentSetMaxConcurrent(config.subagentMaxConcurrent).catch(() => {});
     }
@@ -3877,20 +4316,54 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
   // Setup training collection whitelist listener
   if (_unlistenTraining) { _unlistenTraining(); _unlistenTraining = null; }
-  _unlistenTraining = await tauri.listen('social-set-training-enabled', (e) => {
-    const { target, enabled } = e.payload || {};
+  const unlistenTraining = await tauri.listen('social-set-training-enabled', (e) => {
+    const { target, enabled, petId } = e.payload || {};
+    if (petId !== config.petId) return;
     if (target == null) return;
     trainingTargetsMap.set(String(target), !!enabled);
     addLog('info', `Training collection ${enabled ? 'enabled' : 'disabled'} for ${target}`, null, target);
   });
+  if (!isRuntimeGenerationCurrent()) {
+    unlistenTraining();
+    return false;
+  }
+  _unlistenTraining = unlistenTraining;
 
   // Setup global training collection toggle listener
   if (_unlistenTrainingGlobal) { _unlistenTrainingGlobal(); _unlistenTrainingGlobal = null; }
-  _unlistenTrainingGlobal = await tauri.listen('social-set-training-collection-enabled', (e) => {
-    const { enabled } = e.payload || {};
+  const unlistenTrainingGlobal = await tauri.listen('social-set-training-collection-enabled', (e) => {
+    const { enabled, petId } = e.payload || {};
+    if (petId !== config.petId) return;
     _currentTrainingCollectionEnabled = !!enabled;
     addLog('info', `Training collection global switch ${enabled ? 'enabled' : 'disabled'}`);
   });
+  if (!isRuntimeGenerationCurrent()) {
+    unlistenTrainingGlobal();
+    return false;
+  }
+  _unlistenTrainingGlobal = unlistenTrainingGlobal;
+
+  // Listener 注册前发生的 UI toggle 事件可能已经丢失；以持久化 settings
+  // 再同步一次，确保启动完成时采用最新的全局开关和 target 白名单。
+  try {
+    const latestSettings = await tauri.getSettings();
+    if (!isRuntimeGenerationCurrent()) return false;
+    if (latestSettings?.trainingCollectionEnabled != null) {
+      _currentTrainingCollectionEnabled = !!latestSettings.trainingCollectionEnabled;
+    }
+    if (
+      latestSettings?.trainingTargets
+      && typeof latestSettings.trainingTargets === 'object'
+      && !Array.isArray(latestSettings.trainingTargets)
+    ) {
+      trainingTargetsMap.clear();
+      for (const [target, enabled] of Object.entries(latestSettings.trainingTargets)) {
+        trainingTargetsMap.set(String(target), !!enabled);
+      }
+    }
+  } catch (error) {
+    addLog('warn', 'Failed to refresh latest training settings', error?.message || error);
+  }
 
   // 启动层 1: Fetcher 循环（每 1s batch 拉取）
   fetcherLoop();
@@ -3920,6 +4393,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
  * 停止社交循环
  */
 export function stopSocialLoop() {
+  // 无论 activeLoop 是否已经建立，都先使 STARTING/运行中的旧 generation 失效。
+  socialLoopGeneration++;
+  startingPetId = null;
+
   if (activeLoop) {
     // 持久化 lurk modes 在清空之前
     if (lurkModes.size > 0) {
@@ -3942,15 +4419,18 @@ export function stopSocialLoop() {
     if (_unlistenTrainingGlobal) { _unlistenTrainingGlobal(); _unlistenTrainingGlobal = null; }
     addLog('info', `Stopped social loop for pet: ${activeLoop.petId}`);
     activeLoop = null;
-    sentMessagesCache.clear();
-    imageDescCache.clear();
-    imageDescInflight.clear();
-    lurkModes.clear();
-    pausedTargets.clear();
-    trainingTargetsMap.clear();
-    knownTargets.clear();
-    targetNamesCache.clear();
   }
+  // stop 也可能发生在 startSocialLoop 尚未设置 activeLoop 的阶段。
+  if (_unlistenTraining) { _unlistenTraining(); _unlistenTraining = null; }
+  if (_unlistenTrainingGlobal) { _unlistenTrainingGlobal(); _unlistenTrainingGlobal = null; }
+  sentMessagesCache.clear();
+  imageDescCache.clear();
+  imageDescInflight.clear();
+  lurkModes.clear();
+  pausedTargets.clear();
+  trainingTargetsMap.clear();
+  knownTargets.clear();
+  targetNamesCache.clear();
 }
 
 /**
@@ -4048,12 +4528,13 @@ export function getTargetNames() {
 
 /**
  * 获取当前社交循环状态
- * @returns {{ active: boolean, petId: string|null }}
+ * @returns {{ active: boolean, starting: boolean, petId: string|null }}
  */
 export function getSocialStatus() {
   return {
     active: activeLoop !== null,
-    petId: activeLoop?.petId || null,
+    starting: activeLoop === null && startingPetId !== null,
+    petId: activeLoop?.petId || startingPetId || null,
     lurkModes: Object.fromEntries(lurkModes),
     pausedTargets: Object.fromEntries(pausedTargets),
   };
