@@ -28,6 +28,7 @@ import {
   isSubagentPermissionCurrent,
   setSubagentEnabledForConversation,
 } from '../../utils/subagentCapability.js';
+import { shouldApplyComposerFocus } from '../../utils/chatFocusModel.js';
 
 // ===== 模块级别全局变量 =====
 // 存储 Preferences 中的默认值，所有组件实例共享
@@ -165,21 +166,43 @@ const processMessagesForLLM = async (messages) => {
 export const ChatboxInputBox = ({
   activePetId,
   autoFocus = false,
+  focusRequest = null,
+  compact = false,
   activeTabId,
   quickReplyEnabled = false,
   quickReplyRequest,
   onQuickReplyHandled,
+  onHeightChange,
+  onOverlayOpenChange,
 }) => {
+  const containerRef = useRef(null);
+  const subagentAnchorRef = useRef(null);
+  const lastPointerDownAtRef = useRef(Number.NEGATIVE_INFINITY);
+  const lastHandledFocusRequestRef = useRef(0);
   // 会话 ID ref（需要先声明，供其他地方引用）
   const conversationIdRef = useRef(null);
   const quickReplyEnabledRef = useRef(Boolean(quickReplyEnabled));
   const quickReplyGateRef = useRef(null);
   const handleSendRef = useRef(null);
   const lastQuickReplyRequestIdRef = useRef(null);
+  const stateValue = useStateValue();
+  const [state, dispatch] = stateValue || [{}, () => {}];
+  const {
+    currentConversationId,
+    runFromHereTimestamp,
+    characterMoods = {},
+    lastTimeInjection = {},
+    apiProviders = [],
+  } = state;
   if (quickReplyGateRef.current === null) {
     quickReplyGateRef.current = createQuickReplyRequestGate();
   }
   quickReplyEnabledRef.current = Boolean(quickReplyEnabled);
+
+  // activeTabId is the render-time source of truth; global state catches up in
+  // the same tab switch, while the ref serves only long-lived async callbacks.
+  const authoritativeConversationId = activeTabId || null;
+  conversationIdRef.current = authoritativeConversationId;
   
   // 按会话管理生成状态，支持多会话并行
   const [generatingConversations, setGeneratingConversations] = useState(new Set());
@@ -191,6 +214,7 @@ export const ChatboxInputBox = ({
   const [memoryEnabledByConversation, setMemoryEnabledByConversation] = useState({});
   // Subagent 状态
   const [showSubagentPanel, setShowSubagentPanel] = useState(false);
+  const [showSkillsPopover, setShowSkillsPopover] = useState(false);
   const [activeSubagentCount, setActiveSubagentCount] = useState(0);
   const [subagentEnabledByConversation, setSubagentEnabledByConversation] = useState({});
   const subagentEnabledByConversationRef = useRef({});
@@ -203,7 +227,7 @@ export const ChatboxInputBox = ({
   const conversationDefaultsRef = useRef({});
   
   // 获取当前会话的记忆状态
-  const currentConvId = conversationIdRef.current || 'temp';
+  const currentConvId = authoritativeConversationId || 'temp';
   const subagentConversationId = activeTabId || currentConvId;
   const subagentEnabled = isSubagentEnabledForConversation(
     subagentEnabledByConversation,
@@ -249,7 +273,7 @@ export const ChatboxInputBox = ({
   
   // 设置当前会话的记忆状态
   const setMemoryEnabled = (value) => {
-    const convId = conversationIdRef.current || 'temp';
+    const convId = authoritativeConversationId || 'temp';
     const currentValue = getMemoryEnabledForConversation(convId);
     setMemoryEnabledByConversation(prev => ({
       ...prev,
@@ -268,7 +292,7 @@ export const ChatboxInputBox = ({
   
   // 设置当前会话的 MCP 服务器启用状态
   const setEnabledMcpServers = (value) => {
-    const convId = conversationIdRef.current || 'temp';
+    const convId = authoritativeConversationId || 'temp';
     setEnabledMcpServersByConversation(prev => ({
       ...prev,
       [convId]: typeof value === 'function' ? value(prev[convId] ?? new Set()) : value
@@ -557,10 +581,6 @@ export const ChatboxInputBox = ({
   };
 
   const inputRef = useRef(null);
-  const stateValue = useStateValue();
-  const [state, dispatch] = stateValue || [{}, () => {}];
-  // 新方案: 使用 Rust TabState
-  const { currentConversationId, runFromHereTimestamp, characterMoods = {}, lastTimeInjection = {}, apiProviders = [] } = state;
 
   useEffect(() => {
     quickReplyGateRef.current.settingsChanged();
@@ -572,7 +592,7 @@ export const ChatboxInputBox = ({
   // 兼容性：当前会话是否在生成
   // 使用 currentConversationId（来自 state）而不是 conversationIdRef.current
   // 这样当 Tab 切换时，isGenerating 会随着 currentConversationId 的变化而重新计算
-  const isGenerating = generatingConversations.has(currentConversationId) || 
+  const isGenerating = generatingConversations.has(authoritativeConversationId) ||
                        generatingConversations.has('temp');
   
   // 发送/暂停按钮切换动画状态
@@ -590,51 +610,75 @@ export const ChatboxInputBox = ({
   }, [isGenerating]);
   
   // 本地消息状态 - 从 Rust TabState 加载
-  const [userMessages, setUserMessages] = useState([]);
+  const [messageSnapshot, setMessageSnapshot] = useState({
+    conversationId: null,
+    messages: [],
+  });
+  const userMessages = messageSnapshot.conversationId === authoritativeConversationId
+    ? messageSnapshot.messages
+    : [];
   
   // 新方案: 使用 Rust TabState 订阅
   useEffect(() => {
-    if (!currentConversationId) {
-      setUserMessages([]);
+    const targetConversationId = authoritativeConversationId;
+    if (!targetConversationId) {
+      setMessageSnapshot({ conversationId: null, messages: [] });
       return;
     }
-    
+
+    setMessageSnapshot({ conversationId: targetConversationId, messages: [] });
     let unlisten = null;
     let isMounted = true;
-    
+    let eventCount = 0;
+
     const setup = async () => {
+      // Subscribe before reading so an update cannot fall into the gap.
+      unlisten = await tauri.subscribeTabState(targetConversationId, (newState) => {
+        eventCount += 1;
+        if (isMounted) {
+          setMessageSnapshot({
+            conversationId: targetConversationId,
+            messages: newState.messages || [],
+          });
+        }
+      });
+      if (!isMounted) {
+        unlisten?.();
+        unlisten = null;
+        return;
+      }
+
       // 获取初始状态
-      const initialState = await tauri.getTabState(currentConversationId);
+      const initialState = await tauri.getTabState(targetConversationId);
       
       // 如果 Rust 缓存为空，从数据库加载并初始化
       if (!initialState.messages || initialState.messages.length === 0) {
-        console.log('[ChatboxInputBox] Cache empty, loading from database:', currentConversationId);
-        const conversation = await tauri.getConversationWithHistory(currentConversationId);
+        console.log('[ChatboxInputBox] Cache empty, loading from database:', targetConversationId);
+        const conversation = await tauri.getConversationWithHistory(targetConversationId);
         if (conversation && conversation.history && conversation.history.length > 0) {
           // 初始化 Rust TabState
-          await tauri.initTabMessages(currentConversationId, conversation.history);
-        } else if (isMounted) {
-          setUserMessages([]);
+          await tauri.initTabMessages(targetConversationId, conversation.history);
+        } else if (isMounted && eventCount === 0) {
+          setMessageSnapshot({ conversationId: targetConversationId, messages: [] });
         }
-      } else if (isMounted) {
-        setUserMessages(initialState.messages);
+      } else if (isMounted && eventCount === 0) {
+        setMessageSnapshot({
+          conversationId: targetConversationId,
+          messages: initialState.messages,
+        });
       }
-      
-      // 订阅状态更新
-      unlisten = await tauri.subscribeTabState(currentConversationId, (newState) => {
-        if (isMounted) {
-          setUserMessages(newState.messages || []);
-        }
-      });
     };
-    
-    setup();
+    setup().catch(error => {
+      if (!isMounted) return;
+      console.error('[ChatboxInputBox] Failed to load active tab state:', error);
+      setMessageSnapshot({ conversationId: targetConversationId, messages: [] });
+    });
     
     return () => {
       isMounted = false;
       if (unlisten) unlisten();
     };
-  }, [currentConversationId]);
+  }, [authoritativeConversationId]);
   
   // 临时覆盖模型（仅当前会话有效，不保存到数据库）
   const [overrideModel, setOverrideModel] = useState(null);
@@ -724,6 +768,11 @@ export const ChatboxInputBox = ({
   const [characterId, setCharacterId] = useState(null);
   const [petInfo, setPetInfo] = useState(null);
   const capabilityPetId = activePetId || petInfo?._id;
+  const assistantContextReady = Boolean(
+    activePetId
+    && petInfo?._id
+    && String(activePetId) === String(petInfo._id)
+  );
   const [activeModelConfig, setActiveModelConfig] = useState(null);
   const [functionModelInfo, setFunctionModelInfo] = useState(null);
   const [imageModelInfo, setImageModelInfo] = useState(null);
@@ -804,17 +853,14 @@ export const ChatboxInputBox = ({
                 console.log("[ChatboxInputBox] Fallback to first pet:", firstPet.name);
               } else {
                 console.log("[ChatboxInputBox] No assistants or pets available");
-                setCharacterId(null);
               }
             }
           } catch (fallbackError) {
             console.error("Error loading fallback assistant:", fallbackError);
-            setCharacterId(null);
           }
         }
       } catch (error) {
         console.error("Error loading default character ID from settings:", error);
-        setCharacterId(null);
       }
 
       // 加载图像生成模型配置（generate_image 工具用）
@@ -902,11 +948,13 @@ export const ChatboxInputBox = ({
   // 当 firstCharacter 改变时，直接设置 characterId，不发送事件
   // 事件发送由 ChatboxBody 负责
   useEffect(() => {
-    if (firstCharacter != null) {
+    // The active tab owns Assistant selection once it exists. A slower default
+    // Assistant lookup must never overwrite that live tab context.
+    if (firstCharacter != null && !activePetId) {
       // 直接设置本地状态，不发送事件避免循环
       setCharacterId(firstCharacter);
     }
-  }, [firstCharacter]);
+  }, [activePetId, firstCharacter]);
   
 
   // 监听角色 ID
@@ -924,16 +972,19 @@ export const ChatboxInputBox = ({
   // 加载角色信息，并清理或保留对话历史
   useEffect(() => {
     if (!characterId) return;
+    let cancelled = false;
 
     const fetchPetInfo = async () => {
       try {
         // 首先尝试从新的 Assistant API 获取
         let assistant = await tauri.getAssistant(characterId);
+        if (cancelled) return;
         let modelConfig = null;
         
         if (assistant && assistant.modelConfigId) {
           // 新数据模型：从关联的 ModelConfig 获取 API 配置
           modelConfig = await tauri.getModelConfig(assistant.modelConfigId);
+          if (cancelled) return;
         }
 
         setActiveModelConfig(modelConfig);
@@ -941,6 +992,7 @@ export const ChatboxInputBox = ({
         // 如果新 API 没有数据，回退到旧的 Pet API（向后兼容）
         if (!assistant) {
           assistant = await tauri.getPet(characterId);
+          if (cancelled) return;
         }
         
         if (assistant) {
@@ -982,7 +1034,7 @@ export const ChatboxInputBox = ({
           }
         } else {
           console.error("Pet not found for ID:", characterId);
-          setCharacterId(null);
+          if (!cancelled) setCharacterId(null);
           return;
         }
 
@@ -993,6 +1045,7 @@ export const ChatboxInputBox = ({
         // Tab 系统已通过 currentConversationId + sync effect 管理活跃对话 ID，
         // 无需在此处重复管理。
       } catch (error) {
+        if (cancelled) return;
         console.error("Error fetching pet info:", error);
         // 不要在错误时设置 characterId 为 null，这可能导致循环
         // setCharacterId(null);
@@ -1000,6 +1053,9 @@ export const ChatboxInputBox = ({
     };
 
     fetchPetInfo();
+    return () => {
+      cancelled = true;
+    };
   }, [characterId]);
 
   // Completed subagent notifications (chat-source only)
@@ -1043,6 +1099,8 @@ export const ChatboxInputBox = ({
   // 监听助手更新事件，当当前助手被修改时重新加载 petInfo
   useEffect(() => {
     if (!characterId) return;
+    let cancelled = false;
+    let requestGeneration = 0;
 
     const handlePetsUpdate = async (event) => {
       // event 结构: { action: 'update', type: 'assistant', id, data }
@@ -1051,19 +1109,23 @@ export const ChatboxInputBox = ({
       // 如果更新的是当前正在使用的助手，重新加载其信息
       if (event && (event.id === characterId || event._id === characterId)) {
         console.log("[ChatboxInputBox] Current assistant updated, reloading petInfo...");
+        const generation = ++requestGeneration;
         
         try {
           let assistant = await tauri.getAssistant(characterId);
+          if (cancelled || generation !== requestGeneration) return;
           let modelConfig = null;
           
           if (assistant && assistant.modelConfigId) {
             modelConfig = await tauri.getModelConfig(assistant.modelConfigId);
+            if (cancelled || generation !== requestGeneration) return;
           }
           
           setActiveModelConfig(modelConfig);
           
           if (!assistant) {
             assistant = await tauri.getPet(characterId);
+            if (cancelled || generation !== requestGeneration) return;
           }
           
           if (assistant) {
@@ -1090,6 +1152,7 @@ export const ChatboxInputBox = ({
             console.log("[ChatboxInputBox] petInfo reloaded with new modelName:", modelName);
           }
         } catch (error) {
+          if (cancelled || generation !== requestGeneration) return;
           console.error("[ChatboxInputBox] Error reloading petInfo:", error);
         }
       }
@@ -1101,6 +1164,8 @@ export const ChatboxInputBox = ({
     }
 
     return () => {
+      cancelled = true;
+      requestGeneration += 1;
       if (cleanup) cleanup();
     };
   }, [characterId]);
@@ -1123,49 +1188,14 @@ export const ChatboxInputBox = ({
     };
   }, []);
 
-  // 接收会话 ID
-  useEffect(() => {
-    const fetchConv = async (conversationId) => {
-      try {
-        const conv = await tauri.getConversationById(conversationId);
-        setCharacterId(conv.petId)
-        // alert(conv.petID);
-      } catch (error) {
-        console.error("Error fetching conversation:", error);
-        throw error;
-      }
-    };
-
-    const handleConversationId = async(id) => {
-      await fetchConv(id);
-      console.log("📥 Received conversation ID from Electron:", id);
-
-
-      conversationIdRef.current = id;
-    };
-
-    let cleanup;
-    if (tauri.onConversationId) {
-      cleanup = tauri.onConversationId(handleConversationId);
-    }
-    return () => {
-      if (cleanup) cleanup();
-    };
-  }, []);
-
-  // Sync conversationIdRef with currentConversationId from global state
-  useEffect(() => {
-    conversationIdRef.current = currentConversationId;
-  }, [currentConversationId]);
-
   const handleChange = (e) => {
     const nextText = e.target.value;
-    if (!String(userText).trim() && String(nextText).trim() && currentConversationId) {
-      quickReplyGateRef.current.invalidateConversation(currentConversationId);
+    if (!String(userText).trim() && String(nextText).trim() && authoritativeConversationId) {
+      quickReplyGateRef.current.invalidateConversation(authoritativeConversationId);
       dispatch({
         type: actionType.SET_SUGGEST_TEXT,
         suggestText: [],
-        conversationId: currentConversationId,
+        conversationId: authoritativeConversationId,
       });
     }
     setUserText(nextText);
@@ -1198,7 +1228,7 @@ export const ChatboxInputBox = ({
   }, [userText, autoResize]);
 
   // 获取当前会话的表情 - 使用 currentConversationId 确保切换 tab 后立即更新
-  const currentMood = characterMoods?.[currentConversationId] || 'normal';
+  const currentMood = characterMoods?.[authoritativeConversationId] || 'normal';
 
   // 回车发送
   const handleKeyDown = (e) => {
@@ -1258,14 +1288,18 @@ export const ChatboxInputBox = ({
     let reply = null;
     let thisModel = null;
     let _userText = null;
-    if (!characterId) {
-      alert("Please select a character first!");
+    const conversationContextReady = Boolean(
+      authoritativeConversationId
+      && String(currentConversationId || '') === String(authoritativeConversationId)
+    );
+    if (!characterId || !assistantContextReady || !conversationContextReady) {
+      console.warn('[handleSend] Assistant context is still loading for the active tab.');
       return;
     }
 
     // Lock Subagent permission before the first await. A later off → on toggle
     // must not grant this already-started request a fresh capability token.
-    const subagentConversationIdAtSend = conversationIdOverride || activeTabId || conversationIdRef.current || 'temp';
+    const subagentConversationIdAtSend = conversationIdOverride || authoritativeConversationId || 'temp';
     const subagentPermission = captureSubagentPermission(
       subagentEnabledByConversationRef.current,
       subagentCapabilityRevisionsRef.current,
@@ -1938,7 +1972,7 @@ When using tools, please follow these guidelines:
     const action = getQuickReplySelectionAction({
       enabled: quickReplyEnabled,
       request: quickReplyRequest,
-      currentConversationId,
+      currentConversationId: authoritativeConversationId,
       isGenerating,
       draft: userText,
       attachmentCount: attachmentsRef.current.length,
@@ -1969,7 +2003,7 @@ When using tools, please follow these guidelines:
   }, [
     quickReplyRequest,
     quickReplyEnabled,
-    currentConversationId,
+    authoritativeConversationId,
     isGenerating,
     userText,
     onQuickReplyHandled,
@@ -2021,7 +2055,7 @@ const handleStop = async () => {
     console.log('[handleStop] Stopping generation and MCP tool calls');
     
     // 取消当前会话的请求
-    const currentConvId = conversationIdRef.current || 'temp';
+    const currentConvId = authoritativeConversationId || 'temp';
     const controller = abortControllersRef.current.get(currentConvId);
     
     // 取消 AbortController（如果存在 - 用于 JS fetch 请求）
@@ -2085,14 +2119,14 @@ const handleStop = async () => {
   useEffect(() => {
     const previousCount = previousAttachmentCountRef.current;
     previousAttachmentCountRef.current = attachments.length;
-    if (attachments.length <= previousCount || !currentConversationId) return;
-    quickReplyGateRef.current.invalidateConversation(currentConversationId);
+    if (attachments.length <= previousCount || !authoritativeConversationId) return;
+    quickReplyGateRef.current.invalidateConversation(authoritativeConversationId);
     dispatch({
       type: actionType.SET_SUGGEST_TEXT,
       suggestText: [],
-      conversationId: currentConversationId,
+      conversationId: authoritativeConversationId,
     });
-  }, [attachments.length, currentConversationId, dispatch]);
+  }, [attachments.length, authoritativeConversationId, dispatch]);
 
   // The persistent action row is designed to fit the 460px window floor. Keep
   // that minimum stable so status tags, Skills counts, and sidebar changes can
@@ -2115,17 +2149,123 @@ const handleStop = async () => {
     };
   }, []);
 
-  // 当窗口可见或切换 Tab 时，自动聚焦输入框
+  // Report the in-flow composer height so the native compact window can stay
+  // tightly wrapped around drafts, attachments, and notifications.
   useEffect(() => {
-    if (autoFocus && inputRef.current) {
-      // 添加短暂延迟确保窗口完全显示和 DOM 更新完成
-      const timer = setTimeout(() => {
-        inputRef.current?.focus();
-        console.log('[ChatboxInputBox] Auto-focused input, autoFocus:', autoFocus, 'activeTabId:', activeTabId);
-      }, 150);
-      return () => clearTimeout(timer);
+    const element = containerRef.current;
+    if (!element || !onHeightChange) return undefined;
+
+    let frameId = null;
+    const report = () => {
+      if (frameId !== null) cancelAnimationFrame(frameId);
+      frameId = requestAnimationFrame(() => {
+        frameId = null;
+        onHeightChange(Math.ceil(element.getBoundingClientRect().height));
+      });
+    };
+
+    report();
+    const observer = new ResizeObserver(report);
+    observer.observe(element);
+    return () => {
+      observer.disconnect();
+      if (frameId !== null) cancelAnimationFrame(frameId);
+    };
+  }, [compact, onHeightChange]);
+
+  const hasOpenComposerOverlay = showCapabilityDrawer
+    || showSubagentPanel
+    || showModelSelector
+    || showSkillsPopover;
+
+  useEffect(() => {
+    onOverlayOpenChange?.(hasOpenComposerOverlay);
+  }, [hasOpenComposerOverlay, onOverlayOpenChange]);
+
+  useEffect(() => {
+    const recordPointerDown = () => {
+      lastPointerDownAtRef.current = performance.now();
+    };
+    document.addEventListener('pointerdown', recordPointerDown, true);
+    return () => document.removeEventListener('pointerdown', recordPointerDown, true);
+  }, []);
+
+  // Every native activation is a fresh, explicit request to type. Retry for a
+  // short bounded interval while the WebView receives OS focus. A pointerdown
+  // after the activation wins, so a real user click is never stolen back.
+  useEffect(() => {
+    const requestId = Number(focusRequest?.id);
+    const requestedAt = Number(focusRequest?.requestedAt);
+    if (!Number.isSafeInteger(requestId) || requestId <= 0 || !Number.isFinite(requestedAt)) {
+      return undefined;
     }
-  }, [autoFocus, activeTabId]);
+    if (requestId <= lastHandledFocusRequestRef.current) return undefined;
+
+    // Explicit summon returns the composer to its typing state.
+    setShowCapabilityDrawer(false);
+    setShowSubagentPanel(false);
+    setShowModelSelector(false);
+
+    let cancelled = false;
+    let frameId = null;
+    let attempts = 0;
+    const tryFocus = () => {
+      if (cancelled || requestId !== Number(focusRequest?.id)) return;
+      const input = inputRef.current;
+      if (!input || lastPointerDownAtRef.current > requestedAt) {
+        lastHandledFocusRequestRef.current = requestId;
+        return;
+      }
+
+      const activeElement = document.activeElement;
+      const activeElementSafe = !activeElement
+        || activeElement === document.body
+        || activeElement === document.documentElement
+        || activeElement === input;
+      if (shouldApplyComposerFocus({
+        documentFocused: document.hasFocus(),
+        explicitRequest: true,
+        activeElementSafe,
+        requestStartedAt: requestedAt,
+        lastPointerDownAt: lastPointerDownAtRef.current,
+      })) {
+        input.focus({ preventScroll: true });
+        lastHandledFocusRequestRef.current = requestId;
+        return;
+      }
+
+      attempts += 1;
+      if (attempts < 12) {
+        frameId = requestAnimationFrame(tryFocus);
+      } else {
+        lastHandledFocusRequestRef.current = requestId;
+      }
+    };
+    frameId = requestAnimationFrame(tryFocus);
+    return () => {
+      cancelled = true;
+      if (frameId !== null) cancelAnimationFrame(frameId);
+    };
+  }, [focusRequest]);
+
+  // Legacy visibility events do not carry an activation id. Keep a narrow
+  // fallback for those events without overriding focus on another control.
+  useEffect(() => {
+    if (!autoFocus || focusRequest || !inputRef.current || hasOpenComposerOverlay) return;
+    const input = inputRef.current;
+    const activeElement = document.activeElement;
+    const activeElementSafe = !activeElement
+      || activeElement === document.body
+      || activeElement === document.documentElement
+      || activeElement === input;
+    if (shouldApplyComposerFocus({
+      documentFocused: document.hasFocus(),
+      explicitRequest: false,
+      activeElementSafe,
+    })) {
+      input.focus({ preventScroll: true });
+    }
+  }, [autoFocus, focusRequest, hasOpenComposerOverlay]);
 
   // Helper function to process a file and add to attachments
   const processFile = async (file) => {
@@ -2229,15 +2369,17 @@ const handleStop = async () => {
     String(notification.conversationId || '') === String(subagentConversationId || '')
   )), [subagentNotifications, subagentConversationId]);
 
-  const sendDisabled = !String(userText).trim()
-    && !isGenerating
-    && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user');
-
-  const showAssistantIdentity = Boolean(
-    petInfo?._id
-    && activePetId
-    && String(petInfo._id) === String(activePetId)
+  const conversationContextReady = Boolean(
+    authoritativeConversationId
+    && String(currentConversationId || '') === String(authoritativeConversationId)
   );
+  const sendDisabled = ((!assistantContextReady || !conversationContextReady) && !isGenerating) || (
+    !String(userText).trim()
+    && !isGenerating
+    && !(userMessages.length > 0 && userMessages[userMessages.length - 1].role === 'user')
+  );
+
+  const showAssistantIdentity = assistantContextReady;
 
   const closeCapabilityDrawer = useCallback(() => {
     setShowCapabilityDrawer(false);
@@ -2262,10 +2404,13 @@ const handleStop = async () => {
   }, []);
 
   return (
-    <div className="relative mx-auto w-full max-w-[32rem] px-4 pb-4 no-drag">
+    <div
+      ref={containerRef}
+      className={`relative mx-auto w-full max-w-[32rem] no-drag ${compact ? 'px-2 pb-2' : 'px-4 pb-4'}`}
+    >
       {/* Subagent 完成通知条 */}
       {visibleSubagentNotifications.length > 0 && (
-        <div className="mb-2 space-y-1.5">
+        <div className={`mb-2 space-y-1.5 ${compact ? 'max-h-40 overflow-y-auto pr-1' : ''}`}>
           {visibleSubagentNotifications.map(n => (
             <div key={n.taskId} className={`rounded-xl border px-3 py-2 text-xs shadow-sm transition-all ${
               n.status === 'done' ? 'bg-emerald-50 border-emerald-200' :
@@ -2327,7 +2472,7 @@ const handleStop = async () => {
             </div>
           </div>
         )}
-        <div className="flex flex-wrap gap-2">
+        <div className={`flex flex-wrap gap-2 ${compact ? 'max-h-40 overflow-y-auto' : ''}`}>
             {attachments.map((att, index) => (
                 <div key={index} className="relative inline-block mt-2">
                     <div className="rounded-md bg-gray-100 border border-gray-200 overflow-hidden">
@@ -2473,11 +2618,16 @@ const handleStop = async () => {
             </button>
 
             <div className="shrink-0" onPointerDown={closeCapabilityDrawer}>
-              <SkillsToolbar petId={capabilityPetId} />
+              <SkillsToolbar
+                petId={capabilityPetId}
+                onOpenChange={setShowSkillsPopover}
+                closeRequestId={focusRequest?.id}
+              />
             </div>
 
             <div className="relative shrink-0">
               <button
+                ref={subagentAnchorRef}
                 type="button"
                 onClick={handleCapabilityToggle}
                 aria-label={showCapabilityDrawer ? 'Close more capabilities' : 'Open more capabilities'}
@@ -2495,6 +2645,7 @@ const handleStop = async () => {
                 isOpen={showSubagentPanel}
                 onClose={() => setShowSubagentPanel(false)}
                 conversationId={subagentConversationId}
+                anchorRef={subagentAnchorRef}
               />
             </div>
 

@@ -21,7 +21,7 @@ use llm::{LlmClient, LlmRequest, LlmResponse, StreamChunk, LlmStreamCancellation
 use workspace::WorkspaceEngine;
 use skills::SkillEngine;
 use platform::{Platform, PlatformProvider, WindowEffect};
-use window_layout::{WindowState, screen_info_from_tauri_monitor};
+use window_layout::{WindowGeometry, WindowState, screen_info_from_tauri_monitor};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::collections::HashMap;
@@ -1657,74 +1657,523 @@ async fn elevenlabs_list_models(api_key: String) -> Result<JsonValue, String> {
 
 // ============ Window Management Commands ============
 
-#[tauri::command]
-fn show_chat_window(app: AppHandle) -> Result<(), String> {
-    if let Some(chat) = app.get_webview_window("chat") {
-        // Skip chat-follow sync for 500ms after showing, to prevent
-        // spurious Moved events from snapping chat to character.
-        let ws = app.state::<WinState>();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
+fn set_chat_sync_grace_period(win_state: &WindowState, duration_ms: u64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    win_state
+        .skip_chat_sync_until
+        .store(now.saturating_add(duration_ms), Ordering::SeqCst);
+}
 
-        chat.show().map_err(|e| e.to_string())?;
-        chat.set_focus().map_err(|e| e.to_string())?;
-        let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": true }));
+fn logical_window_geometry(window: &tauri::WebviewWindow) -> Option<WindowGeometry> {
+    let scale_factor = window.scale_factor().ok().filter(|value| *value > 0.0)?;
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    Some(WindowGeometry {
+        x: position.x as f64 / scale_factor,
+        y: position.y as f64 / scale_factor,
+        width: size.width as f64 / scale_factor,
+        height: size.height as f64 / scale_factor,
+    })
+}
+
+fn chat_screen_info(
+    app: &AppHandle,
+    chat: &tauri::WebviewWindow,
+    win_state: &WindowState,
+) -> platform::ScreenInfo {
+    if win_state.chat_follows_character.load(Ordering::SeqCst) {
+        if let Some(character) = app.get_webview_window("character") {
+            if character.is_visible().unwrap_or(false) {
+                if let Some(monitor) = character.current_monitor().ok().flatten() {
+                    return screen_info_from_tauri_monitor(&monitor);
+                }
+            }
+        }
+    }
+
+    if let Some(monitor) = chat.current_monitor().ok().flatten() {
+        return screen_info_from_tauri_monitor(&monitor);
+    }
+
+    Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
+}
+
+fn apply_chat_compact_layout(
+    app: &AppHandle,
+    chat: &tauri::WebviewWindow,
+    win_state: &WindowState,
+) -> Result<(), String> {
+    let (width, height, x, y) = compact_chat_geometry(app, chat, win_state);
+
+    chat.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+        width,
+        height,
+    })))
+    .map_err(|error| error.to_string())?;
+    chat.set_resizable(false)
+        .map_err(|error| error.to_string())?;
+    chat.set_size(tauri::Size::Logical(tauri::LogicalSize {
+        width,
+        height,
+    }))
+    .map_err(|error| error.to_string())?;
+    chat.set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+        .map_err(|error| error.to_string())
+}
+
+fn compact_chat_geometry(
+    app: &AppHandle,
+    chat: &tauri::WebviewWindow,
+    win_state: &WindowState,
+) -> (f64, f64, f64, f64) {
+    let screen = chat_screen_info(app, chat, win_state);
+    let content_min_width = *win_state.chat_min_width.lock().unwrap();
+    let requested_height = *win_state.chat_compact_height.lock().unwrap();
+    let (width, height) = window_layout::compute_chat_compact_size(
+        content_min_width,
+        requested_height,
+        &screen,
+    );
+    let (x, y) = window_layout::position_chat_bottom_center(&screen, width, height);
+    (width, height, x, y)
+}
+
+fn reposition_chat_compact(
+    app: &AppHandle,
+    chat: &tauri::WebviewWindow,
+    win_state: &WindowState,
+) -> Result<(), String> {
+    let (_, _, x, y) = compact_chat_geometry(app, chat, win_state);
+    if let Some(current) = logical_window_geometry(chat) {
+        if (current.x - x).abs() <= 1.0 && (current.y - y).abs() <= 1.0 {
+            return Ok(());
+        }
+    }
+    chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+        .map_err(|error| error.to_string())
+}
+
+fn current_character_anchor(app: &AppHandle) -> Option<(f64, f64, f64)> {
+    let character = app.get_webview_window("character")?;
+    if !character.is_visible().unwrap_or(false) {
+        return None;
+    }
+    let scale_factor = character.scale_factor().ok().filter(|value| *value > 0.0)?;
+    let position = character.outer_position().ok()?;
+    let size = character.outer_size().ok()?;
+    Some((
+        position.x as f64 / scale_factor,
+        position.y as f64 / scale_factor,
+        size.height as f64 / scale_factor,
+    ))
+}
+
+fn apply_chat_full_layout(
+    app: &AppHandle,
+    chat: &tauri::WebviewWindow,
+    win_state: &WindowState,
+    saved_geometry: Option<WindowGeometry>,
+) -> Result<(), String> {
+    let screen = chat_screen_info(app, chat, win_state);
+    let preset = win_state.chat_size_preset.lock().unwrap().clone();
+    let content_min_width = *win_state.chat_min_width.lock().unwrap();
+    let max_width = (screen.work_area.width - window_layout::CHAT_WORK_AREA_MARGIN * 2.0)
+        .max(1.0);
+    let max_height = (screen.work_area.height - window_layout::CHAT_WORK_AREA_MARGIN * 2.0)
+        .max(1.0);
+    let minimum_width = content_min_width
+        .unwrap_or(window_layout::CHAT_MIN_WIDTH_FLOOR)
+        .max(window_layout::CHAT_MIN_WIDTH_FLOOR)
+        .min(max_width);
+    let minimum_height = window_layout::CHAT_FULL_MIN_HEIGHT.min(max_height);
+    let fallback_width = window_layout::compute_chat_width(content_min_width, &preset);
+    let fallback_height = window_layout::get_baseline_sizes()
+        .get("chat")
+        .map(|baseline| {
+            (baseline.height * window_layout::get_scale_factor_for_preset(&preset)).round()
+        })
+        .unwrap_or(400.0);
+    let width = saved_geometry
+        .map(|geometry| geometry.width)
+        .unwrap_or(fallback_width)
+        .max(minimum_width)
+        .min(max_width);
+    let height = saved_geometry
+        .map(|geometry| geometry.height)
+        .unwrap_or(fallback_height)
+        .max(minimum_height)
+        .min(max_height);
+
+    // A compact/full round trip restores the exact captured placement first.
+    // Subsequent character moves resume the normal follow behaviour.
+    let desired_position = saved_geometry
+        .map(|geometry| (geometry.x, geometry.y))
+        .or_else(|| {
+            if win_state.chat_follows_character.load(Ordering::SeqCst) {
+                current_character_anchor(app).map(|(char_x, char_y, char_height)| {
+                    window_layout::position_chat_relative_to_character(
+                        char_x,
+                        char_y,
+                        char_height,
+                        width,
+                        height,
+                    )
+                })
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| window_layout::position_chat_bottom_center(&screen, width, height));
+    let (x, y, _) = window_layout::clamp_to_work_area(
+        &screen,
+        desired_position.0,
+        desired_position.1,
+        width,
+        height,
+    );
+
+    chat.set_resizable(true)
+        .map_err(|error| error.to_string())?;
+    // Lower the compact mode's potentially tall native minimum before asking
+    // the window server to restore a shorter full-chat geometry.
+    chat.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+        width: minimum_width,
+        height: minimum_height,
+    })))
+    .map_err(|error| error.to_string())?;
+    chat.set_size(tauri::Size::Logical(tauri::LogicalSize {
+        width,
+        height,
+    }))
+    .map_err(|error| error.to_string())?;
+    chat.set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+    chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
+        .map_err(|error| error.to_string())
+}
+
+fn emit_chat_activated(app: &AppHandle, win_state: &WindowState) {
+    let focus_request_id = win_state
+        .chat_focus_request_id
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1);
+    let _ = app.emit(
+        "chat-window-vis-change",
+        serde_json::json!({ "visible": true }),
+    );
+    let _ = app.emit(
+        "chat-window-activated",
+        serde_json::json!({
+            "visible": true,
+            "focusRequestId": focus_request_id,
+        }),
+    );
+}
+
+pub(crate) fn show_chat_window_inner(
+    app: &AppHandle,
+    win_state: &WindowState,
+) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
+        set_chat_sync_grace_period(win_state, 500);
+        if win_state.chat_compact.load(Ordering::SeqCst) {
+            apply_chat_compact_layout(app, &chat, win_state)?;
+        }
+        chat.show().map_err(|error| error.to_string())?;
+        chat.set_focus().map_err(|error| error.to_string())?;
+        emit_chat_activated(app, win_state);
+    }
+    Ok(())
+}
+
+pub(crate) fn hide_chat_window_inner(
+    app: &AppHandle,
+    win_state: &WindowState,
+) -> Result<(), String> {
+    if let Some(chat) = app.get_webview_window("chat") {
+        set_chat_sync_grace_period(win_state, 500);
+        chat.hide().map_err(|error| error.to_string())?;
+        let _ = app.emit(
+            "chat-window-vis-change",
+            serde_json::json!({ "visible": false }),
+        );
     }
     Ok(())
 }
 
 #[tauri::command]
-fn hide_chat_window(app: AppHandle) -> Result<(), String> {
-    if let Some(chat) = app.get_webview_window("chat") {
-        // Prevent Moved events from snapping chat before hide completes
-        let ws = app.state::<WinState>();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis() as u64;
-        ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
-
-        chat.hide().map_err(|e| e.to_string())?;
-        let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": false }));
-    }
-    Ok(())
+fn show_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<(), String> {
+    show_chat_window_inner(&app, win_state.inner().as_ref())
 }
 
 #[tauri::command]
-fn toggle_chat_window(app: AppHandle) -> Result<bool, String> {
+fn hide_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<(), String> {
+    hide_chat_window_inner(&app, win_state.inner().as_ref())
+}
+
+#[tauri::command]
+fn toggle_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<bool, String> {
     if let Some(chat) = app.get_webview_window("chat") {
         let is_visible = chat.is_visible().unwrap_or(false);
         if is_visible {
-            // Prevent Moved events from snapping chat before hide completes
-            let ws = app.state::<WinState>();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
-
-            chat.hide().map_err(|e| e.to_string())?;
-            let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": false }));
+            hide_chat_window_inner(&app, win_state.inner().as_ref())?;
             Ok(false)
         } else {
-            // Skip chat-follow sync for 500ms after showing
-            let ws = app.state::<WinState>();
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as u64;
-            ws.skip_chat_sync_until.store(now + 500, std::sync::atomic::Ordering::SeqCst);
-
-            chat.show().map_err(|e| e.to_string())?;
-            chat.set_focus().map_err(|e| e.to_string())?;
-            let _ = app.emit("chat-window-vis-change", serde_json::json!({ "visible": true }));
+            show_chat_window_inner(&app, win_state.inner().as_ref())?;
             Ok(true)
         }
     } else {
         Err("Chat window not found".to_string())
+    }
+}
+
+#[tauri::command]
+fn set_chat_compact_mode(
+    app: AppHandle,
+    compact: bool,
+    height: f64,
+    request_id: u64,
+    win_state: State<WinState>,
+) -> Result<(), String> {
+    let Some(chat) = app.get_webview_window("chat") else {
+        return Ok(());
+    };
+    let state = win_state.inner().as_ref();
+    let _transition_guard = state.chat_layout_transition.lock().unwrap();
+    let latest_request_id = state.chat_layout_request_id.load(Ordering::SeqCst);
+    if request_id < latest_request_id {
+        return Ok(());
+    }
+    state
+        .chat_layout_request_id
+        .store(request_id, Ordering::SeqCst);
+    set_chat_sync_grace_period(state, 500);
+    let was_compact = state.chat_compact.load(Ordering::SeqCst);
+
+    if compact {
+        let requested_height = if height.is_finite() && height > 0.0 {
+            height.max(window_layout::CHAT_COMPACT_MIN_HEIGHT)
+        } else {
+            window_layout::CHAT_COMPACT_DEFAULT_HEIGHT
+        };
+
+        if was_compact {
+            let previous_height = {
+                let mut compact_height = state.chat_compact_height.lock().unwrap();
+                let previous = *compact_height;
+                *compact_height = requested_height;
+                previous
+            };
+            if let Err(error) = apply_chat_compact_layout(&app, &chat, state) {
+                *state.chat_compact_height.lock().unwrap() = previous_height;
+                let _ = apply_chat_compact_layout(&app, &chat, state);
+                return Err(error);
+            }
+            return Ok(());
+        }
+
+        let was_fullscreen = chat.is_fullscreen().unwrap_or(false);
+        let was_maximized = chat.is_maximized().unwrap_or(false);
+        let character_was_visible = app
+            .get_webview_window("character")
+            .and_then(|character| character.is_visible().ok())
+            .unwrap_or(false);
+        let raw_geometry = logical_window_geometry(&chat);
+        let mut restore_geometry = if was_fullscreen || was_maximized {
+            None
+        } else {
+            raw_geometry
+        };
+
+        // maximize_chat_window keeps the pre-maximize geometry in its own
+        // snapshot. Copy it into the compact snapshot without consuming it.
+        if was_fullscreen || was_maximized {
+            let saved_position = *state.saved_chat_position.lock().unwrap();
+            let saved_size = *state.saved_chat_size.lock().unwrap();
+            if let (Some((x, y)), Some((width, height))) = (saved_position, saved_size) {
+                restore_geometry = Some(WindowGeometry {
+                    x,
+                    y,
+                    width,
+                    height,
+                });
+            }
+        }
+
+        // A compact composer cannot display the sidebar. Preserve the
+        // underlying non-sidebar geometry for the later full restore, but do
+        // not mutate shared mode state until native layout succeeds.
+        let sidebar_was_expanded = state.sidebar_expanded.load(Ordering::SeqCst);
+        if sidebar_was_expanded {
+            if let Some(mut geometry) = restore_geometry {
+                let original_width = state.original_width.load(Ordering::SeqCst) as f64;
+                let (x, width) = window_layout::sidebar_collapse(
+                    geometry.x,
+                    original_width,
+                    geometry.width,
+                );
+                geometry.x = x;
+                geometry.width = width;
+                restore_geometry = Some(geometry);
+            }
+        }
+
+        let leave_presentation_result = if was_fullscreen {
+            chat.set_fullscreen(false)
+        } else if was_maximized {
+            chat.unmaximize()
+        } else {
+            Ok(())
+        };
+        if let Err(error) = leave_presentation_result {
+            if was_fullscreen {
+                let _ = chat.set_always_on_top(false);
+                let _ = chat.set_fullscreen(true);
+            } else if was_maximized {
+                let _ = chat.set_always_on_top(false);
+                let _ = chat.maximize();
+            }
+            return Err(error.to_string());
+        }
+        if was_fullscreen || was_maximized {
+            if let Some(character) = app.get_webview_window("character") {
+                let _ = character.show();
+            }
+        }
+
+        let previous_height = {
+            let mut compact_height = state.chat_compact_height.lock().unwrap();
+            let previous = *compact_height;
+            *compact_height = requested_height;
+            previous
+        };
+        if let Err(error) = apply_chat_compact_layout(&app, &chat, state) {
+            *state.chat_compact_height.lock().unwrap() = previous_height;
+            let _ = apply_chat_full_layout(&app, &chat, state, raw_geometry);
+            if was_fullscreen {
+                let _ = chat.set_always_on_top(false);
+                let _ = chat.set_fullscreen(true);
+            } else if was_maximized {
+                let _ = chat.set_always_on_top(false);
+                let _ = chat.maximize();
+            }
+            if let Some(character) = app.get_webview_window("character") {
+                let _ = if character_was_visible {
+                    character.show()
+                } else {
+                    character.hide()
+                };
+            }
+            return Err(error);
+        }
+
+        *state.chat_full_geometry.lock().unwrap() = restore_geometry;
+        state
+            .chat_full_was_fullscreen
+            .store(was_fullscreen, Ordering::SeqCst);
+        state
+            .chat_full_was_maximized
+            .store(was_maximized, Ordering::SeqCst);
+        state
+            .chat_full_character_was_visible
+            .store(character_was_visible, Ordering::SeqCst);
+        if sidebar_was_expanded {
+            state.sidebar_expanded.store(false, Ordering::SeqCst);
+            state.original_width.store(0, Ordering::SeqCst);
+        }
+        state.chat_compact.store(true, Ordering::SeqCst);
+        Ok(())
+    } else {
+        if !was_compact {
+            chat.set_resizable(true)
+                .map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+
+        let saved_geometry = *state.chat_full_geometry.lock().unwrap();
+        let restore_fullscreen = state.chat_full_was_fullscreen.load(Ordering::SeqCst);
+        let restore_maximized = state.chat_full_was_maximized.load(Ordering::SeqCst);
+        let restore_character_visible = state
+            .chat_full_character_was_visible
+            .load(Ordering::SeqCst);
+        let compact_character_visible = app
+            .get_webview_window("character")
+            .and_then(|character| character.is_visible().ok())
+            .unwrap_or(false);
+
+        if let Err(error) = apply_chat_full_layout(&app, &chat, state, saved_geometry) {
+            let _ = apply_chat_compact_layout(&app, &chat, state);
+            return Err(error);
+        }
+
+        // Keep the maximize toggle's canonical restore snapshot aligned with
+        // any full geometry updates made while compact mode was active.
+        if restore_fullscreen || restore_maximized {
+            if let Some(geometry) = logical_window_geometry(&chat) {
+                *state.saved_chat_position.lock().unwrap() = Some((geometry.x, geometry.y));
+                *state.saved_chat_size.lock().unwrap() = Some((geometry.width, geometry.height));
+            }
+        }
+
+        let restore_result = (|| -> Result<(), String> {
+            if restore_fullscreen || restore_maximized {
+                chat.set_always_on_top(false)
+                    .map_err(|error| error.to_string())?;
+                if restore_fullscreen {
+                    chat.set_fullscreen(true)
+                        .map_err(|error| error.to_string())?;
+                } else {
+                    chat.maximize().map_err(|error| error.to_string())?;
+                }
+            }
+
+            if let Some(character) = app.get_webview_window("character") {
+                if restore_character_visible {
+                    character.show().map_err(|error| error.to_string())?;
+                } else {
+                    character.hide().map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(())
+        })();
+
+        if let Err(error) = restore_result {
+            if chat.is_fullscreen().unwrap_or(false) {
+                let _ = chat.set_fullscreen(false);
+            } else if chat.is_maximized().unwrap_or(false) {
+                let _ = chat.unmaximize();
+            }
+            if let Some(character) = app.get_webview_window("character") {
+                let _ = if compact_character_visible {
+                    character.show()
+                } else {
+                    character.hide()
+                };
+            }
+            let _ = apply_chat_compact_layout(&app, &chat, state);
+            return Err(error);
+        }
+
+        // Commit only after every native geometry, presentation, and
+        // character-visibility operation has succeeded.
+        state.chat_compact.store(false, Ordering::SeqCst);
+        *state.chat_full_geometry.lock().unwrap() = None;
+        state
+            .chat_full_was_fullscreen
+            .store(false, Ordering::SeqCst);
+        state
+            .chat_full_was_maximized
+            .store(false, Ordering::SeqCst);
+        state
+            .chat_full_character_was_visible
+            .store(true, Ordering::SeqCst);
+        Ok(())
     }
 }
 
@@ -1922,22 +2371,18 @@ fn toggle_window(app: &AppHandle, label: &str) -> Result<(), String> {
 }
 
 // 打开设置/选择角色/MCP等页面（在chat窗口中导航）
-fn navigate_chat_to(app: &AppHandle, route: &str) -> Result<(), String> {
+fn navigate_chat_to(app: &AppHandle, route: &str, win_state: &WindowState) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
-        // 显示chat窗口
-        let _ = chat.show();
-        let _ = chat.set_focus();
-        
         // 导航到指定路由 (使用 hash routing)
         chat.eval(&format!("window.location.hash = '{}';", route))
             .map_err(|e| e.to_string())?;
     }
-    Ok(())
+    show_chat_window_inner(app, win_state)
 }
 
 #[tauri::command]
-fn open_page_in_chat(app: AppHandle, route: String) -> Result<(), String> {
-    navigate_chat_to(&app, &route)
+fn open_page_in_chat(app: AppHandle, route: String, win_state: State<WinState>) -> Result<(), String> {
+    navigate_chat_to(&app, &route, win_state.inner().as_ref())
 }
 
 #[tauri::command]
@@ -2027,6 +2472,10 @@ fn hide_social_window(app: AppHandle) -> Result<(), String> {
 // 最大化/还原聊天窗口
 #[tauri::command]
 fn maximize_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<(), String> {
+    let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
+    if win_state.chat_compact.load(Ordering::SeqCst) {
+        return Ok(());
+    }
     if let Some(chat) = app.get_webview_window("chat") {
         let is_fullscreen = chat.is_fullscreen().unwrap_or(false);
         let is_maximized = chat.is_maximized().unwrap_or(false);
@@ -2097,6 +2546,11 @@ fn update_preferences(preferences: Preferences, win_state: State<WinState>) -> R
 
 #[tauri::command]
 fn toggle_sidebar(app: AppHandle, expanded: bool, win_state: State<WinState>) -> Result<(), String> {
+    let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
+    if win_state.chat_compact.load(Ordering::SeqCst) {
+        win_state.sidebar_expanded.store(false, Ordering::SeqCst);
+        return Ok(());
+    }
     if let Some(chat) = app.get_webview_window("chat") {
         // 如果是最大化状态，不处理窗口大小
         if chat.is_maximized().unwrap_or(false) {
@@ -2151,6 +2605,7 @@ fn toggle_sidebar(app: AppHandle, expanded: bool, win_state: State<WinState>) ->
 
 #[tauri::command]
 fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<WinState>) -> Result<(), String> {
+    let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
     let scale = window_layout::get_scale_factor_for_preset(&preset);
     let baselines = window_layout::get_baseline_sizes();
     
@@ -2184,28 +2639,54 @@ fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<Wi
     // toolbar (small = that minimum, medium/large scale up from it), so the
     // input toolbar is never squeezed. Height keeps the baseline behaviour.
     *win_state.chat_size_preset.lock().unwrap() = preset.clone();
-    if let (Some(chat), Some(character), Some(chat_baseline)) =
-        (app.get_webview_window("chat"), app.get_webview_window("character"), baselines.get("chat")) {
-        let chat_min = *win_state.chat_min_width.lock().unwrap();
+    let chat_min = *win_state.chat_min_width.lock().unwrap();
+    if let Some(chat_baseline) = baselines.get("chat") {
         let chat_width = window_layout::compute_chat_width(chat_min, &preset);
         let chat_height = (chat_baseline.height * scale).round();
-        
-        // Skip if sidebar is expanded
-        if !win_state.sidebar_expanded.load(Ordering::SeqCst) {
-            if let Ok(char_pos) = character.outer_position() {
-                let sf = character.scale_factor().unwrap_or(1.0);
-                let char_logical_x = char_pos.x as f64 / sf;
-                let char_logical_y = char_pos.y as f64 / sf;
-                
-                if let Ok(char_size) = character.outer_size() {
-                    let char_logical_height = char_size.height as f64 / sf;
-                    
-                    let (x, y) = window_layout::position_chat_relative_to_character(
-                        char_logical_x, char_logical_y, char_logical_height,
-                        chat_width, chat_height,
-                    );
-                    let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: chat_width, height: chat_height }));
-                    let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+
+        if win_state.chat_compact.load(Ordering::SeqCst) {
+            // Keep the compact window untouched, but make the selected preset
+            // authoritative when full mode is restored.
+            if let Some(geometry) = win_state.chat_full_geometry.lock().unwrap().as_mut() {
+                geometry.width = chat_width;
+                geometry.height = chat_height;
+            }
+        } else if let (Some(chat), Some(character)) = (
+            app.get_webview_window("chat"),
+            app.get_webview_window("character"),
+        ) {
+            // Skip if sidebar is expanded
+            if !win_state.sidebar_expanded.load(Ordering::SeqCst) {
+                if let Ok(char_pos) = character.outer_position() {
+                    let sf = character.scale_factor().unwrap_or(1.0);
+                    let char_logical_x = char_pos.x as f64 / sf;
+                    let char_logical_y = char_pos.y as f64 / sf;
+
+                    if let Ok(char_size) = character.outer_size() {
+                        let char_logical_height = char_size.height as f64 / sf;
+
+                        let (x, y) = window_layout::position_chat_relative_to_character(
+                            char_logical_x,
+                            char_logical_y,
+                            char_logical_height,
+                            chat_width,
+                            chat_height,
+                        );
+                        let (x, y, _) = window_layout::clamp_to_work_area(
+                            &screen,
+                            x,
+                            y,
+                            chat_width,
+                            chat_height,
+                        );
+                        let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                            width: chat_width,
+                            height: chat_height,
+                        }));
+                        let _ = chat.set_position(tauri::Position::Logical(
+                            tauri::LogicalPosition { x, y },
+                        ));
+                    }
                 }
             }
         }
@@ -2230,6 +2711,7 @@ fn report_chat_min_width(app: AppHandle, width: f64, preset: Option<String>, win
     if !width.is_finite() || width <= 0.0 {
         return Err(format!("invalid width: {width}"));
     }
+    let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
     // Idempotence: same preset + width within jitter of the stored value →
     // skip entirely, so repeated reports never touch the window server.
     let prev_preset = win_state.chat_size_preset.lock().unwrap().clone();
@@ -2258,6 +2740,18 @@ fn report_chat_min_width(app: AppHandle, width: f64, preset: Option<String>, win
     let min_w = floor_w.min(screen.work_area.width - 40.0);
     *win_state.chat_min_width.lock().unwrap() = Some(min_w);
 
+    if win_state.chat_compact.load(Ordering::SeqCst) {
+        // A toolbar-width report may arrive after compact mode has already
+        // lowered the native minimum height. Never restore the 300px full-mode
+        // floor here; resize/recenter the compact composer instead.
+        let full_width = window_layout::compute_chat_width(Some(min_w), &preset_now)
+            .min(screen.work_area.width - 40.0);
+        if let Some(geometry) = win_state.chat_full_geometry.lock().unwrap().as_mut() {
+            geometry.width = full_width;
+        }
+        return apply_chat_compact_layout(&app, &chat, win_state.inner().as_ref());
+    }
+
     // Read geometry BEFORE set_min_size: if the current width is below the
     // new minimum, macOS grows the window rightward immediately (top-left
     // anchored), so a later read would see an already-shifted right edge.
@@ -2267,7 +2761,10 @@ fn report_chat_min_width(app: AppHandle, width: f64, preset: Option<String>, win
         None
     };
 
-    let _ = chat.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize { width: min_w, height: 300.0 })));
+    let _ = chat.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+        width: min_w,
+        height: window_layout::CHAT_FULL_MIN_HEIGHT,
+    })));
 
     // While the sidebar is expanded the window is temporarily widened; only
     // record state then — collapse restores a size the preset logic owns.
@@ -2376,11 +2873,21 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
                 }
                 log::info!("[Shortcuts] Shortcut2 triggered (chat toggle)");
                 if let Some(window) = app_handle.get_webview_window("chat") {
+                    let win_state = app_handle.state::<WinState>();
                     if window.is_visible().unwrap_or(false) {
-                        let _ = window.hide();
+                        if let Err(error) = hide_chat_window_inner(
+                            &app_handle,
+                            win_state.inner().as_ref(),
+                        ) {
+                            log::error!("[Shortcuts] Failed to hide chat: {}", error);
+                        }
                     } else {
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        if let Err(error) = show_chat_window_inner(
+                            &app_handle,
+                            win_state.inner().as_ref(),
+                        ) {
+                            log::error!("[Shortcuts] Failed to show chat: {}", error);
+                        }
                     }
                 }
             });
@@ -2614,6 +3121,9 @@ pub fn run() {
                                     // focus change even when the window didn't actually move.
                                     // Only sync chat if character moved > 3 logical px.
                                     let ws = app_handle.state::<WinState>();
+                                    let Ok(_transition_guard) = ws.chat_layout_transition.try_lock() else {
+                                        return;
+                                    };
                                     let cur_x = (logical_x * 10.0) as i32;
                                     let cur_y = (logical_y * 10.0) as i32;
                                     let prev_x = ws.last_char_x.swap(cur_x, Ordering::SeqCst);
@@ -2629,28 +3139,46 @@ pub fn run() {
 
                                     // Sync chat window position (only during active drag, not on spurious events)
                                     
-                                    if !ws.sidebar_expanded.load(Ordering::SeqCst) && ws.chat_follows_character.load(Ordering::SeqCst) {
+                                    if ws.chat_follows_character.load(Ordering::SeqCst) {
                                         if let Some(chat) = app_handle.get_webview_window("chat") {
                                             if !chat.is_visible().unwrap_or(false) {
                                                 return;
                                             }
-                                            
-                                            if let Ok(chat_size) = chat.outer_size() {
-                                                let chat_sf = chat.scale_factor().unwrap_or(sf);
-                                                let chat_w = chat_size.width as f64 / chat_sf;
-                                                let chat_h = chat_size.height as f64 / chat_sf;
-                                                
-                                                let final_x = if needs_reposition { new_x } else { logical_x };
-                                                let final_y = if needs_reposition { new_y } else { logical_y };
-                                                
-                                                let (chat_x, chat_y) = window_layout::position_chat_relative_to_character(
-                                                    final_x, final_y, logical_h,
-                                                    chat_w, chat_h,
+
+                                            if ws.chat_compact.load(Ordering::SeqCst) {
+                                                // Compact chat belongs to the character's current
+                                                // screen, but remains centered at that screen's
+                                                // bottom instead of following every character pixel.
+                                                let _ = reposition_chat_compact(
+                                                    &app_handle,
+                                                    &chat,
+                                                    ws.inner().as_ref(),
                                                 );
-                                                
-                                                let _ = chat.set_position(tauri::Position::Logical(
-                                                    tauri::LogicalPosition { x: chat_x, y: chat_y }
-                                                ));
+                                            } else if !ws.sidebar_expanded.load(Ordering::SeqCst) {
+                                                if let Ok(chat_size) = chat.outer_size() {
+                                                    let chat_sf = chat.scale_factor().unwrap_or(sf);
+                                                    let chat_w = chat_size.width as f64 / chat_sf;
+                                                    let chat_h = chat_size.height as f64 / chat_sf;
+
+                                                    let final_x = if needs_reposition { new_x } else { logical_x };
+                                                    let final_y = if needs_reposition { new_y } else { logical_y };
+
+                                                    let (chat_x, chat_y) = window_layout::position_chat_relative_to_character(
+                                                        final_x, final_y, logical_h,
+                                                        chat_w, chat_h,
+                                                    );
+                                                    let (chat_x, chat_y, _) = window_layout::clamp_to_work_area(
+                                                        &screen,
+                                                        chat_x,
+                                                        chat_y,
+                                                        chat_w,
+                                                        chat_h,
+                                                    );
+
+                                                    let _ = chat.set_position(tauri::Position::Logical(
+                                                        tauri::LogicalPosition { x: chat_x, y: chat_y }
+                                                    ));
+                                                }
                                             }
                                         }
                                     }
@@ -2700,9 +3228,12 @@ pub fn run() {
                     match event.id.as_ref() {
                         "chat" => {
                             // Open chat window
-                            if let Some(chat) = app.get_webview_window("chat") {
-                                let _ = chat.show();
-                                let _ = chat.set_focus();
+                            let win_state = app.state::<WinState>();
+                            if let Err(error) = show_chat_window_inner(
+                                app,
+                                win_state.inner().as_ref(),
+                            ) {
+                                log::error!("[Tray] Failed to show chat: {}", error);
                             }
                         }
                         "api" | "assistants" | "mcp" | "settings" => {
@@ -2857,6 +3388,7 @@ pub fn run() {
             show_chat_window,
             hide_chat_window,
             toggle_chat_window,
+            set_chat_compact_mode,
             minimize_window,
             maximize_window,
             close_window,

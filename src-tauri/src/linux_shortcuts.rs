@@ -410,12 +410,31 @@ fn handle_command(app: &tauri::AppHandle, cmd: &str) {
         "toggle_chat" => {
             log::info!("[LinuxShortcuts] Toggling chat window");
             if let Some(window) = app.get_webview_window("chat") {
-                set_grace_period(app);
+                let win_state: tauri::State<'_, crate::WinState> = app.state();
                 if window.is_visible().unwrap_or(false) {
-                    *SAVED_CHAT_POS.lock().unwrap() = get_logical_pos(&window);
-                    let _ = window.hide();
+                    // Compact layout owns its native geometry. Saving its
+                    // bottom-center position here would later overwrite the
+                    // full window's restored position.
+                    if !win_state.chat_compact.load(std::sync::atomic::Ordering::SeqCst) {
+                        *SAVED_CHAT_POS.lock().unwrap() = get_logical_pos(&window);
+                    }
+                    if let Err(error) =
+                        crate::hide_chat_window_inner(app, win_state.inner().as_ref())
+                    {
+                        log::error!("[LinuxShortcuts] Failed to hide chat: {}", error);
+                    }
                 } else {
-                    restore_and_show(&window, &SAVED_CHAT_POS);
+                    if let Err(error) =
+                        crate::show_chat_window_inner(app, win_state.inner().as_ref())
+                    {
+                        log::error!("[LinuxShortcuts] Failed to show chat: {}", error);
+                    } else if !win_state.chat_compact.load(std::sync::atomic::Ordering::SeqCst) {
+                        if let Some((x, y)) = SAVED_CHAT_POS.lock().unwrap().take() {
+                            let _ = window.set_position(tauri::Position::Logical(
+                                tauri::LogicalPosition { x, y },
+                            ));
+                        }
+                    }
                 }
             }
         }

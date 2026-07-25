@@ -6,10 +6,11 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen, emit } from '@tauri-apps/api/event';
+import { listen } from '@tauri-apps/api/event';
 import { ask, open as dialogOpen } from '@tauri-apps/plugin-dialog';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { readTextFile } from '@tauri-apps/plugin-fs';
+import { normalizeChatWindowActivation } from './chatFocusModel.js';
 
 // ==================== Dialog ====================
 
@@ -602,6 +603,8 @@ export const hideChatWindow = () => invoke('hide_chat_window');
 export const toggleChatWindow = () => invoke('toggle_chat_window');
 export const maximizeChatWindow = () => invoke('maximize_chat_window');
 export const toggleSidebar = (expanded) => invoke('toggle_sidebar', { expanded });
+export const setChatCompactMode = (compact, height, requestId) =>
+  invoke('set_chat_compact_mode', { compact, height, requestId });
 
 export const minimizeWindow = (label) => invoke('minimize_window', { label });
 export const maximizeWindow = (label) => invoke('maximize_window', { label });
@@ -752,6 +755,40 @@ export const onChatWindowVisibilityChanged = (callback) => {
   listen('chat-window-vis-change', (event) => callback(event.payload))
     .then(fn => { unlisten = fn; });
   return () => { if (unlisten) unlisten(); };
+};
+
+/**
+ * Listen for explicit native chat-window activations. Unlike a visibility
+ * boolean, focusRequestId changes for every summon, including when the native
+ * window was already visible.
+ */
+export const onChatWindowActivated = (callback) => {
+  let unlisten = null;
+  let disposed = false;
+
+  const readyPromise = listen('chat-window-activated', (event) => {
+    callback(normalizeChatWindowActivation(event.payload));
+  }).then(fn => {
+    if (disposed) {
+      fn();
+      return null;
+    }
+    unlisten = fn;
+    return fn;
+  }).catch(error => {
+    console.error('[tauri.onChatWindowActivated] Listener setup failed:', error);
+    return null;
+  });
+
+  const cleanup = () => {
+    disposed = true;
+    if (unlisten) {
+      unlisten();
+      unlisten = null;
+    }
+  };
+  cleanup.ready = readyPromise;
+  return cleanup;
 };
 
 export const onChatbodyStatusUpdated = (callback) => {
@@ -1169,6 +1206,7 @@ const tauri = {
   toggleChatWindow,
   maximizeChatWindow,
   toggleSidebar,
+  setChatCompactMode,
   minimizeWindow,
   maximizeWindow,
   closeWindow,
@@ -1203,6 +1241,7 @@ const tauri = {
   onApiProvidersUpdated,
   onManageWindowVisibilityChanged,
   onChatWindowVisibilityChanged,
+  onChatWindowActivated,
   onChatbodyStatusUpdated,
   
   // External

@@ -1,12 +1,33 @@
 /**
  * SubagentPanel.jsx — CC Subagent 状态面板
  */
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useLayoutEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { subagentRegistry, onSubagentChange, matchesSubagentScope } from '../../utils/subagentManager';
 
-export default function SubagentPanel({ isOpen, onClose, conversationId }) {
+const PANEL_WIDTH = 320;
+
+export default function SubagentPanel({ isOpen, onClose, conversationId, anchorRef }) {
   const [, forceUpdate] = useState(0);
   const ref = useRef(null);
+  const [position, setPosition] = useState({
+    left: 8,
+    bottom: 56,
+    width: PANEL_WIDTH,
+    maxHeight: 0,
+  });
+
+  const updatePosition = useCallback(() => {
+    const rect = anchorRef?.current?.getBoundingClientRect();
+    if (!rect) return;
+    const width = Math.max(240, Math.min(PANEL_WIDTH, window.innerWidth - 16));
+    setPosition({
+      left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)),
+      bottom: window.innerHeight - rect.top + 8,
+      width,
+      maxHeight: Math.max(0, Math.min(384, rect.top - 16)),
+    });
+  }, [anchorRef]);
 
   useEffect(() => {
     const unsub = onSubagentChange(() => forceUpdate(n => n + 1));
@@ -30,6 +51,17 @@ export default function SubagentPanel({ isOpen, onClose, conversationId }) {
     };
   }, [isOpen, onClose]);
 
+  useLayoutEffect(() => {
+    if (!isOpen) return undefined;
+    updatePosition();
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [isOpen, updatePosition]);
+
   if (!isOpen) return null;
 
   const entries = [...subagentRegistry.entries()]
@@ -43,12 +75,18 @@ export default function SubagentPanel({ isOpen, onClose, conversationId }) {
   const statusIcon = (status) => ({ running: '⏳', done: '✅', timeout: '⏰', failed: '❌' }[status] || '?');
   const statusColor = (status) => ({ running: 'text-blue-600', done: 'text-emerald-600', timeout: 'text-amber-600', failed: 'text-red-600' }[status] || 'text-gray-500');
 
-  return (
+  return createPortal(
     <div
       ref={ref}
       role="dialog"
       aria-label="Subagent tasks for this chat"
-      className="absolute bottom-full left-0 z-50 mb-2 max-h-96 w-80 overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl"
+      className="fixed z-[9999] overflow-y-auto rounded-xl border border-gray-200 bg-white shadow-xl"
+      style={{
+        left: `${position.left}px`,
+        bottom: `${position.bottom}px`,
+        width: `${position.width}px`,
+        maxHeight: `${position.maxHeight}px`,
+      }}
     >
       <div className="sticky top-0 flex items-center justify-between border-b bg-white px-3 py-2">
         <span className="text-sm font-semibold text-gray-700">Subagents</span>
@@ -73,7 +111,8 @@ export default function SubagentPanel({ isOpen, onClose, conversationId }) {
           ))}
         </div>
       )}
-    </div>
+    </div>,
+    document.body,
   );
 }
 

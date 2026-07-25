@@ -8,7 +8,13 @@ import { buildSkillsToolbarRows, canToggleToolbarSkill, isSkillsConfigUpdate } f
 
 const POPOVER_WIDTH = 320;
 
-export default function SkillsToolbar({ petId, variant = 'icon', onEnabledCountChange }) {
+export default function SkillsToolbar({
+  petId,
+  variant = 'icon',
+  onEnabledCountChange,
+  onOpenChange,
+  closeRequestId,
+}) {
   const [isOpen, setIsOpen] = useState(false);
   const [rows, setRows] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -67,6 +73,10 @@ export default function SkillsToolbar({ petId, variant = 'icon', onEnabledCountC
     if (isOpen) refresh();
   }, [isOpen, refresh]);
 
+  useEffect(() => {
+    if (closeRequestId) setIsOpen(false);
+  }, [closeRequestId]);
+
   // Management and Chat share skills_config_${petId}; react to either window.
   useEffect(() => {
     if (!petId) return undefined;
@@ -121,6 +131,13 @@ export default function SkillsToolbar({ petId, variant = 'icon', onEnabledCountC
   useEffect(() => {
     if (hasLoaded) onEnabledCountChange?.(enabledCount);
   }, [enabledCount, hasLoaded, onEnabledCountChange]);
+
+  useEffect(() => {
+    onOpenChange?.(isOpen);
+    return () => {
+      if (isOpen) onOpenChange?.(false);
+    };
+  }, [isOpen, onOpenChange]);
 
   const handleToggle = async (skill) => {
     if (!petId || !canToggleToolbarSkill(skill) || busyIds.has(skill.id)) return;

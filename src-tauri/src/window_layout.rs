@@ -2,7 +2,7 @@
 // All computations use logical coordinates exclusively.
 // Platform-specific work-area information comes from `platform::PlatformProvider`.
 
-use crate::platform::{Platform, PlatformProvider, ScreenInfo};
+use crate::platform::{LogicalRect, Platform, PlatformProvider, ScreenInfo};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64};
 use std::sync::Mutex;
@@ -11,6 +11,22 @@ use std::sync::Mutex;
 
 /// Sidebar width in logical pixels (matches frontend w-64 = 256px)
 pub const SIDEBAR_WIDTH: f64 = 256.0;
+
+/// Native minimum height used by the regular, full chat window.
+pub const CHAT_FULL_MIN_HEIGHT: f64 = 300.0;
+
+/// The compact composer may report a taller preferred height as its textarea
+/// or attachment tray grows, but it must never collapse below this floor.
+pub const CHAT_COMPACT_MIN_HEIGHT: f64 = 96.0;
+
+/// Safe fallback before the frontend has measured the compact composer.
+pub const CHAT_COMPACT_DEFAULT_HEIGHT: f64 = 132.0;
+
+/// Clearance between the compact composer window and the usable screen edge.
+pub const CHAT_COMPACT_BOTTOM_MARGIN: f64 = 16.0;
+
+/// Horizontal clearance used when a chat window must fit inside a work area.
+pub const CHAT_WORK_AREA_MARGIN: f64 = 20.0;
 
 /// Minimum visible pixels when clamping to screen edge
 const MIN_VISIBLE: f64 = 50.0;
@@ -34,6 +50,23 @@ pub struct WindowState {
     pub sidebar_expanded: AtomicBool,
     pub original_width: AtomicU32,
     pub chat_follows_character: AtomicBool,
+    /// Whether the chat is currently showing only the empty composer.
+    pub chat_compact: AtomicBool,
+    /// Last frontend-measured compact height in logical pixels.
+    pub chat_compact_height: Mutex<f64>,
+    /// Full-window geometry captured before entering compact mode. This is
+    /// intentionally separate from the maximize/restore snapshot below.
+    pub chat_full_geometry: Mutex<Option<WindowGeometry>>,
+    /// Native presentation state to restore after leaving compact mode.
+    pub chat_full_was_maximized: AtomicBool,
+    pub chat_full_was_fullscreen: AtomicBool,
+    pub chat_full_character_was_visible: AtomicBool,
+    /// Serializes compact/full native mutations so rapid frontend height and
+    /// mode updates cannot interleave their geometry snapshots.
+    pub chat_layout_transition: Mutex<()>,
+    /// Latest frontend layout request applied or admitted. Older IPC calls may
+    /// arrive late; they must never overwrite a newer full/compact decision.
+    pub chat_layout_request_id: AtomicU64,
     pub saved_chat_position: Mutex<Option<(f64, f64)>>,
     pub saved_chat_size: Mutex<Option<(f64, f64)>>,
     pub screenshot_cache: Mutex<Option<(Vec<u8>, u32, u32)>>,
@@ -42,6 +75,9 @@ pub struct WindowState {
     /// Epoch millis until which chat position sync should be skipped.
     /// Set after show_chat_window to prevent Moved events from snapping chat.
     pub skip_chat_sync_until: AtomicU64,
+    /// Monotonic id attached to chat activation events so the frontend can
+    /// refocus the composer even when visibility itself did not change.
+    pub chat_focus_request_id: AtomicU64,
     /// Last known character position (logical px * 10 for sub-pixel precision).
     /// Used to filter spurious Moved events on XWayland.
     pub last_char_x: AtomicI32,
@@ -60,12 +96,21 @@ impl WindowState {
             sidebar_expanded: AtomicBool::new(false),
             original_width: AtomicU32::new(0),
             chat_follows_character: AtomicBool::new(true),
+            chat_compact: AtomicBool::new(false),
+            chat_compact_height: Mutex::new(CHAT_COMPACT_DEFAULT_HEIGHT),
+            chat_full_geometry: Mutex::new(None),
+            chat_full_was_maximized: AtomicBool::new(false),
+            chat_full_was_fullscreen: AtomicBool::new(false),
+            chat_full_character_was_visible: AtomicBool::new(true),
+            chat_layout_transition: Mutex::new(()),
+            chat_layout_request_id: AtomicU64::new(0),
             saved_chat_position: Mutex::new(None),
             saved_chat_size: Mutex::new(None),
             screenshot_cache: Mutex::new(None),
             pending_restore_windows: Mutex::new(Vec::new()),
             pending_character_id: Mutex::new(None),
             skip_chat_sync_until: AtomicU64::new(0),
+            chat_focus_request_id: AtomicU64::new(0),
             last_char_x: AtomicI32::new(i32::MIN),
             last_char_y: AtomicI32::new(i32::MIN),
             chat_min_width: Mutex::new(None),
@@ -74,17 +119,38 @@ impl WindowState {
     }
 }
 
+/// A window rectangle expressed entirely in logical coordinates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct WindowGeometry {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
 // ============ Screen Info Helper ============
 
 /// Extract ScreenInfo from a Tauri monitor object via the Platform abstraction.
 pub fn screen_info_from_tauri_monitor(monitor: &tauri::Monitor) -> ScreenInfo {
     let size = monitor.size();
     let pos = monitor.position();
-    Platform::screen_info_from_monitor(
-        (size.width, size.height),
-        (pos.x, pos.y),
-        monitor.scale_factor(),
-    )
+    let work_area = monitor.work_area();
+    let scale_factor = monitor.scale_factor().max(f64::EPSILON);
+    ScreenInfo {
+        total: LogicalRect::new(
+            pos.x as f64 / scale_factor,
+            pos.y as f64 / scale_factor,
+            size.width as f64 / scale_factor,
+            size.height as f64 / scale_factor,
+        ),
+        work_area: LogicalRect::new(
+            work_area.position.x as f64 / scale_factor,
+            work_area.position.y as f64 / scale_factor,
+            work_area.size.width as f64 / scale_factor,
+            work_area.size.height as f64 / scale_factor,
+        ),
+        scale_factor,
+    }
 }
 
 // ============ Baseline Sizes ============
@@ -145,6 +211,31 @@ pub fn compute_chat_width(content_min_width: Option<f64>, preset: &str) -> f64 {
     (min_w * get_chat_width_scale_for_preset(preset)).round()
 }
 
+/// Clamp the compact composer to the supplied work area. The reported height
+/// may be non-finite during a transient DOM measurement; use the stable
+/// fallback in that case.
+pub fn compute_chat_compact_size(
+    content_min_width: Option<f64>,
+    requested_height: f64,
+    screen: &ScreenInfo,
+) -> (f64, f64) {
+    let max_width = (screen.work_area.width - CHAT_WORK_AREA_MARGIN * 2.0).max(1.0);
+    let max_height = (screen.work_area.height - CHAT_WORK_AREA_MARGIN * 2.0).max(1.0);
+    let width = content_min_width
+        .unwrap_or(CHAT_MIN_WIDTH_FLOOR)
+        .max(CHAT_MIN_WIDTH_FLOOR)
+        .min(max_width);
+    let requested_height = if requested_height.is_finite() && requested_height > 0.0 {
+        requested_height
+    } else {
+        CHAT_COMPACT_DEFAULT_HEIGHT
+    };
+    let height = requested_height
+        .max(CHAT_COMPACT_MIN_HEIGHT.min(max_height))
+        .min(max_height);
+    (width.round(), height.round())
+}
+
 // ============ Layout Functions ============
 
 /// Calculate the bottom-right position for the character window within the work area.
@@ -172,7 +263,23 @@ pub fn position_chat_relative_to_character(
     let char_bottom = char_y + char_height;
     let chat_x = char_x - chat_width - CHAT_CHARACTER_GAP;
     let chat_y = char_bottom - chat_height - CHAT_VERTICAL_OFFSET;
-    (chat_x.max(0.0), chat_y.max(0.0))
+    // Monitor origins may be negative when a display sits to the left of or
+    // above the primary display. The caller owns work-area clamping because it
+    // also knows which monitor the character is on.
+    (chat_x, chat_y)
+}
+
+/// Center the compact composer at the bottom of the current work area.
+/// Unlike the legacy relative-to-character helper, this deliberately retains
+/// negative monitor origins used by displays placed left of the primary one.
+pub fn position_chat_bottom_center(
+    screen: &ScreenInfo,
+    chat_width: f64,
+    chat_height: f64,
+) -> (f64, f64) {
+    let x = screen.work_area.x + (screen.work_area.width - chat_width) / 2.0;
+    let y = screen.work_area.bottom() - chat_height - CHAT_COMPACT_BOTTOM_MARGIN;
+    (x.max(screen.work_area.x), y.max(screen.work_area.y))
 }
 
 /// Calculate the screen-center position for the manage/settings window.
@@ -309,6 +416,16 @@ pub fn is_cursor_in_window(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::platform::LogicalRect;
+
+    fn screen_with_work_area(x: f64, y: f64, width: f64, height: f64) -> ScreenInfo {
+        let rect = LogicalRect::new(x, y, width, height);
+        ScreenInfo {
+            total: rect,
+            work_area: rect,
+            scale_factor: 1.0,
+        }
+    }
 
     #[test]
     fn character_presets_use_the_enlarged_minimum() {
@@ -324,5 +441,52 @@ mod tests {
             apply_size_preset("character", "large"),
             Some((299.0, 448.0))
         );
+    }
+
+    #[test]
+    fn compact_chat_uses_content_floor_and_measured_height() {
+        let screen = screen_with_work_area(0.0, 24.0, 1440.0, 876.0);
+        assert_eq!(
+            compute_chat_compact_size(Some(420.0), 118.4, &screen),
+            (460.0, 118.0)
+        );
+        assert_eq!(
+            compute_chat_compact_size(Some(510.0), f64::NAN, &screen),
+            (510.0, CHAT_COMPACT_DEFAULT_HEIGHT)
+        );
+    }
+
+    #[test]
+    fn compact_chat_size_stays_inside_small_work_area() {
+        let screen = screen_with_work_area(0.0, 0.0, 400.0, 120.0);
+        assert_eq!(
+            compute_chat_compact_size(Some(800.0), 500.0, &screen),
+            (360.0, 80.0)
+        );
+    }
+
+    #[test]
+    fn compact_chat_bottom_center_preserves_negative_monitor_origin() {
+        let screen = screen_with_work_area(-1920.0, 23.0, 1920.0, 1057.0);
+        assert_eq!(
+            position_chat_bottom_center(&screen, 460.0, 132.0),
+            (-1190.0, 932.0)
+        );
+    }
+
+    #[test]
+    fn chat_relative_to_character_preserves_negative_monitor_coordinates() {
+        assert_eq!(
+            position_chat_relative_to_character(-180.0, 500.0, 390.0, 460.0, 400.0),
+            (-660.0, 410.0)
+        );
+    }
+
+    #[test]
+    fn relative_chat_clamps_against_the_negative_target_work_area() {
+        let screen = screen_with_work_area(-1920.0, -1080.0, 1920.0, 1080.0);
+        let (x, y) =
+            position_chat_relative_to_character(-100.0, -300.0, 390.0, 460.0, 400.0);
+        assert_eq!(clamp_to_work_area(&screen, x, y, 460.0, 400.0), (x, y, false));
     }
 }

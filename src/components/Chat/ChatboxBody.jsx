@@ -2,6 +2,16 @@ import React, { useEffect, useState, useRef, useCallback } from 'react';
 import ChatboxTitleBar from '../Layout/ChatboxTitleBar';
 import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
+import useActiveTabState from './useActiveTabState';
+import {
+  COMPACT_CHAT_VIEW,
+  EMPTY_CHAT_PRESENTATION,
+  EMPTY_CHAT_PRESENTATION_EVENT,
+  getCompactChatView,
+  getCompactChatWindowHeight,
+  nextEmptyChatPresentation,
+  shouldUseCompactChat,
+} from './compactChatModel.js';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import * as tauri from '../../utils/tauri';
@@ -9,6 +19,7 @@ import { listen } from '@tauri-apps/api/event';
 import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown, MdClear } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
+import { createChatFocusRequestGate } from '../../utils/chatFocusModel.js';
 // import { AiFillChrome } from 'react-icons/ai';
 // import ChatboxTabBar from './ChatboxTabBar';
 
@@ -32,10 +43,16 @@ const HighlightText = ({ text, keyword }) => {
 
 export const Chatbox = () => {
   // 方案 C: 使用 Rust 内存缓存管理消息
-  const [{ navBarChats, updatedConversation, streamingReplies, characterMoods, suggestText = {} }, dispatch] = useStateValue();
+  const [{ navBarChats, updatedConversation, streamingReplies, liveToolCalls = {}, characterMoods, suggestText = {} }, dispatch] = useStateValue();
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [windowVisible, setWindowVisible] = useState(true); // 窗口可见性状态，默认为 true
+  const [windowVisible, setWindowVisible] = useState(false);
+  const [focusRequest, setFocusRequest] = useState(null);
+  const [emptyChatPresentation, setEmptyChatPresentation] = useState(
+    EMPTY_CHAT_PRESENTATION.COMPACT,
+  );
+  const [compactContentHeight, setCompactContentHeight] = useState(104);
+  const [composerOverlayOpen, setComposerOverlayOpen] = useState(false);
   const [isMouseOver, setIsMouseOver] = useState(false);
   const [showTitleBar, setShowTitleBar] = useState(false); // 延迟隐藏用
   const [isTitleBarVisible, setIsTitleBarVisible] = useState(false); // 控制 opacity
@@ -75,6 +92,33 @@ export const Chatbox = () => {
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
   const activeTabIdRef = useRef(null);
+  const conversationSelectionGenerationRef = useRef(0);
+  const focusRequestGateRef = useRef(null);
+  const compactModeRequestRef = useRef('');
+  // Seed with wall-clock time so a WebView reload cannot restart request ids
+  // below the Rust process's last accepted generation.
+  const compactModeGenerationRef = useRef(Date.now());
+  if (focusRequestGateRef.current === null) {
+    focusRequestGateRef.current = createChatFocusRequestGate();
+  }
+
+  const activeTabState = useActiveTabState(activeTabId);
+  const activeStreamingContent = activeTabId ? (streamingReplies?.[activeTabId] ?? null) : null;
+  const activeLiveToolCalls = activeTabId ? (liveToolCalls?.[activeTabId] ?? []) : [];
+  const compactChatView = getCompactChatView({
+    activeTabId,
+    tabState: activeTabState,
+    streamingContent: activeStreamingContent,
+    liveToolCalls: activeLiveToolCalls,
+  });
+  const isCompactChat = shouldUseCompactChat({
+    view: compactChatView,
+    presentation: emptyChatPresentation,
+  });
+  const compactWindowHeight = getCompactChatWindowHeight(
+    compactContentHeight,
+    composerOverlayOpen,
+  );
   
   // chatbodyStatus is for "Memory updating" display - use activeTabId state for immediate reactivity
   const chatbodyStatus = activeTabId ? (chatbodyStatuses[activeTabId] || '') : '';
@@ -92,6 +136,13 @@ export const Chatbox = () => {
 
   const handleQuickReplyHandled = useCallback((requestId) => {
     setQuickReplyRequest(current => current?.id === requestId ? null : current);
+  }, []);
+
+  const lockTabPresentation = useCallback(() => {
+    setEmptyChatPresentation(current => nextEmptyChatPresentation(
+      current,
+      EMPTY_CHAT_PRESENTATION_EVENT.USER_NAVIGATION,
+    ));
   }, []);
   
   // 切换侧边栏时调整窗口大小
@@ -350,11 +401,76 @@ export const Chatbox = () => {
     }
   }, [chatbodyStatus]);
 
+  const handleCompactHeightChange = useCallback((height) => {
+    if (!Number.isFinite(height) || height <= 0) return;
+    setCompactContentHeight(previous => (
+      Math.abs(previous - height) <= 1 ? previous : height
+    ));
+  }, []);
+
+  const handleComposerOverlayOpenChange = useCallback((open) => {
+    setComposerOverlayOpen(Boolean(open));
+  }, []);
+
+  // Once a visible session starts showing conversational activity, keep that
+  // session in the regular tab layout. This prevents a transient empty frame
+  // between streaming and persisted history from shrinking the window again.
+  useEffect(() => {
+    if (!windowVisible || compactChatView !== COMPACT_CHAT_VIEW.POPULATED) return;
+    setEmptyChatPresentation(current => nextEmptyChatPresentation(
+      current,
+      EMPTY_CHAT_PRESENTATION_EVENT.CONTENT_ACTIVE,
+    ));
+  }, [compactChatView, windowVisible]);
+
+  // Keep the native window geometry synchronized even while it is hidden, so
+  // the next summon appears directly in the correct mode without a resize jump.
+  useEffect(() => {
+    const height = isCompactChat ? compactWindowHeight : 0;
+    const requestKey = `${isCompactChat ? 'compact' : 'full'}:${height}`;
+    if (compactModeRequestRef.current === requestKey) return;
+    compactModeRequestRef.current = requestKey;
+    const requestId = ++compactModeGenerationRef.current;
+
+    let disposed = false;
+    let retryTimer = null;
+    const syncMode = async (attempt = 0) => {
+      try {
+        await tauri.setChatCompactMode(isCompactChat, height, requestId);
+      } catch (error) {
+        if (disposed || compactModeRequestRef.current !== requestKey) return;
+        console.error('[ChatboxBody] Failed to update compact chat mode:', error);
+        if (attempt < 2) {
+          retryTimer = setTimeout(() => syncMode(attempt + 1), 150 * (attempt + 1));
+        } else {
+          compactModeRequestRef.current = '';
+        }
+      }
+    };
+    syncMode();
+    return () => {
+      disposed = true;
+      if (retryTimer) clearTimeout(retryTimer);
+    };
+  }, [compactWindowHeight, isCompactChat]);
+
+  useEffect(() => {
+    if (!isCompactChat || !sidebarOpen) return;
+    setSidebarOpen(false);
+    tauri.toggleSidebar?.(false);
+  }, [isCompactChat, sidebarOpen]);
+
   // ============ 监听窗口可见性变化 ============
   useEffect(() => {
     const handleVisibilityChange = (payload) => {
       if (payload && typeof payload.visible === 'boolean') {
         setWindowVisible(payload.visible);
+        if (!payload.visible) {
+          setEmptyChatPresentation(current => nextEmptyChatPresentation(
+            current,
+            EMPTY_CHAT_PRESENTATION_EVENT.WINDOW_HIDDEN,
+          ));
+        }
         console.log('[ChatboxBody] Window visibility changed:', payload.visible);
       }
     };
@@ -364,6 +480,22 @@ export const Chatbox = () => {
       cleanup = tauri.onChatWindowVisibilityChanged(handleVisibilityChange);
     }
     
+    return () => {
+      if (cleanup) cleanup();
+    };
+  }, []);
+
+  // Visibility alone cannot retrigger focus when a visible window is summoned
+  // again. Native activation carries a monotonic request id for that purpose.
+  useEffect(() => {
+    const cleanup = tauri.onChatWindowActivated?.((payload) => {
+      if (!focusRequestGateRef.current.accept(payload)) return;
+      setWindowVisible(true);
+      setFocusRequest({
+        id: payload.focusRequestId,
+        requestedAt: performance.now(),
+      });
+    });
     return () => {
       if (cleanup) cleanup();
     };
@@ -380,7 +512,7 @@ export const Chatbox = () => {
     let unlisten = null;
     let isMounted = true;
 
-    const handleCharacterId = async (id) => {
+    const handleCharacterId = async (id, { preserveCompactIntent = false } = {}) => {
       if (!isMounted) return;
 
       // 如果是切换 assistant 触发的，跳过创建新对话（只用于更新 character 窗口皮肤）
@@ -473,7 +605,10 @@ export const Chatbox = () => {
             return [...prev.map(t => ({...t, isActive: false})), newTab];
         });
 
-        handleTabClick(newConversation._id, { skipFetch: true });
+        handleTabClick(newConversation._id, {
+          skipFetch: true,
+          preserveEmptyPresentation: preserveCompactIntent,
+        });
 
         // 刷新对话列表以显示新创建的对话（fire-and-forget，不阻塞 UI）
         fetchConversations();
@@ -536,7 +671,7 @@ export const Chatbox = () => {
         if (defaultAssistantId && isMounted) {
           console.log('[ChatboxBody] Auto-loading default assistant:', defaultAssistantId);
           // 直接调用 handler，而不是通过事件系统
-          handleCharacterId(defaultAssistantId);
+          handleCharacterId(defaultAssistantId, { preserveCompactIntent: true });
         }
       } catch (error) {
         console.error('[ChatboxBody] Error loading default assistant:', error);
@@ -565,15 +700,39 @@ export const Chatbox = () => {
     }
   };
 
-  const handleTabClick = async (clickedId, { skipFetch = false } = {}) => {
+  const handleTabClick = async (
+    clickedId,
+    { skipFetch = false, preserveEmptyPresentation = false } = {},
+  ) => {
+    if (!preserveEmptyPresentation) lockTabPresentation();
+    conversationSelectionGenerationRef.current += 1;
     // Even if clicking active tab, we might want to ensure sync? 
-    // But for performance, skip if same.
-    if (activeTabId === clickedId) return;
+    // Repair the shared context even when the visual tab is already active.
+    if (activeTabId === clickedId) {
+      activeTabIdRef.current = clickedId;
+      dispatch({
+        type: actionType.SET_CURRENT_CONVERSATION_ID,
+        id: clickedId,
+      });
+      tauri.sendConversationId?.(clickedId);
+      return;
+    }
     
     setActiveTabId(clickedId);
     activeTabIdRef.current = clickedId;
     
     setTabs(prev => prev.map(t => ({...t, isActive: t.id === clickedId})));
+
+    // Switch every active-conversation consumer before hydration. Keeping the
+    // old context alive during the await window can send a focused Enter key to
+    // the new tab with the previous Assistant's model and system prompt.
+    dispatch({
+      type: actionType.SET_CURRENT_CONVERSATION_ID,
+      id: clickedId,
+    });
+    const tabMood = characterMoods[clickedId] || 'normal';
+    tauri.sendMoodUpdate?.(tabMood, clickedId);
+    tauri.sendConversationId?.(clickedId);
 
     // skipFetch=true 时跳过 DB 查询（新建的空对话已初始化过 TabState，无需再查）
     if (!skipFetch) {
@@ -594,18 +753,10 @@ export const Chatbox = () => {
       }
     }
 
-    // Sync global - send the mood of the clicked tab to update character display
-    const tabMood = characterMoods[clickedId] || 'normal';
-    tauri.sendMoodUpdate?.(tabMood, clickedId);
-    tauri.sendConversationId?.(clickedId);
-    
-    dispatch({
-        type: actionType.SET_CURRENT_CONVERSATION_ID,
-        id: clickedId,
-    });
   };
 
   const handleCloseTab = (e, closedId) => {
+    conversationSelectionGenerationRef.current += 1;
     e.stopPropagation();
     
     let nextActiveId = activeTabId;
@@ -634,6 +785,7 @@ export const Chatbox = () => {
   };
 
   const handleCloseAllTabs = () => {
+    conversationSelectionGenerationRef.current += 1;
     setTabs([]);
     setActiveTabId(null);
     activeTabIdRef.current = null;
@@ -656,7 +808,9 @@ export const Chatbox = () => {
         return;
     }
 
+    const selectionGeneration = ++conversationSelectionGenerationRef.current;
     const conversation = await fetchConversationById(conv._id);
+    if (selectionGeneration !== conversationSelectionGenerationRef.current) return;
     const newTab = {
         id: conv._id,
         label: conv.title || "Chat",
@@ -666,13 +820,13 @@ export const Chatbox = () => {
     };
     
     setTabs(prev => [...prev.map(t => ({...t, isActive: false})), newTab]);
-    
-    // Manually trigger switch logic
-    setActiveTabId(conv._id);
-    activeTabIdRef.current = conv._id;
-    
-    // 新方案: 初始化 Rust TabState
-    await tauri.initTabMessages(conv._id, conversation.history);
+    // Commit visual and shared selection together. Hydration is background-only
+    // and can no longer overwrite a newer click when it completes.
+    handleTabClick(conv._id, { skipFetch: true });
+
+    void tauri.initTabMessages(conv._id, conversation.history).catch(error => {
+      console.error('[ChatboxBody] Failed to initialize conversation history:', error);
+    });
     
     // Initialize mood and suggestText for new tab
     dispatch({
@@ -686,11 +840,6 @@ export const Chatbox = () => {
         conversationId: conv._id
     });
 
-    tauri.sendConversationId?.(conv._id);
-    dispatch({
-        type: actionType.SET_CURRENT_CONVERSATION_ID,
-        id: conv._id,
-    });
   };
 
   // Ref for search result click to avoid circular dependency
@@ -765,6 +914,10 @@ export const Chatbox = () => {
   }, [tabs, handleTabClick, fetchConversations]);
 
   const handleNewChat = () => {
+    // New means "open an empty tab in this full chat session", not "summon
+    // the desktop composer". Set this synchronously before the character-id
+    // round trip creates and hydrates the conversation.
+    lockTabPresentation();
     const activeTab = tabs.find(tab => tab.id === activeTabId);
     if (activeTab) {
         // 如果有活跃的 Tab，使用其 petId 创建新对话
@@ -1008,7 +1161,10 @@ export const Chatbox = () => {
 
   return (
     <div 
-      className={`h-screen rounded-[16px] overflow-clip relative bg-white`}
+      className={`h-screen overflow-clip relative transition-colors duration-150 ${isCompactChat
+        ? 'rounded-[24px] bg-transparent'
+        : 'rounded-[16px] bg-white'
+      }`}
       {...(platformInfo.has_cursor_tracking === 'false' ? {
         onMouseEnter: () => setIsMouseOver(true),
         onMouseLeave: () => setIsMouseOver(false),
@@ -1016,13 +1172,15 @@ export const Chatbox = () => {
     >
     {/* 白色遮罩层：侧边栏关闭时 80% 透明度（有 vibrancy 效果时），打开时或无 vibrancy 时 100% */}
     <div className={`absolute inset-0 bg-white transition-opacity duration-200 pointer-events-none ${
-      platformInfo.has_vibrancy === 'false' 
+      isCompactChat
+        ? 'opacity-0'
+        : platformInfo.has_vibrancy === 'false'
         ? 'opacity-100' 
         : sidebarOpen ? 'opacity-100' : 'opacity-80'
     }`} />
-    <div className={`h-full flex group/chatwindow overflow-hidden relative`}>
+    <div className={`h-full flex group/chatwindow relative ${isCompactChat ? 'overflow-visible' : 'overflow-hidden'}`}>
       {/* Sidebar - 小窗口根据 sidebarOpen 状态显示，全屏时始终显示 */}
-      <div className={`${sidebarOpen ? 'flex' : 'hidden'} lg:!flex flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
+      <div className={`${isCompactChat ? 'hidden' : `${sidebarOpen ? 'flex' : 'hidden'} lg:!flex`} flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
         
         {/* Window Controls & Sidebar Toggle */}
         <div className="p-3 pt-4 draggable flex items-center justify-between" data-tauri-drag-region>
@@ -1246,6 +1404,7 @@ export const Chatbox = () => {
                             }
                           } else {
                             // 没有活跃对话时，创建新对话
+                            lockTabPresentation();
                             tauri.sendCharacterId?.(assistant._id);
                           }
                           setShowAssistantDropdown(false);
@@ -1269,7 +1428,8 @@ export const Chatbox = () => {
       </div>
 
       {/* Main Chat Area */}
-      <div className={`h-full flex-1 flex flex-col justify-between relative`}>
+      <div className="h-full min-w-0 flex-1 flex flex-col justify-end relative">
+        <div className={`${isCompactChat ? 'hidden' : 'flex'} min-h-0 flex-1 flex-col`}>
         {/* Title Bar - 淡入淡出效果 */}
         {showTitleBar && (
           <div className={`flex-shrink-0 transition-opacity duration-200 ${isTitleBarVisible ? 'opacity-100' : 'opacity-0'}`}>
@@ -1331,6 +1491,7 @@ export const Chatbox = () => {
                 })
              )}
         </div>
+        </div>
         
         <div className="w-full">
             <ChatboxInputArea 
@@ -1338,10 +1499,14 @@ export const Chatbox = () => {
                 activePetId={tabs.find(t => t.id === activeTabId)?.petId}
                 sidebarOpen={sidebarOpen}
                 autoFocus={windowVisible}
+                focusRequest={focusRequest}
+                compact={isCompactChat}
                 activeTabId={activeTabId}
                 quickReplyEnabled={quickReplyEnabled}
                 quickReplyRequest={quickReplyRequest}
                 onQuickReplyHandled={handleQuickReplyHandled}
+                onHeightChange={handleCompactHeightChange}
+                onOverlayOpenChange={handleComposerOverlayOpenChange}
             />
         </div>
       </div>
