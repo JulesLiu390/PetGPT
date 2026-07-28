@@ -8,6 +8,12 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::time::Duration;
+
+/// 流式请求的建连超时
+const STREAM_CONNECT_TIMEOUT_SECS: u64 = 20;
+/// 流式请求两次读之间的最大空闲时间（不是总时长，长回答不受影响）
+const STREAM_READ_TIMEOUT_SECS: u64 = 120;
 
 /// LLM 流取消管理器
 pub struct LlmStreamCancellation {
@@ -93,7 +99,16 @@ pub async fn stream_chat(
     request: LlmRequest,
     cancellation: Arc<LlmStreamCancellation>,
 ) -> Result<LlmResponse, String> {
-    let client = Client::new();
+    // 流式请求不能设总超时（长回答本来就慢），但必须设建连超时 + 单次读超时：
+    // 否则半开连接会让 SSE 读取永久挂起，前端的 await 永不返回。
+    let client = Client::builder()
+        .connect_timeout(Duration::from_secs(STREAM_CONNECT_TIMEOUT_SECS))
+        .read_timeout(Duration::from_secs(STREAM_READ_TIMEOUT_SECS))
+        .build()
+        .unwrap_or_else(|e| {
+            log::error!("[LlmStream] Failed to build timed client, falling back: {}", e);
+            Client::new()
+        });
     let conversation_id = request.conversation_id.clone();
     
     // 重置取消状态

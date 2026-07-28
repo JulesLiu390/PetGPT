@@ -1,8 +1,18 @@
 //! LLM HTTP 客户端
 
+use std::time::Duration;
 use reqwest::Client;
 use crate::llm::types::*;
 use crate::llm::stream::content_part_to_gemini_part;
+
+/// 单次非流式请求超时（与 llm/proxy.rs 的 REQUEST_TIMEOUT_SECS 对齐）。
+///
+/// 没有它时，半开的 TCP 连接（机器休眠 / 网络切换 / provider 静默丢连接）会让
+/// 请求永不返回也永不报错，调用方的 await 被永久钉死——social agent 的 Vision
+/// 预处理走的就是这条路，一次挂起就会让整个 Intent 循环再也不评估。
+const REQUEST_TIMEOUT_SECS: u64 = 180;
+/// 建连超时——单独设更短，避免不可达端点白等整个请求超时。
+const CONNECT_TIMEOUT_SECS: u64 = 20;
 
 /// LLM 客户端
 pub struct LlmClient {
@@ -11,9 +21,15 @@ pub struct LlmClient {
 
 impl LlmClient {
     pub fn new() -> Self {
-        Self {
-            http_client: Client::new(),
-        }
+        let http_client = Client::builder()
+            .timeout(Duration::from_secs(REQUEST_TIMEOUT_SECS))
+            .connect_timeout(Duration::from_secs(CONNECT_TIMEOUT_SECS))
+            .build()
+            .unwrap_or_else(|e| {
+                log::error!("[LlmClient] Failed to build timed client, falling back: {}", e);
+                Client::new()
+            });
+        Self { http_client }
     }
 
     /// 获取 API 端点

@@ -72,6 +72,38 @@ let _unlistenTrainingGlobal = null;
 const LLM_RETRY_DELAYS = [5000, 25000, 125000];
 
 /**
+ * Vision（图片描述）单次调用硬超时。
+ * 后端已有超时，这里再加一层前端兜底：Vision 是唯一被 Intent 关键路径 await 的
+ * LLM 调用，一次永久挂起就会让整个 target 再也不评估、不发言。
+ */
+const VISION_CALL_TIMEOUT_MS = 90 * 1000;
+/** Vision 重试 delays —— 比通用 LLM 短：图片描述可以降级成 [图片描述失败]，不值得占住调用方 */
+const VISION_RETRY_DELAYS = [5000, 25000];
+/**
+ * Intent eval 前的图片预处理总预算。超过就不再等——本轮直接带原图/无描述进 eval，
+ * 未完成的描述继续在后台跑并落进 imageDescCache，下一轮 eval 直接命中。
+ */
+const VISION_PREPROCESS_BUDGET_MS = 120 * 1000;
+
+/**
+ * 给任意 Promise 加硬超时。
+ * 底层 Promise 无法真正取消（JS 限制），但调用方的 await 一定会在 ms 内返回，
+ * 不会被永不 settle 的 Promise 永久钉死。
+ */
+function withHardTimeout(promise, ms, label = 'Operation') {
+  let timeoutId = null;
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(
+      () => reject(new Error(`${label} 硬超时（${Math.round(ms / 1000)}s）`)),
+      ms,
+    );
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timeoutId !== null) clearTimeout(timeoutId);
+  });
+}
+
+/**
  * MCP/内置工具的失败形状并不统一：有的 reject，有的 resolve
  * `{ error }` / `{ isError: true }` / `{ success: false }`，还有的把 JSON
  * 包在 content[0].text 中。发送类动作必须统一按失败处理。
@@ -759,15 +791,20 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
   // Vision 走 callLLM → Rust 后端，Rust 不转发 explicitCache/cacheKey，
   // 而且 Vision 通常用 Gemini（隐式缓存），因此此处不传显式缓存参数。
   // usage 日志行仍然通过 logUsageRecord 发出，面板能看到 Vision 的 cached tokens。
-  const result = await callLLM({
-    messages,
-    apiFormat: visionLLMConfig.apiFormat,
-    apiKey: visionLLMConfig.apiKey,
-    model: visionLLMConfig.modelName,
-    baseUrl: visionLLMConfig.baseUrl,
-    options: { temperature: 0.2 },
-    conversationId: `vision-desc-${Date.now()}`,
-  });
+  // 硬超时兜底：即使后端/网络层完全不返回，调用方也不会被永久阻塞。
+  const result = await withHardTimeout(
+    callLLM({
+      messages,
+      apiFormat: visionLLMConfig.apiFormat,
+      apiKey: visionLLMConfig.apiKey,
+      model: visionLLMConfig.modelName,
+      baseUrl: visionLLMConfig.baseUrl,
+      options: { temperature: 0.2 },
+      conversationId: `vision-desc-${Date.now()}`,
+    }),
+    VISION_CALL_TIMEOUT_MS,
+    'Vision LLM',
+  );
 
   // Log vision usage
   if (petId) {
@@ -1114,10 +1151,12 @@ async function pollTarget({
             cachedCount++;
             return Promise.resolve(imageDescCache.get(cacheKey));
           }
-          // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用，失败指数重试 5→25→125s）
+          // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用，失败指数重试）
           if (imageDescInflight.has(cacheKey)) {
             cachedCount++;
-            return imageDescInflight.get(cacheKey);
+            // 复用的 inflight 可能因硬超时/接口错误 reject —— 降级为占位符，
+            // 不能让一张图把整轮 Reply 拖成异常。
+            return imageDescInflight.get(cacheKey).catch(() => '[图片描述失败]');
           }
           const imgData = img.data || '';
           const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
@@ -1126,7 +1165,7 @@ async function pollTarget({
             imageDescInflight.set(cacheKey, p);
             return p;
           };
-          const descP = retryLLM(wrappedDescribe, { label: `Vision [${sender}] img${j}`, target })
+          const descP = retryLLM(wrappedDescribe, { label: `Vision [${sender}] img${j}`, target, delays: VISION_RETRY_DELAYS })
             .then(desc => {
               addLog('llm', `🖼️ Vision [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
               describedCount++;
@@ -2327,6 +2366,8 @@ export async function startSocialLoop(config, onStatusChange) {
   let fetcherTimeoutId = null;
   // loopGeneration 在异步启动前生成；stop 即使发生在 STARTING 阶段也会使其失效。
   let dailyCompressTimeoutId = null; // 每日压缩定时器
+  let socialWatchdogTimeoutId = null; // 看门狗定时器（Intent 循环 + Fetcher 链）
+  let fetcherTickAt = Date.now();     // Fetcher 最近一次开始拉取的时间（看门狗用）
   const isRuntimeGenerationCurrent = () =>
     socialLoopGeneration === loopGeneration && activeLoop?._generation === loopGeneration;
   const canTargetDispatch = (target, { allowFullLurk = false } = {}) =>
@@ -2343,6 +2384,14 @@ export async function startSocialLoop(config, onStatusChange) {
   const INTENT_LLM_MAX_RETRIES = 3;             // LLM 调用失败后最多重试 3 次
   const INTENT_RETRY_DELAYS = [5000, 25000, 125000];           // 默认退避 5s/25s/125s
   const INTENT_RETRY_DELAYS_OVERLOAD = [32000, 64000, 128000]; // 上游 503/UNAVAILABLE 时用更长退避
+  const INTENT_WATCHDOG_CHECK_MS = 30 * 1000;      // 看门狗巡检间隔
+  // 停滞判定阈值：必须大于"最慢但正常"的一轮 eval。心跳打在每次工具调用/重试上，
+  // 单次 LLM 请求受后端 180s 超时约束，重试退避最长 128s——10 分钟没有任何心跳
+  // 只可能是真的卡死了。
+  const INTENT_WATCHDOG_TIMEOUT_MS = 10 * 60 * 1000;
+  // Fetcher 正常每 BATCH_POLL_INTERVAL_MS 一轮、单轮受 10s 工具超时约束；
+  // 2 分钟没开始新一轮说明 setTimeout 链断了（未捕获异常 / invoke 永不 settle）。
+  const FETCHER_WATCHDOG_TIMEOUT_MS = 2 * 60 * 1000;
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
   // ── Reply 并发派发 ──
   // 旧机制：replyWakeFlag (one-shot) → Reply loop 消费后启动单一 LLM。问题：Reply LLM 慢时，
@@ -2354,6 +2403,9 @@ export async function startSocialLoop(config, onStatusChange) {
   // 旧 replyWakeFlag/replyWakeResolvers 已废弃。
   const inFlightReplies = new Map();              // target → Array<{ id, brief, createdAt }>（按 push 顺序即时间顺序）
   const MAX_CONCURRENT_REPLY = 3;                 // 每 target Reply 并发上限
+  // 在途 Reply 的最大存活时间：超过即视为僵死并回收并发槽位。
+  // 正常一轮 Reply（含 Vision 预算 + LLM 重试 + MCP 发送）远低于此值。
+  const REPLY_TASK_MAX_AGE_MS = 10 * 60 * 1000;
 
   // === Lessons Review 机制 ===
   const LESSONS_MAX_WAIT_MS = 30 * 60 * 1000;       // 最长 30 分钟必须 review
@@ -2582,9 +2634,23 @@ JSON 数组格式，每条：
         _wake: null,          // 可中断 sleep 的 resolve 回调
         forceEval: null,      // 强制评估来源: null | 'reply' | 'subagent' | 'newmsg'
         postReplyRestUntil: 0, // Reply 发完后的休息截止时间（20s 内有新消息则提前结束）
+        // ── 看门狗字段 ──
+        heartbeatAt: Date.now(), // 最近一次"取得进展"的时间戳；卡在 await 里就不再更新
+        epoch: 0,               // 循环代次；看门狗重启时 +1，旧实例解冻后凭此自杀
+        targetType: null,       // 供看门狗重启时复用
       });
     }
     return intentMap.get(target);
+  };
+
+  /**
+   * 心跳：标记该 target 的 Intent 循环"仍在推进"。
+   * 必须打在每个可能长时间阻塞的 await 前后，以及 LLM 工具回调里——
+   * 这样一次正常的慢 eval（重试退避可达数分钟）不会被看门狗误判，
+   * 而真正永久挂起的 await 一定会让心跳停滞。
+   */
+  const touchIntent = (state) => {
+    if (state) state.heartbeatAt = Date.now();
   };
 
   /** 可中断的延迟（用于 intentLoop，支持通过 state._wake 提前唤醒） */
@@ -2981,7 +3047,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         }
         if (imageDescInflight.has(cacheKey)) {
           cachedCount++;
-          return imageDescInflight.get(cacheKey);
+          // 同上：复用 inflight 时也要吃掉 reject，避免一张图导致整轮 eval 抛异常
+          return imageDescInflight.get(cacheKey).catch(() => '[图片描述失败]');
         }
         const imgData = img.data || '';
         const imgPreview = imgData.startsWith('http') ? imgData.slice(0, 120) : `${img.mimeType || 'unknown'} base64(${Math.round(imgData.length / 1024)}KB)`;
@@ -2990,7 +3057,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           imageDescInflight.set(cacheKey, p);
           return p;
         };
-        return retryLLM(wrappedDescribe, { label: `Vision-pre [${sender}] img${j}`, target })
+        return retryLLM(wrappedDescribe, { label: `Vision-pre [${sender}] img${j}`, target, delays: VISION_RETRY_DELAYS })
           .then(desc => {
             addLog('llm', `🖼️ Vision-pre [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
             describedCount++;
@@ -3034,9 +3101,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   const intentLoop = async (target, targetType) => {
     const state = getIntentState(target);
     const tName = () => targetNamesCache.get(target) || target;
+    state.targetType = targetType;
+    // 本实例的代次快照：看门狗重启会 +1，旧实例从阻塞中解冻后凭此退出，
+    // 避免同一 target 出现两个并发 Intent 循环。
+    const myEpoch = state.epoch;
+    const isMyEpochCurrent = () => state.epoch === myEpoch;
+    touchIntent(state);
 
-    while (activeLoop && activeLoop._generation === loopGeneration) {
+    while (activeLoop && activeLoop._generation === loopGeneration && isMyEpochCurrent()) {
       try {
+        touchIntent(state);
         // ── 暂停检查 ──
         if (pausedTargets.get(target)) {
           await sleepInterruptible(state, 2000);
@@ -3210,7 +3284,18 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         }
 
         // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
-        await preprocessBufferImages(target);
+        // 关键路径不允许被图片描述无限期阻塞：超出预算就放手，未完成的描述在后台继续
+        // 落进 imageDescCache，下一轮 eval 命中缓存即可。
+        try {
+          await withHardTimeout(
+            preprocessBufferImages(target),
+            VISION_PREPROCESS_BUDGET_MS,
+            'Vision-pre',
+          );
+        } catch (e) {
+          addLog('warn', `🖼️ [${tName()}] 图片预处理超出预算，本轮跳过：${e.message || e}`, null, target);
+        }
+        touchIntent(state);
 
         // 记录 eval 前的水位线，用于检测 eval 期间是否有新消息到达
         const wmBeforeEval = intentWatermarks.get(target);
@@ -3300,12 +3385,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               },
               builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: promptConfig.botQQ, ownerQQ: promptConfig.ownerQQ, ownerName: promptConfig.ownerName, ownerSecret: eph?.ownerSecret || '', intentInjectionWatermarks, intentInterceptCounts, intentSituationSeen, consumedAtMeIds: consumedAtMe.get(target) || new Set(), addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, inFlightReplies, lurkMode: targetLurkMode, hasUnconsumedAtMe: getUnconsumedAtMeIds(target).length > 0, runtimeGuard: () => canTargetDispatch(target) },
               toolCallFilter: (name, args) => {
+                touchIntent(state);
                 if (
                   socialLoopGeneration !== loopGeneration
                   || activeLoop?._generation !== loopGeneration
                   || pausedTargets.get(target)
                 ) {
                   return 'Intent 已取消：Social Agent 已停止或目标已暂停。';
+                }
+                if (!isMyEpochCurrent()) {
+                  return 'Intent 已取消：本轮评估已被看门狗判定卡死并重启。';
                 }
                 if (
                   lurkModes.get(target) === 'full-lurk'
@@ -3351,6 +3440,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               toolResultAnnotation: ({ name, args, isError }) =>
                 recordIntentOptionalToolUse(optionalToolLedger, { name, args, isError }),
               onToolCall: (name, args) => {
+                touchIntent(state);
                 if (!isRuntimeGenerationCurrent()) return;
                 if (name === 'write_intent_plan') {
                   // 与 executor 同步应用 auto-fix（brief 非空但 actions 缺 reply → 自动补 reply）
@@ -3387,6 +3477,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                 addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args, null, 2), target);
               },
               onToolResult: (name, result, _toolCallId, isError) => {
+                touchIntent(state);
                 if (!isRuntimeGenerationCurrent()) return;
                 if (
                   lurkModes.get(target) === 'semi-lurk'
@@ -3435,9 +3526,11 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               },
             });
             intentResult = { content: raw.content, error: null };
+            touchIntent(state);
             break;
           } catch (e) {
-            if (!isRuntimeGenerationCurrent()) return;
+            touchIntent(state);
+            if (!isRuntimeGenerationCurrent() || !isMyEpochCurrent()) return;
             if (attempt < INTENT_LLM_MAX_RETRIES) {
               // 上游 503/UNAVAILABLE（Gemini high demand 等）用更长退避让上游恢复
               const errStr = String(e.message || e);
@@ -3446,13 +3539,15 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
               const retryDelay = delays[attempt] || 5000;
               addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in ${retryDelay / 1000}s${isOverload ? ', overload backoff' : ''}): ${e.message || e}`, e._debugBody || null, target);
               await sleepInterruptible(state, retryDelay);
+              touchIntent(state);
               continue;
             }
             intentResult = { content: e.message || e, error: true };
           }
         }
 
-        if (!isRuntimeGenerationCurrent()) return;
+        if (!isRuntimeGenerationCurrent() || !isMyEpochCurrent()) return;
+        touchIntent(state);
 
         // Write training trace exactly once per eval (final attempt outcome only)
         if (_shouldCollectTraining && _latestTrace) {
@@ -3529,6 +3624,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         const stickerActions = actions.filter(a => a.type === 'sticker');
         const canPlannedActionDispatch = () => {
           if (!canTargetDispatch(target)) return false;
+          // 被看门狗重启过的旧实例不得再产生任何外部副作用
+          if (!isMyEpochCurrent()) return false;
           const mode = lurkModes.get(target) || 'normal';
           return mode !== 'semi-lurk' || plannedActionAtMeIds.length > 0;
         };
@@ -3654,7 +3751,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // 并行预取当前对话人物档案，供下次 eval 注入（fire-and-forget）
         updatePeopleCache(target, targetType).catch(() => {});
 
-        if (replyAction) {
+        if (replyAction && isMyEpochCurrent()) {
           addLog('send', `💬 reply → ${tName()}`, null, target);
           // 直接派发 Reply 任务（fire-and-forget，并发上限 3 由 spawnReplyTask 内部管理）
           spawnReplyTask(target, targetType, {
@@ -3667,13 +3764,87 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             addLog('error', `spawnReplyTask 启动失败 ${tName()}`, e?.message || e, target);
           });
         }
+        // 已被看门狗替换的实例不得再进入 sleepInterruptible——否则会把 state._wake
+        // 覆盖成自己的 resolver，新实例的唤醒通道就失效了。
+        if (!isMyEpochCurrent()) break;
         await sleepInterruptible(state, 500);
       } catch (e) {
-        if (!isRuntimeGenerationCurrent()) return;
+        touchIntent(state);
+        if (!isRuntimeGenerationCurrent() || !isMyEpochCurrent()) return;
         addLog('intent', `Intent loop error [${tName()}]`, e.message || e, target);
         await sleepInterruptible(state, 2000);
       }
     }
+    if (!isMyEpochCurrent()) {
+      addLog('debug', `Intent [${tName()}] 旧实例退出（已被看门狗替换）`, null, target);
+    }
+  };
+
+  /**
+   * Intent 看门狗：兜住任何"await 永不返回"导致的静默睡死。
+   *
+   * Intent 是唯一的发言派发者——它一卡，Fetcher/Observer 日志照刷、状态照显示
+   * active，但这个 target 再也不会说话。心跳由 intentLoop 在每个推进点打点；
+   * 超过 INTENT_WATCHDOG_TIMEOUT_MS 没有任何进展就判定卡死，bump epoch 让旧实例
+   * 解冻后自杀，并原地重启一个新循环（IntentState 复用，lastPlan/水位线不丢）。
+   */
+  const socialWatchdogTick = () => {
+    if (!isRuntimeGenerationCurrent()) return;
+    const now = Date.now();
+
+    // ── Fetcher 链：断了就没有任何 target 会再收到新消息 ──
+    const fetcherStalledMs = now - fetcherTickAt;
+    if (fetcherStalledMs > FETCHER_WATCHDOG_TIMEOUT_MS) {
+      addLog(
+        'error',
+        `🐕 看门狗：Fetcher 已 ${Math.round(fetcherStalledMs / 1000)}s 未开始新一轮拉取，重启轮询链`,
+      );
+      fetcherTickAt = now;
+      // scheduleFetcher 会先清掉已有定时器，旧实例若稍后恢复也只会重排出一条链
+      scheduleFetcher();
+    }
+
+    for (const [target, state] of intentMap) {
+      if (!state.targetType) continue;      // 该 target 的循环还没起过
+      if (pausedTargets.get(target)) {
+        touchIntent(state);                  // 暂停期间不计入卡死
+        continue;
+      }
+      const stalledMs = now - (state.heartbeatAt || 0);
+      if (stalledMs <= INTENT_WATCHDOG_TIMEOUT_MS) continue;
+
+      const tName = targetNamesCache.get(target) || target;
+      addLog(
+        'error',
+        `🐕 看门狗：[${tName}] Intent 循环已停滞 ${Math.round(stalledMs / 1000)}s，判定卡死并重启`,
+        `epoch ${state.epoch} → ${state.epoch + 1}；上次 eval 于 ${state.lastEvalTime ? new Date(state.lastEvalTime).toISOString() : '从未'}`,
+        target,
+      );
+      // 让旧实例失效：它从阻塞中恢复后会在 while 条件 / epoch 检查处退出
+      state.epoch++;
+      state.heartbeatAt = now;
+      if (state.loopTimeoutId !== null) {
+        clearTimeout(state.loopTimeoutId);
+        state.loopTimeoutId = null;
+      }
+      if (state._wake) { state._wake(); state._wake = null; }
+      // 卡死那轮可能残留了"评估中"的痕迹，强制新实例立刻重评一次
+      state.forceEval = state.forceEval || 'newmsg';
+      state.postReplyRestUntil = 0;
+      intentLoop(target, state.targetType); // fire-and-forget，新 epoch
+    }
+  };
+
+  const scheduleSocialWatchdog = () => {
+    if (!isRuntimeGenerationCurrent()) return;
+    socialWatchdogTimeoutId = setTimeout(() => {
+      try {
+        socialWatchdogTick();
+      } catch (e) {
+        addLog('warn', `看门狗执行失败: ${e.message || e}`);
+      }
+      scheduleSocialWatchdog();
+    }, INTENT_WATCHDOG_CHECK_MS);
   };
 
   // ============ 层1: Fetcher — 定时 batch 拉取，写入 dataBuffer ============
@@ -3685,8 +3856,9 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
    */
   const fetcherLoop = async () => {
     if (!activeLoop || activeLoop._generation !== loopGeneration) return;
-    
+
     const t0 = Date.now();
+    fetcherTickAt = t0; // 心跳：卡在本轮内部时时间戳不再前进，看门狗据此重启轮询链
     const batchToolName = `${config.mcpServerName}__batch_get_recent_context`;
     
     let targetResults = [];
@@ -3816,6 +3988,12 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   };
   
   const scheduleFetcher = () => {
+    // 先清掉可能已存在的定时器：看门狗重启轮询链后，旧实例若稍后恢复并再次
+    // scheduleFetcher，也只会保留一条链，不会出现重复轮询。
+    if (fetcherTimeoutId !== null) {
+      clearTimeout(fetcherTimeoutId);
+      fetcherTimeoutId = null;
+    }
     if (activeLoop && activeLoop._generation === loopGeneration) {
       fetcherTimeoutId = setTimeout(fetcherLoop, BATCH_POLL_INTERVAL_MS);
     }
@@ -4016,6 +4194,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       }
     }
     const list = inFlightReplies.get(target) || [];
+    // 回收僵死槽位：若某个 Reply 任务因底层 await 永不返回而进不到 finally，
+    // 它会永久占着并发额度，最终让这个 target 的所有 reply 都被"并发已达上限"丢弃。
+    // 这里按最大存活时间强制回收（原任务真的醒来时 finally 里 findIndex 会落空，无副作用）。
+    for (let i = list.length - 1; i >= 0; i--) {
+      const age = Date.now() - (list[i].createdAt || 0);
+      if (age > REPLY_TASK_MAX_AGE_MS) {
+        addLog('warn', `⚠️ ${label} Reply 任务已 ${Math.round(age / 60000)} 分钟未结束，回收并发槽位`, null, target);
+        list.splice(i, 1);
+      }
+    }
     if (list.length >= MAX_CONCURRENT_REPLY) {
       addLog('warn', `⚠️ ${label} Reply 并发已达上限 (${list.length}/${MAX_CONCURRENT_REPLY})，本次 reply 跳过`, null, target);
       return;
@@ -4226,6 +4414,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         clearTimeout(dailyCompressTimeoutId);
         dailyCompressTimeoutId = null;
       }
+      if (socialWatchdogTimeoutId !== null) {
+        clearTimeout(socialWatchdogTimeoutId);
+        socialWatchdogTimeoutId = null;
+      }
       for (const [, iState] of intentMap) {
         if (iState.loopTimeoutId !== null) {
           clearTimeout(iState.loopTimeoutId);
@@ -4383,7 +4575,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     getIntentState(t.target); // 预注册
     intentLoop(t.target, t.targetType); // fire-and-forget
   }
-  
+
+  // 看门狗：监控 Fetcher 轮询链 + 各 target 的 Intent 循环是否卡死
+  scheduleSocialWatchdog();
+
   onStatusChange?.(true);
   addLog('info', 'Social loop started successfully');
   return true;
