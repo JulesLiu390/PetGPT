@@ -88,9 +88,13 @@ test('intent plan validation rejects malformed and mode-forbidden actions', () =
   );
   assert.match(
     socialTools.validateIntentPlanArgs(
-      { state, brief: `[观点]\n${'字'.repeat(150)}`, actions: [{ type: 'reply' }] },
+      {
+        state,
+        brief: `[观点]\n${'字'.repeat(socialTools.REPLY_BRIEF_HARD_MAX_CHARS)}`,
+        actions: [{ type: 'reply' }],
+      },
     ),
-    /超过 150 字/,
+    /超过 500 字上限/,
   );
   assert.match(
     socialTools.validateIntentPlanArgs(
