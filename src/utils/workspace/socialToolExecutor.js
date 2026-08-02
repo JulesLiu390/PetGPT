@@ -32,8 +32,17 @@ const KNOWN_TARGETS_PATH = 'social/targets.json';
 /** 历史查询返回最大字符数 */
 export const HISTORY_READ_MAX_CHARS = 8000;
 
-/** 单个社交文件最大字符数（写入时校验） */
+/**
+ * 单个社交文件的**建议体量**：prompt 注入与 social_read 返回都按这个值截断。
+ * 不是写入判定标准——写超了只是读回来看不全，不会整篇被拒。
+ */
 export const SOCIAL_FILE_MAX_CHARS = 20000;
+
+/**
+ * social_write 的硬上限。只用来兜住"模型失控倾泻"这一种情况，
+ * 不承担内容长度标准的职责——正常长文该写就写，读回来时自动截断。
+ */
+export const SOCIAL_FILE_WRITE_HARD_MAX_CHARS = 200000;
 
 /**
  * MCP transports may resolve failures instead of rejecting. Sending code must
@@ -348,6 +357,17 @@ async function executeSocialRead(petId, args) {
 
   try {
     const content = await tauri.workspaceRead(petId, canonicalPath);
+    // 大文件优雅降级：只回前 SOCIAL_FILE_MAX_CHARS 字符并明确告知，
+    // 避免一个失控的大文件把整轮 context 撑爆（写入侧已放宽，读取侧兜住）。
+    if (content && content.length > SOCIAL_FILE_MAX_CHARS) {
+      const head = content.slice(0, SOCIAL_FILE_MAX_CHARS);
+      return {
+        content: [{
+          type: 'text',
+          text: `${head}\n\n（⚠️ 本文件共 ${content.length} 字符，以上只是前 ${SOCIAL_FILE_MAX_CHARS} 字符。要改后面的内容请用 social_edit 精确替换；文件太大建议先精简。）`,
+        }],
+      };
+    }
     return { content: [{ type: 'text', text: content || '（空文件）' }] };
   } catch (e) {
     if (e?.toString?.()?.includes('不存在') || e?.toString?.()?.includes('FileNotFound')) {
@@ -364,8 +384,8 @@ async function executeSocialWrite(petId, args) {
   const canonicalPath = canonicalizeSocialPath(path);
   if (!canonicalPath) return { error: '路径必须是 social/ 下的安全文件路径' };
   if (isReadOnlyPath(canonicalPath)) return { error: `${canonicalPath} 是系统自动维护的只读文件，不允许手动写入。` };
-  if (content.length > SOCIAL_FILE_MAX_CHARS) {
-    return { error: `内容超出单文件上限（${SOCIAL_FILE_MAX_CHARS} 字符），请精简后重试。` };
+  if (content.length > SOCIAL_FILE_WRITE_HARD_MAX_CHARS) {
+    return { error: `内容超出单文件硬上限（${SOCIAL_FILE_WRITE_HARD_MAX_CHARS} 字符），请拆成多个文件。` };
   }
 
   try {
@@ -1502,6 +1522,13 @@ export function autoFixPlanArgs(args) {
 const INTENT_ACTION_TYPES = new Set(['reply', 'sticker', 'image', 'wait']);
 const REPLY_BRIEF_TIERS = new Set(['接梗', '闲扯', '观点', '展开', '深答']);
 export const MAX_INTENT_ACTIONS = 3;
+/**
+ * brief 长度硬上限。
+ * prompt 里给的是 150 字的**建议**（见 socialPromptBuilder 与本工具的 description）——
+ * 那是希望它写得克制，不是判定标准。真正超纲才拒绝，否则一次超几十字就要整轮重来，
+ * 白烧一次 eval。
+ */
+export const REPLY_BRIEF_HARD_MAX_CHARS = 500;
 const INTENT_ACTION_LIMITS = Object.freeze({
   reply: 1,
   sticker: 1,
@@ -1589,8 +1616,8 @@ export function validateIntentPlanArgs({ state, brief, actions }, context = {}) 
     if (!tierMatch || !REPLY_BRIEF_TIERS.has(tierMatch[1])) {
       return 'brief 第 1 行必须且只能是档位标签：[接梗] / [闲扯] / [观点] / [展开] / [深答]';
     }
-    if (Array.from(briefText).length > 150) {
-      return `brief 全文超过 150 字（当前 ${Array.from(briefText).length} 字）`;
+    if (Array.from(briefText).length > REPLY_BRIEF_HARD_MAX_CHARS) {
+      return `brief 全文超过 ${REPLY_BRIEF_HARD_MAX_CHARS} 字上限（当前 ${Array.from(briefText).length} 字），请压缩到 150 字左右`;
     }
   }
 
@@ -2532,8 +2559,10 @@ async function executeWebshotSend(args, context) {
 
 // ============ voice_send（ElevenLabs TTS → qq mcp send_voice） ============
 
-/** voice_send 文字硬限：超过即拒绝（控费 + SILK 时长） */
+/** voice_send 建议长度：写进 description 引导模型，不作判定 */
 const VOICE_SEND_MAX_CHARS = 50;
+/** voice_send 硬上限：只拦真正失控的长文（控费 + SILK 时长），略微超出建议不拒绝 */
+const VOICE_SEND_HARD_MAX_CHARS = 200;
 
 /** 获取 voice_send 工具定义 */
 export function getVoiceSendToolDefinition() {
@@ -2592,8 +2621,8 @@ async function executeVoiceSend(args, context) {
   if (!text) {
     return { error: 'text 为空' };
   }
-  if (text.length > VOICE_SEND_MAX_CHARS) {
-    const err = `text 超过 ${VOICE_SEND_MAX_CHARS} 字（实际 ${text.length}），拒绝发送`;
+  if (text.length > VOICE_SEND_HARD_MAX_CHARS) {
+    const err = `text 超过 ${VOICE_SEND_HARD_MAX_CHARS} 字硬上限（实际 ${text.length}），拒绝发送；语音请控制在 ${VOICE_SEND_MAX_CHARS} 字左右`;
     await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
     return { error: err };
   }
