@@ -8,6 +8,7 @@ mod skills;
 mod subagent;
 mod platform;
 mod window_layout;
+mod qq_connector;
 mod commands;
 #[cfg(target_os = "linux")]
 mod linux_shortcuts;
@@ -2955,6 +2956,11 @@ pub fn run() {
             let mcp_manager = Arc::new(tokio::sync::RwLock::new(McpManager::new()));
             app.manage(mcp_manager);
 
+            // Initialize the optional, on-demand native QQ connector. It never
+            // downloads or starts anything until the user explicitly asks.
+            let qq_connector_dir = app_data_dir.join("connectors").join("qq");
+            app.manage(Arc::new(qq_connector::QqConnectorManager::new(qq_connector_dir)));
+
             // Initialize LLM client
             let llm_client: LlmState = Arc::new(LlmClient::new());
             app.manage(llm_client);
@@ -3370,6 +3376,18 @@ pub fn run() {
             mcp_cancel_all_tool_calls,
             mcp_reset_cancellation,
             mcp_set_sampling_config,
+            // Managed native QQ connector (no Docker)
+            qq_connector::qq_connector_status,
+            qq_connector::qq_connector_install_mcp,
+            qq_connector::qq_connector_install_napcat,
+            qq_connector::qq_connector_open_installer,
+            qq_connector::qq_connector_launch_napcat,
+            qq_connector::qq_connector_stop_napcat,
+            qq_connector::qq_connector_webui_login,
+            qq_connector::qq_connector_get_login_state,
+            qq_connector::qq_connector_refresh_qr,
+            qq_connector::qq_connector_list_accounts,
+            qq_connector::qq_connector_complete_setup,
             // File handling commands
             save_file,
             save_image_to_path,

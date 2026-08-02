@@ -125,6 +125,26 @@ impl Database {
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN api_key TEXT", []);
         let _ = conn.execute("ALTER TABLE mcp_servers ADD COLUMN max_iterations INTEGER", []);
 
+        // Native QQ connector accounts. Runtime binaries and login data live in
+        // app-data; this table only maps a QQ identity to its managed MCP server.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS qq_accounts (
+                uin TEXT PRIMARY KEY,
+                nickname TEXT,
+                avatar_url TEXT,
+                mcp_server_id TEXT NOT NULL,
+                provider TEXT NOT NULL,
+                http_port INTEGER NOT NULL DEFAULT 3000,
+                ws_port INTEGER NOT NULL DEFAULT 3001,
+                webui_port INTEGER NOT NULL DEFAULT 6099,
+                last_login_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (mcp_server_id) REFERENCES mcp_servers(id) ON DELETE CASCADE
+            )",
+            [],
+        )?;
+
         // Migration: add is_deleted to pets
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN is_deleted INTEGER DEFAULT 0", []);
 

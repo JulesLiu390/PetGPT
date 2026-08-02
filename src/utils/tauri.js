@@ -6,11 +6,31 @@
  */
 
 import { invoke } from '@tauri-apps/api/core';
-import { listen } from '@tauri-apps/api/event';
+import { emit, listen } from '@tauri-apps/api/event';
 import { ask, open as dialogOpen } from '@tauri-apps/plugin-dialog';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { readTextFile } from '@tauri-apps/plugin-fs';
 import { normalizeChatWindowActivation } from './chatFocusModel.js';
+
+const subscribeToTauriEvent = (eventName, callback) => {
+  const hasEventRuntime = typeof window !== 'undefined'
+    && typeof window.__TAURI_INTERNALS__?.transformCallback === 'function';
+  if (!hasEventRuntime) return () => {};
+
+  let unlisten = null;
+  let cancelled = false;
+  listen(eventName, callback).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  }).catch((error) => {
+    console.warn(`[tauri.events] Failed to listen for ${eventName}:`, error);
+  });
+
+  return () => {
+    cancelled = true;
+    if (unlisten) unlisten();
+  };
+};
 
 // ==================== Dialog ====================
 
@@ -536,6 +556,25 @@ export const mcp = {
   cancelAllToolCalls: () => invoke('mcp_cancel_all_tool_calls'),
   resetCancellation: () => invoke('mcp_reset_cancellation'),
   setSamplingConfig: (serverId, config) => invoke('mcp_set_sampling_config', { serverId, config }),
+  emitServersUpdated: (payload = {}) => emit('mcp-servers-updated', payload),
+  onServersUpdated: (callback) => subscribeToTauriEvent('mcp-servers-updated', callback),
+};
+
+// ==================== Managed native QQ connector ====================
+
+export const qqConnector = {
+  status: () => invoke('qq_connector_status'),
+  installMcp: () => invoke('qq_connector_install_mcp'),
+  installNapcat: () => invoke('qq_connector_install_napcat'),
+  openInstaller: () => invoke('qq_connector_open_installer'),
+  launchNapcat: (qq = null) => invoke('qq_connector_launch_napcat', { qq }),
+  stopNapcat: () => invoke('qq_connector_stop_napcat'),
+  webuiLogin: (request) => invoke('qq_connector_webui_login', { request }),
+  getLoginState: () => invoke('qq_connector_get_login_state'),
+  refreshQr: () => invoke('qq_connector_refresh_qr'),
+  listAccounts: () => invoke('qq_connector_list_accounts'),
+  completeSetup: (request = {}) => invoke('qq_connector_complete_setup', { request }),
+  onProgress: (callback) => subscribeToTauriEvent('qq-connector-progress', callback),
 };
 
 // ==================== File Operations ====================

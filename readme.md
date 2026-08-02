@@ -77,6 +77,12 @@ Extend AI capabilities with external tools:
 - **Tool Execution** — AI can call tools automatically during conversations
 - **Server Management** — Start, stop, and configure MCP servers from the UI
 - **Per-Conversation Tools** — Enable/disable tools per chat session
+- **Built-in QQ Connector** — Download a managed QQ-MCP runtime and official native NapCat package on demand, complete QQ QR login, and persist the QQ account → MCP server mapping without Docker
+
+Open **Management → MCP** to use the built-in QQ setup wizard. PetGPT keeps the
+Python runtime under its app-data directory, restricts NapCat WebUI access and
+OneBot adapters to localhost, and generates a separate OneBot access token.
+NapCat's official macOS installer still requires its guided QQ patch step.
 
 ### 🧩 Per-Assistant Skills
 

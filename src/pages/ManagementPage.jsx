@@ -22,6 +22,7 @@ import { emit, listen } from '@tauri-apps/api/event';
 import PseudoLive2DCharacter from "../components/Avatar/PseudoLive2DCharacter";
 import SkillsPanel from "../components/Settings/SkillsPanel";
 import AssistantSkillsSelector from "../components/Settings/AssistantSkillsSelector";
+import QqConnectorPanel from "../components/Settings/QqConnectorPanel";
 
 // ==================== Shared Components ====================
 
@@ -2259,6 +2260,7 @@ const McpServersPanel = () => {
 
       {/* Scrollable content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3 space-y-3">
+        {!showForm && <QqConnectorPanel onReady={loadServers} />}
         {showForm ? (
           <Card
             title={editingServer ? `Edit: ${editingServer.name}` : "New MCP Server"}
