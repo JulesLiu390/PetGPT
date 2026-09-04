@@ -542,4 +542,8 @@ plans.
 
 ## 📄 License
 
-License metadata: `MIT` in [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml).
+PetGPT is licensed under the [MIT License](LICENSE).
+
+Copyright (c) 2026 JulesLiu390 and PetGPT contributors.
+
+Third-party dependencies and assets remain subject to their respective licenses.
