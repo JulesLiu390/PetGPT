@@ -47,5 +47,22 @@
     "globals": "^15.15.0",
     "tailwindcss": "^4.0.14",
     "vite": "^6.2.0"
+  },
+  "overrides": {
+    "@tailwindcss/vite": {
+      "nanoid": "5.1.16"
+    },
+    "@vitejs/plugin-react": {
+      "nanoid": "5.1.16"
+    },
+    "nanoid": {
+      "nanoid": "5.1.16"
+    },
+    "postcss": {
+      "nanoid": "5.1.16"
+    },
+    "vite": {
+      "nanoid": "5.1.16"
+    }
   }
 }
