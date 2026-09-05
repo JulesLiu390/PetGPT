@@ -103,7 +103,38 @@ Extend AI capabilities with external tools:
 Open **Management → MCP** to use the built-in QQ setup wizard. PetGPT keeps the
 Python runtime under its app-data directory, restricts NapCat WebUI access and
 OneBot adapters to localhost, and generates a separate OneBot access token.
-NapCat's official macOS installer still requires its guided QQ patch step.
+On macOS, the wizard prepares a private copy of an installed `/Applications/QQ.app`
+and patches that copy only; the original QQ app remains unchanged.
+
+#### Linux QQ setup
+
+The Linux wizard follows the same managed flow: install → start → scan → register.
+The official NapCat AppImage includes QQ and runs with `--appimage-extract-and-run`,
+so neither a separate QQ installation nor FUSE setup is required.
+
+1. Open **Management → MCP → Built-in QQ Connector**. If system dependencies are
+   missing, click **Install Linux Dependencies** and approve the desktop's
+   administrator authentication dialog. Automatic installation supports apt,
+   dnf and pacman with `pkexec`; otherwise the wizard shows manual instructions.
+2. Click **Install QQ-MCP** and **Download NapCat AppImage**. Downloads are selected
+   for x86_64 or aarch64 and checked against the release's SHA-256 digest.
+3. Click **Start NapCat**. PetGPT waits for the local WebUI, loads the managed
+   token and connects automatically. Scan the QR code in the wizard; if WebUI
+   2FA is enabled, enter its code first. A saved QQ session can use quick login.
+4. Click **Configure and Add MCP** to create the localhost-only OneBot adapters
+   and register the QQ account's MCP service.
+
+QQ data, NapCat configuration, QR cache and startup logs stay under
+`<app-data>/connectors/qq/qq-isolated/profile/`, separate from your ordinary QQ
+profile. Token and 2FA settings survive restarts and runtime updates. The wizard
+shows missing `xvfb-run`/`Xvfb`/`xauth` dependencies, port conflicts, startup errors
+and the log path. System dependency installation also includes libgbm. **Stop**
+terminates the managed process group, including QQ and its virtual display.
+
+NapCat runs with Electron's sandbox disabled; a separate data directory is not
+a security sandbox. Upgrading from the earlier Linux launcher uses this new
+private profile, so you may need to scan again; existing data is not migrated
+or deleted automatically.
 
 ### 🧩 Per-Assistant Skills
 

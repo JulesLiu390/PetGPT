@@ -9,6 +9,7 @@ import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/sub
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { normalizeApiProviders } from "../utils/apiProviders";
 import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
+import SocialPreflightBar from "../components/Social/SocialPreflightBar";
 import { listen, emit } from "@tauri-apps/api/event";
 
 // ==================== SocialPage ====================
@@ -48,6 +49,7 @@ export default function SocialPage() {
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
   const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
+  const [preflight, setPreflight] = useState(null); // dependency chain: NapCat → QQ account → MCP process
 
   useEffect(() => {
     selectedPetIdRef.current = selectedPetId;
@@ -702,6 +704,13 @@ export default function SocialPage() {
         alert('Failed to stop social agent: ' + (error?.message || error));
       }
     } else {
+      // The MCP process starting is not the same as the chain working: a stdio
+      // MCP server spawns fine while NapCat is down, and the agent then polls
+      // forever without ever receiving a message. Refuse to start instead.
+      if (preflight && !preflight.canStart) {
+        alert(preflight.summary || 'Social agent prerequisites are not ready. See Preflight above.');
+        return;
+      }
       const operationPetId = selectedPetId;
       setIsStarting(true);
       try {
@@ -895,7 +904,8 @@ export default function SocialPage() {
             </button>
             <button
               onClick={handleToggle}
-              disabled={!selectedPetId || isStarting}
+              disabled={!selectedPetId || isStarting || (!socialActive && preflight ? !preflight.canStart : false)}
+              title={!socialActive && preflight && !preflight.canStart ? preflight.summary : undefined}
               className={`no-drag px-3 py-1.5 text-xs font-medium rounded-lg ${
                 socialActive
                   ? 'bg-red-500 text-white hover:bg-red-600'
@@ -908,6 +918,12 @@ export default function SocialPage() {
             </button>
           </div>
         }
+      />
+
+      {/* Preflight — dependency chain that must be up before Start does anything */}
+      <SocialPreflightBar
+        mcpServerName={config.mcpServerName}
+        onReportChange={setPreflight}
       />
 
       {/* Main Content */}

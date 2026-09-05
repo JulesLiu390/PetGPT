@@ -23,6 +23,7 @@ import PseudoLive2DCharacter from "../components/Avatar/PseudoLive2DCharacter";
 import SkillsPanel from "../components/Settings/SkillsPanel";
 import AssistantSkillsSelector from "../components/Settings/AssistantSkillsSelector";
 import QqConnectorPanel from "../components/Settings/QqConnectorPanel";
+import SocialPreflightBar from "../components/Social/SocialPreflightBar";
 
 // ==================== Shared Components ====================
 
@@ -3547,6 +3548,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
   const [saving, setSaving] = useState(false);
   const [socialActive, setSocialActive] = useState(false);
   const [socialStarting, setSocialStarting] = useState(false);
+  const [preflight, setPreflight] = useState(null); // dependency chain: NapCat → QQ account → MCP process
 
   useEffect(() => {
     selectedPetIdRef.current = selectedPetId;
@@ -3778,6 +3780,13 @@ const SocialPanel = ({ assistants, apiProviders }) => {
       if (socialActive) {
         await emit('social-stop', { petId: selectedPetId });
       } else {
+        // A spawned MCP process does not mean the chain works: it starts fine
+        // while NapCat is down, and the agent then polls forever without ever
+        // receiving a message. Refuse to start instead.
+        if (preflight && !preflight.canStart) {
+          alert(preflight.summary || 'Social agent prerequisites are not ready. See Preflight above.');
+          return;
+        }
         const operationPetId = selectedPetId;
         setSocialStarting(true);
         const configToStart = { ...buildConfigToSave(), petId: operationPetId };
@@ -3828,7 +3837,8 @@ const SocialPanel = ({ assistants, apiProviders }) => {
           </button>
           <button
             onClick={handleToggle}
-            disabled={!selectedPetId || socialStarting}
+            disabled={!selectedPetId || socialStarting || (!socialActive && preflight ? !preflight.canStart : false)}
+            title={!socialActive && preflight && !preflight.canStart ? preflight.summary : undefined}
             className={`px-3 py-1.5 text-xs font-medium rounded-lg ${
               socialActive 
                 ? 'bg-red-500 text-white hover:bg-red-600' 
@@ -3839,6 +3849,12 @@ const SocialPanel = ({ assistants, apiProviders }) => {
           </button>
         </div>
       </div>
+
+      {/* Preflight — dependency chain that must be up before Start does anything */}
+      <SocialPreflightBar
+        mcpServerName={config.mcpServerName}
+        onReportChange={setPreflight}
+      />
 
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">

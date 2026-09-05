@@ -566,11 +566,16 @@ export const qqConnector = {
   status: () => invoke('qq_connector_status'),
   installMcp: () => invoke('qq_connector_install_mcp'),
   installNapcat: () => invoke('qq_connector_install_napcat'),
+  installLinuxDependencies: () => invoke('qq_connector_install_linux_dependencies'),
   openInstaller: () => invoke('qq_connector_open_installer'),
   launchNapcat: (qq = null) => invoke('qq_connector_launch_napcat', { qq }),
   stopNapcat: () => invoke('qq_connector_stop_napcat'),
   webuiLogin: (request) => invoke('qq_connector_webui_login', { request }),
   getLoginState: () => invoke('qq_connector_get_login_state'),
+  /** 轻量在线探测：自动重连 WebUI 会话，不取二维码，可安全轮询 */
+  loginProbe: () => invoke('qq_connector_login_probe'),
+  /** 尝试用本地残留会话免扫码登录；登不上会返回未登录的探测结果 */
+  ensureLogin: () => invoke('qq_connector_ensure_login'),
   refreshQr: () => invoke('qq_connector_refresh_qr'),
   listAccounts: () => invoke('qq_connector_list_accounts'),
   completeSetup: (request = {}) => invoke('qq_connector_complete_setup', { request }),

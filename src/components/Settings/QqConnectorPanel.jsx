@@ -2,6 +2,8 @@ import React, { useCallback, useEffect, useState } from 'react';
 import { FaArrowUpRightFromSquare, FaCheck, FaDownload, FaPlay, FaRotate, FaStop } from 'react-icons/fa6';
 import { Alert, Badge, Button, Card, FormGroup, Input } from '../UI/ui';
 import * as tauri from '../../utils/tauri';
+import { useI18n } from '../../i18n/context.js';
+import { startAndConnectNapcat } from './qqConnectorSetup.js';
 
 const formatBytes = (value) => {
   if (!Number.isFinite(value) || value <= 0) return '';
@@ -30,6 +32,7 @@ const Step = ({ number, title, done, children }) => (
 );
 
 export default function QqConnectorPanel({ onReady }) {
+  const { t } = useI18n();
   const [status, setStatus] = useState(null);
   const [busy, setBusy] = useState('');
   const [progress, setProgress] = useState(null);
@@ -65,12 +68,14 @@ export default function QqConnectorPanel({ onReady }) {
     setBusy(name);
     setError('');
     setNotice('');
+    setProgress(null);
     try {
       const result = await action();
       await refreshStatus();
       return result;
     } catch (e) {
       setError(errorText(e));
+      await refreshStatus().catch(() => {});
       return null;
     } finally {
       setBusy('');
@@ -98,6 +103,23 @@ export default function QqConnectorPanel({ onReady }) {
     return () => window.clearInterval(timer);
   }, [authenticated, loginState?.isLogin, checkLogin]);
 
+  useEffect(() => {
+    if (!status?.napcatRunning) return undefined;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await tauri.qqConnector.status();
+        setStatus(next);
+        if (!next.napcatRunning) {
+          setAuthenticated(false);
+          setLoginState(null);
+        }
+      } catch {
+        // Keep the last known state; normal actions surface connector errors.
+      }
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [status?.napcatRunning]);
+
   const connectWebui = async () => {
     setBusy('webui');
     setError('');
@@ -110,7 +132,6 @@ export default function QqConnectorPanel({ onReady }) {
       setRequire2fa(Boolean(result.require2fa));
       setAuthenticated(Boolean(result.authenticated));
       if (result.authenticated) {
-        setWebuiToken('');
         setTotpCode('');
       }
     } catch (e) {
@@ -136,24 +157,57 @@ export default function QqConnectorPanel({ onReady }) {
 
   const downloading = progress?.downloaded && progress?.total;
   const percentage = downloading ? Math.min(100, Math.round((progress.downloaded / progress.total) * 100)) : 0;
-  const nativeLabel = status?.platform === 'linux' ? 'Download NapCat AppImage' : 'Download Native Installer';
+  const isMac = status?.platform === 'macos';
+  const isLinux = status?.platform === 'linux';
+  const isManaged = isMac || isLinux;
+  const dependencies = status?.linuxDependencies;
+  const missingDependencies = dependencies?.missing || [];
+  const nativeLabel = t(isMac
+    ? 'Prepare Isolated QQ + NapCat'
+    : status?.platform === 'linux' ? 'Download NapCat AppImage' : 'Download Native Installer');
+  const updateNativeLabel = t(isMac ? 'Rebuild Isolated QQ + Update NapCat' : 'Update Native NapCat');
+
+  const launchNapcat = async () => {
+    setAuthenticated(false);
+    setLoginState(null);
+    setRequire2fa(false);
+    const result = await run('launch', () => {
+      setProgress({ message: 'Starting NapCat and waiting for WebUI. First launch may take up to 60 seconds.' });
+      return startAndConnectNapcat(tauri.qqConnector, { qq, managed: isManaged });
+    });
+    if (result?.launch?.webuiToken) {
+      setWebuiToken(result.launch.webuiToken);
+      setWebuiUrl('http://127.0.0.1:6099');
+    }
+    if (result?.session) {
+      setAuthenticated(Boolean(result.session.authenticated));
+      setRequire2fa(Boolean(result.session.require2fa));
+      if (result.session.authenticated) {
+        setTotpCode('');
+        setNotice(t('NapCat started and WebUI connected. Scan the QR code to sign in.'));
+      }
+    }
+    if (result?.connectionError) {
+      setError(result.connectionError);
+    }
+  };
 
   return (
     <Card
-      title="Built-in QQ Connector"
-      description="Install QQ-MCP and the official native NapCat runtime without Docker. Components are downloaded only when requested."
-      action={<Badge tone={setupResult || accounts.length ? 'green' : 'blue'}>{setupResult || accounts.length ? 'Ready' : 'No Docker'}</Badge>}
+      title={t('Built-in QQ Connector')}
+      description={t('Install QQ-MCP and the official native NapCat runtime without Docker. Components are downloaded only when requested.')}
+      action={<Badge tone={setupResult || accounts.length ? 'green' : 'blue'}>{t(setupResult || accounts.length ? 'Ready' : 'No Docker')}</Badge>}
     >
       <div className="space-y-3">
-        {error && <Alert tone="red">{error}</Alert>}
-        {notice && <Alert tone="green">{notice}</Alert>}
+        {error && <Alert tone="red">{t(error)}</Alert>}
+        {notice && <Alert tone="green">{t(notice)}</Alert>}
         {accounts.length > 0 && (
           <div className="rounded-xl border border-emerald-100 bg-emerald-50/70 p-3">
-            <div className="text-xs font-semibold text-emerald-800 mb-2">Connected QQ accounts</div>
+            <div className="text-xs font-semibold text-emerald-800 mb-2">{t('Connected QQ accounts')}</div>
             <div className="flex flex-wrap gap-2">
               {accounts.map((account) => (
                 <Badge key={account.uin} tone="green">
-                  {account.nickname || 'QQ'} · {account.uin} → {account.serverName}
+                  <span data-i18n-ignore>{account.nickname || 'QQ'} · {account.uin} → {account.serverName}</span>
                 </Badge>
               ))}
             </div>
@@ -162,7 +216,7 @@ export default function QqConnectorPanel({ onReady }) {
         {progress && busy && (
           <div className="rounded-xl border border-blue-100 bg-blue-50 p-3 space-y-2">
             <div className="flex justify-between gap-3 text-xs text-blue-800">
-              <span>{progress.message}</span>
+              <span>{t(progress.message)}</span>
               {downloading && <span>{formatBytes(progress.downloaded)} / {formatBytes(progress.total)}</span>}
             </div>
             {downloading && (
@@ -173,7 +227,26 @@ export default function QqConnectorPanel({ onReady }) {
           </div>
         )}
 
-        <Step number="1" title="Install managed runtimes" done={status?.mcpInstalled && status?.napcatPackageReady}>
+        <Step number="1" title={t('Install managed runtimes')} done={status?.mcpInstalled && status?.napcatPackageReady && missingDependencies.length === 0}>
+          {isLinux && missingDependencies.length > 0 && (
+            <div className="space-y-2 mb-3">
+              <Alert tone="yellow">
+                {t('Linux system dependencies are missing:')} <span data-i18n-ignore>{missingDependencies.join(', ')}</span>
+                <div>{t('Install them below. Your system may ask for an administrator password.')}</div>
+              </Alert>
+              <Button type="button" disabled={Boolean(busy) || !dependencies?.canInstall}
+                onClick={() => run('dependencies', () => tauri.qqConnector.installLinuxDependencies())}>
+                <FaDownload className="w-3.5 h-3.5" /> {t('Install Linux Dependencies')}
+              </Button>
+              {!dependencies?.canInstall && <div className="text-xs text-slate-600">
+                {t('Automatic installation is unavailable. Install Xvfb, xvfb-run, xauth and libgbm with your package manager.')}
+              </div>}
+              {dependencies?.manualCommand && <details className="text-xs text-slate-500">
+                <summary className="cursor-pointer">{t('Manual installation command')}</summary>
+                <code data-i18n-ignore className="block mt-2 break-all select-text">{dependencies.manualCommand}</code>
+              </details>}
+            </div>
+          )}
           <div className="flex flex-wrap gap-2">
             <Button
               type="button"
@@ -182,7 +255,7 @@ export default function QqConnectorPanel({ onReady }) {
               onClick={() => run('mcp', () => tauri.qqConnector.installMcp())}
             >
               <FaDownload className="w-3.5 h-3.5" />
-              {status?.mcpInstalled ? 'Update QQ-MCP' : 'Install QQ-MCP'}
+              {t(status?.mcpInstalled ? 'Update QQ-MCP' : 'Install QQ-MCP')}
             </Button>
             <Button
               type="button"
@@ -191,61 +264,89 @@ export default function QqConnectorPanel({ onReady }) {
               onClick={() => run('napcat', () => tauri.qqConnector.installNapcat())}
             >
               <FaDownload className="w-3.5 h-3.5" />
-              {status?.napcatPackageReady ? 'Update Native NapCat' : nativeLabel}
+              {status?.napcatPackageReady ? updateNativeLabel : nativeLabel}
             </Button>
           </div>
           <div className="text-[11px] text-slate-500">
-            Platform: {status?.platform || '…'} / {status?.arch || '…'}
+            {t('Platform:')} {status?.platform || '…'} / {status?.arch || '…'}
             {status?.napcatProvider ? ` · ${status.napcatProvider}` : ''}
           </div>
-        </Step>
-
-        <Step number="2" title="Install and start native NapCat" done={status?.napcatRunning || authenticated}>
-          <FormGroup label="QQ number" hint="Used when the Windows native launcher supports quick login.">
-            <Input value={qq} onChange={(e) => setQq(e.target.value.replace(/\D/g, ''))} placeholder="QQ number" />
-          </FormGroup>
-          <div className="flex flex-wrap gap-2">
-            <Button type="button" variant="secondary" disabled={!status?.napcatPackageReady || Boolean(busy)} onClick={async () => {
-              const message = await run('installer', () => tauri.qqConnector.openInstaller());
-              if (message) setNotice(message);
-            }}>
-              <FaArrowUpRightFromSquare className="w-3.5 h-3.5" /> Open Official Installer
-            </Button>
-            <Button type="button" variant="secondary" disabled={!status?.napcatPackageReady || Boolean(busy)} onClick={() => run('launch', () => tauri.qqConnector.launchNapcat(qq || null))}>
-              <FaPlay className="w-3.5 h-3.5" /> Start NapCat
-            </Button>
-            {status?.napcatRunning && (
-              <Button type="button" variant="ghost" disabled={Boolean(busy)} onClick={() => run('stop', () => tauri.qqConnector.stopNapcat())}>
-                <FaStop className="w-3.5 h-3.5" /> Stop
-              </Button>
-            )}
-          </div>
-          {status?.platform === 'macos' && (
-            <Alert tone="yellow">The official macOS installer still requires its guided QQ patch step. PetGPT does not modify QQ application files directly.</Alert>
+          {isMac && status?.isolatedRuntime && (
+            <div className="rounded-lg border border-emerald-200 bg-emerald-50/80 p-3 space-y-1 text-[11px] text-emerald-900">
+              <div className="font-semibold">{t('Isolated runtime ready')}</div>
+              <div>{t('Source QQ:')} <span data-i18n-ignore>{status.sourceQqVersion || 'QQ'} · /Applications/QQ.app</span></div>
+              <div className="break-all">{t('Private copy:')} <span data-i18n-ignore>{status.isolatedQqApp}</span></div>
+              <div className="break-all">{t('Dedicated data:')} <span data-i18n-ignore>{status.isolatedProfileDir}</span></div>
+              <div>{t('App identity:')} <span data-i18n-ignore>{status.isolatedBundleId}</span></div>
+            </div>
           )}
         </Step>
 
-        <Step number="3" title="Connect WebUI and scan QR code" done={Boolean(loginState?.isLogin)}>
+        <Step number="2" title={t(isManaged ? 'Start isolated QQ + NapCat' : 'Install and start native NapCat')} done={status?.napcatRunning || authenticated}>
+          <FormGroup label={t('QQ number')} hint={t(isManaged ? 'Optional quick-login account for the isolated QQ instance.' : 'Used when the Windows native launcher supports quick login.')}>
+            <Input value={qq} onChange={(e) => setQq(e.target.value.replace(/\D/g, ''))} placeholder={t('QQ number')} />
+          </FormGroup>
+          <div className="flex flex-wrap gap-2">
+            {!isLinux && <Button type="button" variant="secondary" disabled={!status?.napcatPackageReady || Boolean(busy)} onClick={async () => {
+              const message = await run('installer', () => tauri.qqConnector.openInstaller());
+              if (message) setNotice(message);
+            }}>
+              <FaArrowUpRightFromSquare className="w-3.5 h-3.5" /> {t(isMac ? 'Show Isolated QQ in Finder' : 'Open Official Installer')}
+            </Button>}
+            <Button type="button" variant="secondary" disabled={!status?.napcatPackageReady || Boolean(busy) || status?.napcatRunning || missingDependencies.length > 0} onClick={launchNapcat}>
+              <FaPlay className="w-3.5 h-3.5" /> {t(isMac ? 'Start Isolated NapCat' : 'Start NapCat')}
+            </Button>
+            {status?.napcatRunning && (
+              <Button type="button" variant="ghost" disabled={Boolean(busy)} onClick={() => run('stop', async () => {
+                await tauri.qqConnector.stopNapcat();
+                setAuthenticated(false);
+                setLoginState(null);
+                setRequire2fa(false);
+              })}>
+                <FaStop className="w-3.5 h-3.5" /> {t('Stop')}
+              </Button>
+            )}
+          </div>
+          {isLinux && <Alert tone="blue">{t('QQ and NapCat use a private data directory. No separate QQ installation or FUSE setup is needed.')}</Alert>}
+          {isLinux && <Alert tone="yellow">{t('NapCat runs with the Electron sandbox disabled. A separate data directory is not a security sandbox; consider using a dedicated QQ account.')}</Alert>}
+          {isLinux && status?.isolatedProfileDir && <div className="text-[11px] text-slate-500 break-all">
+            {t('Dedicated data:')} <span data-i18n-ignore>{status.isolatedProfileDir}</span>
+          </div>}
+          {status?.logPath && <div className="text-[11px] text-slate-500 break-all">
+            {t('Startup log:')} <span data-i18n-ignore>{status.logPath}</span>
+          </div>}
+          {isMac && (
+            <Alert tone="blue">{t('PetGPT patches only its private QQ copy. /Applications/QQ.app remains untouched; the isolated copy uses a separate app identity, profile, and hot-update directory and can run alongside original QQ.')}</Alert>
+          )}
+          {isMac && (
+            <Alert tone="yellow">{t('NapCat requires the isolated copy to run with Electron and macOS app sandboxes disabled. Use a dedicated QQ account if account or security isolation is important.')}</Alert>
+          )}
+        </Step>
+
+        <Step number="3" title={t('Connect WebUI and scan QR code')} done={Boolean(loginState?.isLogin)}>
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-            <FormGroup label="NapCat WebUI URL">
+            <FormGroup label={t('NapCat WebUI URL')}>
               <Input value={webuiUrl} onChange={(e) => setWebuiUrl(e.target.value)} />
             </FormGroup>
-            <FormGroup label="WebUI token" hint="Shown by NapCat at startup; it is used only to obtain a one-hour local credential.">
-              <Input type="password" value={webuiToken} onChange={(e) => setWebuiToken(e.target.value)} />
+            <FormGroup label={t('WebUI token')} hint={t(authenticated
+              ? 'WebUI is connected. The token is retained only in this window for reconnecting.'
+              : isManaged ? 'Generated and filled automatically when managed NapCat starts; it is used only to obtain a one-hour local credential.'
+                : 'Shown by NapCat at startup; it is used only to obtain a one-hour local credential.')}>
+              <Input type="password" value={webuiToken} onChange={(e) => setWebuiToken(e.target.value)} placeholder={t(isManaged ? 'Generated automatically when NapCat starts' : 'WebUI token')} />
             </FormGroup>
           </div>
           {require2fa && (
-            <FormGroup label="2FA code">
+            <FormGroup label={t('2FA code')}>
               <Input value={totpCode} onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, '').slice(0, 6))} />
             </FormGroup>
           )}
           <div className="flex flex-wrap gap-2">
-            <Button type="button" disabled={Boolean(busy) || (!authenticated && !webuiToken)} onClick={connectWebui}>
-              {authenticated ? 'Reconnect WebUI' : 'Connect WebUI'}
+            <Button type="button" disabled={Boolean(busy) || (!authenticated && !webuiToken && !(isManaged && status?.napcatRunning))} onClick={connectWebui}>
+              {t(authenticated ? 'Reconnect WebUI' : 'Connect WebUI')}
             </Button>
             {authenticated && (
               <Button type="button" variant="secondary" disabled={Boolean(busy)} onClick={checkLogin}>
-                <FaRotate className="w-3.5 h-3.5" /> Check login
+                <FaRotate className="w-3.5 h-3.5" /> {t('Check login')}
               </Button>
             )}
             {authenticated && !loginState?.isLogin && (
@@ -253,25 +354,25 @@ export default function QqConnectorPanel({ onReady }) {
                 const next = await run('qr', () => tauri.qqConnector.refreshQr());
                 if (next) setLoginState(next);
               }}>
-                Refresh QR
+                {t('Refresh QR')}
               </Button>
             )}
           </div>
           {loginState?.qrcode && !loginState.isLogin && (
             <div className="flex items-center gap-4 rounded-xl border border-slate-200 bg-white p-3">
-              <img src={loginState.qrcode} alt="QQ login QR code" className="w-36 h-36 rounded-lg border border-slate-100" />
-              <div className="text-xs text-slate-600 leading-relaxed">Open QQ on your phone and scan this code. PetGPT checks the local login state automatically.</div>
+              <img src={loginState.qrcode} alt={t('QQ login QR code')} className="w-36 h-36 rounded-lg border border-slate-100" />
+              <div className="text-xs text-slate-600 leading-relaxed">{t('Open QQ on your phone and scan this code. PetGPT checks the local login state automatically.')}</div>
             </div>
           )}
           {loginState?.isLogin && (
-            <Alert tone="green">QQ logged in: {loginState.account?.nickname || qq || 'connected account'}</Alert>
+            <Alert tone="green">{t(`QQ logged in: ${loginState.account?.nickname || qq || 'connected account'}`)}</Alert>
           )}
         </Step>
 
-        <Step number="4" title="Configure OneBot and register MCP" done={Boolean(setupResult || accounts.length)}>
-          <Alert tone="blue">PetGPT will create localhost-only HTTP/WS adapters with a random token, then validate the required Social Agent tool contract.</Alert>
+        <Step number="4" title={t('Configure OneBot and register MCP')} done={Boolean(setupResult || accounts.length)}>
+          <Alert tone="blue">{t('PetGPT will create localhost-only HTTP/WS adapters with a random token, then validate the required Social Agent tool contract.')}</Alert>
           <Button type="button" disabled={Boolean(busy) || !status?.mcpInstalled || !loginState?.isLogin} onClick={completeSetup}>
-            <FaCheck className="w-3.5 h-3.5" /> Configure and Add MCP
+            <FaCheck className="w-3.5 h-3.5" /> {t('Configure and Add MCP')}
           </Button>
         </Step>
       </div>
