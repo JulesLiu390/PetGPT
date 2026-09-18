@@ -141,7 +141,7 @@ async function executeEdit(petId, args, memoryEnabled) {
  * 返回 base64 → 包装成 data URI → 由 toolExecutor 提取并塞到对话气泡。
  */
 async function executeGenerateImage(args, context) {
-  const { imageModel } = context;
+  const { imageModel, abortSignal } = context;
   if (!imageModel || !imageModel.modelName) {
     return { error: '尚未配置图像生成模型，请到设置 → Defaults 选择 Image Model Provider 和 Model。' };
   }
@@ -170,6 +170,7 @@ async function executeGenerateImage(args, context) {
         n: 1,
         response_format: 'b64_json',
       }),
+      signal: abortSignal,
     });
     if (!resp.ok) {
       const text = await resp.text().catch(() => '');
@@ -196,6 +197,9 @@ async function executeGenerateImage(args, context) {
       ],
     };
   } catch (err) {
+    if (err?.name === 'AbortError' || abortSignal?.aborted) {
+      throw err;
+    }
     return { error: `图像生成异常: ${err?.message || err}` };
   }
 }

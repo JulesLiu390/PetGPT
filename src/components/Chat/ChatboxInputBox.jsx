@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useRef, useState, useEffect, useLayoutEffect, useCallback, useMemo } from 'react';
 import { useStateValue } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import { FaArrowUp, FaShareNodes, FaFile, FaStop, FaBrain, FaCamera, FaPaperclip, FaRobot } from "react-icons/fa6";
@@ -15,7 +15,7 @@ import SubagentPanel from './SubagentPanel';
 import CapabilityDrawer, { CapabilityTag, CapabilityToggleAction } from './CapabilityIsland';
 import { buildActiveCapabilityTags, getCapabilityIslandMinWidth } from './capabilityIslandModel.js';
 import { createQuickReplyRequestGate, getQuickReplySelectionAction, parseQuickReplyResponse } from './quickReplyModel.js';
-import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount } from '../../utils/subagentManager';
+import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount, killByConversation } from '../../utils/subagentManager';
 import { getSubagentToolDefinition } from '../../utils/workspace/socialToolExecutor';
 import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
@@ -29,6 +29,7 @@ import {
   setSubagentEnabledForConversation,
 } from '../../utils/subagentCapability.js';
 import { shouldApplyComposerFocus } from '../../utils/chatFocusModel.js';
+import { isAbortError, throwIfAborted } from '../../utils/cancellation.js';
 
 // ===== 模块级别全局变量 =====
 // 存储 Preferences 中的默认值，所有组件实例共享
@@ -176,6 +177,8 @@ export const ChatboxInputBox = ({
   onOverlayOpenChange,
 }) => {
   const containerRef = useRef(null);
+  const composerSurfaceRef = useRef(null);
+  const compactComposerWasVisibleRef = useRef(false);
   const subagentAnchorRef = useRef(null);
   const lastPointerDownAtRef = useRef(Number.NEGATIVE_INFINITY);
   const lastHandledFocusRequestRef = useRef(0);
@@ -1288,6 +1291,7 @@ export const ChatboxInputBox = ({
     let reply = null;
     let thisModel = null;
     let _userText = null;
+    let controller = null;
     const conversationContextReady = Boolean(
       authoritativeConversationId
       && String(currentConversationId || '') === String(authoritativeConversationId)
@@ -1348,6 +1352,8 @@ export const ChatboxInputBox = ({
     let sendingConversationId = subagentConversationIdAtSend;
     // 保存初始 ID 用于状态清理（因为 sendingConversationId 后面可能会变）
     const initialConversationId = sendingConversationId;
+    controller = new AbortController();
+    abortControllersRef.current.set(initialConversationId, controller);
     quickReplyGateRef.current.invalidateConversation(sendingConversationId);
     console.log('[handleSend] ★ sendingConversationId:', sendingConversationId, 'conversationIdRef:', conversationIdRef.current, 'currentConversationId:', currentConversationId);
     
@@ -1448,6 +1454,7 @@ export const ChatboxInputBox = ({
     }
 
     try {
+    throwIfAborted(controller.signal);
     let fullMessages = [];
     const isDefaultPersonality = petInfo?.systemInstruction &&
       (petInfo.systemInstruction.trim().toLowerCase() === "default model (english)" ||
@@ -1570,10 +1577,6 @@ export const ChatboxInputBox = ({
       }
 
     reply = null;
-
-    // Create new AbortController for this conversation's request
-    const controller = new AbortController();
-    abortControllersRef.current.set(initialConversationId, controller);
 
     // 检查是否启用了 MCP 工具
     const mcpEnabled = enabledMcpServers.size > 0;
@@ -1710,8 +1713,10 @@ When using tools, please follow these guidelines:
               ),
             },
             imageModel: imageModelInfo,
+            abortSignal: controller.signal,
           }
         });
+        throwIfAborted(controller.signal);
 
         // 桥接：扫 toolCallHistory 里 generate_image 成功结果，把 base64 图片塞进 reply.content
         const generatedImageParts = [];
@@ -1747,6 +1752,9 @@ When using tools, please follow these guidelines:
           });
         }, 2000);
       } catch (error) {
+        if (controller.signal.aborted || isAbortError(error)) {
+          throw error;
+        }
         console.error('[ChatboxInputBox] Tool call failed:', error);
         reply = { content: `Error: ${error.message}`, mood: 'normal' };
         
@@ -1778,10 +1786,13 @@ When using tools, please follow these guidelines:
           conversationId: sendingConversationId
         }
       );
+      throwIfAborted(controller.signal);
       
       console.log('[ChatboxInputBox] callOpenAILibStream returned:', reply);
     }
       
+    throwIfAborted(controller.signal);
+
     // Clear this conversation's abort controller after completion
     abortControllersRef.current.delete(initialConversationId);
 
@@ -1938,9 +1949,15 @@ When using tools, please follow these guidelines:
     }
     
     } catch (error) {
-      console.error('[handleSend] Error occurred:', error);
+      if (controller?.signal?.aborted || isAbortError(error)) {
+        console.log('[handleSend] Generation cancelled by user');
+        dispatch({ type: actionType.CLEAR_STREAMING_REPLY, id: initialConversationId });
+        reply = null;
+      } else {
+        console.error('[handleSend] Error occurred:', error);
+      }
       // Ensure we have some reply object for the finally block
-      if (!reply) {
+      if (!reply && !controller?.signal?.aborted && !isAbortError(error)) {
         reply = { content: `Error: ${error.message}`, mood: 'normal' };
       }
     } finally {
@@ -2087,6 +2104,10 @@ const handleStop = async () => {
       type: actionType.CLEAR_TOOL_CALLS,
       conversationId: currentConvId
     });
+    dispatch({
+      type: actionType.CLEAR_STREAMING_REPLY,
+      id: currentConvId
+    });
     
     // 重置 TabState 的 thinking 状态
     if (currentConvId) {
@@ -2107,6 +2128,10 @@ const handleStop = async () => {
     } catch (err) {
       console.error('[handleStop] Failed to cancel MCP tool calls:', err);
     }
+
+    // Subagents are separate native processes and are not covered by either
+    // the LLM or MCP cancellation managers.
+    killByConversation(currentConvId);
   };
 
   const [attachments, setAttachments] = useState([]);
@@ -2172,6 +2197,51 @@ const handleStop = async () => {
       if (frameId !== null) cancelAnimationFrame(frameId);
     };
   }, [compact, onHeightChange]);
+
+  // Replaying this on each native activation makes the compact composer feel
+  // attached to the summon action without remounting the textarea (and losing
+  // its draft or selection). Keep the movement short and anchored to the
+  // bottom edge so it reads as a gentle lift rather than a modal zoom.
+  useLayoutEffect(() => {
+    const element = composerSurfaceRef.current;
+    if (!compact || !element || typeof element.animate !== 'function') {
+      compactComposerWasVisibleRef.current = false;
+      return undefined;
+    }
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) {
+      compactComposerWasVisibleRef.current = autoFocus;
+      return undefined;
+    }
+    // Do not play an exit animation for the initially hidden native window.
+    if (!autoFocus && !compactComposerWasVisibleRef.current) return undefined;
+    compactComposerWasVisibleRef.current = autoFocus;
+
+    const animation = autoFocus
+      ? element.animate(
+        [
+          { opacity: 0, transform: 'translate3d(0, 7px, 0) scale(0.975)' },
+          { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
+        ],
+        {
+          duration: 220,
+          easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+          fill: 'none',
+        },
+      )
+      : element.animate(
+        [
+          { opacity: 1, transform: 'translate3d(0, 0, 0) scale(1)' },
+          { opacity: 0, transform: 'translate3d(0, 4px, 0) scale(0.985)' },
+        ],
+        {
+          duration: 120,
+          easing: 'cubic-bezier(0.4, 0, 1, 1)',
+          fill: 'none',
+        },
+      );
+
+    return () => animation.cancel();
+  }, [autoFocus, compact, focusRequest?.id]);
 
   const hasOpenComposerOverlay = showCapabilityDrawer
     || showSubagentPanel
@@ -2406,7 +2476,7 @@ const handleStop = async () => {
   return (
     <div
       ref={containerRef}
-      className={`relative mx-auto w-full max-w-[32rem] no-drag ${compact ? 'px-2 pb-2' : 'px-4 pb-4'}`}
+      className={`relative mx-auto w-full max-w-[32rem] no-drag ${compact ? 'p-2.5' : 'px-4 pb-4'}`}
     >
       {/* Subagent 完成通知条 */}
       {visibleSubagentNotifications.length > 0 && (
@@ -2426,13 +2496,13 @@ const handleStop = async () => {
                   onClick={() => setExpandedNotification(expandedNotification === n.taskId ? null : n.taskId)}
                   className="text-[10px] text-gray-500 hover:text-gray-700 px-1.5 py-0.5 rounded hover:bg-black/5"
                 >
-                  {expandedNotification === n.taskId ? '收起' : '查看'}
+                  {expandedNotification === n.taskId ? 'Collapse' : 'View'}
                 </button>
                 <button
                   onClick={() => handleInjectSubagentResult(n)}
                   className="text-[10px] text-blue-600 hover:text-blue-800 px-1.5 py-0.5 rounded hover:bg-blue-50 font-medium"
                 >
-                  注入对话
+                  Inject conversation
                 </button>
                 <button
                   onClick={() => handleDismissNotification(n.taskId)}
@@ -2444,8 +2514,10 @@ const handleStop = async () => {
               {expandedNotification === n.taskId && (
                 <div className="mt-1.5 p-2 rounded bg-white/80 border border-gray-100 text-[10px] text-gray-600 whitespace-pre-wrap max-h-40 overflow-y-auto">
                   {n.status === 'done' && n.result
-                    ? n.result
-                    : n.error || '(无内容)'}
+                    ? <span data-i18n-ignore>{n.result}</span>
+                    : n.error
+                      ? <span data-i18n-ignore>{n.error}</span>
+                      : '(No content)'}
                 </div>
               )}
             </div>
@@ -2454,10 +2526,14 @@ const handleStop = async () => {
       )}
       {/* Compact translucent input panel. */}
       <div 
-        className={`relative rounded-[20px] border p-2.5 shadow-[0_10px_28px_rgba(15,23,42,0.09)] backdrop-blur-xl transition-all no-drag ${
-          isDragging 
+        ref={composerSurfaceRef}
+        data-dragging={isDragging ? 'true' : 'false'}
+        className={`relative rounded-[20px] border p-2.5 backdrop-blur-xl no-drag ${compact
+          ? 'compact-chat-composer-surface'
+          : `shadow-[0_10px_28px_rgba(15,23,42,0.09)] transition-all ${isDragging
             ? 'border-blue-300 bg-blue-50/90'
             : 'border-white/80 bg-white/75'
+          }`
         }`}
         onDragEnter={handleDragEnter}
         onDragLeave={handleDragLeave}

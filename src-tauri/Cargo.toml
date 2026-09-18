@@ -1,6 +1,6 @@
 [package]
 name = "petgpt"
-version = "0.4.5"
+version = "0.4.8"
 description = "PetGPT - AI Desktop Pet Assistant"
 authors = ["JulesLiu390"]
 license = "MIT"
@@ -64,6 +64,8 @@ window-vibrancy = "0.5"
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
 objc = "0.2"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSGeometry"] }
 
 # Linux specific
 [target.'cfg(target_os = "linux")'.dependencies]

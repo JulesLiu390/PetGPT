@@ -33,3 +33,6 @@ design/.DS_Store
 
 # Git worktrees
 .worktrees/
+
+# Playwright MCP session output (console logs, page snapshots, screenshots)
+.playwright-mcp/

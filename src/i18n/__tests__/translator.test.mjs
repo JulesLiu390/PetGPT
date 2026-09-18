@@ -45,6 +45,8 @@ test('managed QQ connector surface has complete Chinese copy', () => {
     ['Install Linux Dependencies', '安装 Linux 系统依赖'],
     ['Linux system dependencies are missing. Open the full setup to install them.', '缺少 Linux 系统依赖，请打开完整设置进行安装。'],
     ['Install managed runtimes', '安装托管运行环境'],
+    ['Installing Chromium headless shell for QQ screenshots', '正在安装 QQ 截图所需的 Chromium 无头浏览器'],
+    ['Verifying the QQ screenshot browser', '正在验证 QQ 截图浏览器'],
     ['Update Native NapCat', '更新原生 NapCat'],
     ['Prepare Isolated QQ + NapCat', '准备隔离 QQ + NapCat'],
     ['Rebuild Isolated QQ + Update NapCat', '重建隔离 QQ + 更新 NapCat'],

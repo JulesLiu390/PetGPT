@@ -2,14 +2,17 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FaCheck, FaChevronDown, FaChevronUp, FaPlay, FaRotate, FaXmark } from 'react-icons/fa6';
 import { Button } from '../UI/ui';
 import * as tauri from '../../utils/tauri';
+import InlineQqLogin from './InlineQqLogin.jsx';
+import { createPreflightQrController, EMPTY_QR_STATE, needsInlineLoginQr } from './preflightQrModel.js';
 import {
   ACTION_LAUNCH_NAPCAT,
   ACTION_OPEN_SETUP,
-  ACTION_QUICK_LOGIN,
+  ACTION_SCAN_QR,
   ACTION_START_MCP,
   PREFLIGHT_BLOCKED,
   PREFLIGHT_OK,
   buildSocialPreflight,
+  findManagedAccount,
 } from './socialPreflightModel';
 
 const POLL_INTERVAL_MS = 5000;
@@ -49,68 +52,83 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
   const [connectorStatus, setConnectorStatus] = useState(null);
   const [accounts, setAccounts] = useState(null);
   const [loginProbe, setLoginProbe] = useState(null);
+  const [probedServer, setProbedServer] = useState(null);
   const [mcpServerExists, setMcpServerExists] = useState(null);
   const [mcpRunning, setMcpRunning] = useState(null);
   const [expanded, setExpanded] = useState(false);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
+  const [qrState, setQrState] = useState(EMPTY_QR_STATE);
+  const selectedServer = useRef(mcpServerName);
+  selectedServer.current = mcpServerName;
 
   // Probes race with each other when the server selection changes mid-flight;
   // only the newest one is allowed to publish.
   const probeSeq = useRef(0);
-  // 自动快速登录每个 NapCat 运行周期只尝试一次，见 probe()
+  // 自动快速登录每次掉线只尝试一次，成功上线或重启后重新武装。
   const quickLoginTried = useRef(false);
+  const probeInFlight = useRef(null);
 
-  const probe = useCallback(async () => {
+  const probe = useCallback(() => {
+    if (selectedServer.current !== mcpServerName) return Promise.resolve();
+    if (probeInFlight.current?.server === mcpServerName) return probeInFlight.current.promise;
     const seq = ++probeSeq.current;
+    const isCurrent = () => probeSeq.current === seq && selectedServer.current === mcpServerName;
     const publish = (setter, value) => {
-      if (probeSeq.current === seq) setter(value);
+      if (isCurrent()) setter(value);
     };
 
-    const [status, linkedAccounts] = await Promise.all([
-      tauri.qqConnector.status().catch(() => null),
-      tauri.qqConnector.listAccounts().catch(() => null),
-    ]);
-    publish(setConnectorStatus, status);
-    publish(setAccounts, linkedAccounts);
+    const promise = (async () => {
+      const [status, linkedAccounts] = await Promise.all([
+        tauri.qqConnector.status().catch(() => null),
+        tauri.qqConnector.listAccounts().catch(() => null),
+      ]);
+      if (!isCurrent()) return;
+      publish(setConnectorStatus, status);
+      publish(setAccounts, linkedAccounts);
 
-    // 只在 NapCat 确实在跑时探测登录态：没跑的话 WebUI 必然连不上，
-    // 每轮都去撞一次只会拖慢轮询并刷出无意义的错误。
-    if (status?.napcatRunning) {
-      let probe = await tauri.qqConnector.loginProbe().catch(() => null);
-      // 本地还留着有效会话时不该让用户去扫码 —— 自动登一次。
-      // 每个 NapCat 运行周期只试一次：登不上通常是会话真过期了，
-      // 反复重试既没用又会拖慢每一轮轮询。
-      if (probe?.sessionReady && !probe.isLogin && !quickLoginTried.current) {
-        quickLoginTried.current = true;
-        probe = await tauri.qqConnector.ensureLogin().catch(() => probe);
+      // Only touch QQ login for the selected managed account while NapCat is
+      // running. A custom MCP server must not trigger a QQ sign-in flow.
+      if (status?.napcatRunning && findManagedAccount(linkedAccounts, mcpServerName)) {
+        let nextProbe = await tauri.qqConnector.loginProbe().catch(() => null);
+        if (!isCurrent()) return;
+        if (nextProbe?.sessionReady && !nextProbe.isLogin && !quickLoginTried.current) {
+          quickLoginTried.current = true;
+          nextProbe = await tauri.qqConnector.ensureLogin().catch(() => nextProbe);
+        }
+        if (!isCurrent()) return;
+        if (nextProbe?.isLogin) quickLoginTried.current = false;
+        publish(setLoginProbe, nextProbe);
+      } else {
+        quickLoginTried.current = false;
+        publish(setLoginProbe, null);
       }
-      publish(setLoginProbe, probe);
-    } else {
-      // NapCat 重启后重新武装：新进程可能已经带着账号自己登上了
-      quickLoginTried.current = false;
-      publish(setLoginProbe, null);
-    }
+      publish(setProbedServer, mcpServerName);
 
-    const name = String(mcpServerName || '').trim();
-    if (!name) {
-      publish(setMcpServerExists, null);
-      publish(setMcpRunning, null);
-      return;
-    }
-    try {
-      const server = await tauri.mcp.getServerByName(name);
-      if (!server?._id) {
-        publish(setMcpServerExists, false);
+      const name = String(mcpServerName || '').trim();
+      if (!name) {
+        publish(setMcpServerExists, null);
         publish(setMcpRunning, null);
         return;
       }
-      publish(setMcpServerExists, true);
-      publish(setMcpRunning, Boolean(await tauri.mcp.isServerRunning(server._id)));
-    } catch {
-      publish(setMcpServerExists, null);
-      publish(setMcpRunning, null);
-    }
+      try {
+        const server = await tauri.mcp.getServerByName(name);
+        if (!server?._id) {
+          publish(setMcpServerExists, false);
+          publish(setMcpRunning, null);
+          return;
+        }
+        publish(setMcpServerExists, true);
+        publish(setMcpRunning, Boolean(await tauri.mcp.isServerRunning(server._id)));
+      } catch {
+        publish(setMcpServerExists, null);
+        publish(setMcpRunning, null);
+      }
+    })().finally(() => {
+      if (probeInFlight.current?.seq === seq) probeInFlight.current = null;
+    });
+    probeInFlight.current = { server: mcpServerName, seq, promise };
+    return promise;
   }, [mcpServerName]);
 
   // Reset to "not probed yet" on server change so the bar never shows the
@@ -118,13 +136,28 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
   useEffect(() => {
     setMcpServerExists(null);
     setMcpRunning(null);
+    setConnectorStatus(null);
+    setAccounts(null);
+    setLoginProbe(null);
+    setProbedServer(null);
+    quickLoginTried.current = false;
     setError('');
   }, [mcpServerName]);
 
   useEffect(() => {
-    probe();
-    const timer = window.setInterval(probe, POLL_INTERVAL_MS);
-    return () => window.clearInterval(timer);
+    let cancelled = false;
+    let timer;
+    const tick = async () => {
+      await probe();
+      if (!cancelled) timer = window.setTimeout(tick, POLL_INTERVAL_MS);
+    };
+    tick();
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      probeSeq.current += 1;
+      probeInFlight.current = null;
+    };
   }, [probe]);
 
   const report = useMemo(() => buildSocialPreflight({
@@ -133,8 +166,24 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
     accounts,
     mcpServerExists,
     mcpRunning,
-    loginProbe,
-  }), [mcpServerName, connectorStatus, accounts, mcpServerExists, mcpRunning, loginProbe]);
+    loginProbe: probedServer === mcpServerName ? loginProbe : null,
+  }), [mcpServerName, connectorStatus, accounts, mcpServerExists, mcpRunning, loginProbe, probedServer]);
+
+  const qrNeeded = probedServer === mcpServerName
+    && needsInlineLoginQr({ managed: report.managed, connectorStatus, loginProbe });
+  const qrController = useMemo(() => createPreflightQrController(tauri.qqConnector, setQrState, {
+    onLogin: () => { probe(); },
+  }), [probe]);
+
+  useEffect(() => {
+    if (qrNeeded) {
+      setExpanded(true);
+      qrController.start();
+    } else {
+      qrController.reset();
+    }
+    return () => qrController.reset();
+  }, [qrController, qrNeeded]);
 
   useEffect(() => {
     onReportChange?.(report);
@@ -170,17 +219,11 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
     await tauri.mcp.startServer(server._id);
   });
 
-  const quickLogin = () => run(ACTION_QUICK_LOGIN, async () => {
-    quickLoginTried.current = true;
-    setLoginProbe(await tauri.qqConnector.ensureLogin());
-  });
-
   const openSetup = () => tauri.openManageWindowWithTab('mcp').catch(e => setError(errorText(e)));
 
   const runAction = (action) => {
     if (action === ACTION_LAUNCH_NAPCAT) return launchNapcat();
     if (action === ACTION_START_MCP) return startMcp();
-    if (action === ACTION_QUICK_LOGIN) return quickLogin();
     if (action === ACTION_OPEN_SETUP) return openSetup();
     return undefined;
   };
@@ -188,13 +231,14 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
   const actionLabels = {
     [ACTION_LAUNCH_NAPCAT]: 'Start NapCat',
     [ACTION_START_MCP]: 'Start MCP',
-    [ACTION_QUICK_LOGIN]: 'Sign in with saved session',
     [ACTION_OPEN_SETUP]: 'Open Full Setup',
   };
 
   // One button per distinct remedy, in dependency order.
   const remedies = [];
   for (const entry of report.blocking) {
+    // The QR card is automatic and has its own refresh action.
+    if (entry.action === ACTION_SCAN_QR) continue;
     if (entry.action && !remedies.includes(entry.action)) remedies.push(entry.action);
   }
   if (!remedies.includes(ACTION_OPEN_SETUP)) remedies.push(ACTION_OPEN_SETUP);
@@ -214,6 +258,7 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
               {entry.label}
             </span>
           ))}
+
         </span>
         <span className="flex-1" />
         {!report.canStart && (
@@ -240,6 +285,8 @@ export default function SocialPreflightBar({ mcpServerName, onReportChange, clas
               </span>
             </div>
           ))}
+
+          {qrNeeded && <InlineQqLogin state={qrState} account={report.account} onRefresh={qrController.refresh} />}
 
           {error && <div className="text-xs text-rose-600" data-i18n-ignore>{error}</div>}
 

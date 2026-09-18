@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
 import ChatboxTitleBar from '../Layout/ChatboxTitleBar';
 import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
@@ -20,6 +20,19 @@ import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown, MdC
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
 import { createChatFocusRequestGate } from '../../utils/chatFocusModel.js';
+import { useI18n } from '../../i18n/context.js';
+import {
+  DEFAULT_MARKDOWN_TYPOGRAPHY,
+  getMarkdownTypographyCssVariables,
+  normalizeMarkdownTypography,
+} from '../../utils/markdownTypography.js';
+import UpdateBanner from './UpdateBanner';
+import {
+  UPDATE_CHECK_STARTUP_DELAY_MS,
+  shouldCheckForUpdate,
+  shouldShowUpdateBanner,
+  updateSettingsPatchFor,
+} from '../../utils/updateCheck.js';
 // import { AiFillChrome } from 'react-icons/ai';
 // import ChatboxTabBar from './ChatboxTabBar';
 
@@ -42,6 +55,7 @@ const HighlightText = ({ text, keyword }) => {
 };
 
 export const Chatbox = () => {
+  const { t } = useI18n();
   // 方案 C: 使用 Rust 内存缓存管理消息
   const [{ navBarChats, updatedConversation, streamingReplies, liveToolCalls = {}, characterMoods, suggestText = {} }, dispatch] = useStateValue();
   const [testCount, setTestCount] = useState(0);
@@ -68,6 +82,7 @@ export const Chatbox = () => {
   // Stay disabled until persisted settings load, so an explicitly disabled
   // preference can never race an eager suggestion request at startup.
   const [quickReplyEnabled, setQuickReplyEnabled] = useState(false);
+  const [markdownTypography, setMarkdownTypography] = useState(DEFAULT_MARKDOWN_TYPOGRAPHY);
   const [quickReplyRequest, setQuickReplyRequest] = useState(null);
   const quickReplyRequestIdRef = useRef(0);
   // Per-tab chatbody status for "Memory updating" display
@@ -115,6 +130,9 @@ export const Chatbox = () => {
     view: compactChatView,
     presentation: emptyChatPresentation,
   });
+  const chatShellRef = useRef(null);
+  const chatContentRef = useRef(null);
+  const previousCompactChatRef = useRef(isCompactChat);
   const compactWindowHeight = getCompactChatWindowHeight(
     compactContentHeight,
     composerOverlayOpen,
@@ -245,6 +263,61 @@ export const Chatbox = () => {
     switchTabPrefix: MOD_KEY,
   });
 
+  // ── 更新检查 ──
+  // 放在 chat 窗口而不是 character 窗口：提示条就在这里，不需要跨窗口传状态。
+  const [updateInfo, setUpdateInfo] = useState(null);
+  const [updateSettings, setUpdateSettings] = useState({});
+  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const runUpdateCheck = async () => {
+      try {
+        const settings = await tauri.getSettings();
+        if (cancelled) return;
+        setUpdateSettings(settings || {});
+        if (!shouldCheckForUpdate({ settings })) return;
+
+        const info = await tauri.checkForUpdate();
+        if (cancelled || !info) return;
+        setUpdateInfo(info);
+        // 记下检查时间并把结果告诉其它窗口（Management 的侧栏角标读这个）
+        await tauri.updateSettings(updateSettingsPatchFor(info));
+        if (!cancelled) {
+          setUpdateSettings((prev) => ({ ...prev, ...updateSettingsPatchFor(info) }));
+        }
+      } catch (error) {
+        // 网络不通、限流、GitHub 抖动都不该打扰用户，静默即可。
+        console.warn('[ChatboxBody] Update check skipped:', error);
+      }
+    };
+
+    const timer = setTimeout(runUpdateCheck, UPDATE_CHECK_STARTUP_DELAY_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, []);
+
+  const handleSkipUpdateVersion = useCallback(async () => {
+    const version = updateInfo?.latestVersion;
+    setDismissedUpdateVersion(version || '');
+    if (!version) return;
+    try {
+      await tauri.updateSettings({ skippedVersion: version });
+      setUpdateSettings((prev) => ({ ...prev, skippedVersion: version }));
+    } catch (error) {
+      console.error('[ChatboxBody] Failed to persist skipped version:', error);
+    }
+  }, [updateInfo]);
+
+  const showUpdateBanner = shouldShowUpdateBanner({
+    info: updateInfo,
+    settings: updateSettings,
+    dismissedVersion: dismissedUpdateVersion,
+  });
+
   // 加载聊天相关设置
   useEffect(() => {
     const loadChatSettings = async () => {
@@ -257,6 +330,7 @@ export const Chatbox = () => {
         });
         const enabled = settings.quickReplyEnabled !== false && settings.quickReplyEnabled !== 'false';
         setQuickReplyEnabled(enabled);
+        setMarkdownTypography(normalizeMarkdownTypography(settings));
         if (!enabled) {
           setQuickReplyRequest(null);
           dispatch({ type: actionType.CLEAR_SUGGEST_TEXTS });
@@ -273,6 +347,7 @@ export const Chatbox = () => {
         payload?.key === 'quickReplyEnabled'
         || payload?.key?.includes('Hotkey')
         || payload?.key?.includes('switchTab')
+        || payload?.key?.startsWith('markdown')
       ) {
         loadChatSettings();
       }
@@ -453,6 +528,46 @@ export const Chatbox = () => {
       if (retryTimer) clearTimeout(retryTimer);
     };
   }, [compactWindowHeight, isCompactChat]);
+
+  // Native macOS animates the actual window frame. This matching content
+  // transition hides the compact-to-full reflow and gives other platforms a
+  // graceful visual fallback when their window manager resizes immediately.
+  useLayoutEffect(() => {
+    const wasCompact = previousCompactChatRef.current;
+    previousCompactChatRef.current = isCompactChat;
+    const shell = chatShellRef.current;
+    const content = chatContentRef.current;
+    if (!wasCompact || isCompactChat || !windowVisible || !shell || !content) return undefined;
+    if (typeof shell.animate !== 'function' || typeof content.animate !== 'function') return undefined;
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return undefined;
+
+    const shellAnimation = shell.animate(
+      [
+        { borderRadius: '24px' },
+        { borderRadius: '16px' },
+      ],
+      {
+        duration: 240,
+        easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+        fill: 'none',
+      },
+    );
+    const contentAnimation = content.animate(
+      [
+        { opacity: 0.72, transform: 'translate3d(0, 5px, 0)' },
+        { opacity: 1, transform: 'translate3d(0, 0, 0)' },
+      ],
+      {
+        duration: 220,
+        easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+        fill: 'none',
+      },
+    );
+    return () => {
+      shellAnimation.cancel();
+      contentAnimation.cancel();
+    };
+  }, [isCompactChat, windowVisible]);
 
   useEffect(() => {
     if (!isCompactChat || !sidebarOpen) return;
@@ -1161,26 +1276,31 @@ export const Chatbox = () => {
 
   return (
     <div 
-      className={`h-screen overflow-clip relative transition-colors duration-150 ${isCompactChat
+      ref={chatShellRef}
+      style={getMarkdownTypographyCssVariables(markdownTypography)}
+      className={`h-screen overflow-clip relative ${isCompactChat
         ? 'rounded-[24px] bg-transparent'
-        : 'rounded-[16px] bg-white'
+        : 'rounded-[16px] bg-white/10 backdrop-blur-2xl'
       }`}
       {...(platformInfo.has_cursor_tracking === 'false' ? {
         onMouseEnter: () => setIsMouseOver(true),
         onMouseLeave: () => setIsMouseOver(false),
       } : {})}
     >
-    {/* 白色遮罩层：侧边栏关闭时 80% 透明度（有 vibrancy 效果时），打开时或无 vibrancy 时 100% */}
-    <div className={`absolute inset-0 bg-white transition-opacity duration-200 pointer-events-none ${
+    {/* Keep both layouts translucent; this tint sits above the native material. */}
+    <div className={`absolute inset-0 transition-colors duration-200 pointer-events-none ${
       isCompactChat
-        ? 'opacity-0'
+        ? 'bg-transparent'
         : platformInfo.has_vibrancy === 'false'
-        ? 'opacity-100' 
-        : sidebarOpen ? 'opacity-100' : 'opacity-80'
+        ? 'bg-white/80'
+        : sidebarOpen ? 'bg-white/75' : 'bg-white/65'
     }`} />
-    <div className={`h-full flex group/chatwindow relative ${isCompactChat ? 'overflow-visible' : 'overflow-hidden'}`}>
+    <div
+      ref={chatContentRef}
+      className={`h-full flex group/chatwindow relative ${isCompactChat ? 'overflow-visible' : 'overflow-hidden'}`}
+    >
       {/* Sidebar - 小窗口根据 sidebarOpen 状态显示，全屏时始终显示 */}
-      <div className={`${isCompactChat ? 'hidden' : `${sidebarOpen ? 'flex' : 'hidden'} lg:!flex`} flex-col w-64 bg-[#f9f9f9] border-r border-gray-200 h-full shrink-0`}>
+      <div className={`${isCompactChat ? 'hidden' : `${sidebarOpen ? 'flex' : 'hidden'} lg:!flex`} flex-col w-64 bg-slate-50/60 backdrop-blur-xl border-r border-white/55 h-full shrink-0`}>
         
         {/* Window Controls & Sidebar Toggle */}
         <div className="p-3 pt-4 draggable flex items-center justify-between" data-tauri-drag-region>
@@ -1216,7 +1336,7 @@ export const Chatbox = () => {
                 value={searchQuery}
                 onChange={(e) => handleSearchChange(e.target.value)}
                 onKeyDown={(e) => { if (e.key === 'Escape') clearSearch(); }}
-                placeholder="搜索对话..."
+                placeholder="Search conversations..."
                 className="flex-1 bg-transparent outline-none text-gray-700 placeholder-gray-400"
                 autoFocus
               />
@@ -1233,7 +1353,7 @@ export const Chatbox = () => {
               className="flex items-center gap-2 px-3 py-1.5 bg-gray-200/50 rounded-md text-gray-500 text-xs cursor-pointer hover:bg-gray-200/80 transition-colors"
             >
               <MdSearch className="text-sm" />
-              <span>搜索</span>
+              <span>Search</span>
             </div>
           )}
         </div>
@@ -1244,16 +1364,16 @@ export const Chatbox = () => {
             /* === 搜索结果 === */
             <>
               {isSearching ? (
-                <div className="px-3 py-4 text-xs text-gray-400 text-center">搜索中...</div>
+                <div className="px-3 py-4 text-xs text-gray-400 text-center">Searching...</div>
               ) : searchResults.length === 0 ? (
-                <div className="px-3 py-4 text-xs text-gray-400 text-center">无匹配结果</div>
+                <div className="px-3 py-4 text-xs text-gray-400 text-center">No matching results</div>
               ) : (
                 <>
                   {/* 标题匹配 */}
                   {searchResults.filter(r => r.matchType === 'title').length > 0 && (
                     <>
                       <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1">
-                        标题匹配
+                        Title match
                       </div>
                       {searchResults.filter(r => r.matchType === 'title').map((result) => (
                         <div
@@ -1261,10 +1381,10 @@ export const Chatbox = () => {
                           onClick={() => handleSearchResultClick(result)}
                           className="group flex flex-col p-2 rounded-lg hover:bg-blue-50 cursor-pointer transition-colors"
                         >
-                          <span className="text-sm text-[#0d0d0d] truncate">
-                            <HighlightText text={result.conversation.title || '无标题'} keyword={searchQuery} />
+                          <span data-i18n-ignore className="text-sm text-[#0d0d0d] truncate">
+                            <HighlightText text={result.conversation.title || t('Untitled')} keyword={searchQuery} />
                           </span>
-                          <span className="text-[10px] text-gray-400 mt-0.5">{result.conversation.petName}</span>
+                          <span data-i18n-ignore className="text-[10px] text-gray-400 mt-0.5">{result.conversation.petName}</span>
                         </div>
                       ))}
                     </>
@@ -1273,7 +1393,7 @@ export const Chatbox = () => {
                   {searchResults.filter(r => r.matchType === 'content').length > 0 && (
                     <>
                       <div className="px-2 py-1 text-xs font-semibold text-gray-400 uppercase tracking-wider mb-1 mt-2">
-                        消息匹配
+                        Message match
                       </div>
                       {searchResults.filter(r => r.matchType === 'content').map((result) => (
                         <div
@@ -1281,11 +1401,11 @@ export const Chatbox = () => {
                           onClick={() => handleSearchResultClick(result)}
                           className="group flex flex-col p-2 rounded-lg hover:bg-blue-50 cursor-pointer transition-colors"
                         >
-                          <span className="text-sm text-[#0d0d0d] truncate">{result.conversation.title || '无标题'}</span>
-                          <span className="text-[10px] text-gray-500 mt-0.5 line-clamp-2 leading-relaxed">
+                          <span data-i18n-ignore className="text-sm text-[#0d0d0d] truncate">{result.conversation.title || t('Untitled')}</span>
+                          <span data-i18n-ignore className="text-[10px] text-gray-500 mt-0.5 line-clamp-2 leading-relaxed">
                             <HighlightText text={result.snippet || ''} keyword={searchQuery} />
                           </span>
-                          <span className="text-[10px] text-gray-400 mt-0.5">{result.conversation.petName}</span>
+                          <span data-i18n-ignore className="text-[10px] text-gray-400 mt-0.5">{result.conversation.petName}</span>
                         </div>
                       ))}
                     </>
@@ -1305,7 +1425,7 @@ export const Chatbox = () => {
               onClick={() => handleItemClick(conv)}
               className="group flex items-center justify-between p-2 rounded-lg hover:bg-[#ececec] cursor-pointer transition-colors text-sm text-gray-700"
             >
-              <span className="truncate flex-1 pr-2 text-[#0d0d0d]">{conv.title}</span>
+              <span data-i18n-ignore className="truncate flex-1 pr-2 text-[#0d0d0d]">{conv.title}</span>
               <MdDelete 
                 onClick={(e) => handleDelete(e, conv._id)}
                 className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity text-lg" 
@@ -1334,7 +1454,7 @@ export const Chatbox = () => {
                   onClick={() => handleOrphanClick(conv)}
                   className="group flex items-center justify-between p-2 rounded-lg hover:bg-amber-50 cursor-pointer transition-colors text-sm text-gray-500 border-l-2 border-amber-400"
                 >
-                  <span className="truncate flex-1 pr-2">{conv.title}</span>
+                  <span data-i18n-ignore className="truncate flex-1 pr-2">{conv.title}</span>
                   <MdDelete 
                     onClick={(e) => handleDelete(e, conv._id)}
                     className="text-gray-400 hover:text-red-500 opacity-0 group-hover:opacity-100 transition-opacity text-lg" 
@@ -1356,14 +1476,14 @@ export const Chatbox = () => {
                 {(() => {
                   const currentPetId = tabs.find(t => t.id === activeTabId)?.petId;
                   const currentAssistant = allAssistants.find(a => a._id === currentPetId);
-                  const name = currentAssistant?.name || 'Select Assistant';
+                  const name = currentAssistant?.name || t('Select Assistant');
                   const initials = name.split(' ').map(w => w[0]).join('').slice(0, 2).toUpperCase();
                   return (
                     <>
                       <div className="w-8 h-8 rounded-full bg-blue-500 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
                         {initials}
                       </div>
-                      <div className="flex-1 text-sm font-medium text-gray-700 truncate">{name}</div>
+                      <div data-i18n-ignore className="flex-1 text-sm font-medium text-gray-700 truncate">{name}</div>
                       <MdKeyboardArrowDown className={`text-gray-500 transition-transform flex-shrink-0 ${showAssistantDropdown ? 'rotate-180' : ''}`} />
                     </>
                   );
@@ -1414,7 +1534,7 @@ export const Chatbox = () => {
                         <div className="w-6 h-6 rounded-full bg-blue-500 flex items-center justify-center text-white text-[10px] font-bold flex-shrink-0">
                           {initials}
                         </div>
-                        <span className="text-sm text-gray-700 truncate">{assistant.name}</span>
+                        <span data-i18n-ignore className="text-sm text-gray-700 truncate">{assistant.name}</span>
                       </div>
                     );
                   })}
@@ -1448,6 +1568,13 @@ export const Chatbox = () => {
                 onToggleSidebar={handleToggleSidebar}
             />
           </div>
+        )}
+        {showUpdateBanner && (
+          <UpdateBanner
+            info={updateInfo}
+            onDismiss={() => setDismissedUpdateVersion(updateInfo?.latestVersion || '')}
+            onSkipVersion={handleSkipUpdateVersion}
+          />
         )}
         {chatbodyStatus != "" && (
           <div className="text-center text-sm text-gray-600 animate-pulse absolute top-10 left-0 right-0 z-10 pointer-events-none">

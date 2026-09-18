@@ -24,6 +24,17 @@ import SkillsPanel from "../components/Settings/SkillsPanel";
 import AssistantSkillsSelector from "../components/Settings/AssistantSkillsSelector";
 import QqConnectorPanel from "../components/Settings/QqConnectorPanel";
 import SocialPreflightBar from "../components/Social/SocialPreflightBar";
+import { useI18n } from "../i18n/context";
+import {
+  getMarkdownTypographyStyle,
+  MARKDOWN_TYPOGRAPHY_LIMITS,
+  normalizeMarkdownTypography,
+} from "../utils/markdownTypography";
+import {
+  pendingUpdateVersion,
+  updateDownloadUrl,
+  updateSettingsPatchFor,
+} from "../utils/updateCheck";
 
 // ==================== Shared Components ====================
 
@@ -1443,6 +1454,7 @@ const ApiProvidersPanel = () => {
  * MCP Server 编辑/创建表单
  */
 const McpServerForm = ({ server, onSave, onCancel }) => {
+  const { t } = useI18n();
   const [name, setName] = useState(server?.name || '');
   const [transport, setTransport] = useState(server?.transport || 'stdio');
   const [command, setCommand] = useState(server?.command || '');
@@ -1614,17 +1626,17 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
   return (
     <form onSubmit={handleSubmit} className="space-y-4">
       <FormGroup>
-        <Label required>Server Name</Label>
+        <Label required>{t('Server Name')}</Label>
         <Input
           value={name}
           onChange={(e) => { setName(e.target.value); setTestResult(null); }}
-          placeholder="e.g., tavily, filesystem"
+          placeholder={t('e.g., tavily, filesystem')}
           required
         />
       </FormGroup>
       
       <FormGroup>
-        <Label>Transport Type</Label>
+        <Label>{t('Transport Type')}</Label>
         <div className="flex gap-4">
           <label className="flex items-center gap-2 cursor-pointer">
             <input
@@ -1637,7 +1649,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
             />
             <span className="text-sm">
               <span className="font-medium">Stdio</span>
-              <span className="text-gray-500 ml-1">(Local)</span>
+              <span className="text-gray-500 ml-1">{t('(Local)')}</span>
             </span>
           </label>
           <label className="flex items-center gap-2 cursor-pointer">
@@ -1651,7 +1663,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
             />
             <span className="text-sm">
               <span className="font-medium">HTTP/SSE</span>
-              <span className="text-gray-500 ml-1">(Remote)</span>
+              <span className="text-gray-500 ml-1">{t('(Remote)')}</span>
             </span>
           </label>
         </div>
@@ -1660,30 +1672,30 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
       {transport === 'stdio' ? (
         <>
           <FormGroup>
-            <Label required>Command</Label>
+            <Label required>{t('Command')}</Label>
             <Input
               value={command}
               onChange={(e) => { setCommand(e.target.value); setTestResult(null); }}
-              placeholder="e.g., npx"
+              placeholder={t('e.g., npx')}
               required
             />
           </FormGroup>
           
           <FormGroup>
-            <Label>Arguments</Label>
+            <Label>{t('Arguments')}</Label>
             <Input
               value={args}
               onChange={(e) => { setArgs(e.target.value); setTestResult(null); }}
-              placeholder="e.g., -y, @modelcontextprotocol/server-filesystem"
+              placeholder={t('e.g., -y, @modelcontextprotocol/server-filesystem')}
             />
           </FormGroup>
           
           <FormGroup>
-            <Label>Environment Variables</Label>
+            <Label>{t('Environment Variables')}</Label>
             <Textarea
               value={envVars}
               onChange={(e) => { setEnvVars(e.target.value); setTestResult(null); }}
-              placeholder="KEY=value (one per line)"
+              placeholder={t('KEY=value (one per line)')}
               rows={2}
               className="font-mono text-sm"
             />
@@ -1692,23 +1704,23 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
       ) : (
         <>
           <FormGroup>
-            <Label required>Server URL</Label>
+            <Label required>{t('Server URL')}</Label>
             <Input
               value={url}
               onChange={(e) => { setUrl(e.target.value); setTestResult(null); }}
-              placeholder="e.g., https://api.example.com/mcp"
+              placeholder={t('e.g., https://api.example.com/mcp')}
               required
             />
           </FormGroup>
           
           <FormGroup>
-            <Label>API Key</Label>
+            <Label>{t('API Key')}</Label>
             <div className="relative">
               <Input
                 type={showApiKey ? "text" : "password"}
                 value={apiKey}
                 onChange={(e) => { setApiKey(e.target.value); setTestResult(null); }}
-                placeholder="Optional authentication key"
+                placeholder={t('Optional authentication key')}
                 className="pr-10"
               />
               <button
@@ -1725,10 +1737,10 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
       )}
       
       <FormGroup>
-        <Label>Icon</Label>
+        <Label>{t('Icon')}</Label>
         <div className="flex items-center gap-3">
           <IconSelectorTrigger value={icon} onChange={setIcon} />
-          <span className="text-sm text-gray-500">Click to select</span>
+          <span className="text-sm text-gray-500">{t('Click to select')}</span>
         </div>
       </FormGroup>
       
@@ -1736,18 +1748,18 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
         <Checkbox
           checked={autoStart}
           onChange={(e) => setAutoStart(e.target.checked)}
-          label="Auto-start when PetGPT opens"
+          label={t('Auto-start when PetGPT opens')}
         />
         <Checkbox
           checked={showInToolbar}
           onChange={(e) => setShowInToolbar(e.target.checked)}
-          label="Show in toolbar"
+          label={t('Show in toolbar')}
         />
       </div>
       
       {/* Max Iterations Setting */}
       <FormGroup>
-        <Label>Max Tool Call Iterations</Label>
+        <Label>{t('Max Tool Call Iterations')}</Label>
         <div className="flex items-center gap-3">
           <Checkbox
             checked={isUnlimited}
@@ -1759,7 +1771,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
                 setMaxIterations(10);
               }
             }}
-            label="Unlimited"
+            label={t('Unlimited')}
           />
           {!isUnlimited && (
             <Input
@@ -1773,7 +1785,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
           )}
         </div>
         <p className="text-xs text-gray-500 mt-1">
-          Limit the number of tool calls per conversation turn for this server
+          {t('Limit the number of tool calls per conversation turn for this server')}
         </p>
       </FormGroup>
       
@@ -1781,7 +1793,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
       {(testResult || error) && (
         <div className="mt-2">
           {error && !testResult && (
-            <Alert variant="error">{error}</Alert>
+            <Alert variant="error">{t(error)}</Alert>
           )}
           {testResult && (
             <div className={`p-3 rounded-lg border text-sm ${
@@ -1790,11 +1802,11 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
                 : 'bg-red-50 border-red-200 text-red-800'
             }`}>
               <div className="font-medium">
-                {testResult.success ? '✓ Connection Successful' : '✗ Connection Failed'}
+                {t(testResult.success ? '✓ Connection Successful' : '✗ Connection Failed')}
               </div>
               {testResult.success && (
                 <div className="mt-1">
-                  Found {testResult.toolCount || 0} tool(s)
+                  {t('Found')} {testResult.toolCount || 0} {t('tool(s)')}
                   {testResult.tools?.length > 0 && (
                     <div className="flex flex-wrap gap-1 mt-1">
                       {testResult.tools.slice(0, 3).map((tool, i) => (
@@ -1808,7 +1820,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
                 </div>
               )}
               {!testResult.success && testResult.message && (
-                <div className="mt-1 opacity-90">{testResult.message}</div>
+                <div data-i18n-ignore className="mt-1 opacity-90">{testResult.message}</div>
               )}
             </div>
           )}
@@ -1824,11 +1836,11 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
           disabled={testing || !isValid()}
         >
           {testing ? <FiRefreshCw className="w-4 h-4 animate-spin" /> : <FaCheck className="w-4 h-4" />}
-          Test
+          {t('Test')}
         </Button>
         <div className="flex-1" />
         <Button type="button" variant="secondary" onClick={onCancel}>
-          Cancel
+          {t('Cancel')}
         </Button>
         <Button 
           type="submit" 
@@ -1836,7 +1848,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
           disabled={saving || (!server && !testResult?.success)}
         >
           {saving ? <FaSpinner className="w-4 h-4 animate-spin" /> : null}
-          {server ? 'Save' : 'Add Server'}
+          {t(server ? 'Save' : 'Add Server')}
         </Button>
       </div>
     </form>
@@ -1844,6 +1856,7 @@ const McpServerForm = ({ server, onSave, onCancel }) => {
 };
 
 const McpServerCard = ({ server, onDelete, onEdit }) => {
+  const { t } = useI18n();
   const [expanded, setExpanded] = useState(false);
   const [tools, setTools] = useState([]);
   const isRunning = server.isRunning || server.status === 'running';
@@ -1877,33 +1890,33 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
         <div className="min-w-0 flex-1">
           <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
-              <div className="font-semibold text-slate-900 truncate">{server.name}</div>
+              <div data-i18n-ignore className="font-semibold text-slate-900 truncate">{server.name}</div>
               <div className="mt-1 flex flex-wrap items-center gap-1.5">
                 <Badge tone={isRunning ? "green" : "gray"}>
-                  {isRunning ? 'Running' : 'Stopped'}
+                  {t(isRunning ? 'Running' : 'Stopped')}
                 </Badge>
-                {server.autoStart && <Badge tone="blue">Auto-start</Badge>}
+                {server.autoStart && <Badge tone="blue">{t('Auto-start')}</Badge>}
               </div>
             </div>
             <div className="shrink-0 flex items-center gap-1.5">
               <Button
                 variant="secondary"
                 onClick={() => onEdit(server)}
-                title="Edit"
+                title={t('Edit')}
               >
                 <FaPen className="w-3.5 h-3.5" />
               </Button>
               <Button
                 variant="danger"
                 onClick={() => onDelete(server._id)}
-                title="Delete"
+                title={t('Delete')}
               >
                 <FaTrash className="w-3.5 h-3.5" />
               </Button>
               <Button
                 variant="secondary"
                 onClick={() => setExpanded(!expanded)}
-                title={expanded ? "Collapse" : "Expand"}
+                title={t(expanded ? 'Collapse' : 'Expand')}
               >
                 {expanded ? <FaChevronUp className="w-3.5 h-3.5" /> : <FaChevronDown className="w-3.5 h-3.5" />}
               </Button>
@@ -1921,7 +1934,7 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
         <div className="mt-3 pt-3 border-t border-slate-100">
           <div className="space-y-2 text-sm">
             <div className="flex">
-              <span className="w-24 text-slate-500">Command:</span>
+              <span className="w-24 text-slate-500">{t('Command:')}</span>
               <code className="text-slate-700 bg-slate-100 px-2 py-0.5 rounded text-xs">
                 {server.command} {server.args?.join(' ')}
               </code>
@@ -1929,8 +1942,8 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
             
             {server.env && Object.keys(server.env).length > 0 && (
               <div className="flex">
-                <span className="w-24 text-slate-500">Env vars:</span>
-                <span className="text-slate-700">{Object.keys(server.env).length} configured</span>
+                <span className="w-24 text-slate-500">{t('Env vars:')}</span>
+                <span className="text-slate-700">{Object.keys(server.env).length} {t('configured')}</span>
               </div>
             )}
           </div>
@@ -1938,14 +1951,14 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
           {isRunning && tools.length > 0 && (
             <div className="mt-3">
               <h4 className="text-sm font-medium text-slate-700 mb-2">
-                Available Tools ({tools.length})
+                {t('Available Tools')} ({tools.length})
               </h4>
               <div className="grid gap-2">
                 {tools.map((tool, index) => (
                   <div key={index} className="bg-slate-50 rounded p-2 border border-slate-200">
-                    <div className="font-medium text-slate-800 text-sm">{tool.name}</div>
+                    <div data-i18n-ignore className="font-medium text-slate-800 text-sm">{tool.name}</div>
                     {tool.description && (
-                      <div className="text-xs text-slate-500 mt-1">{tool.description}</div>
+                      <div data-i18n-ignore className="text-xs text-slate-500 mt-1">{tool.description}</div>
                     )}
                   </div>
                 ))}
@@ -1955,7 +1968,7 @@ const McpServerCard = ({ server, onDelete, onEdit }) => {
           
           {isRunning && tools.length === 0 && (
             <div className="mt-3 text-sm text-slate-500">
-              No tools available from this server.
+              {t('No tools available from this server.')}
             </div>
           )}
         </div>
@@ -2129,7 +2142,8 @@ const ModelsPanel = () => {
                           <div className="col-span-6 text-sm text-gray-800 font-mono truncate" title={modelName}>
                             {modelName}
                           </div>
-                          <div className="col-span-3 text-sm text-gray-500">
+                          {/* 与相邻的模型名列一致地截断：窄窗口下服务商名折行会把整行撑高 */}
+                          <div className="col-span-3 text-sm text-gray-500 truncate" title={provider.name}>
                             {provider.name}
                           </div>
                           <div className="col-span-3 flex justify-center">
@@ -2140,7 +2154,7 @@ const ModelsPanel = () => {
                                 onChange={() => toggleModelVisibility(provider, modelName)}
                                 className="sr-only peer"
                               />
-                              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-2 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
+                              <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-green-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-green-500"></div>
                             </label>
                           </div>
                         </div>
@@ -2158,6 +2172,7 @@ const ModelsPanel = () => {
 };
 
 const McpServersPanel = () => {
+  const { t } = useI18n();
   const [servers, setServers] = useState([]);
   const [serverStatuses, setServerStatuses] = useState({});
   const [loading, setLoading] = useState(true);
@@ -2250,11 +2265,11 @@ const McpServersPanel = () => {
       {!showForm && (
         <div className="px-4 pt-3 pb-2 flex items-center justify-between gap-3 border-b border-slate-100">
           <div className="text-base font-semibold text-slate-800">
-            MCP Servers ({servers.length})
+            {t('MCP Servers')} ({servers.length})
           </div>
           <Button variant="primary" onClick={() => setIsCreating(true)}>
             <FaPlus className="w-4 h-4" />
-            New
+            {t('New')}
           </Button>
         </div>
       )}
@@ -2264,8 +2279,8 @@ const McpServersPanel = () => {
         {!showForm && <QqConnectorPanel onReady={loadServers} />}
         {showForm ? (
           <Card
-            title={editingServer ? `Edit: ${editingServer.name}` : "New MCP Server"}
-            description="Configure an MCP server for tool integration"
+            title={editingServer ? `${t('Edit')}: ${editingServer.name}` : t('New MCP Server')}
+            description={t('Configure an MCP server for tool integration')}
           >
             <McpServerForm
               server={editingServer}
@@ -2276,16 +2291,16 @@ const McpServersPanel = () => {
         ) : loading ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <FiRefreshCw className="w-8 h-8 animate-spin text-slate-300 mb-4" />
-            <div className="text-slate-400 text-sm">Loading...</div>
+            <div className="text-slate-400 text-sm">{t('Loading...')}</div>
           </div>
         ) : servers.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <FaPlug className="w-12 h-12 text-slate-300 mb-4" />
-            <div className="text-slate-600 font-medium">No MCP servers yet</div>
-            <div className="text-slate-400 text-sm mb-4">Add one to enable tool integration</div>
+            <div className="text-slate-600 font-medium">{t('No MCP servers yet')}</div>
+            <div className="text-slate-400 text-sm mb-4">{t('Add one to enable tool integration')}</div>
             <Button variant="primary" onClick={() => setIsCreating(true)}>
               <FaPlus className="w-4 h-4" />
-              Add Server
+              {t('Add Server')}
             </Button>
           </div>
         ) : (
@@ -2807,7 +2822,22 @@ const SettingsPanel = () => {
 // ==================== UI Settings Panel ====================
 
 const UIPanel = ({ settings, onSettingsChange, onSave, saving }) => {
+  const { language, setLanguage } = useI18n();
   if (!settings) return null;
+
+  const handleLanguageChange = async (event) => {
+    onSettingsChange(event);
+    await setLanguage(event.target.value);
+  };
+
+  const handleBooleanChange = (event) => {
+    onSettingsChange({
+      target: {
+        name: event.target.name,
+        value: event.target.checked,
+      },
+    });
+  };
   
   return (
     <>
@@ -2821,8 +2851,22 @@ const UIPanel = ({ settings, onSettingsChange, onSave, saving }) => {
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
         <div className="space-y-4">
-          <Card title="Window Settings" description="Customize the application window">
-            <FormGroup label="Window Size">
+          <Card title="Language" description="Choose the language used throughout PetGPT">
+            <FormGroup label="Interface Language">
+              <Select
+                name="language"
+                value={settings.language || language || "en"}
+                onChange={handleLanguageChange}
+              >
+                <option value="en">English</option>
+                <option value="zh-CN">Chinese (Simplified)</option>
+              </Select>
+            </FormGroup>
+          </Card>
+
+          <Card title="Size Settings" description="Adjust interface windows and character independently">
+            <div className="space-y-5">
+            <FormGroup label="Interface Size" hint="Controls the chat and settings windows.">
               <Select
                 name="windowSize"
                 value={settings.windowSize || "medium"}
@@ -2833,6 +2877,39 @@ const UIPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                 <option value="small">Small</option>
               </Select>
             </FormGroup>
+            <FormGroup label="Character Size" hint="Uses a wider scale range so each character size is visually distinct.">
+              <Select
+                name="characterSize"
+                value={settings.characterSize || "medium"}
+                onChange={onSettingsChange}
+              >
+                <option value="large">Large · 135%</option>
+                <option value="medium">Medium · 100%</option>
+                <option value="small">Small · 75%</option>
+              </Select>
+            </FormGroup>
+            </div>
+          </Card>
+
+          <Card title="Chat Window Behavior" description="Configure how the chat window behaves when enlarged">
+            <div className="flex items-center justify-between gap-4">
+              <div className="min-w-0">
+                <div className="text-sm font-medium text-slate-700">Keep Maximized Chat on Top</div>
+                <div className="text-xs text-slate-500 mt-0.5">
+                  Keep the chat above other applications after maximizing it. Compact chat always stays on top.
+                </div>
+              </div>
+              <label className="relative inline-flex items-center cursor-pointer shrink-0">
+                <input
+                  type="checkbox"
+                  name="chatAlwaysOnTopWhenMaximized"
+                  checked={settings.chatAlwaysOnTopWhenMaximized === true || settings.chatAlwaysOnTopWhenMaximized === 'true'}
+                  onChange={handleBooleanChange}
+                  className="sr-only peer"
+                />
+                <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500" />
+              </label>
+            </div>
           </Card>
           
           <div className="pt-2">
@@ -3019,7 +3096,7 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
                 </Select>
               </FormGroup>
 
-              <FormGroup label="Image Model" hint="provider 下所有已缓存模型（不过滤）">
+              <FormGroup label="Image Model" hint="All cached models from the provider (unfiltered)">
                 <Select
                   name="imageModelName"
                   value={settings.imageModelName || ""}
@@ -3064,8 +3141,169 @@ const DefaultsPanel = ({ settings, onSettingsChange, onSave, saving, assistants,
 
 // ==================== Preferences Panel ====================
 
+/**
+ * 手动检查更新。发现新版本时只给下载入口 —— 安装由用户手动完成，
+ * 原因见 src-tauri/src/updater.rs 顶部注释。
+ */
+const UpdateCheckCard = ({ settings, onCheckboxChange }) => {
+  const { t } = useI18n();
+  const [appVersion, setAppVersion] = useState('');
+  const [checking, setChecking] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    tauri.getAppVersion()
+      .then((version) => { if (!cancelled) setAppVersion(version || ''); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  const lastCheckedAt = Number(settings?.lastUpdateCheckAt);
+  const lastCheckedLabel = Number.isFinite(lastCheckedAt) && lastCheckedAt > 0
+    ? new Date(lastCheckedAt).toLocaleString()
+    : '';
+
+  const handleCheckNow = async () => {
+    setChecking(true);
+    setError('');
+    try {
+      const info = await tauri.checkForUpdate();
+      setResult(info);
+      await tauri.updateSettings(updateSettingsPatchFor(info));
+    } catch (err) {
+      setError(String(err?.message || err));
+      setResult(null);
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  // 之前跳过的版本在这里仍然显示：用户是主动来查的。
+  const hasUpdate = Boolean(result?.hasUpdate);
+  const downloadUrl = updateDownloadUrl(result);
+
+  return (
+    <Card title="Updates" description="Check GitHub for a newer PetGPT release">
+      <div className="space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div className="flex-1">
+            <div className="text-sm font-medium text-slate-700">{t('Check for Updates Automatically')}</div>
+            <div className="text-xs text-slate-500 mt-0.5">
+              {t('Checks GitHub once a day and shows a notice in chat. PetGPT never downloads or installs an update on its own.')}
+            </div>
+          </div>
+          <label className="relative inline-flex items-center cursor-pointer shrink-0">
+            <input
+              type="checkbox"
+              name="updateCheckEnabled"
+              checked={settings.updateCheckEnabled !== false && settings.updateCheckEnabled !== 'false'}
+              onChange={onCheckboxChange}
+              className="sr-only peer"
+            />
+            <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[\'\'] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+          </label>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-3 border-t border-slate-100 pt-3">
+          <div className="text-xs text-slate-500">
+            {t('Current version')}: <span data-i18n-ignore className="font-medium text-slate-700 tabular-nums">{appVersion || '—'}</span>
+          </div>
+          <Button
+            type="button"
+            variant="secondary"
+            className="!px-2.5 !py-1 !text-xs"
+            disabled={checking}
+            onClick={handleCheckNow}
+          >
+            {checking
+              ? <><FaSpinner className="animate-spin w-3 h-3" />{t('Checking…')}</>
+              : <><FiRefreshCw className="w-3 h-3" />{t('Check Now')}</>}
+          </Button>
+          {lastCheckedLabel && (
+            <div className="text-xs text-slate-400">
+              {t('Last checked')}: <span data-i18n-ignore>{lastCheckedLabel}</span>
+            </div>
+          )}
+        </div>
+
+        {error && <Alert tone="red">{t('Update check failed')}: <span data-i18n-ignore>{error}</span></Alert>}
+
+        {result && !error && (hasUpdate ? (
+          <Alert tone="blue">
+            <div className="space-y-1.5">
+              <div className="font-medium">
+                {t('A new version is available')}: <span data-i18n-ignore className="tabular-nums">{result.latestVersion}</span>
+                {result.prerelease && (
+                  <span className="ml-1.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-700">
+                    {t('Pre-release')}
+                  </span>
+                )}
+              </div>
+              <div className="text-xs">
+                {t('Download the installer, drag the app into Applications, then run this once so macOS will open it:')}
+              </div>
+              <code data-i18n-ignore className="block rounded bg-white/70 px-2 py-1 font-mono text-[11px] border border-slate-200">
+                sudo xattr -cr /Applications/PetGPT.app
+              </code>
+              <Button
+                type="button"
+                variant="primary"
+                className="!px-2.5 !py-1 !text-xs"
+                disabled={!downloadUrl}
+                onClick={() => downloadUrl && tauri.openExternal(downloadUrl)}
+              >
+                <FaDownload className="w-3 h-3" />
+                {result.assetUrl ? t('Download DMG') : t('Open release page')}
+              </Button>
+            </div>
+          </Alert>
+        ) : (
+          <Alert tone="green">{t('PetGPT is up to date')}</Alert>
+        ))}
+      </div>
+    </Card>
+  );
+};
+
+
+const TypographyControl = ({ label, name, value, limits, unit, onChange }) => (
+  <div className="grid grid-cols-[minmax(0,1fr)_6.5rem] items-center gap-x-4 gap-y-2">
+    <Label htmlFor={name} className="col-span-2">{label}</Label>
+    <input
+      id={name}
+      type="range"
+      name={name}
+      min={limits.min}
+      max={limits.max}
+      step={limits.step}
+      value={value}
+      onChange={onChange}
+      className="w-full accent-blue-600 cursor-pointer"
+    />
+    <div className="relative">
+      <Input
+        type="number"
+        name={name}
+        min={limits.min}
+        max={limits.max}
+        step={limits.step}
+        value={value}
+        onChange={onChange}
+        className="pr-9 tabular-nums"
+      />
+      <span className="pointer-events-none absolute inset-y-0 right-3 flex items-center text-xs text-slate-400">
+        {unit}
+      </span>
+    </div>
+  </div>
+);
+
 const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
   if (!settings) return null;
+
+  const markdownTypography = normalizeMarkdownTypography(settings);
   
   // 处理 checkbox 变化
   const handleCheckboxChange = (e) => {
@@ -3075,6 +3313,15 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
         name,
         value: checked
       }
+    });
+  };
+
+  const handleTypographyChange = (e) => {
+    onSettingsChange({
+      target: {
+        name: e.target.name,
+        value: Number(e.target.value),
+      },
     });
   };
 
@@ -3090,6 +3337,47 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
       {/* Content */}
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-3">
         <div className="space-y-4">
+          <UpdateCheckCard settings={settings} onCheckboxChange={handleCheckboxChange} />
+
+          <Card title="Markdown Typography" description="Customize Markdown text in chat">
+            <div className="space-y-4">
+              <TypographyControl
+                label="Font Size"
+                name="markdownFontSize"
+                value={markdownTypography.markdownFontSize}
+                limits={MARKDOWN_TYPOGRAPHY_LIMITS.fontSize}
+                unit="px"
+                onChange={handleTypographyChange}
+              />
+              <TypographyControl
+                label="Letter Spacing"
+                name="markdownLetterSpacing"
+                value={markdownTypography.markdownLetterSpacing}
+                limits={MARKDOWN_TYPOGRAPHY_LIMITS.letterSpacing}
+                unit="px"
+                onChange={handleTypographyChange}
+              />
+              <TypographyControl
+                label="Line Height"
+                name="markdownLineHeight"
+                value={markdownTypography.markdownLineHeight}
+                limits={MARKDOWN_TYPOGRAPHY_LIMITS.lineHeight}
+                unit="×"
+                onChange={handleTypographyChange}
+              />
+
+              <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-4 overflow-hidden">
+                <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mb-2">
+                  Live Preview
+                </div>
+                <div style={getMarkdownTypographyStyle(markdownTypography)} className="text-slate-700 break-words">
+                  <div className="font-semibold">Markdown typography preview</div>
+                  <div className="mt-1">Readable text with emphasis, links, and lists.</div>
+                </div>
+              </div>
+            </div>
+          </Card>
+
           {/* Memory Settings */}
           <Card title="Memory" description="Configure conversation memory behavior">
             <div className="flex items-center justify-between">
@@ -3107,7 +3395,7 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                   onChange={handleCheckboxChange}
                   className="sr-only peer"
                 />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
               </label>
             </div>
           </Card>
@@ -3129,7 +3417,7 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                   onChange={handleCheckboxChange}
                   className="sr-only peer"
                 />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
               </label>
             </div>
           </Card>
@@ -3151,7 +3439,7 @@ const PreferencesPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                   onChange={handleCheckboxChange}
                   className="sr-only peer"
                 />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
               </label>
             </div>
           </Card>
@@ -3319,6 +3607,10 @@ const HotkeysPanel = ({ settings, onSettingsChange, onSave, saving }) => {
 // ==================== Screenshot Panel ====================
 
 const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
+  const { t } = useI18n();
+  const [editingIdx, setEditingIdx] = useState(null);
+  const [editDraft, setEditDraft] = useState({ name: '', icon: '', prompt: '' });
+
   if (!settings) return null;
 
   // 解析 screenshot_prompts（JSON 字符串 → 数组）
@@ -3330,9 +3622,6 @@ const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
       return [];
     } catch { return []; }
   })();
-
-  const [editingIdx, setEditingIdx] = useState(null);
-  const [editDraft, setEditDraft] = useState({ name: '', icon: '', prompt: '' });
 
   const updatePrompts = (newPrompts) => {
     onSettingsChange({
@@ -3426,7 +3715,7 @@ const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                   onChange={handleCheckboxChange}
                   className="sr-only peer"
                 />
-                <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
               </label>
             </div>
           </Card>
@@ -3483,8 +3772,8 @@ const ScreenshotPanel = ({ settings, onSettingsChange, onSave, saving }) => {
                     <div className="flex items-center gap-3 p-2 rounded-lg hover:bg-slate-50 group">
                       <span className="text-xl w-8 text-center shrink-0">{item.icon || '📋'}</span>
                       <div className="flex-1 min-w-0">
-                        <div className="text-sm font-medium text-slate-700 truncate">{item.name}</div>
-                        <div className="text-xs text-slate-400 truncate">{item.prompt || '(no prompt)'}</div>
+                        <div data-i18n-ignore className="text-sm font-medium text-slate-700 truncate">{item.name}</div>
+                        <div data-i18n-ignore className="text-xs text-slate-400 truncate">{item.prompt || t('(no prompt)')}</div>
                       </div>
                       <div className="flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
@@ -3840,8 +4129,8 @@ const SocialPanel = ({ assistants, apiProviders }) => {
             disabled={!selectedPetId || socialStarting || (!socialActive && preflight ? !preflight.canStart : false)}
             title={!socialActive && preflight && !preflight.canStart ? preflight.summary : undefined}
             className={`px-3 py-1.5 text-xs font-medium rounded-lg ${
-              socialActive 
-                ? 'bg-red-500 text-white hover:bg-red-600' 
+              socialActive
+                ? 'bg-red-500 text-white hover:bg-red-600'
                 : 'bg-cyan-500 text-white hover:bg-cyan-600'
             } disabled:opacity-50`}
           >
@@ -4282,7 +4571,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
                         }}
                         className="sr-only peer"
                       />
-                      <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                      <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
                     </label>
                   </div>
                 ))}
@@ -4342,7 +4631,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
                   rows={3}
                   value={config.socialPersonaPrompt}
                   onChange={(e) => handleConfigChange('socialPersonaPrompt', e.target.value)}
-                  placeholder="e.g. 你是群里的活跃成员，喜欢用emoji..."
+                  placeholder="e.g. You're an active group member who loves using emoji..."
                 />
               </FormGroup>
               <FormGroup label="Reply Strategy" hint="Rules for when to reply vs stay silent (stored in social/REPLY_STRATEGY.md)">
@@ -4377,7 +4666,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
                     onChange={(e) => handleConfigChange('agentCanEditStrategy', e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                  <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
                 </label>
               </div>
               <div className="flex items-center justify-between">
@@ -4394,7 +4683,7 @@ const SocialPanel = ({ assistants, apiProviders }) => {
                     onChange={(e) => handleConfigChange('atMustReply', e.target.checked)}
                     className="sr-only peer"
                   />
-                  <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                  <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
                 </label>
               </div>
             </div>
@@ -4445,7 +4734,8 @@ const tabGroups = [
 
 const allTabs = tabGroups.flatMap(g => g.tabs.map(t => t.id));
 
-const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
+const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize, pendingUpdate = '' }) => {
+  const { t } = useI18n();
   return (
     <div className="w-32 bg-slate-50 border-r border-slate-200 flex flex-col shrink-0 overflow-y-auto">
       {/* Window Controls - macOS Style */}
@@ -4454,7 +4744,7 @@ const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
         <div 
           onClick={onClose} 
           className="no-drag w-3 h-3 rounded-full bg-red-500 hover:bg-red-600 cursor-pointer flex items-center justify-center group"
-          title="关闭"
+          title="Close"
         >
           <MdClose className="text-white text-[8px] opacity-0 group-hover:opacity-100" />
         </div>
@@ -4462,7 +4752,7 @@ const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
         <div 
           onClick={onClose} 
           className="no-drag w-3 h-3 rounded-full bg-yellow-500 hover:bg-yellow-600 cursor-pointer flex items-center justify-center group"
-          title="隐藏"
+          title="Hide"
         >
           <span className="text-white text-[8px] font-bold opacity-0 group-hover:opacity-100">−</span>
         </div>
@@ -4470,7 +4760,7 @@ const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
         <div 
           onClick={onMaximize} 
           className="no-drag w-3 h-3 rounded-full bg-green-500 hover:bg-green-600 cursor-pointer flex items-center justify-center group"
-          title="全屏"
+          title="Fullscreen"
         >
           <LuMaximize2 className="text-white text-[8px] opacity-0 group-hover:opacity-100" />
         </div>
@@ -4482,7 +4772,7 @@ const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
         <div key={group.title}>
           {/* Group title */}
           <div className="px-3 py-1.5 text-[10px] font-semibold text-slate-400 tracking-wider">
-            {group.title}
+            {t(group.title)}
           </div>
           
           {/* Group tabs */}
@@ -4501,10 +4791,16 @@ const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
                       : 'text-slate-500 hover:bg-slate-100 hover:text-slate-700'
                     }
                   `}
-                  title={tab.label}
+                  title={t(tab.label)}
                 >
                   <Icon className="w-4 h-4 shrink-0" />
-                  <span className="text-xs font-medium truncate">{tab.label}</span>
+                  <span className="text-xs font-medium truncate">{t(tab.label)}</span>
+                  {tab.id === 'preferences' && pendingUpdate && (
+                    <span
+                      className="ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-blue-500"
+                      title={t('An update is available')}
+                    />
+                  )}
                 </button>
               );
             })}
@@ -4524,6 +4820,7 @@ const Sidebar = ({ activeTab, onTabChange, onClose, onMaximize }) => {
 // ==================== Main Management Page ====================
 
 const ManagementPage = () => {
+  const { t } = useI18n();
   const location = useLocation();
   const navigate = useNavigate();
   
@@ -4663,15 +4960,17 @@ const ManagementPage = () => {
     setSaving(true);
     try {
       await saveSettingsHook(localSettings);
-      tauri.updateWindowSizePreset(localSettings.windowSize);
+      await tauri.updateCharacterSizePreset(localSettings.characterSize || 'medium');
+      await tauri.updateWindowSizePreset(localSettings.windowSize || 'medium');
       tauri.updateShortcuts(localSettings.programHotkey, localSettings.dialogHotkey, localSettings.screenshotHotkey);
       
       // 同步偏好设置到 Rust 后端
-      if (localSettings.chatFollowsCharacter !== undefined) {
-        await tauri.updatePreferences({ 
-          chatFollowsCharacter: localSettings.chatFollowsCharacter !== false 
-        });
-      }
+      await tauri.updatePreferences({
+        chatFollowsCharacter: localSettings.chatFollowsCharacter !== false,
+        chatAlwaysOnTopWhenMaximized:
+          localSettings.chatAlwaysOnTopWhenMaximized === true
+          || localSettings.chatAlwaysOnTopWhenMaximized === 'true',
+      });
       
       alert("Settings saved successfully!");
     } catch (error) {
@@ -4707,6 +5006,7 @@ const ManagementPage = () => {
           onTabChange={handleTabChange}
           onClose={handleClose}
           onMaximize={handleMaximize}
+          pendingUpdate={pendingUpdateVersion(syncedSettings)}
         />
         
         {/* Main content */}
@@ -4714,7 +5014,7 @@ const ManagementPage = () => {
           {/* TitleBar */}
           <div className="shrink-0">
             <TitleBar
-              title={getTitle()}
+              title={t(getTitle())}
               height="h-12"
             />
           </div>

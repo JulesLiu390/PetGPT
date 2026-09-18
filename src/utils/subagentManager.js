@@ -10,8 +10,25 @@ import { matchesSubagentScope } from './subagentCapability.js';
 
 export { matchesSubagentScope } from './subagentCapability.js';
 
-/** taskId → { status, task, target, targetType, dir, outputPath, source, createdAt, readByIntent, error, result } */
+/** taskId → { status, task, target, targetType, dir, outputPath, source, createdAt, readByIntent, error, result, terminalAt, surfacedToIntent } */
 export const subagentRegistry = new Map();
+
+/** 非 running 的终态，只有终态条目才会被回收 */
+export const TERMINAL_SUBAGENT_STATUSES = new Set(['done', 'failed', 'timeout']);
+
+/**
+ * 终态条目被注入 Intent prompt 这么多次后回收。
+ *
+ * 一次 eval 内部可能因 write_intent_plan 被拦截而重建多次 prompt，所以这里给的
+ * 余量大于 1 —— 目的是「通报过就别再念了」，不是精确计数。
+ */
+export const MAX_INTENT_SURFACES = 3;
+
+/** 兜底存活时间：没有任何一方来收的条目（例如聊天窗口派的）自己过期 */
+export const TERMINAL_ENTRY_TTL_MS = 30 * 60 * 1000;
+
+/** registry 总条数硬上限，超出时按完成时间淘汰最老的终态条目 */
+export const REGISTRY_HARD_CAP = 200;
 
 const _listeners = new Set();
 
@@ -97,7 +114,10 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
           entry.target);
       }
       _cleanupWorkspace(workspacePetId, taskId);
+      markSubagentTerminal(entry);
       _notify('done', { taskId, entry });
+      // reflect 结果已写入 workspace 文件，registry 条目到此没有任何消费方
+      reapSubagentRegistry();
       return;
     }
 
@@ -132,7 +152,9 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
     }
 
     _cleanupWorkspace(workspacePetId, taskId);
+    markSubagentTerminal(entry);
     _notify('done', { taskId, entry });
+    reapSubagentRegistry();
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
   });
   _unlisteners.push(ul1);
@@ -148,7 +170,9 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
       entry.target);
     _appendIndex(workspacePetId, entry, { status: 'timeout', elapsed });
     _cleanupWorkspace(workspacePetId, taskId);
+    markSubagentTerminal(entry);
     _notify('timeout', { taskId, entry });
+    reapSubagentRegistry();
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
   });
   _unlisteners.push(ul2);
@@ -165,7 +189,9 @@ export async function initSubagentListeners({ petId, addLog, wakeIntent }) {
       entry.target);
     _appendIndex(workspacePetId, entry, { status: 'failed', elapsed, error });
     _cleanupWorkspace(workspacePetId, taskId);
+    markSubagentTerminal(entry);
     _notify('error', { taskId, entry });
+    reapSubagentRegistry();
     if (entry.source === 'social' && wakeIntent) wakeIntent(entry.target);
   });
   _unlisteners.push(ul3);
@@ -197,12 +223,87 @@ export function killBySource(source) {
   _notify('clear', { source });
 }
 
+export function killByConversation(conversationId) {
+  const targetId = String(conversationId || 'temp');
+  for (const [taskId, entry] of subagentRegistry) {
+    if (
+      entry.source === 'chat'
+      && entry.status === 'running'
+      && String(entry.conversationId || 'temp') === targetId
+    ) {
+      tauri.subagentKill(taskId).catch(() => {});
+      subagentRegistry.delete(taskId);
+    }
+  }
+  _notify('clear', { source: 'chat', conversationId: targetId });
+}
+
 export function getActiveCount(scope = {}) {
   let n = 0;
   for (const entry of subagentRegistry.values()) {
     if (entry.status === 'running' && matchesSubagentScope(entry, scope)) n++;
   }
   return n;
+}
+
+/**
+ * 记录条目进入终态的时刻。回收全部以 terminalAt 为准，所以每条终态事件都要调它。
+ */
+export function markSubagentTerminal(entry, now = Date.now()) {
+  if (!entry || !TERMINAL_SUBAGENT_STATUSES.has(entry.status)) return entry;
+  if (!entry.terminalAt) entry.terminalAt = now;
+  return entry;
+}
+
+/**
+ * 判断一个终态条目是否已经没人需要了。
+ *
+ * running 永不回收（还在跑）。终态条目在以下任一情况下回收：
+ *  - source==='lessons'：结果直接落 workspace 文件，registry 条目没有任何消费方
+ *    （它甚至不该出现在 Intent prompt 里 —— 之前因为带 target 而被误注入）
+ *  - readByIntent：Intent 已经读走了输出文件
+ *  - 已经向 Intent 通报过 MAX_INTENT_SURFACES 次：失败/超时说一遍就够了
+ *  - 超过 TERMINAL_ENTRY_TTL_MS：没有任何一方来收，兜底过期
+ */
+export function isSubagentEntryReapable(entry, now = Date.now()) {
+  if (!entry || !TERMINAL_SUBAGENT_STATUSES.has(entry.status)) return false;
+  if (entry.source === 'lessons') return true;
+  if (entry.readByIntent) return true;
+  if ((entry.surfacedToIntent || 0) >= MAX_INTENT_SURFACES) return true;
+  return now - (entry.terminalAt || entry.createdAt || 0) > TERMINAL_ENTRY_TTL_MS;
+}
+
+/**
+ * 回收 registry 中不再被需要的终态条目，返回被删除的 taskId 列表。
+ *
+ * 在每次终态事件后、以及每轮 Intent eval 前调用。硬上限那一步是最后一道保险：
+ * 即使某类条目的回收规则将来出了漏洞，registry 也不会无限增长。
+ */
+export function reapSubagentRegistry({ now = Date.now(), registry = subagentRegistry } = {}) {
+  const reaped = [];
+  for (const [taskId, entry] of registry) {
+    if (isSubagentEntryReapable(entry, now)) {
+      registry.delete(taskId);
+      reaped.push(taskId);
+    }
+  }
+
+  if (registry.size > REGISTRY_HARD_CAP) {
+    const terminal = [];
+    for (const [taskId, entry] of registry) {
+      if (TERMINAL_SUBAGENT_STATUSES.has(entry?.status)) {
+        terminal.push([taskId, entry.terminalAt || entry.createdAt || 0]);
+      }
+    }
+    terminal.sort((a, b) => a[1] - b[1]);
+    for (const [taskId] of terminal) {
+      if (registry.size <= REGISTRY_HARD_CAP) break;
+      registry.delete(taskId);
+      reaped.push(taskId);
+    }
+  }
+
+  return reaped;
 }
 
 async function _cleanupWorkspace(petId, taskId) {

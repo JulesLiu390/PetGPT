@@ -1,9 +1,48 @@
 // macOS platform implementation — uses Cocoa/CoreGraphics FFI for native capabilities.
 
 use super::types::*;
+use objc2_app_kit::NSWindow;
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use std::path::Path;
 
 pub struct MacOSPlatform;
+
+impl MacOSPlatform {
+    /// Animate an outer window frame expressed in Tauri's top-left logical
+    /// coordinate system. Cocoa uses a bottom-left origin, so derive the
+    /// target from the current frames' delta; this also preserves monitor
+    /// offsets without assuming the primary screen's height.
+    pub fn set_window_frame(
+        window: &tauri::WebviewWindow,
+        current: LogicalRect,
+        target: LogicalRect,
+    ) -> Result<(), String> {
+        let ns_window = window.ns_window().map_err(|error| error.to_string())?;
+        if ns_window.is_null() {
+            return Err("Chat NSWindow handle is null".to_string());
+        }
+
+        unsafe {
+            let ns_window = &*ns_window.cast::<NSWindow>();
+            let current_native = ns_window.frame();
+            let target_native = NSRect::new(
+                NSPoint::new(
+                    current_native.origin.x + (target.x - current.x),
+                    current_native.origin.y
+                        - (target.y - current.y)
+                        - (target.height - current.height),
+                ),
+                NSSize::new(target.width, target.height),
+            );
+            // Individual frames are driven by the app so WKWebView receives a
+            // real resize notification on every step instead of repainting
+            // only after AppKit's built-in frame animation has completed.
+            ns_window.setFrame_display_animate(target_native, true, false);
+        }
+
+        Ok(())
+    }
+}
 
 // ============ CoreGraphics / CoreFoundation FFI for screenshot ============
 
@@ -259,7 +298,7 @@ impl PlatformProvider for MacOSPlatform {
                 use window_vibrancy::{apply_vibrancy, NSVisualEffectMaterial, NSVisualEffectState};
                 apply_vibrancy(
                     window,
-                    NSVisualEffectMaterial::FullScreenUI,
+                    NSVisualEffectMaterial::UnderWindowBackground,
                     Some(NSVisualEffectState::Active),
                     Some(*radius),
                 )

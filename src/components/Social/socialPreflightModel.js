@@ -24,7 +24,7 @@ export const PREFLIGHT_PENDING = 'pending';
 
 export const ACTION_LAUNCH_NAPCAT = 'launch-napcat';
 export const ACTION_START_MCP = 'start-mcp';
-export const ACTION_QUICK_LOGIN = 'quick-login';
+export const ACTION_SCAN_QR = 'scan-qr';
 export const ACTION_OPEN_SETUP = 'open-setup';
 
 /** 在线账号描述，e.g. `Nickname · 12345678`。不参与翻译。 */
@@ -165,11 +165,12 @@ function buildLoginCheck({ napcatRunning, loginProbe }) {
     return check('login', 'QQ online', PREFLIGHT_PENDING, { detail: loginProbe.error || '' });
   }
   if (!loginProbe.isLogin) {
-    // 先给「用本地会话登一次」的入口；真的登不上时用户还能走旁边的完整设置扫码。
+    // Saved-session recovery is attempted automatically before this result is
+    // published. An expired session falls back to the inline QR card.
     return check('login', 'QQ online', PREFLIGHT_BLOCKED, {
       detail: loginProbe.error || '',
-      message: 'QQ is not logged in. Try signing in with the saved session, or scan the QR code in the full setup.',
-      action: ACTION_QUICK_LOGIN,
+      message: 'QQ is not logged in. Scan the QR code below to sign in.',
+      action: ACTION_SCAN_QR,
     });
   }
   if (loginProbe.isOffline) {

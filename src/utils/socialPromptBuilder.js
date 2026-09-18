@@ -14,12 +14,26 @@ import { socialTargetDir } from './socialTargetType.js';
 /**
  * Build subagent status section for Intent prompt injection
  */
+/**
+ * 汇报当前 target 的后台任务状态给 Intent。
+ *
+ * 副作用（有意为之）：每条被写进 prompt 的终态条目会累加 surfacedToIntent。
+ * 回收逻辑靠这个计数判断「已经通报过了」，否则失败/超时的条目会永远留在
+ * registry 里、并且每轮 eval 都重复告诉 LLM 一次同样的失败。
+ *
+ * reflect（source==='lessons'）任务不汇报：它是后台自省，结果直接写 workspace
+ * 文件，Intent 既不该看到也无法处理。
+ */
 export function buildSubagentStatusSection(subagentRegistry, targetId) {
   if (!subagentRegistry || subagentRegistry.size === 0) return '';
 
   const lines = [];
   for (const [taskId, entry] of subagentRegistry) {
     if (entry.target !== targetId) continue;
+    if (entry.source === 'lessons') continue;
+    if (entry.status !== 'running') {
+      entry.surfacedToIntent = (entry.surfacedToIntent || 0) + 1;
+    }
     const elapsed = Math.round((Date.now() - entry.createdAt) / 1000);
     switch (entry.status) {
       case 'done':

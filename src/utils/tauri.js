@@ -10,7 +10,10 @@ import { emit, listen } from '@tauri-apps/api/event';
 import { ask, open as dialogOpen } from '@tauri-apps/plugin-dialog';
 import { open as shellOpen } from '@tauri-apps/plugin-shell';
 import { readTextFile } from '@tauri-apps/plugin-fs';
+import { getVersion as appGetVersion } from '@tauri-apps/api/app';
 import { normalizeChatWindowActivation } from './chatFocusModel.js';
+import { getActiveLanguage, translateUiText } from '../i18n/translator.js';
+import { createAbortError, isAbortError, throwIfAborted } from './cancellation.js';
 
 const subscribeToTauriEvent = (eventName, callback) => {
   const hasEventRuntime = typeof window !== 'undefined'
@@ -36,11 +39,12 @@ const subscribeToTauriEvent = (eventName, callback) => {
 
 export const confirm = async (message, options = {}) => {
   try {
-    return await ask(message, {
-      title: options.title || 'PetGPT',
+    const language = getActiveLanguage();
+    return await ask(translateUiText(message, language), {
+      title: translateUiText(options.title || 'PetGPT', language),
       kind: 'warning',
-      okLabel: 'Yes',
-      cancelLabel: 'No',
+      okLabel: translateUiText('Yes', language),
+      cancelLabel: translateUiText('No', language),
     });
   } catch (err) {
     console.error('[tauri.confirm] Dialog error:', err);
@@ -109,7 +113,13 @@ const isMacOS = navigator.platform.toUpperCase().indexOf('MAC') >= 0 ||
 const MOD_KEY = isMacOS ? 'Cmd' : 'Ctrl';
 
 const DEFAULT_SETTINGS = {
+  language: 'en',
   windowSize: 'medium',
+  characterSize: 'medium',
+  chatAlwaysOnTopWhenMaximized: false,
+  markdownFontSize: 14,
+  markdownLetterSpacing: 0,
+  markdownLineHeight: 1.3,
   defaultAssistant: '',
   programHotkey: 'Shift + Space',
   dialogHotkey: 'Alt + Space',
@@ -124,10 +134,10 @@ const DEFAULT_SETTINGS = {
   switchTabPrefix: MOD_KEY,  // 切换标签页前缀，按下此键 + 数字(1-9)切换
   // 截图快捷 Prompt 配置
   screenshotPrompts: [
-    { id: 'ocr', name: 'OCR 识别', prompt: '请识别图片中的所有文字，保持原有格式输出', icon: '🔍' },
-    { id: 'describe', name: '描述图片', prompt: '请详细描述这张图片的内容', icon: '📝' },
-    { id: 'code', name: '分析代码', prompt: '请分析这段代码截图，指出潜在问题并给出改进建议', icon: '💻' },
-    { id: 'translate', name: '翻译文字', prompt: '请翻译图片中的文字为中文', icon: '🌐' },
+    { id: 'ocr', name: 'OCR Recognition', prompt: 'Extract all text from this image and preserve the original formatting.', icon: '🔍' },
+    { id: 'describe', name: 'Describe Image', prompt: 'Describe the contents of this image in detail.', icon: '📝' },
+    { id: 'code', name: 'Analyze Code', prompt: 'Analyze the code in this screenshot, identify potential issues, and suggest improvements.', icon: '💻' },
+    { id: 'translate', name: 'Translate Text', prompt: 'Translate the text in this image into English.', icon: '🌐' },
   ],
   defaultScreenshotPrompt: null, // null = 显示选择器, 'id' = 直接使用该 prompt
   trainingCollectionEnabled: false,
@@ -394,11 +404,13 @@ const encodeJsonBody = (body) => {
   return btoa(binary);
 };
 
-export const llmProxyStream = async (endpoint, headers, body, onChunk) => {
+export const llmProxyStream = async (endpoint, headers, body, onChunk, abortSignal) => {
+  throwIfAborted(abortSignal);
   const requestId = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const eventName = `llm-proxy-chunk:${requestId}`;
   let callbackError = null;
   const unlisten = await listen(eventName, (event) => {
+    if (abortSignal?.aborted) return;
     const payload = event.payload || {};
     if (payload.chunk && onChunk) {
       try {
@@ -409,17 +421,37 @@ export const llmProxyStream = async (endpoint, headers, body, onChunk) => {
     }
   });
 
+  let cancelRequest = null;
+  const cancelStream = () => {
+    if (!cancelRequest) {
+      cancelRequest = invoke('llm_proxy_cancel_stream', { requestId }).catch((error) => {
+        console.warn('[llmProxyStream] Failed to cancel proxy stream:', error);
+        return false;
+      });
+    }
+    return cancelRequest;
+  };
+  abortSignal?.addEventListener('abort', cancelStream, { once: true });
+
   try {
+    throwIfAborted(abortSignal);
     await invoke('llm_proxy_stream', {
       requestId,
       endpoint,
       headers,
       bodyB64: encodeJsonBody(body)
     });
+    throwIfAborted(abortSignal);
     if (callbackError) {
       throw callbackError;
     }
+  } catch (error) {
+    if (abortSignal?.aborted || isAbortError(error)) {
+      throw createAbortError();
+    }
+    throw error;
   } finally {
+    abortSignal?.removeEventListener('abort', cancelStream);
     unlisten();
   }
 };
@@ -686,6 +718,7 @@ export const hideWindow = async (label) => {
 
 // Shortcuts
 export const updateWindowSizePreset = (preset) => invoke('update_window_size_preset', { preset });
+export const updateCharacterSizePreset = (preset) => invoke('update_character_size_preset', { preset });
 // 上报聊天输入工具栏的最小内容宽度（逻辑像素），后端据此更新 chat 窗口最小宽度并按预设比例缩放
 export const reportChatMinWidth = (width, preset) => invoke('report_chat_min_width', { width, preset });
 export const updateShortcuts = (programHotkey, dialogHotkey, screenshotHotkey = '') => 
@@ -1038,6 +1071,17 @@ export const runTrainingExport = async (options) => {
 
 export const getHomeDir = () => invoke('get_home_dir');
 
+// ==================== Update Check ====================
+
+/**
+ * 查询 GitHub 最新 Release。只报告，不下载不安装 —— 见 src-tauri/src/updater.rs。
+ * 当前版本由 Rust 侧从 package_info() 取，前端不传。
+ */
+export const checkForUpdate = () => invoke('check_for_update');
+
+/** 当前运行的应用版本（编译期常量，不经网络）。 */
+export const getAppVersion = () => appGetVersion();
+
 // Model Configs (alias to pets with model type)
 export const getModelConfigs = async () => {
   const pets = await getPets();
@@ -1266,6 +1310,7 @@ const tauri = {
   hideManageWindow,
   hideSettingsWindow,
   updateWindowSizePreset,
+  updateCharacterSizePreset,
   reportChatMinWidth,
   updateShortcuts,
   updatePreferences,
@@ -1347,6 +1392,10 @@ const tauri = {
   skillsOpenGlobalFolder,
   runTrainingExport,
   getHomeDir,
+
+  // Update check
+  checkForUpdate,
+  getAppVersion,
 
   // TTS
   elevenlabsTts,

@@ -52,6 +52,51 @@ html, body, #root {
   animation: fade-in 0.2s ease-out;
 }
 
+/* Compact chat composer ----------------------------------------------------
+   A light inner keyline keeps the translucent panel edge consistent against
+   both light and dark desktop content. The shadow is deliberately centered
+   and tight so it stays inside the compact window's small outer gutter. */
+.compact-chat-composer-surface {
+  transform-origin: 50% 100%;
+  background:
+    linear-gradient(145deg, rgba(255, 255, 255, 0.74), rgba(248, 250, 252, 0.56));
+  background-clip: padding-box;
+  border-color: rgba(255, 255, 255, 0.82);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.92),
+    inset 0 0 0 0.5px rgba(71, 85, 105, 0.13),
+    0 2px 5px rgba(15, 23, 42, 0.08),
+    0 6px 16px -7px rgba(15, 23, 42, 0.22);
+  transition:
+    border-color 160ms ease,
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.compact-chat-composer-surface:focus-within {
+  border-color: rgba(255, 255, 255, 0.94);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.96),
+    inset 0 0 0 0.5px rgba(59, 130, 246, 0.14),
+    0 2px 5px rgba(15, 23, 42, 0.08),
+    0 7px 18px -8px rgba(37, 99, 235, 0.24);
+}
+
+.compact-chat-composer-surface[data-dragging='true'] {
+  background: rgba(239, 246, 255, 0.92);
+  border-color: rgba(147, 197, 253, 0.9);
+  box-shadow:
+    inset 0 0 0 0.5px rgba(59, 130, 246, 0.18),
+    0 2px 5px rgba(15, 23, 42, 0.08),
+    0 7px 18px -8px rgba(37, 99, 235, 0.3);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .compact-chat-composer-surface {
+    transition: none;
+  }
+}
+
 /* Thinking 动画 - 忽大忽小的黑色圆圈 */
 @keyframes thinking-pulse {
   0%, 100% {

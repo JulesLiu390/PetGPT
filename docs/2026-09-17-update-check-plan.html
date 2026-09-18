@@ -1,0 +1,302 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PetGPT 更新检查方案</title>
+<style>
+  img { max-width: 100%; }
+  :root {
+    --bg: #fbfaf8;
+    --fg: #1b1a18;
+    --muted: #6d6862;
+    --rule: #e2ded7;
+    --accent: #ab4a1c;
+    --chip-bg: #f0ece4;
+    --code-bg: #f2efe9;
+    --ok: #3f6b45;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #17171a;
+      --fg: #e9e7e3;
+      --muted: #99948c;
+      --rule: #2f2e31;
+      --accent: #e28a53;
+      --chip-bg: #242326;
+      --code-bg: #201f22;
+      --ok: #8fb894;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #17171a;
+    --fg: #e9e7e3;
+    --muted: #99948c;
+    --rule: #2f2e31;
+    --accent: #e28a53;
+    --chip-bg: #242326;
+    --code-bg: #201f22;
+    --ok: #8fb894;
+  }
+
+  html { color-scheme: light dark; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--fg);
+    font: 15px/1.65 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+      "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap {
+    max-width: 780px;
+    margin: 0 auto;
+    padding-inline: 20px;
+    padding-block: 56px 72px;
+  }
+
+  h1 {
+    font: 600 27px/1.25 Georgia, "Songti SC", "Noto Serif CJK SC", serif;
+    margin: 0 0 10px;
+    letter-spacing: -0.01em;
+  }
+  .meta {
+    color: var(--muted);
+    font-size: 13px;
+    margin: 0 0 6px;
+  }
+  .lede {
+    margin: 22px 0 0;
+    padding: 14px 16px;
+    background: var(--chip-bg);
+    border-left: 2px solid var(--accent);
+    font-size: 14px;
+  }
+  .lede b { font-weight: 600; }
+
+  h2 {
+    font: 600 17px/1.3 Georgia, "Songti SC", "Noto Serif CJK SC", serif;
+    margin: 44px 0 14px;
+    padding-bottom: 7px;
+    border-bottom: 1px solid var(--rule);
+  }
+  h2 .n {
+    color: var(--accent);
+    font-size: 14px;
+    margin-right: 8px;
+  }
+
+  p { margin: 0 0 12px; }
+  .note { color: var(--muted); font-size: 13.5px; }
+
+  code, .path {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    background: var(--code-bg);
+    padding: 1px 5px;
+    border-radius: 3px;
+    word-break: break-word;
+  }
+
+  .item {
+    border-top: 1px solid var(--rule);
+    padding: 16px 0 4px;
+    display: grid;
+    grid-template-columns: 46px 1fr;
+    gap: 0 14px;
+  }
+  .item:first-of-type { border-top: none; }
+  .tag {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--accent);
+    padding-top: 2px;
+  }
+  .item h3 {
+    font: 600 15px/1.4 inherit;
+    margin: 0 0 6px;
+  }
+  .item p { margin: 0 0 8px; font-size: 14px; }
+  .where {
+    font-size: 12.5px;
+    color: var(--muted);
+    margin: 0 0 8px;
+  }
+  .where .path { color: var(--fg); }
+  .yes { color: var(--ok); font-weight: 600; }
+
+  ul { margin: 0 0 12px; padding-left: 20px; }
+  li { margin-bottom: 6px; font-size: 14px; }
+
+  .no li { color: var(--muted); }
+
+  .seq {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12.5px;
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  .seq li {
+    background: var(--chip-bg);
+    padding: 4px 9px;
+    border-radius: 3px;
+    margin: 0;
+  }
+  .seq .arw { background: none; color: var(--muted); padding: 0 1px; }
+
+  @media (max-width: 460px) {
+    .wrap { padding-block: 36px 52px; }
+    .item { grid-template-columns: 1fr; gap: 0; }
+    .tag { padding: 0 0 4px; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>PetGPT 更新检查方案</h1>
+  <p class="meta">方案 B · 应用内检测 + 引导下载 · 2026-09-17</p>
+
+  <div class="lede">
+    <b>范围：</b>启动后静默比对 GitHub 最新 Release，发现新版本就提示用户去下载 DMG。
+    <b>不做</b>下载、不解压、不替换 <code>.app</code>、不引入 <code>tauri-plugin-updater</code>、不需要签名密钥。
+    整体约 400–600 行新代码，风险面接近零。
+  </div>
+
+  <h2><span class="n">01</span>功能清单</h2>
+
+  <div class="item">
+    <div class="tag">F0</div>
+    <div>
+      <h3>版本号单点化（前置阻塞项）</h3>
+      <p class="where">位置 <span class="path">scripts/create-dmg.sh:18</span> · <span class="path">scripts/create-dmg-intel.sh:18</span></p>
+      <p>现在版本号硬编码在 4 处，且 Intel 脚本还停在 <code>0.4.4</code>，实际已是 <code>0.4.8</code>。
+      让两个 DMG 脚本从 <code>tauri.conf.json</code> 读取 version，删掉硬编码。</p>
+      <p class="note">整个方案靠版本号比较驱动，源头不一致会直接把错误版本号告诉用户 —— 必须先修这个。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F1</div>
+    <div>
+      <h3>Rust 侧 <code>check_for_update</code> 命令</h3>
+      <p class="where">新建 <span class="path">src-tauri/src/updater.rs</span>，注册进 <span class="path">lib.rs:3550</span> 的 invoke_handler</p>
+      <p>请求 <code>api.github.com/repos/JulesLiu390/PetGPT/releases/latest</code>，可直接套用
+      <span class="path">qq_connector.rs:342</span> 的 <code>latest_release()</code> 写法 —— 但要带自己的
+      <code>User-Agent</code>（GitHub 强制要求）并加 <code>.timeout()</code>。</p>
+      <p>当前版本从 <code>app.package_info().version</code> 取，编译期即来自 Cargo.toml，不用前端传。</p>
+      <p>返回 <code>currentVersion / latestVersion / hasUpdate / releaseUrl / notes / pubDate / assetUrl / assetSize</code>。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F2</div>
+    <div>
+      <h3>架构感知的资产挑选</h3>
+      <p class="where">同 <span class="path">updater.rs</span>，参照 <span class="path">qq_connector.rs:2540</span> 的 OS/ARCH 匹配写法</p>
+      <p><code>std::env::consts::ARCH</code> 为 <code>aarch64</code> → 挑 <code>*_aarch64.dmg</code>，<code>x86_64</code> → <code>*_x64.dmg</code>。</p>
+      <p>非 macOS 或找不到匹配资产时 <code>assetUrl</code> 留空，前端退化为「打开 Release 页」，不要把 Linux 用户指向 DMG。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F3</div>
+    <div>
+      <h3>semver 比较（纯函数，带测试）</h3>
+      <p class="where">同 <span class="path">updater.rs</span> + <code>#[cfg(test)]</code></p>
+      <p>要处理 <code>v</code> 前缀、三段式、以及预发布标签 —— <code>0.5.0-beta</code> 不能盖过 <code>0.5.0</code>。</p>
+      <p class="note">手写十几行即可，不必为此给 Cargo.toml 增加 semver 依赖。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F4</div>
+    <div>
+      <h3>节流与缓存</h3>
+      <p class="where">复用已有 <code>get_setting</code> / <code>set_setting</code> + <span class="path">src/utils/useSettings.js</span></p>
+      <p>新增 settings 键：<code>updateCheckEnabled</code>（默认 true）、<code>lastUpdateCheckAt</code>、<code>lastKnownVersion</code>、<code>skippedVersion</code>。</p>
+      <p>GitHub 匿名 API 限流 60 次/小时/IP，所以：检查间隔 ≥ 24h，启动后延迟约 60s 再查（不抢启动资源），网络失败一律静默，不打扰用户。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F5</div>
+    <div>
+      <h3>Preferences 面板设置项</h3>
+      <p class="where"><span class="path">src/pages/ManagementPage.jsx:3171</span> PreferencesPanel</p>
+      <p>四项：当前版本显示、自动检查开关、「立即检查」按钮及结果状态、上次检查时间。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F6</div>
+    <div>
+      <h3>新版本提示 UI</h3>
+      <p class="where"><span class="path">src/components/Chat/ChatboxBody.jsx</span> 顶部 banner + Management 侧栏角标</p>
+      <p><b>不要放 character 窗口</b> —— 那是透明置顶的宠物形态，任何弹层都会破坏它。放 chat 窗口顶部一条可关闭的轻量 banner，Management 的 Preferences 入口加个小红点。</p>
+      <p>按钮：下载（<code>shell:allow-open</code> <span class="yes">权限已有</span>）· 稍后 · 跳过此版本（写入 <code>skippedVersion</code>）。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F7</div>
+    <div>
+      <h3>安装引导（本项目特有，不能省）</h3>
+      <p class="where">同 F6 提示组件；文案对齐 <span class="path">scripts/dmg-readme.rtf</span></p>
+      <p>应用未签名未公证，用户装完必须执行 <code>sudo xattr -cr /Applications/PetGPT.app</code>。
+      提示里要内嵌这条命令并提供一键复制（<code>clipboard-manager:allow-write-text</code> <span class="yes">权限已有</span>）。</p>
+      <p class="note">否则用户下完新版打不开，会以为更新把应用搞坏了。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F8</div>
+    <div>
+      <h3>i18n 接线</h3>
+      <p class="where"><span class="path">src/i18n/messages.js</span> · <span class="path">src/i18n/translator.js</span></p>
+      <p>固定文案成对加进 <code>UI_MESSAGES</code>（英文在前，它是源语言）。</p>
+      <p>带变量的句子（如「发现新版本 0.5.0」）必须走 <code>translator.js</code> 的 <code>dynamicRules</code> 正则规则 —— 这个项目是 DOM 层运行时替换，字面匹配对动态串无效。</p>
+    </div>
+  </div>
+
+  <div class="item">
+    <div class="tag">F9</div>
+    <div>
+      <h3>前端 wrapper 与测试</h3>
+      <p class="where"><span class="path">src/utils/tauri.js</span> · <span class="path">src/utils/__tests__/</span></p>
+      <p><code>tauri.js</code> 加 <code>checkForUpdate()</code> 包装。测试覆盖三个纯函数：semver 比较与资产挑选（<code>cargo test</code>）、节流判断与跳过逻辑（<code>node --test</code>）。</p>
+    </div>
+  </div>
+
+  <h2><span class="n">02</span>明确不做的事</h2>
+  <ul class="no">
+    <li>不下载 DMG、不 <code>hdiutil attach</code>、不替换正在运行的 <code>.app</code></li>
+    <li>不引入 <code>tauri-plugin-updater</code>、不生成 minisign 密钥、不改 <code>bundle.targets</code></li>
+    <li>不做静默更新、不做强制更新</li>
+  </ul>
+  <p class="note">这三条正是方案 B 把风险压到零的原因：应用未签名未公证的前提下，自动替换 bundle 会撞上 Gatekeeper 和 macOS 13+ 的 App Management 保护。</p>
+
+  <h2><span class="n">03</span>权限清单</h2>
+  <p><span class="path">src-tauri/capabilities/default.json</span> <b>无需新增任何权限</b> ——
+  <code>shell:allow-open</code>、<code>clipboard-manager:allow-write-text</code>、<code>core:app:default</code> 均已在列。</p>
+
+  <h2><span class="n">04</span>落地顺序</h2>
+  <ul class="seq">
+    <li>F0 版本号</li><li class="arw">→</li>
+    <li>F1–F3 后端</li><li class="arw">→</li>
+    <li>F4 节流</li><li class="arw">→</li>
+    <li>F5–F7 界面</li><li class="arw">→</li>
+    <li>F8 i18n</li><li class="arw">→</li>
+    <li>F9 测试</li>
+  </ul>
+  <p class="note" style="margin-top:14px">F0 必须先行。F1–F3 做完就能用 <code>npm run tauri:dev</code> 手工验证一次真实的 GitHub 响应，再往上叠 UI。</p>
+
+</div>
+</body>
+</html>

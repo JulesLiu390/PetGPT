@@ -64,13 +64,13 @@ export default function SocialPage() {
   // ── ElevenLabs TTS models ──
   // 兜底模型列表：当 API key 没有 models_read 权限时仍可选择
   const FALLBACK_TTS_MODELS = [
-    { model_id: 'eleven_multilingual_v2', name: 'Multilingual v2 (推荐，多语言)' },
-    { model_id: 'eleven_flash_v2_5', name: 'Flash v2.5 (超低延迟，多语言)' },
-    { model_id: 'eleven_turbo_v2_5', name: 'Turbo v2.5 (低延迟，多语言)' },
-    { model_id: 'eleven_flash_v2', name: 'Flash v2 (超低延迟，英文)' },
-    { model_id: 'eleven_turbo_v2', name: 'Turbo v2 (低延迟，英文)' },
-    { model_id: 'eleven_monolingual_v1', name: 'Monolingual v1 (英文)' },
-    { model_id: 'eleven_multilingual_v1', name: 'Multilingual v1 (旧版)' },
+    { model_id: 'eleven_multilingual_v2', name: 'Multilingual v2 (recommended, multilingual)' },
+    { model_id: 'eleven_flash_v2_5', name: 'Flash v2.5 (ultra-low latency, multilingual)' },
+    { model_id: 'eleven_turbo_v2_5', name: 'Turbo v2.5 (low latency, multilingual)' },
+    { model_id: 'eleven_flash_v2', name: 'Flash v2 (ultra-low latency, English)' },
+    { model_id: 'eleven_turbo_v2', name: 'Turbo v2 (low latency, English)' },
+    { model_id: 'eleven_monolingual_v1', name: 'Monolingual v1 (English)' },
+    { model_id: 'eleven_multilingual_v1', name: 'Multilingual v1 (legacy)' },
   ];
   const [ttsModels, setTtsModels] = useState(FALLBACK_TTS_MODELS); // [{ model_id, name }]
   const [loadingTtsModels, setLoadingTtsModels] = useState(false);
@@ -998,10 +998,10 @@ export default function SocialPage() {
               </Card>
 
               {/* Prompt Cache — performance setting for OpenAI-type APIs */}
-              <Card title="Prompt Cache" description="显式缓存参数（仅影响 OpenAI 类 API；Anthropic 始终启用，Gemini 走隐式缓存）">
+              <Card title="Prompt Cache" description="Explicit prompt cache parameters (OpenAI-compatible APIs only; Anthropic is always enabled and Gemini uses implicit caching)">
                 <ToggleRow
-                  label="启用显式 Prompt Cache（OpenAI 类 API）"
-                  hint="向 OpenAI 类 API 附加 prompt_cache_key + 24h 保留，提升多轮缓存命中率。如果你用的兼容网关对未知字段报错，请关闭此开关。"
+                  label="Enable explicit Prompt Cache (OpenAI-compatible APIs)"
+                  hint="Add prompt_cache_key and 24-hour retention to OpenAI-compatible APIs to improve multi-turn cache hits. Disable this if your gateway rejects unknown fields."
                   checked={config.explicitPromptCache !== false}
                   onChange={(v) => handleConfigChange('explicitPromptCache', v)}
                 />
@@ -1386,7 +1386,7 @@ export default function SocialPage() {
                                 }}
                                 className="sr-only peer"
                               />
-                              <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+                              <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
                             </label>
                           </div>
                         ))}
@@ -1563,11 +1563,11 @@ export default function SocialPage() {
                         className="rounded"
                       />
                       <span className="text-sm font-medium text-gray-700">CC Subagent</span>
-                      <span className="text-xs text-gray-400">后台研究任务</span>
+                      <span className="text-xs text-gray-400">Background research tasks</span>
                     </div>
                     {config.subagentEnabled !== false && (
                       <div className="grid grid-cols-3 gap-3">
-                        <FormGroup label="Max Concurrent" hint="同时运行上限">
+                        <FormGroup label="Max Concurrent" hint="Maximum concurrent tasks">
                           <Input
                             type="number"
                             min={1}
@@ -1576,7 +1576,7 @@ export default function SocialPage() {
                             onChange={(e) => handleConfigChange('subagentMaxConcurrent', parseInt(e.target.value) || 5)}
                           />
                         </FormGroup>
-                        <FormGroup label="Timeout (seconds)" hint="兜底超时">
+                        <FormGroup label="Timeout (seconds)" hint="Fallback timeout">
                           <Input
                             type="number"
                             min={30}
@@ -1585,7 +1585,7 @@ export default function SocialPage() {
                             onChange={(e) => handleConfigChange('subagentTimeoutSecs', parseInt(e.target.value) || 300)}
                           />
                         </FormGroup>
-                        <FormGroup label="Model" hint="CC 模型">
+                        <FormGroup label="Model" hint="CC model">
                           <Input
                             type="text"
                             value={config.subagentModel || 'sonnet'}
@@ -1606,8 +1606,8 @@ export default function SocialPage() {
                         onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), enabled: e.target.checked })}
                         className="rounded"
                       />
-                      <span className="text-sm font-medium text-gray-700">TTS 语音 (ElevenLabs)</span>
-                      <span className="text-xs text-gray-400">启用 voice_send 内置工具，最多 50 字</span>
+                      <span className="text-sm font-medium text-gray-700">TTS Voice (ElevenLabs)</span>
+                      <span className="text-xs text-gray-400">Enable the built-in voice_send tool, up to 50 characters</span>
                     </div>
                     {config.ttsConfig?.enabled && (
                       <div className="grid grid-cols-2 gap-3">
@@ -1619,7 +1619,7 @@ export default function SocialPage() {
                             placeholder="sk_..."
                           />
                         </FormGroup>
-                        <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? '生成中...' : 'ElevenLabs voice id')}>
+                        <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? 'Generating...' : 'ElevenLabs voice id')}>
                           <div className="flex gap-2">
                             <Input
                               type="text"
@@ -1641,7 +1641,7 @@ export default function SocialPage() {
                                     text: 'hello',
                                     modelId: config.ttsConfig.modelId || undefined,
                                   });
-                                  if (!base64) throw new Error('返回为空');
+                                  if (!base64) throw new Error('Empty response');
                                   const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
                                   await audio.play();
                                 } catch (err) {
@@ -1651,18 +1651,18 @@ export default function SocialPage() {
                                 }
                               }}
                             >
-                              {testingVoice ? '测试中...' : '测试'}
+                              {testingVoice ? 'Testing...' : 'Test'}
                             </button>
                           </div>
                         </FormGroup>
-                        <FormGroup label="Model" hint={ttsModelsError ? `刷新失败: ${ttsModelsError}（仍可使用兜底列表）` : `${ttsModels.length} 个模型可选`}>
+                        <FormGroup label="Model" hint={ttsModelsError ? `Refresh failed: ${ttsModelsError} (fallback list remains available)` : `${ttsModels.length} models available`}>
                           <div className="flex gap-2">
                             <select
                               className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
                               value={config.ttsConfig?.modelId || ''}
                               onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), modelId: e.target.value })}
                             >
-                              <option value="">默认 (eleven_multilingual_v2)</option>
+                              <option value="">Default (eleven_multilingual_v2)</option>
                               {ttsModels.map(m => (
                                 <option key={m.model_id} value={m.model_id}>{m.name} ({m.model_id})</option>
                               ))}
@@ -1671,7 +1671,7 @@ export default function SocialPage() {
                               type="button"
                               className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
                               disabled={loadingTtsModels || !config.ttsConfig?.apiKey}
-                              title="拉取最新模型列表（需要 API key 有 models_read 权限）"
+                              title="Fetch the latest model list (the API key needs models_read permission)"
                               onClick={async () => {
                                 setLoadingTtsModels(true);
                                 setTtsModelsError('');
@@ -1680,7 +1680,7 @@ export default function SocialPage() {
                                   if (Array.isArray(list) && list.length > 0) {
                                     setTtsModels(list);
                                   } else {
-                                    setTtsModelsError('返回为空');
+                                    setTtsModelsError('Empty response');
                                   }
                                 } catch (err) {
                                   // 失败保留原有列表（兜底或上次成功的）
@@ -1690,7 +1690,7 @@ export default function SocialPage() {
                                 }
                               }}
                             >
-                              {loadingTtsModels ? '加载中...' : '刷新'}
+                              {loadingTtsModels ? 'Loading...' : 'Refresh'}
                             </button>
                           </div>
                         </FormGroup>
@@ -1707,8 +1707,8 @@ export default function SocialPage() {
                         onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), enabled: e.target.checked })}
                         className="rounded"
                       />
-                      <span className="text-sm font-medium text-gray-700">AI 生图 (generate_image_send)</span>
-                      <span className="text-xs text-gray-400">让 Glitch 用 AI 生图发到群里：流程图 / 示意图 / 自制表情包</span>
+                      <span className="text-sm font-medium text-gray-700">AI Image Generation (generate_image_send)</span>
+                      <span className="text-xs text-gray-400">Let Glitch generate and send diagrams, illustrations, or custom memes to the group</span>
                     </div>
                     {config.imageGenConfig?.enabled && (
                       <div className="grid grid-cols-2 gap-3">
@@ -1718,20 +1718,20 @@ export default function SocialPage() {
                             value={config.imageGenConfig?.providerId || ''}
                             onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), providerId: e.target.value, modelName: '' })}
                           >
-                            <option value="">选择 provider</option>
+                            <option value="">Select provider...</option>
                             {apiProviders.map(p => (
                               <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
                             ))}
                           </select>
                         </FormGroup>
-                        <FormGroup label="Model" hint="provider 下所有缓存模型（不过滤），常见: dall-e-3 / gpt-image-1 / doubao-seedream-3-0">
+                        <FormGroup label="Model" hint="All cached provider models (unfiltered); common choices: dall-e-3 / gpt-image-1 / doubao-seedream-3-0">
                           <select
                             className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
                             value={config.imageGenConfig?.modelName || ''}
                             onChange={(e) => handleConfigChange('imageGenConfig', { ...(config.imageGenConfig || {}), modelName: e.target.value })}
                             disabled={!config.imageGenConfig?.providerId}
                           >
-                            <option value="">选择模型</option>
+                            <option value="">Select Model</option>
                             {(() => {
                               const p = apiProviders.find(x => (x._id || x.id) === config.imageGenConfig?.providerId);
                               const list = p?.cachedModels || [];
@@ -1774,7 +1774,7 @@ export default function SocialPage() {
               <button
                 onClick={() => setLeftPanelCollapsed(false)}
                 className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 self-center"
-                title="展开 Targets"
+                title="Expand Targets"
               >
                 ▶
               </button>
@@ -1786,7 +1786,7 @@ export default function SocialPage() {
                   <button
                     onClick={() => setLeftPanelCollapsed(true)}
                     className="p-0.5 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100"
-                    title="折叠 Targets"
+                    title="Collapse Targets"
                   >
                     ◀
                   </button>
@@ -1860,7 +1860,7 @@ export default function SocialPage() {
             <div
               onMouseDown={startResize('left')}
               className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-cyan-300/60 transition-colors"
-              title="拖动调整宽度"
+              title="Drag to resize"
             />
           )}
 
@@ -1952,14 +1952,14 @@ export default function SocialPage() {
               const actionLabel = (a) => {
                 if (a.type === 'sticker') return `📎 sticker#${a.id}`;
                 if (a.type === 'image') return `🖼️ ${a.file || 'image'}`;
-                if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen}字` : ''}`;
+                if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen} chars` : ''}`;
                 if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
                 return `⏸ wait`;
               };
               if (!plan) return (
                 <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-3 py-1.5">
                   <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Plan</span>
-                  <span className="text-[9px] text-slate-400 ml-2">等待 Intent 评估…</span>
+                  <span className="text-[9px] text-slate-400 ml-2">Waiting for Intent evaluation…</span>
                 </div>
               );
               const doneStickers = plan.done.filter(d => d.type === 'sticker').length;
@@ -2070,7 +2070,7 @@ export default function SocialPage() {
             <div
               onMouseDown={startResize('right')}
               className="w-1 shrink-0 cursor-col-resize bg-transparent hover:bg-cyan-300/60 transition-colors"
-              title="拖动调整宽度"
+              title="Drag to resize"
             />
           )}
 
@@ -2083,7 +2083,7 @@ export default function SocialPage() {
               <button
                 onClick={() => setRightPanelCollapsed(false)}
                 className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 self-center"
-                title="展开 Inspector"
+                title="Expand Inspector"
               >
                 ◀
               </button>
@@ -2094,7 +2094,7 @@ export default function SocialPage() {
                   <button
                     onClick={() => setRightPanelCollapsed(true)}
                     className="p-0.5 text-slate-400 hover:text-slate-700 rounded hover:bg-slate-100"
-                    title="折叠 Inspector"
+                    title="Collapse Inspector"
                   >
                     ▶
                   </button>
@@ -2107,19 +2107,19 @@ export default function SocialPage() {
                     onToggle={() => setPanelStateExpanded(v => !v)}
                   >
                     {selectedTarget && intentPlans[selectedTarget]?.state ? (
-                      <div className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap leading-relaxed">
+                      <div data-i18n-ignore className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap leading-relaxed">
                         {intentPlans[selectedTarget].state}
                       </div>
                     ) : (
                       <div className="text-[10px] text-slate-400 font-mono">
-                        {selectedTarget ? '等待 Intent 评估…' : '未选择 target'}
+                        {selectedTarget ? 'Waiting for Intent evaluation…' : 'No target selected'}
                       </div>
                     )}
                   </CollapsibleSection>
 
                   {/* Prompt Cache */}
                   <CollapsibleSection
-                    title="Prompt Cache（本次会话）"
+                    title="Prompt Cache (this session)"
                     expanded={panelCacheExpanded}
                     onToggle={() => setPanelCacheExpanded(v => !v)}
                   >
@@ -2429,7 +2429,7 @@ function PromptCachePanel({ logs }) {
   }, [logs]);
 
   if (stats.length === 0) {
-    return <div className="text-[10px] text-slate-400 font-mono">（暂无 usage 数据）</div>;
+    return <div className="text-[10px] text-slate-400 font-mono">(No usage data)</div>;
   }
   return (
     <div className="text-xs font-mono">
@@ -2613,7 +2613,7 @@ function CustomGroupRules({ petId, target, value, onChange }) {
       >
         <span className="text-[9px] font-semibold text-amber-600 uppercase tracking-wide">⚠️ Custom Rules</span>
         {hasContent && !expanded && (
-          <span className="text-[9px] text-amber-500 ml-1 truncate max-w-[300px]">{value.trim().split('\n')[0]}</span>
+          <span data-i18n-ignore className="text-[9px] text-amber-500 ml-1 truncate max-w-[300px]">{value.trim().split('\n')[0]}</span>
         )}
         <span className="text-slate-300 ml-auto text-[10px]">{expanded ? '▾' : '▸'}</span>
       </div>
@@ -2621,13 +2621,13 @@ function CustomGroupRules({ petId, target, value, onChange }) {
         <div className="mt-1">
           <textarea
             className="w-full p-2 text-xs font-mono rounded border border-amber-200 bg-white resize-y min-h-[60px] max-h-[200px] focus:outline-none focus:ring-1 focus:ring-amber-300"
-            placeholder="输入该群的自定义规则（最高优先级，bot 必须遵守）&#10;例如：不要主动提起政治话题&#10;对群主要尊敬"
+            placeholder="Enter custom rules for this group (highest priority; the bot must follow them)&#10;Example: Do not proactively mention politics&#10;Be respectful to the group owner"
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
           />
           <div className="flex items-center gap-2 mt-1 mb-0.5">
             {isDirty && (
-              <span className="text-[9px] text-amber-500">未保存的修改</span>
+              <span className="text-[9px] text-amber-500">Unsaved changes</span>
             )}
             <button
               onClick={handleApply}
@@ -2638,7 +2638,7 @@ function CustomGroupRules({ petId, target, value, onChange }) {
                   : 'bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed'
               }`}
             >
-              应用规则
+              Apply rules
             </button>
           </div>
         </div>
@@ -2647,23 +2647,23 @@ function CustomGroupRules({ petId, target, value, onChange }) {
       {showConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30">
           <div className="bg-white rounded-lg shadow-xl p-4 max-w-md w-full mx-4">
-            <div className="text-sm font-semibold text-slate-800 mb-2">⚠️ 确认应用自定义规则</div>
-            <div className="text-xs text-slate-600 mb-3">以下规则将立即注入到下一轮 Intent 评估中，优先级最高：</div>
+            <div className="text-sm font-semibold text-slate-800 mb-2">⚠️ Confirm custom rules</div>
+            <div className="text-xs text-slate-600 mb-3">These rules will be injected into the next Intent evaluation immediately with the highest priority:</div>
             <div className="p-2 rounded bg-amber-50 border border-amber-200 text-xs font-mono whitespace-pre-wrap max-h-[200px] overflow-y-auto mb-3">
-              {draft.trim() || '（空，将清除所有自定义规则）'}
+              {draft.trim() ? <span data-i18n-ignore>{draft.trim()}</span> : '(Empty; all custom rules will be cleared)'}
             </div>
             <div className="flex justify-end gap-2">
               <button
                 onClick={() => setShowConfirm(false)}
                 className="px-3 py-1 text-xs rounded border border-slate-300 text-slate-600 hover:bg-slate-50"
               >
-                取消
+                Cancel
               </button>
               <button
                 onClick={confirmApply}
                 className="px-3 py-1 text-xs rounded bg-amber-500 text-white hover:bg-amber-600"
               >
-                确认应用
+                Confirm Apply
               </button>
             </div>
           </div>
@@ -2702,43 +2702,43 @@ function ReflectLogEntry({ log, logFilter }) {
       {expanded && details && (
         <div className="ml-16 mt-0.5 p-2 rounded bg-teal-50 border border-teal-200 text-[10px] space-y-2">
           {details.elapsed != null && (
-            <div><span className="text-teal-600 font-semibold">耗时: </span><span className="text-slate-600">{details.elapsed}s</span></div>
+            <div><span className="text-teal-600 font-semibold">Elapsed: </span><span data-i18n-ignore className="text-slate-600">{details.elapsed}s</span></div>
           )}
           {details.replyCount != null && (
-            <div><span className="text-teal-600 font-semibold">Review 轮数: </span><span className="text-slate-600">{details.replyCount}</span></div>
+            <div><span className="text-teal-600 font-semibold">Review rounds: </span><span data-i18n-ignore className="text-slate-600">{details.replyCount}</span></div>
           )}
           {details.lessons && (
             <div>
-              <div className="text-teal-600 font-semibold mb-1">📋 Lessons 变化:</div>
+              <div className="text-teal-600 font-semibold mb-1">📋 Changes to Lessons:</div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <div className="text-slate-400 text-[9px] mb-0.5">Before:</div>
-                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.lessons.before}</div>
+                  <div data-i18n-ignore className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.lessons.before}</div>
                 </div>
                 <div>
                   <div className="text-slate-400 text-[9px] mb-0.5">After:</div>
-                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.lessons.after}</div>
+                  <div data-i18n-ignore className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.lessons.after}</div>
                 </div>
               </div>
             </div>
           )}
           {details.principles && (
             <div>
-              <div className="text-teal-600 font-semibold mb-1">⭐ Principles 变化:</div>
+              <div className="text-teal-600 font-semibold mb-1">⭐ Changes to Principles:</div>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <div className="text-slate-400 text-[9px] mb-0.5">Before:</div>
-                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.principles.before}</div>
+                  <div data-i18n-ignore className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-500 max-h-40 overflow-y-auto">{details.principles.before}</div>
                 </div>
                 <div>
                   <div className="text-slate-400 text-[9px] mb-0.5">After:</div>
-                  <div className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.principles.after}</div>
+                  <div data-i18n-ignore className="p-1.5 rounded bg-white border border-teal-100 whitespace-pre-wrap text-slate-600 max-h-40 overflow-y-auto">{details.principles.after}</div>
                 </div>
               </div>
             </div>
           )}
           {details.error && (
-            <div className="text-red-500"><span className="font-semibold">错误: </span>{details.error}</div>
+            <div className="text-red-500"><span className="font-semibold">Error: </span><span data-i18n-ignore>{details.error}</span></div>
           )}
         </div>
       )}
@@ -2776,19 +2776,19 @@ function SubagentLogEntry({ log, logFilter }) {
       {expanded && details && (
         <div className="ml-16 mt-0.5 p-2 rounded bg-slate-50 border border-slate-200 text-[10px] space-y-1">
           {details.task && (
-            <div><span className="text-slate-400 font-semibold">Task: </span><span className="text-slate-600">{details.task}</span></div>
+            <div><span className="text-slate-400 font-semibold">Task: </span><span data-i18n-ignore className="text-slate-600">{details.task}</span></div>
           )}
           {details.elapsed != null && (
-            <div><span className="text-slate-400 font-semibold">耗时: </span><span className="text-slate-600">{details.elapsed}s</span></div>
+            <div><span className="text-slate-400 font-semibold">Elapsed: </span><span data-i18n-ignore className="text-slate-600">{details.elapsed}s</span></div>
           )}
           {details.resultLen != null && (
-            <div><span className="text-slate-400 font-semibold">结果: </span><span className="text-slate-600">{details.resultLen}字</span></div>
+            <div><span className="text-slate-400 font-semibold">Result: </span><span data-i18n-ignore className="text-slate-600">{details.resultLen} characters</span></div>
           )}
           {details.resultPreview && (
-            <div className="mt-1 p-1.5 rounded bg-white border border-slate-150 whitespace-pre-wrap text-slate-600">{details.resultPreview}</div>
+            <div data-i18n-ignore className="mt-1 p-1.5 rounded bg-white border border-slate-150 whitespace-pre-wrap text-slate-600">{details.resultPreview}</div>
           )}
           {details.error && (
-            <div className="text-red-500"><span className="font-semibold">错误: </span>{details.error}</div>
+            <div className="text-red-500"><span className="font-semibold">Error: </span><span data-i18n-ignore>{details.error}</span></div>
           )}
         </div>
       )}
@@ -2810,7 +2810,7 @@ function ToggleRow({ label, hint, checked, onChange }) {
           onChange={(e) => onChange(e.target.checked)}
           className="sr-only peer"
         />
-        <div className="w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
+        <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
       </label>
     </div>
   );
@@ -2913,7 +2913,7 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
         <div className="ml-2 mt-0.5">
           <div className="text-slate-400 text-[10px] uppercase tracking-wider">💬 Chat ({d.chatMessages.length})</div>
           {d.chatMessages.slice(-8).map((m, i) => (
-            <div key={i} className={`truncate ${m.isAtMe ? 'text-orange-600' : 'text-slate-500'}`}>
+            <div key={i} data-i18n-ignore className={`truncate ${m.isAtMe ? 'text-orange-600' : 'text-slate-500'}`}>
               <span className="font-medium">{m.sender}:</span> {m.content}
             </div>
           ))}
@@ -2943,7 +2943,7 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
               </button>
             </div>
             {promptExpanded && (
-              <div className="text-slate-600 whitespace-pre-wrap break-words max-h-96 overflow-y-auto bg-slate-50/80 rounded p-1.5 mt-0.5 border border-slate-100 text-[11px] font-mono">
+              <div data-i18n-ignore className="text-slate-600 whitespace-pre-wrap break-words max-h-96 overflow-y-auto bg-slate-50/80 rounded p-1.5 mt-0.5 border border-slate-100 text-[11px] font-mono">
                 {promptLines}
               </div>
             )}
@@ -2975,7 +2975,7 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
             {sent.length > 0 && (
               <div className="mt-0.5 mb-1">
                 {sent.map((s, i) => (
-                  <div key={i} className="text-green-600 font-medium">📤 Sent: {s}</div>
+                  <div key={i} className="text-green-600 font-medium">📤 Sent: <span data-i18n-ignore>{s}</span></div>
                 ))}
               </div>
             )}
@@ -2991,11 +2991,11 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
                   </button>
                 </div>
                 {llmExpanded ? (
-                  <div className="text-slate-600 whitespace-pre-wrap break-words max-h-60 overflow-y-auto bg-slate-50/80 rounded p-1.5 mt-0.5 border border-slate-100">
+                  <div data-i18n-ignore className="text-slate-600 whitespace-pre-wrap break-words max-h-60 overflow-y-auto bg-slate-50/80 rounded p-1.5 mt-0.5 border border-slate-100">
                     {fullText}
                   </div>
                 ) : (
-                  <div className="text-slate-500 truncate cursor-pointer" onClick={() => setLlmExpanded(true)}>
+                  <div data-i18n-ignore className="text-slate-500 truncate cursor-pointer" onClick={() => setLlmExpanded(true)}>
                     {preview}
                   </div>
                 )}
@@ -3008,7 +3008,7 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
         <div className="ml-2 mt-0.5">
           <div className="text-slate-400 text-[10px] uppercase tracking-wider">🔧 Tools ({d.toolCalls.length})</div>
           {d.toolCalls.map((tc, i) => (
-            <div key={i} className={tc.isError ? 'text-red-500' : 'text-slate-500'}>
+            <div key={i} data-i18n-ignore className={tc.isError ? 'text-red-500' : 'text-slate-500'}>
               <span className="font-medium">{tc.name}</span>
               {tc.result && <span className="text-slate-400"> → {tc.result}</span>}
             </div>

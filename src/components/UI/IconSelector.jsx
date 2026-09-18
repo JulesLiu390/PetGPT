@@ -158,7 +158,7 @@ const IconSelector = ({ value, onChange, onClose, isOpen }) => {
               : 'text-gray-500 hover:text-gray-800'
             }`}
         >
-          自定义
+          Custom
         </button>
       </div>
       
@@ -221,14 +221,14 @@ const IconSelector = ({ value, onChange, onClose, isOpen }) => {
         {activeTab === 'custom' && (
           <div className="space-y-4">
             <p className="text-sm text-gray-500">
-              输入 emoji 字符或 react-icons 名称 (如 FiSearch, FaRobot)
+          Enter an emoji or react-icons name (such as FiSearch or FaRobot)
             </p>
             <div className="flex gap-2">
               <input
                 type="text"
                 value={customInput}
                 onChange={(e) => setCustomInput(e.target.value)}
-                placeholder="🔧 或 FiSearch"
+                placeholder="🔧 or FiSearch"
                 className="flex-1 px-3 py-2 bg-white border border-gray-300 rounded-lg
                          text-gray-800 placeholder-gray-400 focus:outline-none focus:ring-2 
                          focus:ring-blue-500 focus:border-transparent"
@@ -243,14 +243,14 @@ const IconSelector = ({ value, onChange, onClose, isOpen }) => {
                 className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-500
                          transition-colors"
               >
-                确定
+                Confirm
               </button>
             </div>
             
             {/* 预览 */}
             {customInput && (
               <div className="flex items-center gap-3 p-3 bg-gray-100 rounded-lg">
-                <span className="text-sm text-gray-500">预览:</span>
+                <span className="text-sm text-gray-500">Preview:</span>
                 <span className="text-2xl">
                   {customInput.startsWith('Fi') || customInput.startsWith('Fa')
                     ? renderReactIcon(customInput, 'text-gray-800')
@@ -265,7 +265,7 @@ const IconSelector = ({ value, onChange, onClose, isOpen }) => {
       
       {/* 当前选中 */}
       <div className="px-3 py-2 border-t border-gray-200 flex items-center justify-between bg-gray-50">
-        <span className="text-xs text-gray-500">当前:</span>
+        <span className="text-xs text-gray-500">Current:</span>
         <span className="text-lg">
           {value && (value.startsWith('Fi') || value.startsWith('Fa'))
             ? renderReactIcon(value, 'text-gray-800')
@@ -342,7 +342,7 @@ const IconSelectorTrigger = ({ value, onChange, className = '' }) => {
                  hover:border-gray-400 hover:bg-gray-50
                  transition-colors focus:outline-none focus:ring-2 
                  focus:ring-blue-500 focus:border-blue-500"
-        title="选择图标"
+        title="Choose icon"
       >
         {renderCurrentIcon()}
       </button>

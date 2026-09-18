@@ -81,6 +81,11 @@ export const confirm = async (message, options = {}) => {
 // 默认设置值
 const DEFAULT_SETTINGS = {
   windowSize: 'medium',
+  characterSize: 'medium',
+  chatAlwaysOnTopWhenMaximized: false,
+  markdownFontSize: 14,
+  markdownLetterSpacing: 0,
+  markdownLineHeight: 1.3,
   defaultAssistant: '',
   programHotkey: 'Shift + Space',
   dialogHotkey: 'Alt + Space',
@@ -563,6 +568,17 @@ export const updateWindowSizePreset = async (size) => {
   if (isTauri()) {
     const { invoke } = await getTauriApi();
     return invoke('update_window_size_preset', { preset: size });
+  }
+};
+
+export const updateCharacterSizePreset = async (size) => {
+  if (isElectron()) {
+    return window.electron.updateCharacterSizePreset?.(size)
+      ?? window.electron.updateWindowSizePreset(size);
+  }
+  if (isTauri()) {
+    const { invoke } = await getTauriApi();
+    return invoke('update_character_size_preset', { preset: size });
   }
 };
 
@@ -2907,6 +2923,7 @@ const bridge = {
   toggleSidebar,
   openMcpSettings,
   updateWindowSizePreset,
+  updateCharacterSizePreset,
   updateShortcuts,
   openExternal,
   minimizeWindow,

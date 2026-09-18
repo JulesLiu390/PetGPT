@@ -2,11 +2,11 @@
 // Implements MCP protocol over Streamable HTTP (2025-03-26 spec)
 // See: https://modelcontextprotocol.io/specification/2025-03-26/basic/transports#streamable-http
 
-use std::sync::atomic::{AtomicU64, AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::collections::HashMap;
-use tokio::sync::{oneshot, RwLock};
 use futures::StreamExt;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::{oneshot, Notify, RwLock};
 use tokio::time::{timeout, Duration};
 
 use super::types::*;
@@ -22,26 +22,27 @@ pub struct McpHttpClient {
     /// The MCP endpoint URL (e.g., https://mcp.tavily.com/mcp/)
     endpoint_url: String,
     api_key: Option<String>,
-    
+
     // HTTP client
     client: reqwest::Client,
-    
+
     // Session management (Mcp-Session-Id header)
     session_id: Arc<RwLock<Option<String>>>,
-    
+
     // Request management
     request_id: AtomicU64,
     pending_requests: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
-    
+
     // State
     is_connected: Arc<Mutex<bool>>,
     server_capabilities: Arc<Mutex<ServerCapabilities>>,
     server_info: Arc<Mutex<Option<ServerInfo>>>,
     tools: Arc<Mutex<Vec<McpTool>>>,
     resources: Arc<Mutex<Vec<McpResource>>>,
-    
+
     // Cancellation support
     cancelled: Arc<AtomicBool>,
+    cancel_notify: Arc<Notify>,
 }
 
 impl McpHttpClient {
@@ -71,23 +72,36 @@ impl McpHttpClient {
             tools: Arc::new(Mutex::new(Vec::new())),
             resources: Arc::new(Mutex::new(Vec::new())),
             cancelled: Arc::new(AtomicBool::new(false)),
+            cancel_notify: Arc::new(Notify::new()),
         }
     }
-    
+
     /// Cancel pending operations
     pub fn cancel(&self) {
         log::info!("[MCP-HTTP][{}] Cancelling operations", self.server_name);
         self.cancelled.store(true, Ordering::SeqCst);
+        self.cancel_notify.notify_waiters();
     }
-    
+
     /// Reset cancellation flag
     pub fn reset_cancellation(&self) {
         self.cancelled.store(false, Ordering::SeqCst);
     }
-    
+
     /// Check if cancelled
     pub fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
+    }
+
+    async fn cancellation_requested(&self) {
+        if self.is_cancelled() {
+            return;
+        }
+        let notified = self.cancel_notify.notified();
+        if self.is_cancelled() {
+            return;
+        }
+        notified.await;
     }
 
     /// Connect to the MCP server via Streamable HTTP
@@ -98,7 +112,11 @@ impl McpHttpClient {
             return Ok(());
         }
 
-        log::info!("[MCP-HTTP][{}] Connecting to {} (Streamable HTTP)", self.server_name, self.endpoint_url);
+        log::info!(
+            "[MCP-HTTP][{}] Connecting to {} (Streamable HTTP)",
+            self.server_name,
+            self.endpoint_url
+        );
 
         // Initialize MCP connection by sending InitializeRequest
         self.initialize().await?;
@@ -111,7 +129,10 @@ impl McpHttpClient {
 
     /// Parse SSE stream response and extract JSON-RPC messages
     /// Implements proper SSE parsing with timeout and cancellation support
-    async fn parse_sse_response(&self, response: reqwest::Response) -> Result<serde_json::Value, String> {
+    async fn parse_sse_response(
+        &self,
+        response: reqwest::Response,
+    ) -> Result<serde_json::Value, String> {
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut result: Option<serde_json::Value> = None;
@@ -123,18 +144,23 @@ impl McpHttpClient {
             if self.is_cancelled() {
                 return Err("Operation cancelled".to_string());
             }
-            
+
             // Check overall timeout
             if start_time.elapsed().as_secs() > SSE_STREAM_TIMEOUT_SECS {
                 return Err("SSE stream timeout".to_string());
             }
-            
+
             // Read next chunk with timeout
-            let chunk_result = timeout(
-                Duration::from_secs(SSE_CHUNK_TIMEOUT_SECS),
-                stream.next()
-            ).await;
-            
+            let chunk_result = tokio::select! {
+                result = timeout(
+                    Duration::from_secs(SSE_CHUNK_TIMEOUT_SECS),
+                    stream.next()
+                ) => result,
+                _ = self.cancellation_requested() => {
+                    return Err("Operation cancelled".to_string());
+                }
+            };
+
             let chunk = match chunk_result {
                 Ok(Some(Ok(bytes))) => bytes,
                 Ok(Some(Err(e))) => {
@@ -152,10 +178,15 @@ impl McpHttpClient {
                     break;
                 }
             };
-            
+
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
-            log::info!("[MCP-HTTP][{}] SSE chunk ({} bytes): {:?}", self.server_name, chunk.len(), &text[..text.len().min(300)]);
+            log::info!(
+                "[MCP-HTTP][{}] SSE chunk ({} bytes): {:?}",
+                self.server_name,
+                chunk.len(),
+                &text[..text.len().min(300)]
+            );
 
             // Process complete events
             // SSE events are separated by blank lines, handle both \r\n\r\n and \n\n
@@ -172,19 +203,27 @@ impl McpHttpClient {
                 let event_block = buffer[..pos].to_string();
                 buffer = buffer[pos + skip_len..].to_string();
 
-                log::debug!("[MCP-HTTP][{}] SSE event block: {:?}", self.server_name, event_block);
+                log::debug!(
+                    "[MCP-HTTP][{}] SSE event block: {:?}",
+                    self.server_name,
+                    event_block
+                );
 
                 // Parse SSE event (extract event type and data)
                 let (event_type, data) = Self::parse_sse_event_full(&event_block);
-                
+
                 if let Some(et) = event_type {
                     last_event_type = Some(et);
                 }
-                
+
                 if let Some(data) = data {
-                    log::debug!("[MCP-HTTP][{}] SSE data (event={:?}): {}", 
-                        self.server_name, last_event_type, data);
-                    
+                    log::debug!(
+                        "[MCP-HTTP][{}] SSE data (event={:?}): {}",
+                        self.server_name,
+                        last_event_type,
+                        data
+                    );
+
                     // Handle different event types per MCP spec
                     match last_event_type.as_deref() {
                         Some("error") => {
@@ -193,37 +232,51 @@ impl McpHttpClient {
                         }
                         Some("endpoint") => {
                             // Server is redirecting to a new endpoint (rare)
-                            log::info!("[MCP-HTTP][{}] Server sent endpoint redirect: {}", 
-                                self.server_name, data);
+                            log::info!(
+                                "[MCP-HTTP][{}] Server sent endpoint redirect: {}",
+                                self.server_name,
+                                data
+                            );
                         }
                         _ => {
                             // Default: "message" event or no event type
                             // Try to parse as JSON-RPC response
                             if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data) {
                                 if let Some(error) = resp.error {
-                                    return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
+                                    return Err(format!(
+                                        "JSON-RPC error {}: {}",
+                                        error.code, error.message
+                                    ));
                                 }
                                 result = Some(resp.result.unwrap_or(serde_json::Value::Null));
                                 // Continue processing in case there are more events
                             }
                             // Handle notifications (log them but continue)
-                            else if let Ok(notif) = serde_json::from_str::<JsonRpcNotification>(&data) {
-                                log::info!("[MCP-HTTP][{}] Server notification: {}", 
-                                    self.server_name, notif.method);
+                            else if let Ok(notif) =
+                                serde_json::from_str::<JsonRpcNotification>(&data)
+                            {
+                                log::info!(
+                                    "[MCP-HTTP][{}] Server notification: {}",
+                                    self.server_name,
+                                    notif.method
+                                );
                             }
                             // Could be a partial or malformed message
                             else {
-                                log::debug!("[MCP-HTTP][{}] Non-JSON SSE data: {}", 
-                                    self.server_name, data);
+                                log::debug!(
+                                    "[MCP-HTTP][{}] Non-JSON SSE data: {}",
+                                    self.server_name,
+                                    data
+                                );
                             }
                         }
                     }
-                    
+
                     // Reset event type after processing
                     last_event_type = None;
                 }
             }
-            
+
             // If we already have a result and the buffer is empty, we can return early
             if result.is_some() && buffer.trim().is_empty() {
                 break;
@@ -233,7 +286,11 @@ impl McpHttpClient {
         // Flush remaining buffer — some servers don't send trailing \n\n before closing the stream
         let remaining = buffer.trim().to_string();
         if !remaining.is_empty() && result.is_none() {
-            log::info!("[MCP-HTTP][{}] Flushing remaining SSE buffer ({} bytes)", self.server_name, remaining.len());
+            log::info!(
+                "[MCP-HTTP][{}] Flushing remaining SSE buffer ({} bytes)",
+                self.server_name,
+                remaining.len()
+            );
             let (event_type, data) = Self::parse_sse_event_full(&remaining);
             if let Some(et) = event_type {
                 last_event_type = Some(et);
@@ -246,7 +303,10 @@ impl McpHttpClient {
                     _ => {
                         if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(&data) {
                             if let Some(error) = resp.error {
-                                return Err(format!("JSON-RPC error {}: {}", error.code, error.message));
+                                return Err(format!(
+                                    "JSON-RPC error {}: {}",
+                                    error.code, error.message
+                                ));
                             }
                             result = Some(resp.result.unwrap_or(serde_json::Value::Null));
                         }
@@ -263,10 +323,10 @@ impl McpHttpClient {
     fn parse_sse_event_full(event_str: &str) -> (Option<String>, Option<String>) {
         let mut event_type: Option<String> = None;
         let mut data_lines = Vec::new();
-        
+
         for line in event_str.lines() {
             let line = line.trim_start(); // SSE spec says leading spaces should be ignored
-            
+
             if let Some(et) = line.strip_prefix("event:") {
                 event_type = Some(et.trim().to_string());
             } else if let Some(data) = line.strip_prefix("data:") {
@@ -285,16 +345,16 @@ impl McpHttpClient {
             }
             // Empty lines within an event block are ignored
         }
-        
+
         let data = if data_lines.is_empty() {
             None
         } else {
             Some(data_lines.join("\n"))
         };
-        
+
         (event_type, data)
     }
-    
+
     /// Legacy parse function for backward compatibility
     fn parse_sse_event(event_str: &str) -> Option<String> {
         Self::parse_sse_event_full(event_str).1
@@ -323,7 +383,8 @@ impl McpHttpClient {
         *self.server_info.lock().unwrap() = result.server_info;
 
         // Send initialized notification
-        self.send_notification("notifications/initialized", None).await?;
+        self.send_notification("notifications/initialized", None)
+            .await?;
 
         // Fetch tools and resources
         self.refresh_tools().await?;
@@ -345,7 +406,11 @@ impl McpHttpClient {
             .await
             .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))?;
 
-        log::info!("[MCP-HTTP][{}] Tools: {:?}", self.server_name, result.tools.iter().map(|t| &t.name).collect::<Vec<_>>());
+        log::info!(
+            "[MCP-HTTP][{}] Tools: {:?}",
+            self.server_name,
+            result.tools.iter().map(|t| &t.name).collect::<Vec<_>>()
+        );
         *self.tools.lock().unwrap() = result.tools;
 
         Ok(())
@@ -364,25 +429,37 @@ impl McpHttpClient {
             .await
             .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))?;
 
-        log::info!("[MCP-HTTP][{}] Resources: {:?}", self.server_name, result.resources.iter().map(|r| &r.uri).collect::<Vec<_>>());
+        log::info!(
+            "[MCP-HTTP][{}] Resources: {:?}",
+            self.server_name,
+            result.resources.iter().map(|r| &r.uri).collect::<Vec<_>>()
+        );
         *self.resources.lock().unwrap() = result.resources;
 
         Ok(())
     }
 
     /// Call a tool with cancellation support
-    pub async fn call_tool(&self, name: &str, arguments: Option<serde_json::Value>) -> Result<ToolCallResult, String> {
+    pub async fn call_tool(
+        &self,
+        name: &str,
+        arguments: Option<serde_json::Value>,
+    ) -> Result<ToolCallResult, String> {
         if !*self.is_connected.lock().unwrap() {
             return Err("Not connected".to_string());
         }
-        
+
         // Check cancellation before starting
         if self.is_cancelled() {
             return Err("Operation cancelled".to_string());
         }
 
         log::info!("[MCP-HTTP][{}] Calling tool: {}", self.server_name, name);
-        log::debug!("[MCP-HTTP][{}] Tool args: {:?}", self.server_name, arguments);
+        log::debug!(
+            "[MCP-HTTP][{}] Tool args: {:?}",
+            self.server_name,
+            arguments
+        );
 
         let params = ToolCallParams {
             name: name.to_string(),
@@ -393,13 +470,17 @@ impl McpHttpClient {
             .send_request("tools/call", Some(serde_json::to_value(params).unwrap()))
             .await
             .and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()))?;
-        
+
         // Check cancellation after completion
         if self.is_cancelled() {
             return Err("Operation cancelled".to_string());
         }
 
-        log::info!("[MCP-HTTP][{}] Tool result: {}", self.server_name, format_tool_result(&result));
+        log::info!(
+            "[MCP-HTTP][{}] Tool result: {}",
+            self.server_name,
+            format_tool_result(&result)
+        );
         Ok(result)
     }
 
@@ -423,7 +504,11 @@ impl McpHttpClient {
 
     /// Send JSON-RPC request via HTTP POST (Streamable HTTP)
     /// The server may respond with application/json or text/event-stream
-    async fn send_request(&self, method: &str, params: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    async fn send_request(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<serde_json::Value, String> {
         let id = self.request_id.fetch_add(1, Ordering::SeqCst);
 
         let request = JsonRpcRequest {
@@ -433,11 +518,22 @@ impl McpHttpClient {
             params,
         };
 
-        log::info!("[MCP-HTTP][{}] Sending request: {} (id={})", self.server_name, method, id);
-        log::debug!("[MCP-HTTP][{}] Request body: {:?}", self.server_name, request);
+        log::info!(
+            "[MCP-HTTP][{}] Sending request: {} (id={})",
+            self.server_name,
+            method,
+            id
+        );
+        log::debug!(
+            "[MCP-HTTP][{}] Request body: {:?}",
+            self.server_name,
+            request
+        );
 
         // Build request - POST to the MCP endpoint
-        let mut req = self.client.post(&self.endpoint_url)
+        let mut req = self
+            .client
+            .post(&self.endpoint_url)
             .header("Content-Type", "application/json")
             // Accept both JSON and SSE responses as per spec
             .header("Accept", "application/json, text/event-stream")
@@ -454,9 +550,14 @@ impl McpHttpClient {
         }
 
         // Send request
-        let response = req.send().await.map_err(|e| {
-            format!("HTTP request failed: {}", e)
-        })?;
+        let response = tokio::select! {
+            result = req.send() => {
+                result.map_err(|e| format!("HTTP request failed: {}", e))?
+            }
+            _ = self.cancellation_requested() => {
+                return Err("Operation cancelled".to_string());
+            }
+        };
 
         // Check for session ID in response (set by server during initialization)
         if let Some(session_id) = response.headers().get("mcp-session-id") {
@@ -468,18 +569,29 @@ impl McpHttpClient {
 
         let status = response.status();
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
+            let body = tokio::select! {
+                result = response.text() => result.unwrap_or_default(),
+                _ = self.cancellation_requested() => {
+                    return Err("Operation cancelled".to_string());
+                }
+            };
             return Err(format!("HTTP {} - {}", status, body));
         }
 
         // Check Content-Type to determine how to parse response
-        let content_type = response.headers()
+        let content_type = response
+            .headers()
             .get("content-type")
             .and_then(|v| v.to_str().ok())
             .unwrap_or("")
             .to_lowercase();
 
-        log::info!("[MCP-HTTP][{}] Response Content-Type: {}, status: {}", self.server_name, content_type, status);
+        log::info!(
+            "[MCP-HTTP][{}] Response Content-Type: {}, status: {}",
+            self.server_name,
+            content_type,
+            status
+        );
 
         if content_type.contains("text/event-stream") {
             // Parse SSE stream response
@@ -487,36 +599,51 @@ impl McpHttpClient {
             self.parse_sse_response(response).await
         } else {
             // Parse JSON response
-            let body = response.text().await.map_err(|e| e.to_string())?;
+            let body = tokio::select! {
+                result = response.text() => result.map_err(|e| e.to_string())?,
+                _ = self.cancellation_requested() => {
+                    return Err("Operation cancelled".to_string());
+                }
+            };
             log::debug!("[MCP-HTTP][{}] JSON response: {}", self.server_name, body);
-            
+
             if body.is_empty() {
                 return Err("Empty response body".to_string());
             }
 
             let resp: JsonRpcResponse = serde_json::from_str(&body)
                 .map_err(|e| format!("Failed to parse JSON response: {} - body: {}", e, body))?;
-            
+
             if let Some(error) = resp.error {
                 return Err(error.message);
             }
-            
+
             Ok(resp.result.unwrap_or(serde_json::Value::Null))
         }
     }
 
     /// Send notification (no response expected)
     /// Per spec: server returns 202 Accepted for notifications
-    async fn send_notification(&self, method: &str, params: Option<serde_json::Value>) -> Result<(), String> {
+    async fn send_notification(
+        &self,
+        method: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<(), String> {
         let notification = JsonRpcNotification {
             jsonrpc: "2.0".to_string(),
             method: method.to_string(),
             params,
         };
 
-        log::debug!("[MCP-HTTP][{}] Sending notification: {}", self.server_name, method);
+        log::debug!(
+            "[MCP-HTTP][{}] Sending notification: {}",
+            self.server_name,
+            method
+        );
 
-        let mut req = self.client.post(&self.endpoint_url)
+        let mut req = self
+            .client
+            .post(&self.endpoint_url)
             .header("Content-Type", "application/json")
             .header("Accept", "application/json, text/event-stream")
             .json(&notification);
@@ -529,8 +656,11 @@ impl McpHttpClient {
             req = req.header("Mcp-Session-Id", session_id);
         }
 
-        let response = req.send().await.map_err(|e| format!("Failed to send notification: {}", e))?;
-        
+        let response = req
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send notification: {}", e))?;
+
         // Per spec: server should return 202 Accepted for notifications
         // But we accept any 2xx status
         if !response.status().is_success() {
@@ -545,7 +675,7 @@ impl McpHttpClient {
     /// Disconnect from the server
     pub fn disconnect(&self) {
         log::info!("[MCP-HTTP][{}] Disconnecting", self.server_name);
-        
+
         // Set cancelled to interrupt any ongoing operations
         self.cancelled.store(true, Ordering::SeqCst);
         *self.is_connected.lock().unwrap() = false;

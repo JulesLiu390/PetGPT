@@ -116,12 +116,21 @@ pub async fn stream_chat(
     
     // 获取取消令牌
     let cancel_token = cancellation.get_token(&conversation_id);
-    
-    match request.api_format {
-        ApiFormat::OpenaiCompatible => stream_openai(app, client, request, cancel_token).await,
-        ApiFormat::GeminiOfficial => stream_gemini(app, client, request, cancel_token).await,
-        ApiFormat::AnthropicNative => stream_anthropic(app, client, request, cancel_token).await,
+
+    let result = match request.api_format {
+        ApiFormat::OpenaiCompatible => stream_openai(app, client, request, cancel_token.clone()).await,
+        ApiFormat::GeminiOfficial => stream_gemini(app, client, request, cancel_token.clone()).await,
+        ApiFormat::AnthropicNative => stream_anthropic(app, client, request, cancel_token.clone()).await,
+    };
+
+    // 流已结束，取消令牌不再有意义 —— 不摘掉的话 cancelled 表就只进不出。
+    // strong_count 守卫：正常情况是「表里 1 个 + 本函数 1 个」=2；若还有并发的同
+    // conversation_id 流在跑，计数更高，此时留给后来者去清，避免它的 cancel 落空。
+    if Arc::strong_count(&cancel_token) <= 2 {
+        cancellation.cleanup(&conversation_id);
     }
+
+    result
 }
 
 /// OpenAI 兼容 API 流式调用

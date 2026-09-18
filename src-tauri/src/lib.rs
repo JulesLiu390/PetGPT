@@ -9,6 +9,7 @@ mod subagent;
 mod platform;
 mod window_layout;
 mod qq_connector;
+mod updater;
 mod commands;
 #[cfg(target_os = "linux")]
 mod linux_shortcuts;
@@ -36,6 +37,45 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 
 // Type alias for LLM client state
 type LlmState = Arc<LlmClient>;
+
+const CHAT_FULL_CORNER_RADIUS: f64 = 16.0;
+const CHAT_COMPACT_CORNER_RADIUS: f64 = 24.0;
+
+fn chat_corner_radius(compact: bool) -> f64 {
+    if compact {
+        CHAT_COMPACT_CORNER_RADIUS
+    } else {
+        CHAT_FULL_CORNER_RADIUS
+    }
+}
+
+/// window-vibrancy adds a tagged native view, so clear the old view before
+/// changing its radius. This avoids two differently rounded effects being
+/// visible at the compact window's corners.
+#[cfg(target_os = "macos")]
+fn refresh_chat_corner_effect(
+    chat: &tauri::WebviewWindow,
+    win_state: &WindowState,
+) -> Result<(), String> {
+    if !win_state.chat_vibrancy_enabled.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    let _ = Platform::clear_window_effect(chat);
+    Platform::apply_window_effect(
+        chat,
+        &WindowEffect::Vibrancy {
+            radius: chat_corner_radius(win_state.chat_compact.load(Ordering::SeqCst)),
+        },
+    )
+}
+
+#[cfg(not(target_os = "macos"))]
+fn refresh_chat_corner_effect(
+    _chat: &tauri::WebviewWindow,
+    _win_state: &WindowState,
+) -> Result<(), String> {
+    Ok(())
+}
 
 // Type alias for LLM stream cancellation state
 type LlmCancelState = Arc<LlmStreamCancellation>;
@@ -101,13 +141,17 @@ fn get_pending_character_id(win_state: State<WinState>) -> Option<String> {
 
 /// 设置 chat 窗口的 vibrancy 效果（跨平台）
 #[tauri::command]
-fn set_vibrancy_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+fn set_vibrancy_enabled(
+    app: AppHandle,
+    enabled: bool,
+    win_state: State<WinState>,
+) -> Result<(), String> {
+    win_state
+        .chat_vibrancy_enabled
+        .store(enabled, Ordering::SeqCst);
     if let Some(chat_window) = app.get_webview_window("chat") {
         if enabled {
-            Platform::apply_window_effect(
-                &chat_window,
-                &WindowEffect::Vibrancy { radius: 16.0 },
-            )?;
+            refresh_chat_corner_effect(&chat_window, win_state.inner().as_ref())?;
         } else {
             Platform::clear_window_effect(&chat_window)?;
         }
@@ -1774,11 +1818,90 @@ fn current_character_anchor(app: &AppHandle) -> Option<(f64, f64, f64)> {
     ))
 }
 
+#[cfg(target_os = "macos")]
+fn schedule_chat_full_frame_animation(
+    app: &AppHandle,
+    chat: &tauri::WebviewWindow,
+    start: WindowGeometry,
+    target: WindowGeometry,
+    request_id: u64,
+    minimum_width: f64,
+    minimum_height: f64,
+) -> Result<(), String> {
+    const FRAME_COUNT: u32 = 16;
+    const FRAME_INTERVAL_MS: u64 = 15;
+
+    // The compact minimum equals its current frame. Remove that constraint
+    // during the transition and install the regular minimum on the last tick.
+    chat.set_min_size(None::<tauri::Size>)
+        .map_err(|error| error.to_string())?;
+
+    let app_handle = app.clone();
+    let chat_window = chat.clone();
+    std::thread::spawn(move || {
+        for step in 1..=FRAME_COUNT {
+            std::thread::sleep(std::time::Duration::from_millis(FRAME_INTERVAL_MS));
+            let linear_progress = step as f64 / FRAME_COUNT as f64;
+            let eased_progress = 1.0 - (1.0 - linear_progress).powi(3);
+            let frame = window_layout::interpolate_window_geometry(
+                start,
+                target,
+                eased_progress,
+            );
+            let is_last = step == FRAME_COUNT;
+            let frame_app = app_handle.clone();
+            let frame_chat = chat_window.clone();
+            if app_handle
+                .run_on_main_thread(move || {
+                    let state = frame_app.state::<WinState>();
+                    if state.chat_layout_request_id.load(Ordering::SeqCst) != request_id
+                        || state.chat_compact.load(Ordering::SeqCst)
+                    {
+                        return;
+                    }
+
+                    if let Some(current) = logical_window_geometry(&frame_chat) {
+                        let current = platform::LogicalRect::new(
+                            current.x,
+                            current.y,
+                            current.width,
+                            current.height,
+                        );
+                        let next = platform::LogicalRect::new(
+                            frame.x,
+                            frame.y,
+                            frame.width,
+                            frame.height,
+                        );
+                        let _ = Platform::set_window_frame(&frame_chat, current, next);
+                    }
+
+                    if is_last {
+                        let _ = frame_chat.set_min_size(Some(tauri::Size::Logical(
+                            tauri::LogicalSize {
+                                width: minimum_width,
+                                height: minimum_height,
+                            },
+                        )));
+                    }
+                })
+                .is_err()
+            {
+                break;
+            }
+        }
+    });
+
+    Ok(())
+}
+
 fn apply_chat_full_layout(
     app: &AppHandle,
     chat: &tauri::WebviewWindow,
     win_state: &WindowState,
     saved_geometry: Option<WindowGeometry>,
+    animate_from_compact: bool,
+    request_id: u64,
 ) -> Result<(), String> {
     let screen = chat_screen_info(app, chat, win_state);
     let preset = win_state.chat_size_preset.lock().unwrap().clone();
@@ -1840,8 +1963,36 @@ fn apply_chat_full_layout(
 
     chat.set_resizable(true)
         .map_err(|error| error.to_string())?;
-    // Lower the compact mode's potentially tall native minimum before asking
-    // the window server to restore a shorter full-chat geometry.
+    chat.set_always_on_top(true)
+        .map_err(|error| error.to_string())?;
+
+    #[cfg(target_os = "macos")]
+    if animate_from_compact {
+        if let Some(current) = logical_window_geometry(chat) {
+            let target = WindowGeometry {
+                x,
+                y,
+                width,
+                height,
+            };
+            if schedule_chat_full_frame_animation(
+                app,
+                chat,
+                current,
+                target,
+                request_id,
+                minimum_width,
+                minimum_height,
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+        }
+    }
+
+    // Instant fallback and regular full-window restores use the final native
+    // constraint before setting their geometry.
     chat.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
         width: minimum_width,
         height: minimum_height,
@@ -1852,8 +2003,6 @@ fn apply_chat_full_layout(
         height,
     }))
     .map_err(|error| error.to_string())?;
-    chat.set_always_on_top(true)
-        .map_err(|error| error.to_string())?;
     chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }))
         .map_err(|error| error.to_string())
 }
@@ -1934,6 +2083,14 @@ fn toggle_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<bool
     }
 }
 
+fn chat_always_on_top_when_maximized(db: &Database) -> bool {
+    db.get_setting("chatAlwaysOnTopWhenMaximized")
+        .ok()
+        .flatten()
+        .and_then(|value| serde_json::from_str::<bool>(&value).ok())
+        .unwrap_or(false)
+}
+
 #[tauri::command]
 fn set_chat_compact_mode(
     app: AppHandle,
@@ -1941,6 +2098,7 @@ fn set_chat_compact_mode(
     height: f64,
     request_id: u64,
     win_state: State<WinState>,
+    db: State<DbState>,
 ) -> Result<(), String> {
     let Some(chat) = app.get_webview_window("chat") else {
         return Ok(());
@@ -2056,7 +2214,14 @@ fn set_chat_compact_mode(
         };
         if let Err(error) = apply_chat_compact_layout(&app, &chat, state) {
             *state.chat_compact_height.lock().unwrap() = previous_height;
-            let _ = apply_chat_full_layout(&app, &chat, state, raw_geometry);
+            let _ = apply_chat_full_layout(
+                &app,
+                &chat,
+                state,
+                raw_geometry,
+                false,
+                request_id,
+            );
             if was_fullscreen {
                 let _ = chat.set_always_on_top(false);
                 let _ = chat.set_fullscreen(true);
@@ -2089,6 +2254,9 @@ fn set_chat_compact_mode(
             state.original_width.store(0, Ordering::SeqCst);
         }
         state.chat_compact.store(true, Ordering::SeqCst);
+        if let Err(error) = refresh_chat_corner_effect(&chat, state) {
+            log::warn!("Failed to refresh compact chat corner effect: {}", error);
+        }
         Ok(())
     } else {
         if !was_compact {
@@ -2100,6 +2268,7 @@ fn set_chat_compact_mode(
         let saved_geometry = *state.chat_full_geometry.lock().unwrap();
         let restore_fullscreen = state.chat_full_was_fullscreen.load(Ordering::SeqCst);
         let restore_maximized = state.chat_full_was_maximized.load(Ordering::SeqCst);
+        let keep_maximized_on_top = chat_always_on_top_when_maximized(db.inner().as_ref());
         let restore_character_visible = state
             .chat_full_character_was_visible
             .load(Ordering::SeqCst);
@@ -2108,7 +2277,17 @@ fn set_chat_compact_mode(
             .and_then(|character| character.is_visible().ok())
             .unwrap_or(false);
 
-        if let Err(error) = apply_chat_full_layout(&app, &chat, state, saved_geometry) {
+        let animate_full_restore = !restore_fullscreen
+            && !restore_maximized
+            && chat.is_visible().unwrap_or(false);
+        if let Err(error) = apply_chat_full_layout(
+            &app,
+            &chat,
+            state,
+            saved_geometry,
+            animate_full_restore,
+            request_id,
+        ) {
             let _ = apply_chat_compact_layout(&app, &chat, state);
             return Err(error);
         }
@@ -2131,6 +2310,8 @@ fn set_chat_compact_mode(
                         .map_err(|error| error.to_string())?;
                 } else {
                     chat.maximize().map_err(|error| error.to_string())?;
+                    chat.set_always_on_top(keep_maximized_on_top)
+                        .map_err(|error| error.to_string())?;
                 }
             }
 
@@ -2164,6 +2345,9 @@ fn set_chat_compact_mode(
         // Commit only after every native geometry, presentation, and
         // character-visibility operation has succeeded.
         state.chat_compact.store(false, Ordering::SeqCst);
+        if let Err(error) = refresh_chat_corner_effect(&chat, state) {
+            log::warn!("Failed to restore full chat corner effect: {}", error);
+        }
         *state.chat_full_geometry.lock().unwrap() = None;
         state
             .chat_full_was_fullscreen
@@ -2472,7 +2656,7 @@ fn hide_social_window(app: AppHandle) -> Result<(), String> {
 
 // 最大化/还原聊天窗口
 #[tauri::command]
-fn maximize_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<(), String> {
+fn maximize_chat_window(app: AppHandle, win_state: State<WinState>, db: State<DbState>) -> Result<(), String> {
     let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
     if win_state.chat_compact.load(Ordering::SeqCst) {
         return Ok(());
@@ -2517,7 +2701,8 @@ fn maximize_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<()
             
             // 最大化（不是全屏）
             chat.maximize().map_err(|e| e.to_string())?;
-            chat.set_always_on_top(false).map_err(|e| e.to_string())?;
+            chat.set_always_on_top(chat_always_on_top_when_maximized(db.inner().as_ref()))
+                .map_err(|e| e.to_string())?;
             
             // 隐藏角色窗口
             if let Some(character) = app.get_webview_window("character") {
@@ -2533,14 +2718,22 @@ fn maximize_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<()
 #[serde(rename_all = "camelCase")]
 struct Preferences {
     chat_follows_character: Option<bool>,
+    chat_always_on_top_when_maximized: Option<bool>,
 }
 
 /// 更新偏好设置的全局状态
 #[tauri::command]
-fn update_preferences(preferences: Preferences, win_state: State<WinState>) -> Result<(), String> {
+fn update_preferences(app: AppHandle, preferences: Preferences, win_state: State<WinState>) -> Result<(), String> {
     if let Some(value) = preferences.chat_follows_character {
         win_state.chat_follows_character.store(value, Ordering::SeqCst);
         println!("[Rust] CHAT_FOLLOWS_CHARACTER updated to: {}", value);
+    }
+    if let Some(value) = preferences.chat_always_on_top_when_maximized {
+        if let Some(chat) = app.get_webview_window("chat") {
+            if chat.is_maximized().unwrap_or(false) {
+                chat.set_always_on_top(value).map_err(|error| error.to_string())?;
+            }
+        }
     }
     Ok(())
 }
@@ -2605,6 +2798,69 @@ fn toggle_sidebar(app: AppHandle, expanded: bool, win_state: State<WinState>) ->
 // ============ Window Size Preset ============
 
 #[tauri::command]
+fn update_character_size_preset(app: AppHandle, preset: String, win_state: State<WinState>) -> Result<(), String> {
+    let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
+    let scale = window_layout::get_character_scale_factor_for_preset(&preset);
+    let screen = if let Some(window) = app.get_webview_window("character") {
+        if let Some(monitor) = window.current_monitor().ok().flatten() {
+            screen_info_from_tauri_monitor(&monitor)
+        } else {
+            Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
+        }
+    } else {
+        Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
+    };
+
+    let baseline = window_layout::get_baseline_sizes()
+        .get("character")
+        .map(|size| (size.width, size.height));
+    if let (Some(character), Some((baseline_width, baseline_height))) =
+        (app.get_webview_window("character"), baseline)
+    {
+        let width = (baseline_width * scale).round();
+        let height = (baseline_height * scale).round();
+        let (x, y) = window_layout::position_character_bottom_right(&screen, width, height);
+        let _ = character.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
+            width: window_layout::CHARACTER_MIN_WIDTH,
+            height: window_layout::CHARACTER_MIN_HEIGHT,
+        })));
+        let _ = character.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
+        let _ = character.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+
+        if win_state.chat_follows_character.load(Ordering::SeqCst)
+            && !win_state.chat_compact.load(Ordering::SeqCst)
+            && !win_state.sidebar_expanded.load(Ordering::SeqCst)
+        {
+            if let Some(chat) = app.get_webview_window("chat") {
+                if let (Ok(chat_size), Ok(chat_scale)) = (chat.outer_size(), chat.scale_factor()) {
+                    let chat_width = chat_size.width as f64 / chat_scale;
+                    let chat_height = chat_size.height as f64 / chat_scale;
+                    let (chat_x, chat_y) = window_layout::position_chat_relative_to_character(
+                        x,
+                        y,
+                        height,
+                        chat_width,
+                        chat_height,
+                    );
+                    let (chat_x, chat_y, _) = window_layout::clamp_to_work_area(
+                        &screen,
+                        chat_x,
+                        chat_y,
+                        chat_width,
+                        chat_height,
+                    );
+                    let _ = chat.set_position(tauri::Position::Logical(
+                        tauri::LogicalPosition { x: chat_x, y: chat_y },
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
 fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<WinState>) -> Result<(), String> {
     let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
     let scale = window_layout::get_scale_factor_for_preset(&preset);
@@ -2621,19 +2877,6 @@ fn update_window_size_preset(app: AppHandle, preset: String, win_state: State<Wi
     } else {
         Platform::screen_info_from_monitor((1920, 1080), (0, 0), 1.0)
     };
-    
-    // Update character window - positioned at bottom-right of work area
-    if let (Some(window), Some(baseline)) = (app.get_webview_window("character"), baselines.get("character")) {
-        let width = (baseline.width * scale).round();
-        let height = (baseline.height * scale).round();
-        let (x, y) = window_layout::position_character_bottom_right(&screen, width, height);
-        let _ = window.set_min_size(Some(tauri::Size::Logical(tauri::LogicalSize {
-            width: window_layout::CHARACTER_MIN_WIDTH,
-            height: window_layout::CHARACTER_MIN_HEIGHT,
-        })));
-        let _ = window.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
-        let _ = window.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
-    }
     
     // Update chat window - positioned to the left of character.
     // Width derives from the content-driven minimum reported by the frontend
@@ -3004,7 +3247,9 @@ pub fn run() {
             if let Some(chat_window) = app.get_webview_window("chat") {
                 let _ = Platform::apply_window_effect(
                     &chat_window,
-                    &WindowEffect::Vibrancy { radius: 16.0 },
+                    &WindowEffect::Vibrancy {
+                        radius: CHAT_FULL_CORNER_RADIUS,
+                    },
                 );
             }
 
@@ -3439,6 +3684,7 @@ pub fn run() {
             update_preferences,
             // Window size and shortcuts
             update_window_size_preset,
+            update_character_size_preset,
             report_chat_min_width,
             update_shortcuts,
             // Event broadcasting
@@ -3472,6 +3718,7 @@ pub fn run() {
             llm::proxy::llm_proxy_call,
             llm::proxy::llm_proxy_get,
             llm::proxy::llm_proxy_stream,
+            llm::proxy::llm_proxy_cancel_stream,
             llm::proxy::image_gen_proxy_call,
             // Workspace commands
             workspace::workspace_read,
@@ -3503,6 +3750,8 @@ pub fn run() {
             subagent::subagent_spawn,
             subagent::subagent_kill,
             subagent::subagent_set_max_concurrent,
+            // In-app update check (reports a new release, never installs it)
+            updater::check_for_update,
             commands::training_export::run_training_export,
             commands::training_export::get_home_dir,
         ])

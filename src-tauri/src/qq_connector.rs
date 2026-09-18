@@ -3,6 +3,7 @@
 //! PetGPT owns the small Python/MCP runtime and downloads NapCat from official
 //! native release channels. Docker is deliberately not supported here.
 
+mod browser;
 mod linux;
 
 use crate::database::{mcp_servers, Database};
@@ -596,6 +597,24 @@ impl QqConnectorManager {
                 executable.display()
             ));
         }
+        // Installing the Python package does not install Playwright's browser.
+        // Use that exact managed environment, including after runtime upgrades.
+        Self::emit_progress(
+            app,
+            "mcp-browser-install",
+            "正在安装 QQ 截图所需的 Chromium 无头浏览器",
+            None,
+            None,
+        );
+        browser::install(&self.runtime_dir()).await?;
+        Self::emit_progress(
+            app,
+            "mcp-browser-check",
+            "正在验证 QQ 截图浏览器",
+            None,
+            None,
+        );
+        browser::verify(&self.runtime_dir()).await?;
         let mut metadata = self.read_metadata().await;
         metadata.uv_version = Some(release.tag_name);
         metadata.qq_mcp_source = Some(QQ_MCP_SOURCE.to_string());
@@ -1514,26 +1533,15 @@ impl QqConnectorManager {
     }
 
     pub async fn login_state(&self) -> Result<QqLoginState, String> {
-        let session = self.session().await?;
         let data: Value = self
-            .webui_post(
-                &session.base_url,
-                "/QQLogin/CheckLoginStatus",
-                json!({}),
-                Some(&session.credential),
-            )
+            .webui_post_authed("/QQLogin/CheckLoginStatus", json!({}))
             .await?;
         let is_login = data
             .get("isLogin")
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let account = if is_login {
-            self.webui_post::<Value>(
-                &session.base_url,
-                "/QQLogin/GetQQLoginInfo",
-                json!({}),
-                Some(&session.credential),
-            )
+            self.webui_post_authed::<Value>("/QQLogin/GetQQLoginInfo", json!({}))
             .await
             .ok()
         } else {
@@ -1546,12 +1554,7 @@ impl QqConnectorManager {
             .map(str::to_string);
         if !is_login && qrcode_content.is_none() {
             qrcode_content = self
-                .webui_post::<Value>(
-                    &session.base_url,
-                    "/QQLogin/GetQQLoginQrcode",
-                    json!({}),
-                    Some(&session.credential),
-                )
+                .webui_post_authed::<Value>("/QQLogin/GetQQLoginQrcode", json!({}))
                 .await
                 .ok()
                 .and_then(|value| {
@@ -1590,15 +1593,18 @@ impl QqConnectorManager {
     }
 
     pub async fn refresh_qr(&self) -> Result<QqLoginState, String> {
-        let session = self.session().await?;
+        // The account may have signed in since the last UI probe. Never
+        // invalidate a successful login just to satisfy a delayed QR request.
+        let probe = self.login_probe().await;
+        if !probe.session_ready {
+            return Err(probe.error.unwrap_or_else(|| "无法连接 NapCat WebUI".to_string()));
+        }
+        if probe.is_login {
+            return self.login_state().await;
+        }
         let qrcode_path = self.managed_qrcode_path().await;
         let _ = fs::remove_file(&qrcode_path).await;
-        self.webui_post_optional::<Value>(
-            &session.base_url,
-            "/QQLogin/RefreshQRcode",
-            json!({}),
-            Some(&session.credential),
-        )
+        self.webui_post_authed_optional::<Value>("/QQLogin/RefreshQRcode", json!({}))
         .await?;
         for _ in 0..20 {
             if fs::try_exists(&qrcode_path).await.unwrap_or(false) {
@@ -2738,6 +2744,91 @@ fn value_as_string(value: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn mock_qr_webui(
+        responses: Vec<(&'static str, Value)>,
+    ) -> (QqConnectorManager, tokio::task::JoinHandle<()>) {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let root = std::env::temp_dir().join(format!("petgpt-qr-api-test-{}", Uuid::new_v4()));
+        let manager = QqConnectorManager::new(root);
+        *manager.webui_session.write().await = Some(WebUiSession {
+            base_url: format!("http://{}", listener.local_addr().unwrap()),
+            credential: "fixture-credential".to_string(),
+        });
+        let cache_path = manager.managed_qrcode_path().await;
+        let server = tokio::spawn(async move {
+            for (path, data) in responses {
+                let (socket, _) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+                    .await.unwrap().unwrap();
+                let mut reader = BufReader::new(socket);
+                let mut line = String::new();
+                reader.read_line(&mut line).await.unwrap();
+                assert_eq!(line, format!("POST /api{path} HTTP/1.1\r\n"));
+                let mut length = 0;
+                let mut authenticated = false;
+                loop {
+                    line.clear();
+                    reader.read_line(&mut line).await.unwrap();
+                    if line == "\r\n" || line.is_empty() { break; }
+                    let lower = line.to_ascii_lowercase();
+                    if let Some(value) = lower.strip_prefix("content-length:") {
+                        length = value.trim().parse::<usize>().unwrap();
+                    }
+                    if lower.trim() == "authorization: bearer fixture-credential" {
+                        authenticated = true;
+                    }
+                }
+                assert!(authenticated);
+                reader.read_exact(&mut vec![0; length]).await.unwrap();
+                if path == "/QQLogin/RefreshQRcode" {
+                    fs::create_dir_all(cache_path.parent().unwrap()).await.unwrap();
+                    fs::write(&cache_path, b"\x89PNG\r\n\x1a\nfixture").await.unwrap();
+                }
+                let body = json!({ "code": 0, "data": data }).to_string();
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
+                );
+                reader.get_mut().write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        (manager, server)
+    }
+
+    #[tokio::test]
+    async fn refresh_qr_accepts_empty_refresh_response_and_returns_the_new_code() {
+        let (manager, server) = mock_qr_webui(vec![
+            ("/QQLogin/CheckLoginStatus", json!({ "isLogin": false })),
+            ("/QQLogin/RefreshQRcode", Value::Null),
+            ("/QQLogin/CheckLoginStatus", json!({
+                "isLogin": false, "qrcodeurl": "https://example.invalid/login?fixture=1"
+            })),
+        ]).await;
+        let state = manager.refresh_qr().await.unwrap();
+        assert!(!state.is_login);
+        assert!(state.qrcode.unwrap().starts_with("data:image/png;base64,"));
+        server.await.unwrap();
+        fs::remove_dir_all(&manager.root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delayed_qr_request_does_not_refresh_or_delete_cache_after_login() {
+        let (manager, server) = mock_qr_webui(vec![
+            ("/QQLogin/CheckLoginStatus", json!({ "isLogin": true })),
+            ("/QQLogin/GetQQLoginInfo", json!({ "uin": "123456" })),
+            ("/QQLogin/CheckLoginStatus", json!({ "isLogin": true })),
+            ("/QQLogin/GetQQLoginInfo", json!({ "uin": "123456" })),
+        ]).await;
+        let cache = manager.managed_qrcode_path().await;
+        fs::create_dir_all(cache.parent().unwrap()).await.unwrap();
+        fs::write(&cache, b"existing-cache").await.unwrap();
+        let state = manager.refresh_qr().await.unwrap();
+        assert!(state.is_login);
+        assert!(state.qrcode.is_none());
+        assert_eq!(fs::read(&cache).await.unwrap(), b"existing-cache");
+        server.await.unwrap();
+        fs::remove_dir_all(&manager.root).await.unwrap();
+    }
 
     #[test]
     fn quick_login_uins_are_parsed_from_every_known_response_shape() {

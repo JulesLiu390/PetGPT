@@ -7,6 +7,7 @@ import { StateProvider } from './context/StateProvider'; // 👈 js文件
 import reducer from './context/reducer';                 // 👈 js文件
 import { initialState } from './context/initialState';   // 👈 js文件
 import ErrorBoundary from './components/ErrorBoundary';
+import { I18nProvider } from './i18n/I18nProvider';
 
 // 设置平台 data 属性，用于 CSS 平台特定样式（如 macOS 圆角）
 const isMac = navigator.userAgent.includes('Macintosh') || navigator.platform?.startsWith('Mac');
@@ -36,9 +37,11 @@ root.render(
   <React.StrictMode>
     <ErrorBoundary>
       <HashRouter>
-        <StateProvider initialState={initialState} reducer={reducer}>
-          <App />
-        </StateProvider>
+        <I18nProvider>
+          <StateProvider initialState={initialState} reducer={reducer}>
+            <App />
+          </StateProvider>
+        </I18nProvider>
       </HashRouter>
     </ErrorBoundary>
   </React.StrictMode>

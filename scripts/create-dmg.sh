@@ -15,12 +15,23 @@ echo -e "${GREEN}🚀 Creating PetGPT DMG...${NC}"
 
 # Configuration
 APP_NAME="PetGPT"
-VERSION="0.4.5"
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+TAURI_CONF="$SCRIPT_DIR/../src-tauri/tauri.conf.json"
+
+# tauri.conf.json is the single source of truth for the version. Hardcoding it
+# here is what let this script and create-dmg{,-intel}.sh drift apart from the
+# real build, and the in-app update check compares against exactly this number.
+VERSION="$(node -p "require('$TAURI_CONF').version" 2>/dev/null || true)"
+if [ -z "$VERSION" ]; then
+    echo -e "${RED}❌ Error: could not read version from ${TAURI_CONF}${NC}"
+    exit 1
+fi
+echo -e "${GREEN}📌 Version: ${VERSION}${NC}"
+
 APP_PATH="src-tauri/target/release/bundle/macos/${APP_NAME}.app"
 DMG_NAME="${APP_NAME}_${VERSION}_aarch64.dmg"
 OUTPUT_PATH="src-tauri/target/release/bundle/dmg"
 STAGING_DIR="src-tauri/target/release/bundle/dmg-staging"
-SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 # Check if .app exists
 if [ ! -d "$APP_PATH" ]; then

@@ -5,15 +5,16 @@
 //! - reqwest 的 `.timeout()` 保证单次请求不会无限等待
 //! - tokio Semaphore 限制同时发出的 LLM 请求数量，防止 Observer/Intent/Compress 三方竞争
 
-use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
-use reqwest::Client;
-use tokio::sync::Semaphore;
-use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use futures::StreamExt;
+use reqwest::Client;
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tauri::{AppHandle, Emitter};
+use tokio::sync::{Notify, Semaphore};
 
 /// LLM 代理的全局状态
 pub struct LlmProxy {
@@ -24,7 +25,44 @@ pub struct LlmProxy {
     image_gen_client: Client,
     /// 图像生成专用 semaphore（独立并发额度，不挤占 LLM）
     image_gen_semaphore: Semaphore,
+    /// Active tool-capable chat streams, keyed by the frontend request id.
+    active_streams: Mutex<HashMap<String, Arc<ProxyStreamCancellation>>>,
 }
+
+struct ProxyStreamCancellation {
+    cancelled: AtomicBool,
+    notify: Notify,
+}
+
+impl ProxyStreamCancellation {
+    fn new() -> Self {
+        Self {
+            cancelled: AtomicBool::new(false),
+            notify: Notify::new(),
+        }
+    }
+
+    fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.notify.notify_waiters();
+    }
+
+    async fn cancelled(&self) {
+        if self.cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+
+        // Register the waiter before checking the flag again so cancellation
+        // cannot fall into the gap between the first check and `.await`.
+        let notified = self.notify.notified();
+        if self.cancelled.load(Ordering::SeqCst) {
+            return;
+        }
+        notified.await;
+    }
+}
+
+const STREAM_CANCELLED_ERROR: &str = "LLM stream cancelled by user";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProxyStreamChunk {
@@ -56,7 +94,35 @@ impl LlmProxy {
                 .build()
                 .expect("Failed to build image-gen reqwest client"),
             image_gen_semaphore: Semaphore::new(MAX_CONCURRENT_IMAGE_GEN),
+            active_streams: Mutex::new(HashMap::new()),
         }
+    }
+
+    fn register_stream(&self, request_id: &str) -> Arc<ProxyStreamCancellation> {
+        self.active_streams
+            .lock()
+            .unwrap()
+            .entry(request_id.to_string())
+            .or_insert_with(|| Arc::new(ProxyStreamCancellation::new()))
+            .clone()
+    }
+
+    fn unregister_stream(&self, request_id: &str) {
+        self.active_streams.lock().unwrap().remove(request_id);
+    }
+
+    fn cancel_stream(&self, request_id: &str) -> bool {
+        // Keeping a pre-cancelled entry closes the tiny race where the abort
+        // IPC reaches Rust just before the stream IPC registers its request.
+        let cancellation = self
+            .active_streams
+            .lock()
+            .unwrap()
+            .entry(request_id.to_string())
+            .or_insert_with(|| Arc::new(ProxyStreamCancellation::new()))
+            .clone();
+        cancellation.cancel();
+        true
     }
 }
 
@@ -67,7 +133,7 @@ impl Default for LlmProxy {
 }
 
 /// 代理 LLM HTTP POST 请求（非流式）
-/// 
+///
 /// 前端传入已由 JS adapter 构建好的 endpoint / headers / bodyB64，
 /// Rust 侧只负责发送 + 超时 + 并发控制，返回原始 JSON 响应。
 ///
@@ -81,20 +147,23 @@ pub async fn llm_proxy_call(
     body_b64: String,
 ) -> Result<serde_json::Value, String> {
     // Base64 解码 → UTF-8 → JSON
-    let body_bytes = BASE64.decode(&body_b64)
+    let body_bytes = BASE64
+        .decode(&body_b64)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
-    let body_str = String::from_utf8(body_bytes)
-        .map_err(|e| format!("UTF-8 decode error: {}", e))?;
-    let body_value: serde_json::Value = serde_json::from_str(&body_str)
-        .map_err(|e| format!("Body JSON parse error: {}", e))?;
+    let body_str =
+        String::from_utf8(body_bytes).map_err(|e| format!("UTF-8 decode error: {}", e))?;
+    let body_value: serde_json::Value =
+        serde_json::from_str(&body_str).map_err(|e| format!("Body JSON parse error: {}", e))?;
 
     // 获取并发许可（若已满则等待，不会无限等——受前面 timeout 保护）
-    let _permit = proxy.semaphore
+    let _permit = proxy
+        .semaphore
         .acquire()
         .await
         .map_err(|e| format!("Semaphore closed: {}", e))?;
 
-    let mut req = proxy.http_client
+    let mut req = proxy
+        .http_client
         .post(&endpoint)
         .header("Content-Type", "application/json");
 
@@ -106,17 +175,13 @@ pub async fn llm_proxy_call(
         req = req.header(key.as_str(), value.as_str());
     }
 
-    let response = req
-        .json(&body_value)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                format!("LLM request timed out after {}s", REQUEST_TIMEOUT_SECS)
-            } else {
-                format!("HTTP error: {}", e)
-            }
-        })?;
+    let response = req.json(&body_value).send().await.map_err(|e| {
+        if e.is_timeout() {
+            format!("LLM request timed out after {}s", REQUEST_TIMEOUT_SECS)
+        } else {
+            format!("HTTP error: {}", e)
+        }
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -139,7 +204,8 @@ pub async fn llm_proxy_get(
     endpoint: String,
     headers: HashMap<String, String>,
 ) -> Result<serde_json::Value, String> {
-    let _permit = proxy.semaphore
+    let _permit = proxy
+        .semaphore
         .acquire()
         .await
         .map_err(|e| format!("Semaphore closed: {}", e))?;
@@ -150,16 +216,13 @@ pub async fn llm_proxy_get(
         req = req.header(key.as_str(), value.as_str());
     }
 
-    let response = req
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                format!("LLM GET request timed out after {}s", REQUEST_TIMEOUT_SECS)
-            } else {
-                format!("HTTP error: {}", e)
-            }
-        })?;
+    let response = req.send().await.map_err(|e| {
+        if e.is_timeout() {
+            format!("LLM GET request timed out after {}s", REQUEST_TIMEOUT_SECS)
+        } else {
+            format!("HTTP error: {}", e)
+        }
+    })?;
 
     let status = response.status();
     if !status.is_success() {
@@ -189,19 +252,49 @@ pub async fn llm_proxy_stream(
     headers: HashMap<String, String>,
     body_b64: String,
 ) -> Result<(), String> {
-    let body_bytes = BASE64.decode(&body_b64)
+    let cancellation = proxy.register_stream(&request_id);
+    let result = llm_proxy_stream_inner(
+        app,
+        proxy.inner().as_ref(),
+        &request_id,
+        endpoint,
+        headers,
+        body_b64,
+        cancellation,
+    )
+    .await;
+    proxy.unregister_stream(&request_id);
+    result
+}
+
+async fn llm_proxy_stream_inner(
+    app: AppHandle,
+    proxy: &LlmProxy,
+    request_id: &str,
+    endpoint: String,
+    headers: HashMap<String, String>,
+    body_b64: String,
+    cancellation: Arc<ProxyStreamCancellation>,
+) -> Result<(), String> {
+    let body_bytes = BASE64
+        .decode(&body_b64)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
-    let body_str = String::from_utf8(body_bytes)
-        .map_err(|e| format!("UTF-8 decode error: {}", e))?;
-    let body_value: serde_json::Value = serde_json::from_str(&body_str)
-        .map_err(|e| format!("Body JSON parse error: {}", e))?;
+    let body_str =
+        String::from_utf8(body_bytes).map_err(|e| format!("UTF-8 decode error: {}", e))?;
+    let body_value: serde_json::Value =
+        serde_json::from_str(&body_str).map_err(|e| format!("Body JSON parse error: {}", e))?;
 
-    let _permit = proxy.semaphore
-        .acquire()
-        .await
-        .map_err(|e| format!("Semaphore closed: {}", e))?;
+    let _permit = tokio::select! {
+        permit = proxy.semaphore.acquire() => {
+            permit.map_err(|e| format!("Semaphore closed: {}", e))?
+        }
+        _ = cancellation.cancelled() => {
+            return Err(STREAM_CANCELLED_ERROR.to_string());
+        }
+    };
 
-    let mut req = proxy.http_client
+    let mut req = proxy
+        .http_client
         .post(&endpoint)
         .header("Content-Type", "application/json");
 
@@ -212,17 +305,20 @@ pub async fn llm_proxy_stream(
         req = req.header(key.as_str(), value.as_str());
     }
 
-    let response = req
-        .json(&body_value)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                format!("LLM stream request timed out after {}s", REQUEST_TIMEOUT_SECS)
-            } else {
-                format!("HTTP error: {}", e)
-            }
-        })?;
+    let response = tokio::select! {
+        response = req.json(&body_value).send() => {
+            response.map_err(|e| {
+                if e.is_timeout() {
+                    format!("LLM stream request timed out after {}s", REQUEST_TIMEOUT_SECS)
+                } else {
+                    format!("HTTP error: {}", e)
+                }
+            })?
+        }
+        _ = cancellation.cancelled() => {
+            return Err(STREAM_CANCELLED_ERROR.to_string());
+        }
+    };
 
     let status = response.status();
     if !status.is_success() {
@@ -233,10 +329,19 @@ pub async fn llm_proxy_stream(
     let event_name = format!("llm-proxy-chunk:{}", request_id);
     let mut stream = response.bytes_stream();
 
-    while let Some(chunk_result) = stream.next().await {
+    loop {
+        let chunk_result = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = cancellation.cancelled() => {
+                return Err(STREAM_CANCELLED_ERROR.to_string());
+            }
+        };
+        let Some(chunk_result) = chunk_result else {
+            break;
+        };
         let chunk = chunk_result.map_err(|e| format!("Stream error: {}", e))?;
         let payload = ProxyStreamChunk {
-            request_id: request_id.clone(),
+            request_id: request_id.to_string(),
             chunk: String::from_utf8_lossy(&chunk).to_string(),
             done: false,
         };
@@ -245,7 +350,7 @@ pub async fn llm_proxy_stream(
     }
 
     let done_payload = ProxyStreamChunk {
-        request_id,
+        request_id: request_id.to_string(),
         chunk: String::new(),
         done: true,
     };
@@ -253,6 +358,44 @@ pub async fn llm_proxy_stream(
         .map_err(|e| format!("Event emit error: {}", e))?;
 
     Ok(())
+}
+
+/// Cancel a tool-capable chat stream without waiting for the provider to emit
+/// another chunk. Dropping the request future closes the underlying response.
+#[tauri::command]
+pub fn llm_proxy_cancel_stream(proxy: tauri::State<'_, Arc<LlmProxy>>, request_id: String) -> bool {
+    proxy.cancel_stream(&request_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProxyStreamCancellation;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn stream_cancellation_wakes_an_active_waiter() {
+        let cancellation = Arc::new(ProxyStreamCancellation::new());
+        let waiter = cancellation.clone();
+        let task = tokio::spawn(async move {
+            waiter.cancelled().await;
+        });
+
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_millis(100), task)
+            .await
+            .expect("cancel waiter should wake")
+            .expect("cancel waiter task should finish");
+    }
+
+    #[tokio::test]
+    async fn cancellation_before_wait_is_observed() {
+        let cancellation = ProxyStreamCancellation::new();
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_millis(100), cancellation.cancelled())
+            .await
+            .expect("pre-cancelled waiter should finish immediately");
+    }
 }
 
 /// 代理图像生成 HTTP POST 请求
@@ -269,19 +412,22 @@ pub async fn image_gen_proxy_call(
     headers: HashMap<String, String>,
     body_b64: String,
 ) -> Result<serde_json::Value, String> {
-    let body_bytes = BASE64.decode(&body_b64)
+    let body_bytes = BASE64
+        .decode(&body_b64)
         .map_err(|e| format!("Base64 decode error: {}", e))?;
-    let body_str = String::from_utf8(body_bytes)
-        .map_err(|e| format!("UTF-8 decode error: {}", e))?;
-    let body_value: serde_json::Value = serde_json::from_str(&body_str)
-        .map_err(|e| format!("Body JSON parse error: {}", e))?;
+    let body_str =
+        String::from_utf8(body_bytes).map_err(|e| format!("UTF-8 decode error: {}", e))?;
+    let body_value: serde_json::Value =
+        serde_json::from_str(&body_str).map_err(|e| format!("Body JSON parse error: {}", e))?;
 
-    let _permit = proxy.image_gen_semaphore
+    let _permit = proxy
+        .image_gen_semaphore
         .acquire()
         .await
         .map_err(|e| format!("Image-gen semaphore closed: {}", e))?;
 
-    let mut req = proxy.image_gen_client
+    let mut req = proxy
+        .image_gen_client
         .post(&endpoint)
         .header("Content-Type", "application/json");
 
@@ -292,17 +438,16 @@ pub async fn image_gen_proxy_call(
         req = req.header(key.as_str(), value.as_str());
     }
 
-    let response = req
-        .json(&body_value)
-        .send()
-        .await
-        .map_err(|e| {
-            if e.is_timeout() {
-                format!("Image-gen request timed out after {}s", IMAGE_GEN_TIMEOUT_SECS)
-            } else {
-                format!("HTTP error: {}", e)
-            }
-        })?;
+    let response = req.json(&body_value).send().await.map_err(|e| {
+        if e.is_timeout() {
+            format!(
+                "Image-gen request timed out after {}s",
+                IMAGE_GEN_TIMEOUT_SECS
+            )
+        } else {
+            format!("HTTP error: {}", e)
+        }
+    })?;
 
     let status = response.status();
     if !status.is_success() {

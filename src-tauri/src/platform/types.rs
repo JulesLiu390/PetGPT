@@ -53,7 +53,7 @@ pub struct ScreenshotData {
 /// Window visual effect types.
 #[derive(Debug, Clone)]
 pub enum WindowEffect {
-    /// macOS vibrancy (NSVisualEffectMaterial::FullScreenUI with given corner radius)
+    /// macOS vibrancy (a translucent under-window material with the given corner radius)
     Vibrancy { radius: f64 },
     /// Windows 11 Mica effect  
     Mica,

@@ -13,6 +13,11 @@ import { getQuickReplyPresentation } from './quickReplyModel.js';
 // 紧凑 Markdown 样式（行间距、段间距大幅缩小）
 const CompactMarkdownStyles = () => (
   <style>{`
+    .message-markdown {
+      font-size: var(--markdown-font-size, 14px);
+      letter-spacing: var(--markdown-letter-spacing, 0px);
+      line-height: var(--markdown-line-height, 1.3);
+    }
     .message-markdown p { margin: 0.1em 0 !important; }
     .message-markdown h1, 
     .message-markdown h2, 
@@ -99,7 +104,7 @@ const CodeBlock = ({ inline, className, children, ...props }) => {
       >
         {copied ? 'Copied' : 'Copy'}
       </button>
-      <pre className="rounded p-4 bg-black text-gray-100 overflow-x-auto max-w-full font-mono text-sm whitespace-pre-wrap break-words">
+      <pre className="rounded p-4 bg-black text-gray-100 overflow-x-auto max-w-full font-mono whitespace-pre-wrap break-words">
         <code ref={codeRef} className="w-full" {...props} />
       </pre>
     </div>
@@ -247,7 +252,6 @@ const MessagePartContent = ({ part, isUser }) => {
     ) : (
         <div 
           className="prose-sm prose-neutral break-words w-full max-w-full message-markdown"
-          style={{ lineHeight: '1.3' }}
         >
             <ReactMarkdown remarkPlugins={[remarkGfm]} components={{a: LinkRenderer, code: CodeBlock}}>
                 {part.text}
@@ -965,7 +969,7 @@ const ChatboxMessageArea = ({
         {searchHighlight && (
           <div className="sticky top-0 z-10 flex items-center justify-between bg-yellow-50 border border-yellow-200 rounded-lg px-3 py-1.5 mb-2 text-xs shadow-sm">
             <span className="text-yellow-800">
-              搜索: <strong>{searchHighlight}</strong>
+              Search: <strong data-i18n-ignore>{searchHighlight}</strong>
             </span>
             <button
               onClick={dismissSearchHighlight}
@@ -1024,7 +1028,9 @@ const ChatboxMessageArea = ({
                             </div>
                         </div>
                       ) : (
-                        <MessagePartContent part={part} isUser={isUser} />
+                        <div data-i18n-ignore>
+                          <MessagePartContent part={part} isUser={isUser} />
+                        </div>
                       )}
                     </div>
 
@@ -1141,9 +1147,9 @@ const ChatboxMessageArea = ({
       {streamingContent && (
         <div className="flex mb-4 justify-start">
             <div className="whitespace-pre-wrap bg-transparent text-left text-sm" style={{ maxWidth: '100%' }}>
-                <div 
+                <div
+                  data-i18n-ignore
                   className="prose-sm prose-neutral break-words w-full max-w-full message-markdown"
-                  style={{ lineHeight: '1.3' }}
                 >
                     <ReactMarkdown
                         remarkPlugins={[remarkGfm]}

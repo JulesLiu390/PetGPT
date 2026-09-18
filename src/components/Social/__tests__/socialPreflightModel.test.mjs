@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import {
   ACTION_LAUNCH_NAPCAT,
   ACTION_OPEN_SETUP,
-  ACTION_QUICK_LOGIN,
+  ACTION_SCAN_QR,
   ACTION_START_MCP,
   PREFLIGHT_BLOCKED,
   PREFLIGHT_OK,
@@ -176,7 +176,7 @@ test('an unprobed chain stays pending and does not block Start', () => {
   );
 });
 
-test('an expired QQ session blocks Start and sends the user to scan a QR code', () => {
+test('an expired QQ session blocks Start and offers an inline QR code', () => {
   const report = buildSocialPreflight({
     mcpServerName: 'qq-12345678',
     connectorStatus: readyStatus,
@@ -188,7 +188,8 @@ test('an expired QQ session blocks Start and sends the user to scan a QR code', 
 
   assert.equal(report.canStart, false);
   assert.equal(statusOf(report, 'login').status, PREFLIGHT_BLOCKED);
-  assert.equal(statusOf(report, 'login').action, ACTION_QUICK_LOGIN);
+  assert.equal(statusOf(report, 'login').action, ACTION_SCAN_QR);
+  assert.match(report.summary, /QR code below/);
   assert.match(report.summary, /QQ is not logged in/);
   // The binding row still reads OK: "bound once" and "online now" are different facts.
   assert.equal(statusOf(report, 'account').status, PREFLIGHT_OK);

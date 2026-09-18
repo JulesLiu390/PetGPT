@@ -1,8 +1,10 @@
 import React from 'react';
 import { MIN_QUICK_REPLIES, normalizeQuickReplies } from './quickReplyModel.js';
+import { useI18n } from '../../i18n/context.js';
 
 /** Grok-style reply chips. Selection is delegated; this component never sends. */
 export default function QuickReplySuggestions({ suggestions, onSelect }) {
+  const { t } = useI18n();
   const replies = normalizeQuickReplies(suggestions);
   if (replies.length < MIN_QUICK_REPLIES) return null;
 
@@ -15,11 +17,12 @@ export default function QuickReplySuggestions({ suggestions, onSelect }) {
       {replies.map(reply => (
         <button
           key={reply}
+          data-i18n-ignore
           type="button"
           onClick={() => onSelect?.(reply)}
           title={reply}
           className="inline-flex h-7 max-w-full items-center rounded-full border border-slate-200/80 bg-slate-50/75 px-2.5 text-left text-[11px] font-medium leading-none text-slate-600 shadow-sm backdrop-blur-sm transition-colors hover:border-slate-300 hover:bg-white hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400"
-          aria-label={`Send suggested reply: ${reply}`}
+          aria-label={`${t('Send suggested reply:')} ${reply}`}
         >
           <span className="max-w-[13rem] truncate">{reply}</span>
         </button>

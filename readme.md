@@ -106,6 +106,12 @@ OneBot adapters to localhost, and generates a separate OneBot access token.
 On macOS, the wizard prepares a private copy of an installed `/Applications/QQ.app`
 and patches that copy only; the original QQ app remains unchanged.
 
+**Install / Update QQ-MCP** also downloads the Chromium headless shell matching
+its managed Python Playwright version and verifies it with an offline screenshot
+before reporting success. Existing Playwright browser caches are preserved.
+If a Linux system library is missing, installation reports Playwright's dependency
+instructions instead of silently leaving chat screenshots broken.
+
 #### Linux QQ setup
 
 The Linux wizard follows the same managed flow: install → start → scan → register.
@@ -123,6 +129,11 @@ so neither a separate QQ installation nor FUSE setup is required.
    2FA is enabled, enter its code first. A saved QQ session can use quick login.
 4. Click **Configure and Add MCP** to create the localhost-only OneBot adapters
    and register the QQ account's MCP service.
+
+For an already linked account, Social Agent preflight tries its saved session
+once. If QQ needs a new login, a fresh QR code appears directly in preflight;
+scan it there and use **Refresh QR** if it expires. Login status updates
+automatically. **Start MCP** remains a separate action if that process is stopped.
 
 QQ data, NapCat configuration, QR cache and startup logs stay under
 `<app-data>/connectors/qq/qq-isolated/profile/`, separate from your ordinary QQ

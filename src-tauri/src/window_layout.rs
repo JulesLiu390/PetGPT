@@ -52,6 +52,10 @@ pub struct WindowState {
     pub chat_follows_character: AtomicBool,
     /// Whether the chat is currently showing only the empty composer.
     pub chat_compact: AtomicBool,
+    /// Whether the native chat background effect is enabled. The compact and
+    /// full layouts use different corner radii, so transitions need to know
+    /// whether it is safe to refresh that effect.
+    pub chat_vibrancy_enabled: AtomicBool,
     /// Last frontend-measured compact height in logical pixels.
     pub chat_compact_height: Mutex<f64>,
     /// Full-window geometry captured before entering compact mode. This is
@@ -97,6 +101,7 @@ impl WindowState {
             original_width: AtomicU32::new(0),
             chat_follows_character: AtomicBool::new(true),
             chat_compact: AtomicBool::new(false),
+            chat_vibrancy_enabled: AtomicBool::new(true),
             chat_compact_height: Mutex::new(CHAT_COMPACT_DEFAULT_HEIGHT),
             chat_full_geometry: Mutex::new(None),
             chat_full_was_maximized: AtomicBool::new(false),
@@ -126,6 +131,28 @@ pub struct WindowGeometry {
     pub y: f64,
     pub width: f64,
     pub height: f64,
+}
+
+/// Interpolate a native window frame while keeping all values in logical
+/// coordinates. Progress is clamped so delayed animation ticks can never
+/// overshoot the final restore geometry.
+pub fn interpolate_window_geometry(
+    start: WindowGeometry,
+    end: WindowGeometry,
+    progress: f64,
+) -> WindowGeometry {
+    let progress = if progress.is_finite() {
+        progress.clamp(0.0, 1.0)
+    } else {
+        1.0
+    };
+    let interpolate = |from: f64, to: f64| from + (to - from) * progress;
+    WindowGeometry {
+        x: interpolate(start.x, end.x),
+        y: interpolate(start.y, end.y),
+        width: interpolate(start.width, end.width),
+        height: interpolate(start.height, end.height),
+    }
 }
 
 // ============ Screen Info Helper ============
@@ -164,8 +191,8 @@ pub struct BaselineSize {
 /// Character dimensions are 1.3× the previous 200×300 logical baseline.
 pub const CHARACTER_BASELINE_WIDTH: f64 = 260.0;
 pub const CHARACTER_BASELINE_HEIGHT: f64 = 390.0;
-pub const CHARACTER_MIN_WIDTH: f64 = 234.0;
-pub const CHARACTER_MIN_HEIGHT: f64 = 351.0;
+pub const CHARACTER_MIN_WIDTH: f64 = 195.0;
+pub const CHARACTER_MIN_HEIGHT: f64 = 293.0;
 
 pub fn get_baseline_sizes() -> HashMap<&'static str, BaselineSize> {
     let mut sizes = HashMap::new();
@@ -183,6 +210,17 @@ pub fn get_scale_factor_for_preset(preset: &str) -> f64 {
         "small" => 0.9,
         "medium" => 1.0,
         "large" => 1.15,
+        _ => 1.0,
+    }
+}
+
+/// Character presets deliberately use a wider range than interface windows.
+/// This keeps the choices visually distinct without scaling the rest of the UI.
+pub fn get_character_scale_factor_for_preset(preset: &str) -> f64 {
+    match preset {
+        "small" => 0.75,
+        "medium" => 1.0,
+        "large" => 1.35,
         _ => 1.0,
     }
 }
@@ -360,7 +398,11 @@ pub fn apply_size_preset(
     preset: &str,
 ) -> Option<(f64, f64)> {
     let baselines = get_baseline_sizes();
-    let scale = get_scale_factor_for_preset(preset);
+    let scale = if window_label == "character" {
+        get_character_scale_factor_for_preset(preset)
+    } else {
+        get_scale_factor_for_preset(preset)
+    };
     baselines.get(window_label).map(|b| {
         ((b.width * scale).round(), (b.height * scale).round())
     })
@@ -428,7 +470,7 @@ mod tests {
     }
 
     #[test]
-    fn character_presets_use_the_enlarged_minimum() {
+    fn character_presets_are_visually_distinct() {
         assert_eq!(
             apply_size_preset("character", "small"),
             Some((CHARACTER_MIN_WIDTH, CHARACTER_MIN_HEIGHT))
@@ -439,8 +481,12 @@ mod tests {
         );
         assert_eq!(
             apply_size_preset("character", "large"),
-            Some((299.0, 448.0))
+            Some((351.0, 527.0))
         );
+        assert!(get_character_scale_factor_for_preset("medium")
+            - get_character_scale_factor_for_preset("small") >= 0.25);
+        assert!(get_character_scale_factor_for_preset("large")
+            - get_character_scale_factor_for_preset("medium") >= 0.35);
     }
 
     #[test]
@@ -471,6 +517,34 @@ mod tests {
         assert_eq!(
             position_chat_bottom_center(&screen, 460.0, 132.0),
             (-1190.0, 932.0)
+        );
+    }
+
+    #[test]
+    fn window_geometry_interpolation_clamps_and_reaches_the_restore_frame() {
+        let start = WindowGeometry {
+            x: 490.0,
+            y: 700.0,
+            width: 460.0,
+            height: 104.0,
+        };
+        let end = WindowGeometry {
+            x: 820.0,
+            y: 360.0,
+            width: 529.0,
+            height: 400.0,
+        };
+        assert_eq!(interpolate_window_geometry(start, end, -1.0), start);
+        assert_eq!(interpolate_window_geometry(start, end, 1.0), end);
+        assert_eq!(interpolate_window_geometry(start, end, f64::NAN), end);
+        assert_eq!(
+            interpolate_window_geometry(start, end, 0.5),
+            WindowGeometry {
+                x: 655.0,
+                y: 530.0,
+                width: 494.5,
+                height: 252.0,
+            }
         );
     }
 

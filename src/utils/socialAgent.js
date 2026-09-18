@@ -14,7 +14,7 @@ import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
 import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition, getSituationToolDefinition, autoFixPlanArgs } from './workspace/socialToolExecutor';
-import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource } from './subagentManager';
+import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource, reapSubagentRegistry } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -52,6 +52,35 @@ const targetNamesCache = new Map();
 
 /** 图片描述缓存 Map<messageId_imageIndex, string> —— 避免重复调用 vision LLM */
 const imageDescCache = new Map();
+
+/**
+ * 图片描述缓存容量上限。
+ *
+ * 缓存只服务于「同一张图在 Intent/Observer/Reply 之间复用」，命中窗口就是 buffer
+ * 的存活期（BUFFER_HARD_CAP 500 条/target × 若干 target）。超过这个量级的旧条目
+ * 再也不会被查到，只会一直占内存 —— 挂机几天下来是纯增长。
+ */
+const IMAGE_DESC_CACHE_MAX = 2000;
+
+/** 读缓存并刷新 LRU 顺序（Map 迭代序即插入序，重新 set 等于挪到队尾） */
+function getCachedImageDesc(cacheKey) {
+  if (!imageDescCache.has(cacheKey)) return undefined;
+  const value = imageDescCache.get(cacheKey);
+  imageDescCache.delete(cacheKey);
+  imageDescCache.set(cacheKey, value);
+  return value;
+}
+
+/** 写缓存并按容量淘汰最久未使用的条目 */
+function setCachedImageDesc(cacheKey, value) {
+  if (imageDescCache.has(cacheKey)) imageDescCache.delete(cacheKey);
+  imageDescCache.set(cacheKey, value);
+  while (imageDescCache.size > IMAGE_DESC_CACHE_MAX) {
+    const oldest = imageDescCache.keys().next();
+    if (oldest.done) break;
+    imageDescCache.delete(oldest.value);
+  }
+}
 
 /** 图片描述进行中 Map<cacheKey, Promise<string>> —— Observer/Reply 并发去重 */
 const imageDescInflight = new Map();
@@ -1147,9 +1176,10 @@ async function pollTarget({
         const descPromises = msg._images.map((img, j) => {
           const cacheKey = `${msg.message_id}_${j}`;
           // 检查缓存
-          if (msg.message_id && imageDescCache.has(cacheKey)) {
+          const cachedDesc = msg.message_id ? getCachedImageDesc(cacheKey) : undefined;
+          if (cachedDesc !== undefined) {
             cachedCount++;
-            return Promise.resolve(imageDescCache.get(cacheKey));
+            return Promise.resolve(cachedDesc);
           }
           // 调用 vision LLM（并发去重：若已有 inflight Promise 则复用，失败指数重试）
           if (imageDescInflight.has(cacheKey)) {
@@ -1169,13 +1199,13 @@ async function pollTarget({
             .then(desc => {
               addLog('llm', `🖼️ Vision [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
               describedCount++;
-              if (msg.message_id) imageDescCache.set(cacheKey, desc);
+              if (msg.message_id) setCachedImageDesc(cacheKey, desc);
               return desc;
             })
             .catch(e => {
               addLog('warn', `Vision desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
               const fallback = '[图片描述失败]';
-              if (msg.message_id) imageDescCache.set(cacheKey, fallback);
+              if (msg.message_id) setCachedImageDesc(cacheKey, fallback);
               return fallback;
             })
             .finally(() => {
@@ -3041,9 +3071,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       // 并行描述同一条消息内的所有图片
       const descPromises = resolvedImages.map((img, j) => {
         const cacheKey = `${msg.message_id}_${j}`;
-        if (msg.message_id && imageDescCache.has(cacheKey)) {
+        const cachedDesc = msg.message_id ? getCachedImageDesc(cacheKey) : undefined;
+        if (cachedDesc !== undefined) {
           cachedCount++;
-          return Promise.resolve(imageDescCache.get(cacheKey));
+          return Promise.resolve(cachedDesc);
         }
         if (imageDescInflight.has(cacheKey)) {
           cachedCount++;
@@ -3061,13 +3092,13 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           .then(desc => {
             addLog('llm', `🖼️ Vision-pre [${sender}] img${j}`, `input: ${imgPreview}\noutput: ${desc}`, target);
             describedCount++;
-            if (msg.message_id) imageDescCache.set(cacheKey, desc);
+            if (msg.message_id) setCachedImageDesc(cacheKey, desc);
             return desc;
           })
           .catch(e => {
             addLog('warn', `Vision-pre desc failed for ${target} msg=${msg.message_id} img=${j}`, e.message || e, target);
             const fallback = '[图片描述失败]';
-            if (msg.message_id) imageDescCache.set(cacheKey, fallback);
+            if (msg.message_id) setCachedImageDesc(cacheKey, fallback);
             return fallback;
           })
           .finally(() => {
@@ -3321,12 +3352,9 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           capturedPlan = null;
           // write_intent_plan 暂存 args（onToolCall 收到，onToolResult 看到结果后决定是否真的捕获）
           let _pendingPlanArgs = null;
-          // Purge consumed subagent entries for this target
-          for (const [taskId, entry] of subagentRegistry) {
-            if (entry.target === target && entry.readByIntent) {
-              subagentRegistry.delete(taskId);
-            }
-          }
+          // 回收已被消费/已通报过/已过期的 subagent 条目。
+          // 放在构建 prompt 之前：本轮 prompt 只包含仍然值得 Intent 知道的任务。
+          reapSubagentRegistry();
           const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
           const sinceMin = state.lastEvalTime > 0
             ? Math.round((Date.now() - state.lastEvalTime) / 60000) : 0;
@@ -4626,6 +4654,16 @@ export function stopSocialLoop() {
   trainingTargetsMap.clear();
   knownTargets.clear();
   targetNamesCache.clear();
+  // 下面这几个原先漏在清理列表外。单独看都受 target/provider 数量约束、算不上
+  // 泄漏，但「声明了却没清」很容易在以后新增 Map 时被照抄，所以一并补齐。
+  customGroupRulesMap.clear();
+  intentInjectionWatermarks.clear();
+  intentInterceptCounts.clear();
+  apiKeyRoundRobin.clear();
+  // 终态 subagent 条目跟着会话一起走；running 的已由上面的 killBySource 处理。
+  reapSubagentRegistry();
+  // systemLogs / targetLogs 有意保留：agent 停掉后用户还要回看日志，
+  // 二者各有 MAX_LOGS(200) 上限，清空由 clearSocialLogs 显式负责。
 }
 
 /**

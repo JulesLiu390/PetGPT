@@ -21,6 +21,7 @@ import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecu
 import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
 import { isSkillTool, executeSkillTool } from '../skills/index.js';
 import { appendToolResultAnnotation } from './toolResultAnnotation.js';
+import { createAbortError, throwIfAborted } from '../cancellation.js';
 
 /**
  * Normalize usage from different LLM adapters into a unified format.
@@ -1100,6 +1101,7 @@ export const callLLMStreamWithTools = async ({
   const MAX_TOTAL_ITERATIONS = 100;
   
   while (totalIterations < MAX_TOTAL_ITERATIONS) {
+    throwIfAborted(abortSignal);
     totalIterations++;
     console.log(`[MCP] Stream tool loop iteration ${totalIterations}`);
     
@@ -1125,6 +1127,7 @@ export const callLLMStreamWithTools = async ({
     const streamToolCalls = new Map(); // index -> {id, name, arguments}
 
     const processStreamText = (chunkText) => {
+      if (abortSignal?.aborted) return;
       buffer += chunkText;
       const lines = buffer.split('\n');
       buffer = lines.pop() || '';
@@ -1201,7 +1204,8 @@ export const callLLMStreamWithTools = async ({
       }
     };
 
-    await streamTransport(req.endpoint, req.headers, req.body, processStreamText);
+    await streamTransport(req.endpoint, req.headers, req.body, processStreamText, abortSignal);
+    throwIfAborted(abortSignal);
     if (buffer.trim()) {
       processStreamText('\n');
     }
@@ -1290,11 +1294,7 @@ export const callLLMStreamWithTools = async ({
       // 检查是否已中断
       if (abortSignal?.aborted) {
         console.log('[MCP] Tool execution aborted by user');
-        return {
-          content: fullContent,
-          toolCallHistory,
-          aborted: true
-        };
+        throw createAbortError();
       }
       
       const toolCallId = call.id || `${call.name}-${Date.now()}`;
@@ -1429,15 +1429,15 @@ export const callLLMStreamWithTools = async ({
           if (onToolResult) {
             onToolResult(call.name, 'Cancelled by user', toolCallId, true);
           }
-          return {
-            content: fullContent,
-            toolCallHistory,
-            aborted: true
-          };
+          throw createAbortError();
         }
         isError = true;
         toolResult = { error: error.message };
       }
+
+      // A builtin or remote tool may not support AbortSignal internally. Do
+      // not feed its late result back to the model after this job was stopped.
+      throwIfAborted(abortSignal);
       
       const formattedResult = formatToolResult(toolResult);
       let modelFacingResult = formattedResult;

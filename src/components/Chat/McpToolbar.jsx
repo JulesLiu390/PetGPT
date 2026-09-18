@@ -453,7 +453,7 @@ const McpToolbar = ({
               : 'text-gray-500 hover:bg-gray-200'
             }
           `}
-          title="MCP 管理"
+          title="MCP Management"
         >
           <FiSettings className="text-lg" />
           {/* 如果有隐藏的已启用服务器，显示数量 */}

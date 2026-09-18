@@ -800,21 +800,16 @@ export const Character = () => {
   // ========== 拖动方案结束 ==========
 
   useEffect(() => {
-    let windowSize = "medium";
-    const getWindowSize = async() => {
+    const applySavedSizes = async () => {
       const settings = await tauri.getSettings();
-      windowSize = settings.windowSize;
-      tauri.updateWindowSizePreset(windowSize);
-    }
-    getWindowSize()
-    // alert(settings.windowSize)
-    
-      .then(result => {
-        console.log("Window size preset updated:", result);
-      })
-      .catch(error => {
-        console.error("Failed to update window size preset:", error);
-      });
+      await tauri.updateCharacterSizePreset(settings.characterSize || 'medium');
+      await tauri.updateWindowSizePreset(settings.windowSize || 'medium');
+      console.log('Saved interface and character sizes applied');
+    };
+
+    applySavedSizes().catch(error => {
+      console.error('Failed to apply saved size presets:', error);
+    });
   }, []);
 
   // 计算是否有其他窗口打开（chat 或 manage/settings）
