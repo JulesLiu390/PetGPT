@@ -633,6 +633,18 @@ export const downloadUrlAsBase64 = (url) => invoke('download_url_as_base64', { u
  * @returns {Promise<{data: string, mime_type: string}>} PNG base64 数据
  */
 export const convertGifToPng = (base64Data) => invoke('convert_gif_to_png', { base64Data });
+/**
+ * 读本地图片文件为 base64。
+ * QQ 的图床地址外部拉不动（HTTP 400，要 QQ 自己的鉴权上下文），但 NapCat
+ * 已经把图存到本地，qq-mcp 会把那份副本的路径交过来。
+ */
+export const readLocalImageAsBase64 = (path) => invoke('read_local_image_as_base64', { path });
+/**
+ * GIF → 按时间均匀采样 9 帧拼成的 3×3 网格 PNG。
+ * 返回 { data, mime_type, frame_count, sampled }。
+ * 比 convertGifToPng 只取首帧保留了动作信息，表情包的意思往往在后几帧。
+ */
+export const gifToContactSheet = (base64Data) => invoke('gif_to_contact_sheet', { base64Data });
 
 /**
  * 调 ElevenLabs TTS，返回 base64 编码的 MP3 音频
@@ -676,7 +688,18 @@ export const captureRegion = (x, y, width, height) =>
 
 export const showChatWindow = () => invoke('show_chat_window');
 export const hideChatWindow = () => invoke('hide_chat_window');
-export const toggleChatWindow = () => invoke('toggle_chat_window');
+/**
+ * 唤出/收起聊天窗口。
+ *
+ * intent 决定唤出形态：'chat'（点角色、点聊天图标）给完整对话框，本次启动
+ * 首次还会放大到最大化；'quick'（全局快捷键）给快捷提问小气泡，并确保窗口
+ * 不处于最大化状态。省略时按 'chat' 处理。
+ */
+export const toggleChatWindow = (intent = 'chat') => invoke('toggle_chat_window', { intent });
+
+/** 后端在唤出窗口时广播的形态意图，前端据此决定紧凑还是常规布局。 */
+export const onChatOpenIntent = (callback) =>
+  subscribeToTauriEvent('chat-open-intent', (event) => callback(event?.payload));
 export const maximizeChatWindow = () => invoke('maximize_chat_window');
 export const toggleSidebar = (expanded) => invoke('toggle_sidebar', { expanded });
 export const setChatCompactMode = (compact, height, requestId) =>
@@ -1082,6 +1105,73 @@ export const checkForUpdate = () => invoke('check_for_update');
 /** 当前运行的应用版本（编译期常量，不经网络）。 */
 export const getAppVersion = () => appGetVersion();
 
+// ==================== Projects ====================
+
+export const projectsList = () => invoke('projects_list');
+export const projectsAdd = (path, name) => invoke('projects_add', { path, name });
+export const projectsRename = (id, name) => invoke('projects_rename', { id, name });
+/** 只解除登记，磁盘上的文件一个都不动。 */
+export const projectsRemove = (id) => invoke('projects_remove', { id });
+export const projectsTouch = (id) => invoke('projects_touch', { id });
+export const projectsRootPath = (id) => invoke('projects_root_path', { id });
+/** 按层懒加载：path 省略或空串表示项目根。 */
+export const projectsListDir = (id, path = '') => invoke('projects_list_dir', { id, path });
+export const projectsPreviewFile = (id, path) => invoke('projects_preview_file', { id, path });
+/**
+ * 项目的 git 状态。不是 git 仓库、或机器上没有 git 时返回 `{ isRepo: false }`，
+ * 不抛错 —— 界面在轮询它，这两种情况都只是「不显示 git 那一段」。
+ */
+export const projectsGitStatus = (id) => invoke('projects_git_status', { id });
+/**
+ * 写回项目内的文件。
+ * `expectedModifiedAt` 传读取时拿到的 modifiedAt 做乐观锁 —— agent 正在同一个
+ * 项目里改文件，磁盘上变了就会报冲突而不是静默覆盖。传 null 表示强制覆盖。
+ */
+export const projectsWriteFile = ({ id, path, content, expectedModifiedAt = null }) =>
+  invoke('projects_write_file', { id, path, content, expectedModifiedAt });
+
+// ==================== Interactive PTY ====================
+
+export const ptySpawn = ({ sessionId, projectId, cwd, kind, cols, rows, shell, resumeId }) =>
+  invoke('pty_spawn', { sessionId, projectId, cwd, kind, cols, rows, shell, resumeId });
+export const ptyWrite = (sessionId, data) => invoke('pty_write', { sessionId, data });
+export const ptyResize = (sessionId, cols, rows) => invoke('pty_resize', { sessionId, cols, rows });
+export const ptyKill = (sessionId) => invoke('pty_kill', { sessionId });
+export const ptyList = (projectId) => invoke('pty_list', { projectId });
+export const ptyKillProject = (projectId) => invoke('pty_kill_project', { projectId });
+/** 会话的 spawn 时刻，认领 agent 会话 id 时要用。 */
+export const ptySpawnedAt = (sessionId) => invoke('pty_spawned_at', { sessionId });
+/**
+ * 会话到目前为止的输出快照，用于重新附着时回放。
+ * 返回 { data, seq }：seq 是快照包含的输出截止偏移，前端只重放 seq 更大的实时事件。
+ */
+export const ptySnapshot = (sessionId) => invoke('pty_snapshot', { sessionId });
+
+// ==================== Project Sessions（历史与恢复） ====================
+
+/** resume 时 agentId 是已知的，直接传，新会话就与原对话同一身份。 */
+export const projectsRegisterSession = ({ sessionId, projectId, kind, title, agentId }) =>
+  invoke('projects_register_session', { sessionId, projectId, kind, title, agentId });
+/** 认领刚落盘的 agent 会话 id。还没有候选时返回 null，可稍后重试。 */
+export const projectsClaimSession = ({ sessionId, projectId, kind, spawnedAt }) =>
+  invoke('projects_claim_session', { sessionId, projectId, kind, spawnedAt });
+export const projectsSessionHistory = (id, limit) =>
+  invoke('projects_session_history', { id, limit });
+export const projectsMarkSessionExited = (sessionId) =>
+  invoke('projects_mark_session_exited', { sessionId });
+export const projectsRenameSession = (sessionId, title) =>
+  invoke('projects_rename_session', { sessionId, title });
+/** 只删 PetGPT 的索引，CLI 自己的会话文件不动。 */
+export const projectsForgetSession = (sessionId) =>
+  invoke('projects_forget_session', { sessionId });
+
+/** PTY 输出流。回调收到的是已经拼好的 UTF-8 文本，可直接喂给 xterm.write()。 */
+export const onPtyOutput = (callback) =>
+  subscribeToTauriEvent('pty-output', (event) => callback(event?.payload));
+/** 进程退出。用于把小标签上的存活点灭掉。 */
+export const onPtyExit = (callback) =>
+  subscribeToTauriEvent('pty-exit', (event) => callback(event?.payload));
+
 // Model Configs (alias to pets with model type)
 export const getModelConfigs = async () => {
   const pets = await getPets();
@@ -1292,6 +1382,7 @@ const tauri = {
   showChatWindow,
   hideChatWindow,
   toggleChatWindow,
+  onChatOpenIntent,
   maximizeChatWindow,
   toggleSidebar,
   setChatCompactMode,
@@ -1396,6 +1487,38 @@ const tauri = {
   // Update check
   checkForUpdate,
   getAppVersion,
+
+  // Projects
+  projectsList,
+  projectsAdd,
+  projectsRename,
+  projectsRemove,
+  projectsTouch,
+  projectsRootPath,
+  projectsListDir,
+  projectsPreviewFile,
+  projectsWriteFile,
+  projectsGitStatus,
+
+  // PTY
+  ptySpawn,
+  ptyWrite,
+  ptyResize,
+  ptyKill,
+  ptyList,
+  ptyKillProject,
+  ptySpawnedAt,
+  ptySnapshot,
+
+  // Project sessions
+  projectsRegisterSession,
+  projectsClaimSession,
+  projectsSessionHistory,
+  projectsMarkSessionExited,
+  projectsRenameSession,
+  projectsForgetSession,
+  onPtyOutput,
+  onPtyExit,
 
   // TTS
   elevenlabsTts,

@@ -209,7 +209,10 @@ const ChatboxTabBar = ({ tabs, activeTabId, onTabClick, onCloseTab, onCloseAllTa
                     : 'bg-transparent text-gray-500 hover:bg-white/40'
                 }`}
               >
-                <span className="truncate flex-1 text-center pointer-events-none">{tab.label}</span>
+                <span className="truncate flex-1 text-center pointer-events-none">
+                  {tab.kind === 'project' && <span className="mr-1 opacity-60">📁</span>}
+                  {tab.label}
+                </span>
                 {!isClosing && (
                   <AiOutlineClose
                     onClick={(e) => handleChromeClose(e, tab.id)}

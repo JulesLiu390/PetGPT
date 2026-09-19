@@ -1,6 +1,6 @@
 [package]
 name = "petgpt"
-version = "0.4.9"
+version = "0.4.12"
 description = "PetGPT - AI Desktop Pet Assistant"
 authors = ["JulesLiu390"]
 license = "MIT"
@@ -59,6 +59,7 @@ url = "2.5"
 
 # Window effects
 window-vibrancy = "0.5"
+portable-pty = "0.9"
 
 # macOS specific
 [target.'cfg(target_os = "macos")'.dependencies]
@@ -72,6 +73,9 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 image = "0.25"
 libc = "0.2"
 
+[target."cfg(unix)".dependencies]
+libc = "0.2"
+
 [profile.dev]
 opt-level = 0
 debug = false
@@ -82,3 +86,8 @@ codegen-units = 1
 
 [profile.dev.package."windows-core"]
 codegen-units = 1
+
+[dev-dependencies]
+# 仅用于在测试里合成 GIF 样本（gif_to_contact_sheet 的用例）。
+# 版本对齐 image 0.25 传递依赖的那个，避免 Cargo.lock 里出现两份。
+gif = "0.14"

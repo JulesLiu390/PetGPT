@@ -4,7 +4,7 @@ import { actionType } from '../../context/reducer';
 import * as tauri from '../../utils/tauri';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import hljs from 'highlight.js';
+import hljs from '../../utils/highlighter.js';
 import 'highlight.js/styles/atom-one-dark.css'; // 引入暗色主题
 import { LiveToolCalls, ToolCallHistory } from './ToolCallDisplay';
 import QuickReplySuggestions from './QuickReplySuggestions';
@@ -182,7 +182,7 @@ const MediaPreviewModal = ({ src, type, onClose }) => {
 };
 
 // Render a single part (text, image, or file)
-const MessagePartContent = ({ part, isUser }) => {
+const MessagePartContentImpl = ({ part, isUser }) => {
   const [mediaSrc, setMediaSrc] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [showPreview, setShowPreview] = useState(false);
@@ -371,6 +371,27 @@ const MessagePartContent = ({ part, isUser }) => {
   }
   return null;
 };
+
+/**
+ * 每条消息内容都 memo 住 —— 这是整个聊天界面最贵的一块。
+ *
+ * 渲染一段 text part 要跑一遍 react-markdown（解析 + 建 AST + 生成组件树），
+ * 里面每个代码块还要过一次语法高亮。而 AI 回复期间父组件是按帧重渲染的，
+ * 不拦的话屏幕上已经定稿的每一条历史消息，都会陪着新来的 token 重算一遍。
+ *
+ * 必须用自定义比较而不是默认的浅比较：纯文本消息的 part 是在渲染过程中现造的
+ * （`[{ type: 'text', text: msg.content }]`），每次都是新对象引用，默认比较
+ * 一次都命中不了。这里逐个比对组件真正读到的字段。
+ */
+const MessagePartContent = React.memo(MessagePartContentImpl, (prev, next) => (
+  prev.isUser === next.isUser
+  && prev.part?.type === next.part?.type
+  && prev.part?.text === next.part?.text
+  && prev.part?.mime_type === next.part?.mime_type
+  && prev.part?.image_url?.url === next.part?.image_url?.url
+  && prev.part?.file_url?.url === next.part?.file_url?.url
+  && prev.part?.file_url?.mime_type === next.part?.file_url?.mime_type
+));
 
 const ChatboxMessageArea = ({
   conversationId,

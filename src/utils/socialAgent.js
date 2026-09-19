@@ -769,6 +769,50 @@ async function convertGifToPng(base64Data) {
   return { data: result.data, mimeType: result.mime_type };
 }
 
+/**
+ * 解析图片给模型用：URL → base64，GIF → 3×3 采样网格。
+ *
+ * GIF 不能原样发：Gemini 的 inline_data 不收 image/gif，Anthropic 也只认静态图。
+ * 过去的做法是在 buildTurnsFromMessages 里把 GIF 直接 filter 掉 —— 群里大部分
+ * 表情包就这么无声消失了。这里改成转成九宫格：按时间均匀取 9 帧拼一张 PNG，
+ * 动作和笑点都还在，而且对所有 API 格式都通用。
+ *
+ * 转换结果带 `fromGif` 标记，buildTurnsFromMessages 据此告诉模型这是动图采样，
+ * 否则模型会把九宫格当成九张独立的图来理解。
+ */
+async function resolveImagesForModel(images) {
+  const resolved = await resolveImageUrls(images);
+  const out = [];
+  for (const img of resolved) {
+    if (img.mimeType !== 'image/gif') {
+      out.push(img);
+      continue;
+    }
+    try {
+      const sheet = await tauri.gifToContactSheet(img.data);
+      console.log(`[Social] GIF → 九宫格: ${sheet.frame_count} 帧采样 ${sheet.sampled} 格, ${Math.round(sheet.data.length / 1024)}KB`);
+      out.push({
+        data: sheet.data,
+        mimeType: sheet.mime_type,
+        sourceUrl: img.sourceUrl,
+        fromGif: true,
+        gifFrames: sheet.frame_count,
+        gifSampled: sheet.sampled,
+      });
+    } catch (e) {
+      // 转换失败就退回首帧，至少比整张丢掉强
+      console.warn('[Social] GIF contact sheet failed, falling back to first frame:', e);
+      try {
+        const png = await convertGifToPng(img.data);
+        out.push({ ...png, sourceUrl: img.sourceUrl, fromGif: true, gifFrames: 0, gifSampled: 1 });
+      } catch {
+        // 首帧也转不出来才放弃这张图
+      }
+    }
+  }
+  return out;
+}
+
 async function describeImage(resolvedImage, contextBefore, contextAfter, senderName, botName, visionLLMConfig, petId) {
   // GIF → PNG 转码（Gemini 不支持 image/gif）
   if (resolvedImage.mimeType === 'image/gif' || resolvedImage.data?.includes('data:image/gif')) {
@@ -945,24 +989,71 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
     // msg._images.data 在 resolveImageUrls 后已变成 base64，无法用于下载
     const originalUrls = (!msg.is_self && msg.image_urls) ? msg.image_urls : [];
 
-    // 过滤掉 Gemini 不支持的 image/gif（GIF 应在 Vision-pre 阶段已转码描述）
+    // 兜底过滤：正常情况下 GIF 已经在 resolveImagesForModel 里转成九宫格 PNG 了，
+    // 走到这里还是 image/gif 只可能是转换失败的残留 —— Gemini/Anthropic 收到会报错。
     if (!msg.is_self && msg._images) {
       msg._images = msg._images.filter(img => img.mimeType !== 'image/gif');
     }
     const hasImages = !msg.is_self && msg._images && msg._images.length > 0;
     let content;
 
-    // 为本条消息的所有图片分配序号并注册原始 URL 到 imageUrlMap
-    // 图片数量以 imageDescs 或 originalUrls 中较大者为准
-    const imageCount = Math.max(originalUrls.length, (hasImageDescs ? msg._imageDescs.length : 0));
+    // 为本条消息的图片分配序号并注册原始 URL 到 imageUrlMap。
+    //
+    // 序号必须以**真正发给模型的图片数**为准。之前这里取 originalUrls.length，
+    // 而上面那道过滤可能已经删掉了一部分 —— 于是模型眼里的「第 1 张图」对应到
+    // imageUrlMap 里的第 2 条，sticker_save(image_id=1) 会存下一张模型根本没看过的图。
+    const visibleImageCount = hasImageDescs ? msg._imageDescs.length : (hasImages ? msg._images.length : 0);
+    const imageCount = Math.min(originalUrls.length || visibleImageCount, visibleImageCount) || visibleImageCount;
     const msgImageBaseId = imageIdCounter;
     for (let i = 0; i < imageCount; i++) {
       imageIdCounter++;
-      const url = originalUrls[i];
-      if (imageUrlMap && url && (url.startsWith('http://') || url.startsWith('https://'))) {
+      // 优先用图片自己记下的来源（resolveImageUrls 写的 sourceUrl）。
+      // 按下标去 originalUrls 里取是不可靠的：下载失败或格式不支持的图会被
+      // 中途丢弃，剩下的图与原始 URL 列表就错位了，模型说的「第 1 张」会对到
+      // 一张它根本没看过的图上。
+      const url = msg._images?.[i]?.sourceUrl || originalUrls[i];
+      // 本地路径也要收：图片现在优先解析成 NapCat 的本地副本，
+      // 只认 http 的话 imageUrlMap 永远是空的，sticker_save 会报「找不到图片 #N」。
+      if (imageUrlMap && url
+          && (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('/'))) {
         imageUrlMap.set(imageIdCounter, url);
       }
     }
+
+    /**
+     * 把 _images 摊成多模态 parts。
+     *
+     * 提示语整条消息只给一次，不再每张图前面重复一遍：多图时那句话会被说 N 遍，
+     * 白烧 token；更要紧的是它原文写着「不需要刻意回应每张图」，用户明明发了
+     * 「这三张图对比一下」也会被这句话对冲掉。所以只在这条消息**没有文字**、
+     * 图片确实是独立表情包时才提示。
+     */
+    const buildImageParts = (images, senderHasText) => {
+      const toUrl = (img) => (
+        img.data.startsWith('http://') || img.data.startsWith('https://') || img.data.startsWith('data:')
+          ? img.data
+          : `data:${img.mimeType};base64,${img.data}`
+      );
+      const hints = [];
+      const gif = images.find(img => img.fromGif);
+      if (gif) {
+        // 不说明的话模型会把九宫格当成九张互不相干的图
+        hints.push(gif.gifSampled > 1
+          ? `（其中的九宫格图是一张 GIF 动图，按时间均匀采样 ${gif.gifSampled} 帧拼成，从左到右、从上到下为播放顺序）`
+          : '（其中一张图来自 GIF 动图）');
+      }
+      if (!senderHasText) {
+        hints.push('（如果是梗图/表情包，理解情绪即可，不需要刻意回应每张图）');
+      }
+      return [
+        ...hints.map(h => ({ type: 'text', text: h })),
+        ...images.map(img => ({
+          type: 'image_url',
+          image_url: { url: toUrl(img), mime_type: img.mimeType || 'image/jpeg' },
+        })),
+      ];
+    };
+    const senderHasText = Boolean((msg.content || '').trim());
 
     if (hasImageDescs && !hasImages) {
       // 全部图片已描述成功 → 纯文本（描述占位）
@@ -973,39 +1064,13 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
       const descText = msg._imageDescs.map((d, i) => `[图片#${msgImageBaseId + i + 1}: ${d}]`).join('\n');
       content = [
         { type: 'text', text: text + '\n' + descText },
-        ...msg._images.flatMap(img => {
-          let url;
-          if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
-            url = img.data;
-          } else if (img.data.startsWith('data:')) {
-            url = img.data;
-          } else {
-            url = `data:${img.mimeType};base64,${img.data}`;
-          }
-          return [
-            { type: 'text', text: '（如果是梗图/表情包，理解情绪即可，不需要刻意回应每张图）' },
-            { type: 'image_url', image_url: { url, mime_type: img.mimeType || 'image/jpeg' } },
-          ];
-        }),
+        ...buildImageParts(msg._images, senderHasText),
       ];
     } else if (hasImages) {
       // 无描述，原始图片 → 多模态数组
       content = [
         { type: 'text', text },
-        ...msg._images.flatMap(img => {
-          let url;
-          if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
-            url = img.data;
-          } else if (img.data.startsWith('data:')) {
-            url = img.data;
-          } else {
-            url = `data:${img.mimeType};base64,${img.data}`;
-          }
-          return [
-            { type: 'text', text: '（如果是梗图/表情包，理解情绪即可，不需要刻意回应每张图）' },
-            { type: 'image_url', image_url: { url, mime_type: img.mimeType || 'image/jpeg' } },
-          ];
-        }),
+        ...buildImageParts(msg._images, senderHasText),
       ];
     } else {
       content = text;
@@ -1144,7 +1209,7 @@ async function pollTarget({
   if (enableImages) {
     for (const msg of individualMessages) {
       if (msg._images && msg._images.length > 0) {
-        msg._images = await resolveImageUrls(msg._images);
+        msg._images = await resolveImagesForModel(msg._images);
         totalImageCount += msg._images.length;
       } else {
         msg._images = [];
@@ -2391,6 +2456,9 @@ export async function startSocialLoop(config, onStatusChange) {
   // MessageBuffer 按 message_id 去重累积消息，不覆盖
   const dataBuffer = new Map(); // target → { messages: [], metadata: {}, compressedSummary, seenIds: Set }
   const BUFFER_HARD_CAP = 500; // 安全阀：单 target 最大缓存消息数
+  // Intent 读取的消息窗口。同时也是 base64 图片在 buffer 里的保留窗口 ——
+  // 两者必须一致：保留得比读取窗口少会让 Intent 看不到图，多则是白占内存。
+  const INTENT_IMAGE_WINDOW = 64;
   const BUFFER_COMPRESS_THRESHOLD = 30; // 旧消息超过此数触发 compress
   // Fetcher 的定时器 ID
   let fetcherTimeoutId = null;
@@ -2972,7 +3040,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
    * 返回 { turns: [{role, content}], ephemeral: {ownerSecret, nameL, nameR, msgL, msgR} }
    */
   const buildIntentTurns = (target) => {
-    const MAX_MSGS = 64;
+    const MAX_MSGS = INTENT_IMAGE_WINDOW;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
     // Intent 只用文本描述（_imageDescs），剥离未 resolve 的原始图片 URL
@@ -3030,15 +3098,71 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   };
 
   /**
+   * VLM 关闭时的图片预处理：把 buffer 里的图 resolve 成 base64 就地写回，
+   * 让 Intent 也能看到原图而不是一句 "[图片]"。
+   *
+   * 只对最近 `INTENT_IMAGE_WINDOW` 条消息保留 base64，滑出窗口的换回原始 URL。
+   * buffer 硬上限是 500 条，而 Intent 只读最近 64 条 —— 不回收的话，几百条
+   * 消息的图片数据会一直压在内存里，且永远不会被读到。真需要时
+   * `resolveImageUrls` 的 LRU 缓存还在，换回来几乎没有代价。
+   */
+  const resolveBufferImagesInPlace = async (buf, target) => {
+    const total = buf.messages.length;
+    const windowStart = Math.max(0, total - INTENT_IMAGE_WINDOW);
+    let resolvedCount = 0;
+
+    for (let i = 0; i < total; i++) {
+      const msg = buf.messages[i];
+      if (msg.is_self || !msg._images || msg._images.length === 0) continue;
+
+      if (i < windowStart) {
+        // 滑出窗口：退回原始 URL 形态，把 base64 占的内存还回去
+        if (msg._images.some(img => !String(img.data || '').startsWith('http'))) {
+          msg._images = (msg.image_urls || []).map(url => ({ data: url, mimeType: 'image/jpeg' }));
+        }
+        continue;
+      }
+
+      if (!msg._images.some(img => String(img.data || '').startsWith('http'))) continue;
+      try {
+        const resolved = await resolveImagesForModel(msg._images);
+        // resolveImageUrls 会丢弃下载失败或非图片的条目，所以可能变短甚至为空
+        msg._images = resolved;
+        resolvedCount += resolved.length;
+      } catch (e) {
+        addLog('warn', `Image resolve failed for ${target} msg=${msg.message_id}`, e.message || e, target);
+      }
+    }
+
+    if (resolvedCount > 0) {
+      addLog('info', `🖼️ Resolved ${resolvedCount} image(s) to base64 for ${target} (VLM off, sending originals)`, null, target);
+    }
+  };
+
+  /**
    * 在 Intent 评估前批量预处理 buffer 中未描述的图片
    * 结果写入 buffer 消息的 _imageDescs + imageDescCache，
    * 使后续 Observer/Reply 的 pollTarget 直接命中缓存。
    */
   const preprocessBufferImages = async (target) => {
     if (config.enableImages === false) return;
-    if (!config.imageDescMode || config.imageDescMode === 'off' || !visionLLMConfig) return;
     const buf = dataBuffer.get(target);
     if (!buf || buf.messages.length === 0) return;
+
+    // VLM 关闭时不做描述，但**必须**把图片 resolve 成 base64 写回 buffer。
+    //
+    // 否则 buffer 里的 _images 一直是 http URL，buildIntentTurns 那道
+    // `!img.data.startsWith('http')` 过滤会把它们全部剥掉 —— 于是 Intent 看到的
+    // 历史里既没有原图、也没有描述（描述本来就没生成），只剩 QQ 消息原文里的
+    // "[图片]" 字面量。VLM 开着时这个缺口被描述文本盖住了，一关就露出来。
+    //
+    // 走 base64 而不是直接把 URL 交给模型：Gemini 的 inline_data 根本不收 URL，
+    // Anthropic 只认 base64，而 QQ 图床对外部服务商也不一定可达
+    // （resolveImageUrls 里那句「OpenAI 可能可以但不稳定」就是说这个）。
+    if (!config.imageDescMode || config.imageDescMode === 'off' || !visionLLMConfig) {
+      await resolveBufferImagesInPlace(buf, target);
+      return;
+    }
 
     const botName = targetNamesCache.get(config.botQQ) || config.botQQ || 'bot';
     let describedCount = 0;

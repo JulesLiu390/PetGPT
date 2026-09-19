@@ -103,6 +103,8 @@ pub async fn subagent_spawn(
 
     cmd.arg("按照 CLAUDE.md 里的任务执行")
         .current_dir(&cwd)
+        // 打包后进程 PATH 只有系统目录，claude 不在里面。见 shell_env。
+        .env("PATH", crate::shell_env::augmented_path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
 

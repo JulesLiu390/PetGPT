@@ -16,8 +16,9 @@ function pickAdapter(apiFormat) {
   return openaiAdapter;
 }
 import tauri from '../tauri';
-import { downloadUrlAsBase64, llmProxyCall, llmProxyStream } from '../tauri';
+import { downloadUrlAsBase64, llmProxyCall, llmProxyStream, readLocalImageAsBase64 } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
+import { createImageCache } from '../imageCache.js';
 import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
 import { isSkillTool, executeSkillTool } from '../skills/index.js';
 import { appendToolResultAnnotation } from './toolResultAnnotation.js';
@@ -419,12 +420,50 @@ const detectMimeFromBase64Prefix = (b64) => {
   return null;
 };
 
+/**
+ * 已下载图片的缓存。
+ *
+ * Intent 循环每轮都会重读 buffer 里最近几十条消息，同一张群图会被反复要求
+ * 解析 —— 没有缓存的话每轮都重新下载一遍，既慢又给 QQ 图床加压。
+ */
+const downloadedImages = createImageCache();
+
 export const resolveImageUrls = async (images) => {
   if (!images || images.length === 0) return images;
-  
+
   const resolved = [];
   for (const img of images) {
+    // 本地绝对路径：qq-mcp 现在优先给出 NapCat 下载好的本地副本。
+    // QQ 图床那个 URL 外部拉不动（HTTP 400，要 QQ 自己的鉴权上下文），
+    // 读本地文件既可靠又省一次网络往返。
+    if (img.data.startsWith('/')) {
+      const cached = downloadedImages.get(img.data);
+      if (cached) {
+        resolved.push({ ...cached, sourceUrl: img.data });
+        continue;
+      }
+      try {
+        const local = await readLocalImageAsBase64(img.data);
+        if (!isValidImageBase64(local.data)) {
+          console.warn('[MCP] Local file is not a valid image, skipping:', img.data);
+          continue;
+        }
+        const entry = { data: local.data, mimeType: local.mime_type || img.mimeType };
+        downloadedImages.set(img.data, entry);
+        resolved.push({ ...entry, sourceUrl: img.data });
+      } catch (e) {
+        console.warn('[MCP] Failed to read local image:', img.data, e);
+      }
+      continue;
+    }
     if (img.data.startsWith('http://') || img.data.startsWith('https://')) {
+      const cached = downloadedImages.get(img.data);
+      if (cached) {
+        // sourceUrl 记住这张图是从哪个 URL 来的。下载失败的条目会被丢弃，
+        // 调用方不能再用「第 i 张图 ↔ 第 i 个 URL」去对应。
+        resolved.push({ ...cached, sourceUrl: img.data });
+        continue;
+      }
       try {
         const result = await downloadUrlAsBase64(img.data);
         // Plan A: 验证下载内容是否为真正的图片
@@ -433,7 +472,9 @@ export const resolveImageUrls = async (images) => {
           continue; // 丢弃无效图片
         }
         const mime = result.mime_type || img.mimeType;
-        resolved.push({ data: result.data, mimeType: (mime === 'application/octet-stream' ? detectMimeFromBase64Prefix(result.data) : mime) || mime });
+        const entry = { data: result.data, mimeType: (mime === 'application/octet-stream' ? detectMimeFromBase64Prefix(result.data) : mime) || mime };
+        downloadedImages.set(img.data, entry);
+        resolved.push({ ...entry, sourceUrl: img.data });
         console.log('[MCP] Downloaded image via backend:', img.data.substring(0, 80) + '...');
       } catch (e) {
         console.warn('[MCP] Failed to download image via backend:', img.data.substring(0, 80), e);

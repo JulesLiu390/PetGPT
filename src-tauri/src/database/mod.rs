@@ -6,6 +6,8 @@ pub mod mcp_servers;
 pub mod api_providers;
 pub mod skins;
 pub mod chat_history;
+pub mod projects;
+pub mod project_sessions;
 
 use rusqlite::{Connection, Result};
 use std::sync::Mutex;
@@ -51,6 +53,43 @@ impl Database {
             [],
         )?;
         
+        // Projects table (project folders registered for terminal/agent sessions)
+        // path is UNIQUE: registering the same folder twice updates the name
+        // instead of creating a duplicate entry.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL UNIQUE,
+                created_at INTEGER NOT NULL,
+                last_opened_at INTEGER
+            )",
+            [],
+        )?;
+
+        // Project sessions: binds a PTY pane to the agent session id that
+        // claude/codex recorded in their own store. No conversation content
+        // lives here. agent_id is UNIQUE so a mis-claim cannot make two panes
+        // resume the same conversation.
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS project_sessions (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                agent_id TEXT,
+                title TEXT,
+                created_at INTEGER NOT NULL,
+                last_active_at INTEGER,
+                status TEXT NOT NULL DEFAULT 'running'
+            )",
+            [],
+        )?;
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_project_sessions_agent
+             ON project_sessions(agent_id) WHERE agent_id IS NOT NULL",
+            [],
+        )?;
+
         // Migration: add type column if not exists
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN type TEXT DEFAULT 'assistant'", []);
         let _ = conn.execute("ALTER TABLE pets ADD COLUMN model_config_id TEXT", []);

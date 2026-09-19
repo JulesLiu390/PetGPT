@@ -140,6 +140,10 @@ impl McpClient {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
+            // PATH 要在 envs 之前设：打包后进程 PATH 只有系统目录，npx/uvx
+            // 这些一个都找不到（见 shell_env）；而放在前面意味着用户在服务器
+            // 配置里显式写的 PATH 仍然能覆盖掉它。
+            .env("PATH", crate::shell_env::augmented_path())
             .envs(&self.env);
 
         let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn process: {}", e))?;

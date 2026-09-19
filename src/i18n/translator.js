@@ -119,6 +119,32 @@ const dynamicRules = {
     [/^Failed to stop social agent: (.+)$/u, (_, error) => `停止社交 Agent 失败：${error}`],
     [/^MCP server "(.+)" no longer exists\. Select another server or register it again\.$/u, (_, server) => `MCP 服务“${server}”已不存在。请另选一个服务，或重新注册。`],
     [/^MCP server "(.+)" not found$/u, (_, server) => `未找到 MCP 服务“${server}”`],
+
+    // ---- 项目 / PTY 的后端错误 ----
+    // 一律追加在末尾：translateCore 取第一个命中的规则，而这里有几条
+    // （`Failed to start …`）比上面既有的规则更宽，抢在前面会翻错。
+    [/^Project '(.+)' is not registered$/u, (_, id) => `项目「${id}」未登记`],
+    [/^Project folder no longer exists: ([\s\S]+)$/u, (_, path) => `项目目录已不存在：${path}`],
+    [/^Not a directory: ([\s\S]+)$/u, (_, path) => `不是一个目录：${path}`],
+    [/^Failed to resolve path: ([\s\S]+)$/u, (_, error) => `解析路径失败：${error}`],
+    [/^Not found: ([\s\S]+)$/u, (_, path) => `找不到：${path}`],
+    [/^Path escapes the project: ([\s\S]+)$/u, (_, path) => `路径越出项目范围：${path}`],
+    [/^Filesystem error: ([\s\S]+)$/u, (_, error) => `文件系统错误：${error}`],
+    [/^File was changed by another program: ([\s\S]+)$/u, (_, path) => `文件已被其它程序修改：${path}`],
+    [/^(.+) is a directory$/u, (_, path) => `${path} 是目录`],
+    [/^Session '(.+)' already exists$/u, (_, id) => `会话「${id}」已存在`],
+    [/^Session '(.+)' does not exist$/u, (_, id) => `会话「${id}」不存在`],
+    [/^Working directory does not exist: ([\s\S]+)$/u, (_, cwd) => `工作目录不存在：${cwd}`],
+    [/^Unknown session kind: (.+)$/u, (_, kind) => `未知的会话类型：${kind}`],
+    // kind 只可能是这三种，写死枚举而不是 (.+)：后者会抢走既有的
+    // `Failed to start social agent: …`
+    [/^Failed to start (claude|codex|shell): ([\s\S]+)$/u, (_, kind, error) => `启动 ${kind} 失败：${error}`],
+    [/^Failed to open PTY: ([\s\S]+)$/u, (_, error) => `打开 PTY 失败：${error}`],
+    [/^Failed to get PTY writer: ([\s\S]+)$/u, (_, error) => `获取 PTY 写端失败：${error}`],
+    [/^Failed to get PTY reader: ([\s\S]+)$/u, (_, error) => `获取 PTY 读端失败：${error}`],
+    [/^Failed to write to PTY: ([\s\S]+)$/u, (_, error) => `写入 PTY 失败：${error}`],
+    [/^Failed to flush PTY: ([\s\S]+)$/u, (_, error) => `刷新 PTY 失败：${error}`],
+    [/^Failed to resize PTY: ([\s\S]+)$/u, (_, error) => `调整 PTY 尺寸失败：${error}`],
   ],
 };
 

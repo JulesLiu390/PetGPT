@@ -10,6 +10,10 @@ mod platform;
 mod window_layout;
 mod qq_connector;
 mod updater;
+mod projects;
+mod agent_sessions;
+mod pty;
+mod shell_env;
 mod commands;
 #[cfg(target_os = "linux")]
 mod linux_shortcuts;
@@ -102,7 +106,7 @@ type WinState = Arc<WindowState>;
 use tauri::WebviewWindow;
 
 // Type alias for database state
-type DbState = Arc<Database>;
+pub(crate) type DbState = Arc<Database>;
 
 // ============ Event Broadcasting ============
 
@@ -1551,6 +1555,185 @@ fn convert_gif_to_png(base64_data: String) -> Result<DownloadedImage, String> {
     })
 }
 
+#[derive(serde::Serialize)]
+struct GifContactSheet {
+    data: String, // raw base64 PNG (no data: prefix)
+    mime_type: String,
+    /// 原始 GIF 的总帧数
+    frame_count: usize,
+    /// 实际放进网格的帧数（帧数不足 9 时会更少）
+    sampled: usize,
+}
+
+/// 3×3 网格的行列数与单格边长上限。
+///
+/// 9 格是在「看得出动作变化」和「单张图别太大」之间取的平衡；256px 的格子
+/// 拼出来是 768×768，对各家 vision 模型都是常规尺寸，不会触发降采样。
+const SHEET_COLS: u32 = 3;
+const SHEET_ROWS: u32 = 3;
+const SHEET_MAX_TILE_EDGE: u32 = 256;
+
+/// 把 GIF 按时间均匀采样 9 帧，拼成一张 3×3 的网格图（contact sheet）。
+///
+/// 为什么需要：Gemini 的 inline_data 不收 image/gif，Anthropic 也只认静态图，
+/// 所以动图过去要么被整个丢弃、要么走 `convert_gif_to_png` 只留第一帧 ——
+/// 而表情包的意思往往在后面几帧才出现，只看首帧等于没看。
+///
+/// 按**时间**而不是帧序号采样：GIF 各帧的 delay 可以差上一个数量级，按序号
+/// 取会在慢帧密集处过采样，快速动作反而被跳过。
+#[tauri::command]
+fn gif_to_contact_sheet(base64_data: String) -> Result<GifContactSheet, String> {
+    use image::codecs::gif::GifDecoder;
+    use image::{imageops, AnimationDecoder, GenericImageView, Rgba, RgbaImage};
+
+    let gif_bytes = BASE64
+        .decode(&base64_data)
+        .map_err(|e| format!("Invalid base64: {}", e))?;
+
+    let decoder = GifDecoder::new(std::io::Cursor::new(gif_bytes))
+        .map_err(|e| format!("Failed to decode GIF: {}", e))?;
+    let frames = decoder
+        .into_frames()
+        .collect_frames()
+        .map_err(|e| format!("Failed to read GIF frames: {}", e))?;
+
+    if frames.is_empty() {
+        return Err("GIF contains no frames".to_string());
+    }
+
+    // 每帧结束时刻的累计毫秒数
+    let mut cumulative_ms: Vec<f64> = Vec::with_capacity(frames.len());
+    let mut total_ms = 0f64;
+    for frame in &frames {
+        let (numer, denom) = frame.delay().numer_denom_ms();
+        // delay 为 0 的 GIF 很常见（表示「尽快播放」）。浏览器普遍按 100ms
+        // 处理，这里跟随，否则总时长会是 0、采样点全挤在一起。
+        let ms = if denom == 0 {
+            100.0
+        } else {
+            f64::from(numer) / f64::from(denom)
+        };
+        total_ms += if ms <= 0.0 { 100.0 } else { ms };
+        cumulative_ms.push(total_ms);
+    }
+
+    let tiles = (SHEET_COLS * SHEET_ROWS) as usize;
+    let sampled = tiles.min(frames.len());
+
+    // 取每个时间段的中点而不是起点：起点会让第一格永远是第 0 帧，
+    // 最后一格也取不到结尾的画面。
+    let picked: Vec<usize> = (0..sampled)
+        .map(|i| {
+            let t = total_ms * (i as f64 + 0.5) / sampled as f64;
+            cumulative_ms
+                .iter()
+                .position(|&c| c >= t)
+                .unwrap_or(frames.len() - 1)
+        })
+        .collect();
+
+    let (frame_w, frame_h) = frames[0].buffer().dimensions();
+    if frame_w == 0 || frame_h == 0 {
+        return Err("GIF has zero-sized frames".to_string());
+    }
+    let longest = frame_w.max(frame_h);
+    let scale = if longest > SHEET_MAX_TILE_EDGE {
+        f64::from(SHEET_MAX_TILE_EDGE) / f64::from(longest)
+    } else {
+        1.0
+    };
+    let tile_w = ((f64::from(frame_w) * scale).round() as u32).max(1);
+    let tile_h = ((f64::from(frame_h) * scale).round() as u32).max(1);
+
+    // 白底：帧数不足 9 时空格留白，比透明更容易让模型看出「就这么多帧」
+    let mut sheet = RgbaImage::from_pixel(
+        tile_w * SHEET_COLS,
+        tile_h * SHEET_ROWS,
+        Rgba([255, 255, 255, 255]),
+    );
+
+    for (slot, &frame_idx) in picked.iter().enumerate() {
+        let resized = imageops::resize(
+            frames[frame_idx].buffer(),
+            tile_w,
+            tile_h,
+            imageops::FilterType::Triangle,
+        );
+        let x = (slot as u32 % SHEET_COLS) * tile_w;
+        let y = (slot as u32 / SHEET_COLS) * tile_h;
+        imageops::overlay(&mut sheet, &resized, i64::from(x), i64::from(y));
+    }
+
+    let mut png_buf: Vec<u8> = Vec::new();
+    image::DynamicImage::ImageRgba8(sheet)
+        .write_to(
+            &mut std::io::Cursor::new(&mut png_buf),
+            image::ImageFormat::Png,
+        )
+        .map_err(|e| format!("Failed to encode PNG: {}", e))?;
+
+    Ok(GifContactSheet {
+        data: BASE64.encode(&png_buf),
+        mime_type: "image/png".to_string(),
+        frame_count: frames.len(),
+        sampled,
+    })
+}
+
+/// 单张本地图片的大小上限。
+const LOCAL_IMAGE_MAX_BYTES: u64 = 20 * 1024 * 1024;
+
+/// 读取本地图片文件为 base64。
+///
+/// 为什么需要：QQ 消息里那个 `gchat.qpic.cn/download?...` 的地址外部根本拉不动
+/// —— 它要 QQ 自己的鉴权上下文，裸 GET 一律 HTTP 400，换什么 UA / Referer 都没用。
+/// 但 NapCat 早就把图片下载到本地磁盘了，qq-mcp 会把那份副本的路径交过来，
+/// 直接读文件既可靠又比走网络快。
+///
+/// 这个命令能读到调用方指定的任意路径，所以做两道约束：必须是绝对路径指向的
+/// 常规文件，且内容必须被 `image` crate 识别为真正的图片。后者同时也是防线 ——
+/// 即便路径被滥用，也只能读出图片，拿不到任意文件的内容。
+#[tauri::command]
+fn read_local_image_as_base64(path: String) -> Result<DownloadedImage, String> {
+    let file_path = std::path::Path::new(&path);
+    if !file_path.is_absolute() {
+        return Err("Local image path must be absolute".to_string());
+    }
+
+    let meta = std::fs::metadata(file_path)
+        .map_err(|e| format!("Cannot stat {}: {}", path, e))?;
+    if !meta.is_file() {
+        return Err(format!("Not a regular file: {}", path));
+    }
+    if meta.len() > LOCAL_IMAGE_MAX_BYTES {
+        return Err(format!(
+            "Image too large: {} bytes (limit {})",
+            meta.len(),
+            LOCAL_IMAGE_MAX_BYTES
+        ));
+    }
+
+    let bytes = std::fs::read(file_path).map_err(|e| format!("Cannot read {}: {}", path, e))?;
+
+    // 按内容而不是扩展名判断类型：QQ 的缓存文件叫 .jpg 却是 PNG 的情况是有的，
+    // mime 报错会让 Gemini 直接拒收整条消息。
+    let format = image::guess_format(&bytes)
+        .map_err(|e| format!("Not a recognizable image ({}): {}", path, e))?;
+    let mime_type = match format {
+        image::ImageFormat::Png => "image/png",
+        image::ImageFormat::Jpeg => "image/jpeg",
+        image::ImageFormat::Gif => "image/gif",
+        image::ImageFormat::WebP => "image/webp",
+        image::ImageFormat::Bmp => "image/bmp",
+        other => return Err(format!("Unsupported image format: {:?}", other)),
+    };
+
+    Ok(DownloadedImage {
+        data: BASE64.encode(&bytes),
+        mime_type: mime_type.to_string(),
+    })
+}
+
 /// Download a URL and return base64 data + mime_type.
 /// Used by the frontend to fetch images from external servers (e.g. QQ)
 /// that block browser cross-origin requests.
@@ -1938,7 +2121,10 @@ fn apply_chat_full_layout(
     let desired_position = saved_geometry
         .map(|geometry| (geometry.x, geometry.y))
         .or_else(|| {
-            if win_state.chat_follows_character.load(Ordering::SeqCst) {
+            if window_layout::chat_should_follow_character(
+                win_state.chat_follows_character.load(Ordering::SeqCst),
+                win_state.chat_opened_as_large.load(Ordering::SeqCst),
+            ) {
                 current_character_anchor(app).map(|(char_x, char_y, char_height)| {
                     window_layout::position_chat_relative_to_character(
                         char_x,
@@ -2047,8 +2233,20 @@ pub(crate) fn hide_chat_window_inner(
     win_state: &WindowState,
 ) -> Result<(), String> {
     if let Some(chat) = app.get_webview_window("chat") {
+        // 关窗前记下大窗尺寸，下次点角色/Dock 图标按这个尺寸开。
+        // 用 try_state：这个函数也可能在 DB 还没 manage 的早期路径上被调到，
+        // 拿不到就跳过记录，不要为此 panic。
+        if let Some(db) = app.try_state::<DbState>() {
+            save_chat_large_geometry(app, win_state, db.inner().as_ref());
+        }
         set_chat_sync_grace_period(win_state, 500);
         chat.hide().map_err(|error| error.to_string())?;
+        // 聊天窗藏起来之后小人必须回到浮动层，否则它会留在普通层、
+        // 被其它 app 盖住
+        win_state.chat_focused.store(false, Ordering::SeqCst);
+        if let Some(db) = app.try_state::<DbState>() {
+            apply_character_float_policy(app, win_state, db.inner().as_ref());
+        }
         let _ = app.emit(
             "chat-window-vis-change",
             serde_json::json!({ "visible": false }),
@@ -2068,14 +2266,50 @@ fn hide_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<(), St
 }
 
 #[tauri::command]
-fn toggle_chat_window(app: AppHandle, win_state: State<WinState>) -> Result<bool, String> {
+fn toggle_chat_window(
+    app: AppHandle,
+    win_state: State<WinState>,
+    db: State<DbState>,
+    intent: Option<String>,
+) -> Result<bool, String> {
     if let Some(chat) = app.get_webview_window("chat") {
         let is_visible = chat.is_visible().unwrap_or(false);
+        let state = win_state.inner().as_ref();
+
+        // 全 UI 大窗可能被别的 app 盖住（它不置顶）。这种情况下点小人应该
+        // 把它抬到前台，而不是收起 —— 也不改它的置顶状态。
+        let lost_at = state.chat_focus_lost_at.load(Ordering::SeqCst);
+        let since_lost = if lost_at == 0 {
+            i64::MAX
+        } else {
+            chrono::Utc::now().timestamp_millis() - lost_at
+        };
+        let action = window_layout::chat_summon_action(
+            is_visible,
+            state.chat_opened_as_large.load(Ordering::SeqCst),
+            state.chat_focused.load(Ordering::SeqCst),
+            since_lost,
+        );
+
+        if action == window_layout::ChatSummonAction::Raise {
+            // 只抬前台：不动几何、不动置顶
+            chat.set_focus().map_err(|e| e.to_string())?;
+            set_chat_sync_grace_period(state, 300);
+            return Ok(true);
+        }
+
         if is_visible {
             hide_chat_window_inner(&app, win_state.inner().as_ref())?;
             Ok(false)
         } else {
-            show_chat_window_inner(&app, win_state.inner().as_ref())?;
+            // 默认按 "chat" 处理：没有显式声明意图的调用方想要的是完整对话框
+            let intent = intent.unwrap_or_else(|| "chat".to_string());
+            open_chat_with_intent(
+                &app,
+                win_state.inner().as_ref(),
+                db.inner().as_ref(),
+                &intent,
+            )?;
             Ok(true)
         }
     } else {
@@ -2654,61 +2888,334 @@ fn hide_social_window(app: AppHandle) -> Result<(), String> {
 
 
 
-// 最大化/还原聊天窗口
+/// 按 chat 窗口的**实际宽度**重算：它该不该置顶、是不是全 UI 形态。
+///
+/// 判据用实际尺寸而不是开窗意图 —— 首次之后的 chat 意图会恢复用户上次留下
+/// 的尺寸，那往往是个小窗；若按意图判定就会把小窗当大窗处理成不置顶。
+fn sync_chat_pin_state(app: &AppHandle, win_state: &WindowState, db: &Database) {
+    let Some(chat) = app.get_webview_window("chat") else {
+        return;
+    };
+    // 紧凑气泡自己管置顶（apply_chat_compact_layout 里固定置顶），不要插手
+    if win_state.chat_compact.load(Ordering::SeqCst) {
+        return;
+    }
+    let Ok(size) = chat.outer_size() else { return };
+    let scale = chat.scale_factor().unwrap_or(1.0);
+    let width = size.width as f64 / scale;
+
+    let is_full_ui = window_layout::is_full_ui_chat(width);
+    win_state
+        .chat_opened_as_large
+        .store(is_full_ui, Ordering::SeqCst);
+    let pinned_pref = chat_always_on_top_when_maximized(db);
+    let _ = chat.set_always_on_top(window_layout::chat_should_pin(is_full_ui, pinned_pref));
+    apply_character_float_policy(app, win_state, db);
+}
+
+/// 按当前状态决定小人是否留在浮动层，并应用到窗口。
+///
+/// macOS 上 `set_always_on_top` 正好映射到需要的两档层级（浮动 3 / 普通 0），
+/// 所以这里不需要动裸 NSWindow；Windows 的 HWND_TOPMOST 与 Linux 的
+/// _NET_WM_STATE_ABOVE 也是同一语义，策略天然跨平台。
+fn apply_character_float_policy(app: &AppHandle, win_state: &WindowState, db: &Database) {
+    let Some(character) = app.get_webview_window("character") else {
+        return;
+    };
+    let chat_visible = app
+        .get_webview_window("chat")
+        .and_then(|chat| chat.is_visible().ok())
+        .unwrap_or(false);
+
+    let should_float = window_layout::character_should_float(
+        chat_visible,
+        win_state.chat_opened_as_large.load(Ordering::SeqCst),
+        win_state.chat_focused.load(Ordering::SeqCst),
+        chat_always_on_top_when_maximized(db),
+    );
+    let _ = character.set_always_on_top(should_float);
+}
+
+/// 记住的大窗几何。点角色或点 Dock 图标时用它恢复，用户上次留下什么尺寸
+/// 下次就是什么尺寸。`maximized` 单独记，因为最大化不是一组坐标能表达的。
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ChatLargeGeometry {
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+    #[serde(default)]
+    maximized: bool,
+}
+
+const CHAT_LARGE_GEOMETRY_KEY: &str = "chatLargeGeometry";
+
+fn load_chat_large_geometry(db: &Database) -> Option<ChatLargeGeometry> {
+    db.get_setting(CHAT_LARGE_GEOMETRY_KEY)
+        .ok()
+        .flatten()
+        .and_then(|raw| serde_json::from_str::<ChatLargeGeometry>(&raw).ok())
+        .filter(|geo| geo.width > 0.0 && geo.height > 0.0)
+}
+
+/// 在隐藏大窗会话时记下它的几何。
+///
+/// 只对「大窗」会话生效：快捷提问那条路径最终也会变成常规小窗，
+/// 若不加区分，隐藏它就会把小尺寸写成记住的大窗尺寸。
+fn save_chat_large_geometry(app: &AppHandle, win_state: &WindowState, db: &Database) {
+    if !win_state.chat_opened_as_large.load(Ordering::SeqCst) {
+        return;
+    }
+    if win_state.chat_compact.load(Ordering::SeqCst) {
+        return;
+    }
+    let Some(chat) = app.get_webview_window("chat") else {
+        return;
+    };
+
+    let maximized = chat.is_maximized().unwrap_or(false) || chat.is_fullscreen().unwrap_or(false);
+    let sf = chat.scale_factor().unwrap_or(1.0);
+    // 最大化状态下取到的是全屏尺寸，存它没意义；沿用上一次记录的坐标，
+    // 只把 maximized 翻上去，这样还原时仍有一组可用的非最大化几何。
+    let previous = load_chat_large_geometry(db);
+    let geometry = if maximized {
+        ChatLargeGeometry {
+            maximized: true,
+            ..previous.unwrap_or(ChatLargeGeometry {
+                x: 0.0,
+                y: 0.0,
+                width: 0.0,
+                height: 0.0,
+                maximized: true,
+            })
+        }
+    } else {
+        let Ok(pos) = chat.outer_position() else { return };
+        let Ok(size) = chat.outer_size() else { return };
+        ChatLargeGeometry {
+            x: pos.x as f64 / sf,
+            y: pos.y as f64 / sf,
+            width: size.width as f64 / sf,
+            height: size.height as f64 / sf,
+            maximized: false,
+        }
+    };
+
+    if let Ok(encoded) = serde_json::to_string(&geometry) {
+        let _ = db.set_setting(CHAT_LARGE_GEOMETRY_KEY, &encoded);
+    }
+}
+
+/// 放大 chat 窗口到最大化，并把当前几何存起来供还原用。
+///
+/// 与 `maximize_chat_window` 的区别是这个不切换：它只负责“变大”，
+/// 所以点角色首次开窗可以直接调它而不担心把已经最大化的窗口还原掉。
+fn expand_chat_window_inner(
+    app: &AppHandle,
+    win_state: &WindowState,
+    db: &Database,
+) -> Result<(), String> {
+    let Some(chat) = app.get_webview_window("chat") else {
+        return Ok(());
+    };
+
+    // 先脱离最大化/全屏：大窗是一个普通的可拖动可缩放窗口，
+    // 而且 set_size 对最大化的窗口不生效。
+    if chat.is_fullscreen().unwrap_or(false) {
+        chat.set_fullscreen(false).map_err(|e| e.to_string())?;
+    } else if chat.is_maximized().unwrap_or(false) {
+        chat.unmaximize().map_err(|e| e.to_string())?;
+    }
+
+    // 保存当前几何供还原用（转换为逻辑坐标）
+    let sf = chat.scale_factor().unwrap_or(1.0);
+    if let Ok(pos) = chat.outer_position() {
+        *win_state.saved_chat_position.lock().unwrap() =
+            Some((pos.x as f64 / sf, pos.y as f64 / sf));
+    }
+    if let Ok(size) = chat.outer_size() {
+        *win_state.saved_chat_size.lock().unwrap() =
+            Some((size.width as f64 / sf, size.height as f64 / sf));
+    }
+
+    let screen = chat_screen_info(app, &chat, win_state);
+    // 用「全 UI 能完整显示」的下限，而不是窗口的绝对最小尺寸：
+    // 460px 宽连侧边栏都不会出现，那不叫大窗。
+    let min_width = win_state
+        .chat_min_width
+        .lock()
+        .unwrap()
+        .unwrap_or(0.0)
+        .max(window_layout::CHAT_FULL_UI_MIN_WIDTH);
+    let geometry = window_layout::large_chat_geometry(
+        &screen,
+        min_width,
+        window_layout::CHAT_FULL_UI_MIN_HEIGHT,
+    );
+
+    chat.set_size(tauri::Size::Logical(tauri::LogicalSize {
+        width: geometry.width,
+        height: geometry.height,
+    }))
+    .map_err(|e| e.to_string())?;
+    chat.set_position(tauri::Position::Logical(tauri::LogicalPosition {
+        x: geometry.x,
+        y: geometry.y,
+    }))
+    .map_err(|e| e.to_string())?;
+
+    // 置顶与层级按实际尺寸统一重算：大窗解除置顶让其它 app 能盖住它，
+    // 小人不再被隐藏，改由焦点驱动的层级策略决定谁在上面。
+    sync_chat_pin_state(app, win_state, db);
+    Ok(())
+}
+
+/// 把 chat 窗口从最大化/全屏还原到用户上次留下的几何。
+fn restore_chat_window_inner(app: &AppHandle, win_state: &WindowState) -> Result<(), String> {
+    let Some(chat) = app.get_webview_window("chat") else {
+        return Ok(());
+    };
+    let is_fullscreen = chat.is_fullscreen().unwrap_or(false);
+    let is_maximized = chat.is_maximized().unwrap_or(false);
+    if !is_fullscreen && !is_maximized {
+        return Ok(());
+    }
+
+    if is_fullscreen {
+        chat.set_fullscreen(false).map_err(|e| e.to_string())?;
+    } else {
+        chat.unmaximize().map_err(|e| e.to_string())?;
+    }
+    chat.set_always_on_top(true).map_err(|e| e.to_string())?;
+
+    let saved_pos = win_state.saved_chat_position.lock().unwrap().take();
+    let saved_size = win_state.saved_chat_size.lock().unwrap().take();
+    if let Some((x, y)) = saved_pos {
+        let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
+    }
+    if let Some((w, h)) = saved_size {
+        let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
+    }
+    Ok(())
+}
+
+/// 唤出 chat 窗口时的两种意图。
+///
+/// `"chat"`（点角色或点聊天图标）要的是完整对话框，本次启动的第一次还会
+/// 直接放大到最大化。`"quick"`（全局快捷键）要的是快捷提问小气泡，
+/// 所以它反过来要确保窗口不是最大化状态 —— 否则上一次留下的大窗会让
+/// “快捷提问是小对话框”这个前提不成立。
+pub(crate) fn open_chat_with_intent(
+    app: &AppHandle,
+    win_state: &WindowState,
+    db: &Database,
+    intent: &str,
+) -> Result<(), String> {
+    if intent == "quick" {
+        win_state.chat_opened_as_large.store(false, Ordering::SeqCst);
+        restore_chat_window_inner(app, win_state)?;
+        show_chat_window_inner(app, win_state)?;
+    } else {
+        win_state.chat_opened_as_large.store(true, Ordering::SeqCst);
+
+        // 点角色要的是对话框，不是快捷提问气泡。若上次会话留在气泡态，
+        // 必须在 show 之前就脱离它 —— 否则窗口会先以气泡尺寸显示，
+        // 等前端收到意图事件再展开，用户会看到一次尺寸跳变。
+        if win_state.chat_compact.swap(false, Ordering::SeqCst) {
+            if let Some(chat) = app.get_webview_window("chat") {
+                let saved_geometry = *win_state.chat_full_geometry.lock().unwrap();
+                let request_id = win_state
+                    .chat_layout_request_id
+                    .fetch_add(1, Ordering::SeqCst)
+                    + 1;
+                let _ = apply_chat_full_layout(
+                    app,
+                    &chat,
+                    win_state,
+                    saved_geometry,
+                    false,
+                    request_id,
+                );
+            }
+        }
+
+        // 记住的尺寸优先；从没开过大窗时才退回最大化当默认。
+        match load_chat_large_geometry(db) {
+            Some(geo) if !geo.maximized => {
+                restore_chat_window_inner(app, win_state)?;
+                if let Some(chat) = app.get_webview_window("chat") {
+                    // 记住的尺寸原样用。只有首次开窗（没有记录时）才默认
+                    // 大窗，之后用户留下什么尺寸就还他什么尺寸。
+                    let screen = chat_screen_info(app, &chat, win_state);
+                    let (width, height) =
+                        window_layout::fit_remembered_chat_size(geo.width, geo.height, &screen);
+                    let _ = chat.set_position(tauri::Position::Logical(
+                        tauri::LogicalPosition { x: geo.x, y: geo.y },
+                    ));
+                    let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                        width,
+                        height,
+                    }));
+                }
+            }
+            _ => {
+                expand_chat_window_inner(app, win_state, db)?;
+            }
+        }
+
+        // 置顶与层级在几何应用之后按实际尺寸统一重算一次：
+        // 走「记住的几何」那条路会经过 restore_chat_window_inner，
+        // 而它为了小窗场景是无条件置顶的。
+        sync_chat_pin_state(app, win_state, db);
+
+        show_chat_window_inner(app, win_state)?;
+    }
+
+    // 大窗/小窗切换会改变谁该在上面
+    apply_character_float_policy(app, win_state, db);
+
+    let _ = app.emit(
+        "chat-open-intent",
+        serde_json::json!({ "intent": intent }),
+    );
+    Ok(())
+}
+
+// 最大化/还原聊天窗口。
+//
+// 这是标题栏那个按钮的行为，保持「真最大化」语义 —— 与自动开窗用的
+// `expand_chat_window_inner`（非全屏大窗）是两件不同的事。
 #[tauri::command]
 fn maximize_chat_window(app: AppHandle, win_state: State<WinState>, db: State<DbState>) -> Result<(), String> {
     let _transition_guard = win_state.chat_layout_transition.lock().unwrap();
     if win_state.chat_compact.load(Ordering::SeqCst) {
         return Ok(());
     }
+    let state = win_state.inner().as_ref();
     if let Some(chat) = app.get_webview_window("chat") {
-        let is_fullscreen = chat.is_fullscreen().unwrap_or(false);
-        let is_maximized = chat.is_maximized().unwrap_or(false);
-        
-        if is_fullscreen || is_maximized {
-            // 还原
-            if is_fullscreen {
-                chat.set_fullscreen(false).map_err(|e| e.to_string())?;
-            } else {
-                chat.unmaximize().map_err(|e| e.to_string())?;
-            }
-            chat.set_always_on_top(true).map_err(|e| e.to_string())?;
-            
-            // 恢复到保存的位置和大小（逻辑坐标）
-            let saved_pos = win_state.saved_chat_position.lock().unwrap().take();
-            let saved_size = win_state.saved_chat_size.lock().unwrap().take();
-            
-            if let Some((x, y)) = saved_pos {
-                let _ = chat.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
-            }
-            if let Some((w, h)) = saved_size {
-                let _ = chat.set_size(tauri::Size::Logical(tauri::LogicalSize { width: w, height: h }));
-            }
-            
-            // 显示角色窗口
-            if let Some(character) = app.get_webview_window("character") {
-                let _ = character.show();
-            }
+        let is_big = chat.is_fullscreen().unwrap_or(false) || chat.is_maximized().unwrap_or(false);
+        if is_big {
+            restore_chat_window_inner(&app, state)?;
+            state.chat_opened_as_large.store(false, Ordering::SeqCst);
         } else {
-            // 保存当前位置和大小（转换为逻辑坐标）
+            // 保存当前几何供还原用（转换为逻辑坐标）
             let sf = chat.scale_factor().unwrap_or(1.0);
             if let Ok(pos) = chat.outer_position() {
-                *win_state.saved_chat_position.lock().unwrap() = Some((pos.x as f64 / sf, pos.y as f64 / sf));
+                *state.saved_chat_position.lock().unwrap() =
+                    Some((pos.x as f64 / sf, pos.y as f64 / sf));
             }
             if let Ok(size) = chat.outer_size() {
-                *win_state.saved_chat_size.lock().unwrap() = Some((size.width as f64 / sf, size.height as f64 / sf));
+                *state.saved_chat_size.lock().unwrap() =
+                    Some((size.width as f64 / sf, size.height as f64 / sf));
             }
-            
-            // 最大化（不是全屏）
             chat.maximize().map_err(|e| e.to_string())?;
             chat.set_always_on_top(chat_always_on_top_when_maximized(db.inner().as_ref()))
                 .map_err(|e| e.to_string())?;
-            
-            // 隐藏角色窗口
-            if let Some(character) = app.get_webview_window("character") {
-                let _ = character.hide();
-            }
+            state.chat_opened_as_large.store(true, Ordering::SeqCst);
         }
+        save_chat_large_geometry(&app, state, db.inner().as_ref());
+        apply_character_float_policy(&app, state, db.inner().as_ref());
     }
     Ok(())
 }
@@ -2827,7 +3334,10 @@ fn update_character_size_preset(app: AppHandle, preset: String, win_state: State
         let _ = character.set_size(tauri::Size::Logical(tauri::LogicalSize { width, height }));
         let _ = character.set_position(tauri::Position::Logical(tauri::LogicalPosition { x, y }));
 
-        if win_state.chat_follows_character.load(Ordering::SeqCst)
+        if window_layout::chat_should_follow_character(
+            win_state.chat_follows_character.load(Ordering::SeqCst),
+            win_state.chat_opened_as_large.load(Ordering::SeqCst),
+        )
             && !win_state.chat_compact.load(Ordering::SeqCst)
             && !win_state.sidebar_expanded.load(Ordering::SeqCst)
         {
@@ -3024,7 +3534,10 @@ fn report_chat_min_width(app: AppHandle, width: f64, preset: Option<String>, win
             // (same formula as update_window_size_preset / drag-follow sync),
             // but only while chat-follows-character is on — otherwise respect
             // the user's manual placement and just keep the right edge fixed.
-            let char_anchor = if win_state.chat_follows_character.load(Ordering::SeqCst) {
+            let char_anchor = if window_layout::chat_should_follow_character(
+                win_state.chat_follows_character.load(Ordering::SeqCst),
+                win_state.chat_opened_as_large.load(Ordering::SeqCst),
+            ) {
                 app.get_webview_window("character").and_then(|character| {
                     if !character.is_visible().unwrap_or(false) { return None; }
                     let sf = character.scale_factor().unwrap_or(1.0);
@@ -3126,9 +3639,13 @@ fn update_shortcuts(app: AppHandle, shortcut1: String, shortcut2: String, shortc
                             log::error!("[Shortcuts] Failed to hide chat: {}", error);
                         }
                     } else {
-                        if let Err(error) = show_chat_window_inner(
+                        // 快捷键是“快捷提问”入口：要小气泡，不要大对话框
+                        let db = app_handle.state::<DbState>();
+                        if let Err(error) = open_chat_with_intent(
                             &app_handle,
                             win_state.inner().as_ref(),
+                            db.inner().as_ref(),
+                            "quick",
                         ) {
                             log::error!("[Shortcuts] Failed to show chat: {}", error);
                         }
@@ -3183,6 +3700,11 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // 后台问登录 shell 要一份完整 PATH。打包后进程只有系统 PATH，
+            // claude / codex / npx 都找不到。放在这里预热，免得第一次点
+            // 「新建会话」时才去起一个 shell。
+            shell_env::prewarm();
+
             // Initialize database
             let app_data_dir = app.path().app_data_dir().expect("Failed to get app data dir");
             std::fs::create_dir_all(&app_data_dir).expect("Failed to create app data dir");
@@ -3193,6 +3715,11 @@ pub fn run() {
             // Initialize built-in skins if they don't exist
             initialize_builtin_skins(&db);
             
+            // 上次退出时留下的 running 记录对应的进程早已不存在
+            let _ = db.reset_project_session_statuses();
+            // 顺手清掉没认领到 agent id 的已退出记录 —— 它们无从 resume，
+            // 界面上也看不见，留着只会让表一直涨
+            let _ = db.prune_orphan_project_sessions();
             app.manage(Arc::new(db));
 
             // Initialize MCP manager
@@ -3238,6 +3765,9 @@ pub fn run() {
 
             let subagent_pool: SubagentPoolState = Arc::new(subagent::SubagentPool::new());
             app.manage(subagent_pool);
+
+            // 交互式 PTY 会话（project 标签里的 Claude / Codex / Terminal）
+            app.manage(Arc::new(pty::PtyManager::new()));
 
             // Initialize window state (replaces scattered static variables)
             let win_state: WinState = Arc::new(WindowState::new());
@@ -3318,6 +3848,51 @@ pub fn run() {
             // Position character window at bottom-right
             position_character_window(app.handle());
             
+            // 方案 C 的核心：跟随聊天窗焦点切换小人的层级。
+            //
+            // 聊天窗拿到焦点 → 小人降到普通层，大窗可以盖住它；
+            // 聊天窗失去焦点 → 小人回到浮动层，继续压在其它 app 之上。
+            // macOS 的层级排序压过焦点顺序，所以这是「大窗能遮住小人、
+            // 小人仍然置顶、同时大窗又不置顶」唯一可行的做法。
+            {
+                let app_handle = app.handle().clone();
+                if let Some(chat) = app.get_webview_window("chat") {
+                    chat.on_window_event(move |event| {
+                        // 用户手动把窗口拖大/拖小会跨过全 UI 阈值，
+                        // 置顶状态和小人层级都要跟着重算
+                        if let tauri::WindowEvent::Resized(_) = event {
+                            let win_state = app_handle.state::<WinState>();
+                            if let Some(db) = app_handle.try_state::<DbState>() {
+                                sync_chat_pin_state(
+                                    &app_handle,
+                                    win_state.inner().as_ref(),
+                                    db.inner().as_ref(),
+                                );
+                            }
+                        }
+                        if let tauri::WindowEvent::Focused(focused) = event {
+                            let win_state = app_handle.state::<WinState>();
+                            win_state
+                                .chat_focused
+                                .store(*focused, Ordering::SeqCst);
+                            // 记下失焦时刻：点小人会先夺走聊天窗的焦点，
+                            // 「刚刚才失焦」用来判断它本来是不是在最前面
+                            win_state.chat_focus_lost_at.store(
+                                if *focused { 0 } else { chrono::Utc::now().timestamp_millis() },
+                                Ordering::SeqCst,
+                            );
+                            if let Some(db) = app_handle.try_state::<DbState>() {
+                                apply_character_float_policy(
+                                    &app_handle,
+                                    win_state.inner().as_ref(),
+                                    db.inner().as_ref(),
+                                );
+                            }
+                        }
+                    });
+                }
+            }
+
             // Listen for character window move events to sync chat window position and bounce back if out of bounds
             let app_handle = app.handle().clone();
             if let Some(character) = app.get_webview_window("character") {
@@ -3390,7 +3965,10 @@ pub fn run() {
 
                                     // Sync chat window position (only during active drag, not on spurious events)
                                     
-                                    if ws.chat_follows_character.load(Ordering::SeqCst) {
+                                    if window_layout::chat_should_follow_character(
+                                        ws.chat_follows_character.load(Ordering::SeqCst),
+                                        ws.chat_opened_as_large.load(Ordering::SeqCst),
+                                    ) {
                                         if let Some(chat) = app_handle.get_webview_window("chat") {
                                             if !chat.is_visible().unwrap_or(false) {
                                                 return;
@@ -3478,11 +4056,14 @@ pub fn run() {
                 .on_menu_event(|app, event| {
                     match event.id.as_ref() {
                         "chat" => {
-                            // Open chat window
+                            // 托盘的“打开聊天”是明确的开对话框动作，同点图标
                             let win_state = app.state::<WinState>();
-                            if let Err(error) = show_chat_window_inner(
+                            let db = app.state::<DbState>();
+                            if let Err(error) = open_chat_with_intent(
                                 app,
                                 win_state.inner().as_ref(),
+                                db.inner().as_ref(),
+                                "chat",
                             ) {
                                 log::error!("[Tray] Failed to show chat: {}", error);
                             }
@@ -3644,6 +4225,8 @@ pub fn run() {
             get_uploads_path,
             download_url_as_base64,
             convert_gif_to_png,
+            gif_to_contact_sheet,
+            read_local_image_as_base64,
             elevenlabs_tts,
             elevenlabs_list_models,
             // Screenshot commands
@@ -3752,9 +4335,318 @@ pub fn run() {
             subagent::subagent_set_max_concurrent,
             // In-app update check (reports a new release, never installs it)
             updater::check_for_update,
+            // Projects (registered folders for terminal/agent sessions)
+            commands::projects::projects_list,
+            commands::projects::projects_add,
+            commands::projects::projects_rename,
+            commands::projects::projects_remove,
+            commands::projects::projects_touch,
+            commands::projects::projects_root_path,
+            commands::projects::projects_list_dir,
+            commands::projects::projects_preview_file,
+            commands::projects::projects_write_file,
+            commands::projects::projects_git_status,
+            // Project sessions (history + resume)
+            commands::projects::projects_register_session,
+            commands::projects::projects_claim_session,
+            commands::projects::projects_session_history,
+            commands::projects::projects_mark_session_exited,
+            commands::projects::projects_rename_session,
+            commands::projects::projects_forget_session,
+            // Interactive PTY sessions
+            pty::pty_spawn,
+            pty::pty_write,
+            pty::pty_resize,
+            pty::pty_kill,
+            pty::pty_list,
+            pty::pty_snapshot,
+            pty::pty_spawned_at,
+            pty::pty_kill_project,
             commands::training_export::run_training_export,
             commands::training_export::get_home_dir,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while running tauri application")
+        .run(|app_handle, event| {
+            // macOS Dock 图标点击。Tauri 只在 macOS 上发这个事件，
+            // 所以整块都是 cfg(macos)。
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { .. } = event {
+                let win_state = app_handle.state::<WinState>();
+                let db = app_handle.state::<DbState>();
+                if let Err(error) = open_chat_with_intent(
+                    app_handle,
+                    win_state.inner().as_ref(),
+                    db.inner().as_ref(),
+                    "chat",
+                ) {
+                    log::error!("[Dock] Failed to open chat: {}", error);
+                }
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = (app_handle, event);
+        });
+}
+
+#[cfg(test)]
+mod chat_large_geometry_tests {
+    use super::ChatLargeGeometry;
+
+    #[test]
+    fn geometry_round_trips_through_the_settings_string() {
+        let geo = ChatLargeGeometry {
+            x: 120.0,
+            y: 64.0,
+            width: 1240.0,
+            height: 820.0,
+            maximized: false,
+        };
+        let encoded = serde_json::to_string(&geo).unwrap();
+        // 前端也读这个键，字段名必须是 camelCase
+        assert!(encoded.contains("\"maximized\""));
+        let decoded: ChatLargeGeometry = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.width, 1240.0);
+        assert_eq!(decoded.height, 820.0);
+        assert_eq!(decoded.x, 120.0);
+        assert!(!decoded.maximized);
+    }
+
+    #[test]
+    fn a_record_written_before_the_maximized_field_existed_still_parses() {
+        // serde(default) 保证旧记录不会让整条设置作废
+        let decoded: ChatLargeGeometry =
+            serde_json::from_str(r#"{"x":10,"y":20,"width":900,"height":600}"#).unwrap();
+        assert!(!decoded.maximized);
+        assert_eq!(decoded.width, 900.0);
+    }
+
+    #[test]
+    fn a_maximized_record_keeps_the_previous_restore_size() {
+        // 最大化时取到的是全屏尺寸，存它没用；save 路径靠 struct update
+        // 语法沿用上一次的坐标，只把 maximized 翻上去。
+        let previous = ChatLargeGeometry {
+            x: 100.0,
+            y: 50.0,
+            width: 1200.0,
+            height: 800.0,
+            maximized: false,
+        };
+        let now_maximized = ChatLargeGeometry {
+            maximized: true,
+            ..previous
+        };
+        assert!(now_maximized.maximized);
+        assert_eq!(now_maximized.width, 1200.0, "还原用的尺寸不能被全屏尺寸覆盖");
+        assert_eq!(now_maximized.x, 100.0);
+    }
+
+    #[test]
+    fn a_zero_sized_record_is_not_usable_as_a_restore_target() {
+        // load 侧会把这种记录过滤掉，退回最大化默认
+        let geo = ChatLargeGeometry {
+            x: 0.0,
+            y: 0.0,
+            width: 0.0,
+            height: 0.0,
+            maximized: false,
+        };
+        assert!(!(geo.width > 0.0 && geo.height > 0.0));
+    }
+}
+
+#[cfg(test)]
+mod gif_contact_sheet_tests {
+    use super::*;
+
+    /// 造一个 N 帧的 GIF，每帧一种纯色，帧间 delay 可指定（单位 10ms，GIF 原生单位）
+    fn make_gif(frames: &[(u8, u16)], w: u16, h: u16) -> String {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut encoder = gif::Encoder::new(&mut buf, w, h, &[]).unwrap();
+            encoder.set_repeat(gif::Repeat::Infinite).unwrap();
+            for &(shade, delay) in frames {
+                let pixels: Vec<u8> = (0..(w as usize * h as usize))
+                    .flat_map(|_| [shade, shade, shade, 255])
+                    .collect();
+                let mut frame = gif::Frame::from_rgba_speed(w, h, &mut pixels.clone(), 10);
+                frame.delay = delay;
+                encoder.write_frame(&frame).unwrap();
+            }
+        }
+        BASE64.encode(&buf)
+    }
+
+    #[test]
+    fn a_long_gif_is_sampled_down_to_nine_tiles() {
+        let frames: Vec<(u8, u16)> = (0..30).map(|i| ((i * 8) as u8, 5)).collect();
+        let sheet = gif_to_contact_sheet(make_gif(&frames, 40, 40)).unwrap();
+
+        assert_eq!(sheet.frame_count, 30);
+        assert_eq!(sheet.sampled, 9, "超过 9 帧时应恰好取 9 帧");
+        assert_eq!(sheet.mime_type, "image/png");
+        assert!(!sheet.data.is_empty());
+    }
+
+    #[test]
+    fn a_short_gif_uses_only_as_many_tiles_as_it_has_frames() {
+        let sheet = gif_to_contact_sheet(make_gif(&[(0, 10), (128, 10), (255, 10)], 20, 20)).unwrap();
+        assert_eq!(sheet.frame_count, 3);
+        assert_eq!(sheet.sampled, 3, "帧数不足 9 时不该重复填满");
+    }
+
+    #[test]
+    fn a_single_frame_gif_still_produces_a_sheet() {
+        let sheet = gif_to_contact_sheet(make_gif(&[(200, 10)], 16, 16)).unwrap();
+        assert_eq!(sheet.sampled, 1);
+    }
+
+    /// delay 全为 0 的 GIF 很常见。按 0 算总时长会是 0，采样点会全挤在第一帧上。
+    #[test]
+    fn zero_delay_frames_do_not_collapse_the_sampling() {
+        let frames: Vec<(u8, u16)> = (0..12).map(|i| ((i * 20) as u8, 0)).collect();
+        let sheet = gif_to_contact_sheet(make_gif(&frames, 24, 24)).unwrap();
+        assert_eq!(sheet.sampled, 9, "delay=0 时仍要摊开采样，而不是退化成单帧");
+    }
+
+    /// 输出尺寸必须是 3×3 网格，且单格受 SHEET_MAX_TILE_EDGE 约束
+    #[test]
+    fn the_sheet_is_a_three_by_three_grid_with_bounded_tiles() {
+        let frames: Vec<(u8, u16)> = (0..9).map(|i| ((i * 25) as u8, 10)).collect();
+        // 原帧 600px，超过单格上限 256，应被缩放
+        let sheet = gif_to_contact_sheet(make_gif(&frames, 600, 600)).unwrap();
+        let png = BASE64.decode(&sheet.data).unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+        let (w, h) = image::GenericImageView::dimensions(&img);
+
+        assert_eq!(w % SHEET_COLS, 0, "宽度应能被列数整除");
+        assert_eq!(h % SHEET_ROWS, 0);
+        assert_eq!(w / SHEET_COLS, SHEET_MAX_TILE_EDGE, "单格应被压到上限");
+        assert_eq!(w, SHEET_MAX_TILE_EDGE * SHEET_COLS);
+    }
+
+    /// 小图不该被放大 —— 放大只会糊，白白增加 token
+    #[test]
+    fn small_frames_are_not_upscaled() {
+        let frames: Vec<(u8, u16)> = (0..9).map(|i| ((i * 25) as u8, 10)).collect();
+        let sheet = gif_to_contact_sheet(make_gif(&frames, 32, 32)).unwrap();
+        let png = BASE64.decode(&sheet.data).unwrap();
+        let img = image::load_from_memory(&png).unwrap();
+        let (w, _) = image::GenericImageView::dimensions(&img);
+        assert_eq!(w, 32 * SHEET_COLS, "32px 的帧应原样铺，不放大到 256");
+    }
+
+    #[test]
+    fn a_real_qq_animated_sticker_converts_to_a_sheet() {
+        let Ok(path) = std::fs::read_to_string("/tmp/real_gif_path.txt") else { return };
+        let path = path.trim();
+        let Ok(bytes) = std::fs::read(path) else { return };
+        let b64 = BASE64.encode(&bytes);
+        match gif_to_contact_sheet(b64) {
+            Ok(sheet) => eprintln!(
+                "  ✅ 真实 QQ 动画表情: {} 帧 → 采样 {} 格, 输出 {} KB",
+                sheet.frame_count, sheet.sampled, sheet.data.len() / 1024
+            ),
+            Err(e) => panic!("❌ 真实 GIF 转换失败: {e}"),
+        }
+    }
+
+    #[test]
+    fn garbage_input_is_rejected_rather_than_panicking() {
+        assert!(gif_to_contact_sheet("not base64 at all!!!".to_string()).is_err());
+        assert!(gif_to_contact_sheet(BASE64.encode(b"still not a gif")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod local_image_tests {
+    use super::*;
+
+    fn write_temp(name: &str, bytes: &[u8]) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("petgpt-localimg-{name}"));
+        std::fs::write(&p, bytes).unwrap();
+        p
+    }
+
+    fn tiny_png() -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(4, 4, image::Rgba([10, 20, 30, 255]));
+        let mut buf = Vec::new();
+        image::DynamicImage::ImageRgba8(img)
+            .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
+        buf
+    }
+
+    #[test]
+    fn a_real_image_is_read_and_encoded() {
+        let path = write_temp("ok.png", &tiny_png());
+        let out = read_local_image_as_base64(path.to_string_lossy().to_string()).unwrap();
+        assert_eq!(out.mime_type, "image/png");
+        assert!(!out.data.is_empty());
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 类型按内容判定，不看扩展名：QQ 的缓存文件叫 .jpg 实际是 PNG 是常有的事，
+    /// mime 报错会让 Gemini 直接拒收整条消息。
+    #[test]
+    fn the_mime_type_comes_from_content_not_the_extension() {
+        let path = write_temp("liar.jpg", &tiny_png());
+        let out = read_local_image_as_base64(path.to_string_lossy().to_string()).unwrap();
+        assert_eq!(out.mime_type, "image/png", "扩展名是 .jpg 但内容是 PNG");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// 这道校验同时也是防线：即便路径被滥用，也只能读出图片，拿不到任意文件内容
+    #[test]
+    fn a_non_image_file_is_refused() {
+        let path = write_temp("secret.txt", b"ssh-rsa AAAAB3NzaC1yc2EA... private stuff");
+        assert!(read_local_image_as_base64(path.to_string_lossy().to_string()).is_err());
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn relative_paths_and_missing_files_are_refused() {
+        assert!(read_local_image_as_base64("relative/path.png".to_string()).is_err());
+        assert!(read_local_image_as_base64("/nonexistent/nope.png".to_string()).is_err());
+    }
+
+    #[test]
+    fn a_directory_is_refused() {
+        let dir = std::env::temp_dir();
+        assert!(read_local_image_as_base64(dir.to_string_lossy().to_string()).is_err());
+    }
+
+    /// 对本机真实的 NapCat 图片缓存跑一次。没有就跳过，不在别人机器上误报。
+    #[test]
+    fn a_real_napcat_cached_image_can_be_read() {
+        let Some(home) = dirs::home_dir() else { return };
+        let pic_dir = home.join("Library/Application Support/com.petgpt.app/connectors/qq/qq-isolated/profile/home/Library/Application Support/QQ");
+        if !pic_dir.is_dir() {
+            return;
+        }
+        // 往下找第一张 .jpg/.png
+        fn find_image(dir: &std::path::Path, depth: usize) -> Option<std::path::PathBuf> {
+            if depth == 0 {
+                return None;
+            }
+            for entry in std::fs::read_dir(dir).ok()?.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    if let Some(found) = find_image(&p, depth - 1) {
+                        return Some(found);
+                    }
+                } else if matches!(
+                    p.extension().and_then(|e| e.to_str()),
+                    Some("jpg") | Some("png")
+                ) {
+                    return Some(p);
+                }
+            }
+            None
+        }
+        let Some(sample) = find_image(&pic_dir, 8) else { return };
+        let out = read_local_image_as_base64(sample.to_string_lossy().to_string())
+            .unwrap_or_else(|e| panic!("读取真实缓存图失败 {}: {e}", sample.display()));
+        assert!(out.mime_type.starts_with("image/"));
+        eprintln!("  读到真实缓存图 {} ({})", sample.display(), out.mime_type);
+    }
 }

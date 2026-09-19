@@ -19,6 +19,10 @@ export const EMPTY_CHAT_PRESENTATION_EVENT = Object.freeze({
   WINDOW_HIDDEN: 'window-hidden',
   USER_NAVIGATION: 'user-navigation',
   CONTENT_ACTIVE: 'content-active',
+  /** 全局快捷键唤出：要的是快捷提问小气泡。 */
+  QUICK_ASK_SUMMON: 'quick-ask-summon',
+  /** 点角色或点聊天图标唤出：要的是完整对话框，跳过气泡。 */
+  CHAT_SUMMON: 'chat-summon',
 });
 
 export const COMPACT_CHAT_MIN_HEIGHT = 104;
@@ -36,6 +40,23 @@ export function normalizeTabStateSnapshot(snapshot) {
     messages: Array.isArray(snapshot?.messages) ? snapshot.messages : [],
     isThinking: Boolean(snapshot?.isThinking ?? snapshot?.is_thinking),
   };
+}
+
+/**
+ * 新建对话该挂在哪个助手名下。
+ *
+ * project 标签和聊天标签共用同一个 tabs 数组，但它不属于任何助手，没有
+ * petId。直接读当前标签的 petId 会拿到 undefined，而 `sendCharacterId(undefined)`
+ * 静悄悄什么都不做 —— 表现就是 project 标签下「新建对话」按钮点了没反应。
+ *
+ * 顺序：当前标签 → 任意一个还开着的聊天标签 → 都没有则返回 null，
+ * 由调用方去让用户先选一个助手。
+ */
+export function pickPetIdForNewChat(tabs, activeTabId) {
+  const list = Array.isArray(tabs) ? tabs : [];
+  const active = list.find((tab) => tab?.id === activeTabId);
+  if (active?.petId) return active.petId;
+  return list.find((tab) => tab?.petId)?.petId ?? null;
 }
 
 export function createLoadingActiveTabState(conversationId, error = null) {
@@ -100,12 +121,16 @@ export function getCompactChatView({
 }
 
 export function nextEmptyChatPresentation(current, event) {
-  if (event === EMPTY_CHAT_PRESENTATION_EVENT.WINDOW_HIDDEN) {
+  if (
+    event === EMPTY_CHAT_PRESENTATION_EVENT.WINDOW_HIDDEN
+    || event === EMPTY_CHAT_PRESENTATION_EVENT.QUICK_ASK_SUMMON
+  ) {
     return EMPTY_CHAT_PRESENTATION.COMPACT;
   }
   if (
     event === EMPTY_CHAT_PRESENTATION_EVENT.USER_NAVIGATION
     || event === EMPTY_CHAT_PRESENTATION_EVENT.CONTENT_ACTIVE
+    || event === EMPTY_CHAT_PRESENTATION_EVENT.CHAT_SUMMON
   ) {
     return EMPTY_CHAT_PRESENTATION.TAB;
   }

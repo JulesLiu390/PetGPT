@@ -13,7 +13,7 @@ import { getPresetsForFormat, getDefaultBaseUrl, findPresetByUrl, getDetectionCa
 import * as tauri from "../utils/tauri";
 import { useSettings } from "../utils/useSettings";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
-import { useStateValue } from "../context/StateProvider";
+import { useDispatch } from "../context/StateProvider";
 import { actionType } from "../context/reducer";
 import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
@@ -1983,7 +1983,8 @@ const ModelsPanel = () => {
   const [providers, setProviders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [expandedProviders, setExpandedProviders] = useState(new Set());
-  const [{}, dispatch] = useStateValue();
+  // 同 App：这个组件 5000 多行，只为了拿 dispatch 不该订阅状态
+  const dispatch = useDispatch();
 
   const loadProviders = useCallback(async () => {
     try {

@@ -1,4 +1,4 @@
-import React, { useEffect, useLayoutEffect, useState, useRef, useCallback } from 'react';
+import React, { useEffect, useLayoutEffect, useState, useRef, useCallback, useMemo } from 'react';
 import ChatboxTitleBar from '../Layout/ChatboxTitleBar';
 import ChatboxInputArea from './ChatboxInputArea';
 import ChatboxMessageArea from './ChatboxMessageArea';
@@ -10,13 +10,14 @@ import {
   getCompactChatView,
   getCompactChatWindowHeight,
   nextEmptyChatPresentation,
+  pickPetIdForNewChat,
   shouldUseCompactChat,
 } from './compactChatModel.js';
-import { useStateValue } from '../../context/StateProvider';
+import { useStateValue, useStreamingReplies } from '../../context/StateProvider';
 import { actionType } from '../../context/reducer';
 import * as tauri from '../../utils/tauri';
 import { listen } from '@tauri-apps/api/event';
-import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown, MdClear } from 'react-icons/md';
+import { MdDelete, MdAdd, MdSearch, MdClose, MdWarning, MdKeyboardArrowDown, MdChevronRight, MdClear } from 'react-icons/md';
 import { BsLayoutSidebar } from "react-icons/bs";
 import { LuMaximize2 } from "react-icons/lu";
 import { createChatFocusRequestGate } from '../../utils/chatFocusModel.js';
@@ -27,6 +28,16 @@ import {
   normalizeMarkdownTypography,
 } from '../../utils/markdownTypography.js';
 import UpdateBanner from './UpdateBanner';
+import ProjectsSection from '../Project/ProjectsSection';
+import ProjectView from '../Project/ProjectView';
+import ProjectStatusBar from '../Project/ProjectStatusBar';
+import { runningSessionIds, sameIdSet } from '../../utils/sessionActivity.js';
+import {
+  GIT_POLL_INTERVAL_MS,
+  buildDeletedIndex,
+  buildGitDecorations,
+  gitStatusSignature,
+} from '../../utils/gitDecorations.js';
 import {
   UPDATE_CHECK_STARTUP_DELAY_MS,
   shouldCheckForUpdate,
@@ -57,9 +68,32 @@ const HighlightText = ({ text, keyword }) => {
 export const Chatbox = () => {
   const { t } = useI18n();
   // 方案 C: 使用 Rust 内存缓存管理消息
-  const [{ navBarChats, updatedConversation, streamingReplies, liveToolCalls = {}, characterMoods, suggestText = {} }, dispatch] = useStateValue();
+  const [{ navBarChats, updatedConversation, liveToolCalls = {}, characterMoods, suggestText = {} }, dispatch] = useStateValue();
+  // 流式回复走独立 Context。它每帧都在变，留在 useStateValue 里会把这整棵
+  // 树（含侧边栏、项目面板、终端）按帧重渲染；而且 StateContext 上挂的那份
+  // streamingReplies 是刻意过期的，见 StateProvider。
+  const streamingReplies = useStreamingReplies();
   const [testCount, setTestCount] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  // 侧边栏里两个同级区块的折叠状态。两个都展开时各分一半剩余高度、
+  // 各自滚动；折起一个，另一个就吃满。
+  const [chatsSectionOpen, setChatsSectionOpen] = useState(true);
+
+  // 全 UI 模式 = 宽到侧边栏常驻显示的程度。用的就是侧边栏 lg:!flex 那条
+  // 断点（Tailwind lg = 1024px），所以「侧边栏常驻」和「大标签常驻」
+  // 永远同时成立，不会出现一个在一个不在。
+  const [isFullUiWidth, setIsFullUiWidth] = useState(false);
+
+  useEffect(() => {
+    const measure = () => setIsFullUiWidth(window.innerWidth >= 1024);
+    measure();
+    window.addEventListener('resize', measure);
+    return () => window.removeEventListener('resize', measure);
+  }, []);
+
+  // 当前激活的 project 标签上报的小标签信息。Ctrl+W 先关小标签，
+  // 小标签全关完之后再关大标签。
+  const projectPanesRef = useRef(null);
   const [windowVisible, setWindowVisible] = useState(false);
   const [focusRequest, setFocusRequest] = useState(null);
   const [emptyChatPresentation, setEmptyChatPresentation] = useState(
@@ -263,6 +297,278 @@ export const Chatbox = () => {
     switchTabPrefix: MOD_KEY,
   });
 
+  // ── Projects ──
+  // project 标签与聊天标签共用同一个 tabs 数组，靠 tab.kind === 'project' 区分。
+  const [projects, setProjects] = useState([]);
+  const [sessionsByProject, setSessionsByProject] = useState({});
+  const [historyByProject, setHistoryByProject] = useState({});
+  const [resumeRequest, setResumeRequest] = useState(null);
+  // 当前 project 标签的 git 状态。侧边栏底部和文件树装饰共用这一份 ——
+  // 拉两次就会出现「状态栏说 3 处改动、文件树标了 4 个」的错位。
+  const [gitStatus, setGitStatus] = useState(null);
+  // 会话活动时间戳记在 ref 里（PTY 输出频率很高，进 state 会疯狂重渲染），
+  // 由一个低频 tick 折算成「正在跑的会话集合」再驱动侧边栏指示器。
+  const sessionActivityRef = useRef({});
+  const [runningSessions, setRunningSessions] = useState(() => new Set());
+
+  const reloadHistory = useCallback(async (projectIds) => {
+    const ids = projectIds || [];
+    if (ids.length === 0) return;
+    const entries = await Promise.all(ids.map(async (id) => {
+      try {
+        return [id, await tauri.projectsSessionHistory(id, 30)];
+      } catch {
+        // 项目目录被移走、CLI 换了存储布局等情况不该阻塞侧边栏
+        return [id, { bound: [], agentSessions: [] }];
+      }
+    }));
+    setHistoryByProject((prev) => ({ ...prev, ...Object.fromEntries(entries) }));
+  }, []);
+
+  const reloadProjects = useCallback(async () => {
+    try {
+      const list = await tauri.projectsList();
+      const rows = Array.isArray(list) ? list : [];
+      setProjects(rows);
+      void reloadHistory(rows.map((p) => p.id));
+    } catch (error) {
+      console.error('[ChatboxBody] Failed to load projects:', error);
+    }
+  }, [reloadHistory]);
+
+  const reloadSessions = useCallback(async () => {
+    try {
+      const list = await tauri.ptyList(null);
+      const grouped = {};
+      for (const session of Array.isArray(list) ? list : []) {
+        if (!grouped[session.projectId]) grouped[session.projectId] = [];
+        grouped[session.projectId].push(session);
+      }
+      setSessionsByProject(grouped);
+    } catch (error) {
+      console.error('[ChatboxBody] Failed to load PTY sessions:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    reloadProjects();
+    reloadSessions();
+  }, [reloadProjects, reloadSessions]);
+
+  // 下面这几个回调必须是稳定引用，不能写成 JSX 里的内联箭头。
+  //
+  // ProjectView 把它们放进了自己 useCallback / useEffect 的依赖里，每次
+  // ChatboxBody 重渲染都换一个新函数的话，那边的「认领轮询」effect 会整个
+  // 重建：clearInterval 掉还没到 2 秒的定时器，然后立刻再 attempt() 一次。
+  // 于是本该 2 秒一次的 projects_claim_session 变成了跟着重渲染的节奏跑，
+  // 而那个命令要扫 CLI 的会话存储，是几百毫秒的磁盘 I/O。
+  const handleReloadProjectsAndSessions = useCallback(async () => {
+    await reloadProjects();
+    await reloadSessions();
+  }, [reloadProjects, reloadSessions]);
+
+  const handleProjectSessionsChanged = useCallback((projectId) => {
+    void reloadSessions();
+    if (projectId) void reloadHistory([projectId]);
+  }, [reloadSessions, reloadHistory]);
+
+  const handlePanesChange = useCallback((info) => {
+    projectPanesRef.current = info;
+  }, []);
+
+  const handleResumeHandled = useCallback(() => setResumeRequest(null), []);
+
+  // 进程退出时让侧边栏的存活点跟着灭掉，否则用户会点进一个死终端
+  useEffect(() => {
+    const unlisten = tauri.onPtyExit(() => { reloadSessions(); });
+    return () => { try { unlisten?.(); } catch { /* ignore */ } };
+  }, [reloadSessions]);
+
+  // 输出时间戳只写 ref；每 400ms 折算一次「正在跑」的集合。
+  //
+  // 关键是集合没变就返回同一个引用让 React bail out —— 早先这里推进的是一个
+  // 时间戳 state，于是不管有没有会话在跑，整棵 ChatboxBody（连带 ProjectView、
+  // FileTree、终端面板）都被无条件重渲染，每秒两次半。
+  useEffect(() => {
+    const unlisten = tauri.onPtyOutput((payload) => {
+      if (payload?.sessionId) sessionActivityRef.current[payload.sessionId] = Date.now();
+    });
+    const timer = setInterval(() => {
+      setRunningSessions((prev) => {
+        const next = runningSessionIds(sessionActivityRef.current);
+        return sameIdSet(prev, next) ? prev : next;
+      });
+    }, 400);
+    return () => {
+      try { unlisten?.(); } catch { /* ignore */ }
+      clearInterval(timer);
+    };
+  }, []);
+
+  const handleResumeSession = useCallback((project, entry) => {
+    handleOpenProjectRef.current?.(project);
+    // 侧边栏传来的行用 sessionId 作标识（没有 id 字段）
+    setResumeRequest({
+      token: `resume:${entry.sessionId ?? entry.agentId}:${Date.now()}`,
+      kind: entry.kind,
+      agentId: entry.agentId,
+      // 带上它，ProjectView 才能找到原来那个 pane 去原地复活，
+      // 而不是新开一个
+      sessionId: entry.sessionId ?? null,
+    });
+  }, []);
+
+  // 从列表里删掉一条会话记录。
+  // 只删 PetGPT 的索引 —— claude/codex 自己的会话文件一个都不动，
+  // 所以这是可逆的：对话数据还在，只是不再列在这里。
+  const handleDeleteSession = useCallback(async (project, row) => {
+    const ok = await tauri.confirm(
+      'Remove this session from the list? The conversation file itself is kept.',
+      { title: 'Remove session' },
+    ).catch(() => false);
+    if (!ok) return;
+    await tauri.projectsForgetSession(row.sessionId).catch(() => {});
+    await reloadHistory([project.id]);
+  }, [reloadHistory]);
+
+  const handleEndSession = useCallback(async (project, session) => {
+    const ok = await tauri.confirm(
+      'End this session? The agent process will be terminated.',
+      { title: 'End session' },
+    ).catch(() => false);
+    if (!ok) return;
+    await tauri.ptyKill(session.id).catch(() => {});
+    await tauri.projectsMarkSessionExited(session.id).catch(() => {});
+    await reloadSessions();
+    await reloadHistory([project.id]);
+  }, [reloadSessions, reloadHistory]);
+
+  const handleOpenProject = useCallback((project) => {
+    const tabId = `project:${project.id}`;
+    setTabs((prev) => {
+      const exists = prev.some((tab) => tab.id === tabId);
+      const deactivated = prev.map((tab) => ({ ...tab, isActive: false }));
+      if (exists) {
+        return deactivated.map((tab) => (tab.id === tabId ? { ...tab, isActive: true } : tab));
+      }
+      return [...deactivated, {
+        id: tabId,
+        label: project.name,
+        kind: 'project',
+        projectId: project.id,
+        isActive: true,
+      }];
+    });
+    setActiveTabId(tabId);
+    activeTabIdRef.current = tabId;
+    void reloadSessions();
+  }, [reloadSessions]);
+
+  const handleOpenProjectRef = useRef(null);
+  handleOpenProjectRef.current = handleOpenProject;
+
+  // 点侧边栏里活着的会话：打开项目标签**并切到它那个 pane**。
+  // 以前这里丢掉了 session 参数，所以只是打开标签，落在哪个 pane 上
+  // 由兜底逻辑决定 —— 看起来就像点错了。
+  const handleFocusSession = useCallback((project, row) => {
+    handleOpenProject(project);
+    if (!row) return;
+    setResumeRequest({
+      token: `focus:${row.sessionId ?? row.agentId}:${Date.now()}`,
+      focusOnly: true,
+      kind: row.kind,
+      agentId: row.agentId ?? null,
+      sessionId: row.sessionId ?? null,
+    });
+  }, [handleOpenProject]);
+
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+  // 空会话的欢迎态：有标签但里面还没有任何内容，且不在紧凑气泡、不在 project 标签。
+  // compactChatView === EMPTY 已经涵盖「无消息 + 未思考 + 无流式输出」三个条件。
+  const showEmptyGreeting = !isCompactChat
+    && tabs.length > 0
+    && compactChatView === COMPACT_CHAT_VIEW.EMPTY;
+  const activeProjectTab = activeTab?.kind === 'project' ? activeTab : null;
+  const activeProject = activeProjectTab
+    ? projects.find((p) => p.id === activeProjectTab.projectId) || null
+    : null;
+
+  // ── git 状态轮询 ──
+  //
+  // 只在 project 标签真正处在前台时跑。切回聊天标签就停掉：后台标签的 git
+  // 状态没人看，而这条路径每次都要起一个子进程。
+  const gitSignatureRef = useRef('');
+  // 文件树的刷新按钮推进它，强制插一次轮询
+  const [gitRefreshToken, setGitRefreshToken] = useState(0);
+  const refreshGitStatus = useCallback(() => setGitRefreshToken((n) => n + 1), []);
+
+  // 换项目（或切走）先清空。留着上一个项目的分支名，会在新项目的第一次
+  // 请求回来之前显示一段明确错误的信息。
+  //
+  // 单独一个 effect：跟下面的轮询合在一起的话，手动刷新也会把状态清空，
+  // 界面要空白一下才填回来 —— 而那次刷新多半什么都没变。
+  useEffect(() => {
+    gitSignatureRef.current = '';
+    setGitStatus(null);
+  }, [activeProjectTab?.projectId]);
+
+  useEffect(() => {
+    const projectId = activeProjectTab?.projectId;
+    if (!projectId) return undefined;
+
+    let cancelled = false;
+    let inflight = false;
+
+    const tick = async () => {
+      // 大仓库冷缓存时一次 status 可能跑几秒。上一次还没回来就跳过这一轮，
+      // 否则请求会越堆越多，每个都占着一个 git 进程。
+      if (inflight) return;
+      inflight = true;
+      try {
+        const next = await tauri.projectsGitStatus(projectId);
+        if (cancelled) return;
+        // 绝大多数轮询结果与上一次完全相同。不比一下就 setState 的话，
+        // 整棵虚拟滚动的文件树会跟着每 4 秒空转重建一次。
+        const signature = gitStatusSignature(next);
+        if (signature !== gitSignatureRef.current) {
+          gitSignatureRef.current = signature;
+          setGitStatus(next);
+        }
+      } catch (error) {
+        // 项目目录被移走或删掉是常事，不值得打断界面
+        if (!cancelled) console.warn('[ChatboxBody] git status failed:', error);
+      } finally {
+        inflight = false;
+      }
+    };
+
+    void tick();
+    const timer = setInterval(tick, GIT_POLL_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [activeProjectTab?.projectId, gitRefreshToken]);
+
+  // gitStatus 的引用只在内容真变化时才更新（见上面的签名比较），
+  // 所以这里的缓存能一直命中，FileTree 的 memo 也就拦得住。
+  const gitDecorations = useMemo(
+    () => buildGitDecorations(gitStatus?.files),
+    [gitStatus],
+  );
+  // 已删除的文件不在磁盘上，装饰救不了它们 —— 得作为额外的行补进树里
+  const deletedByDir = useMemo(
+    () => buildDeletedIndex(gitStatus?.files),
+    [gitStatus],
+  );
+
+  // 助手下拉开着的时候切到 project 标签，它会连同整块一起被卸载，但 state
+  // 留在 true —— 再切回聊天标签时菜单就自己弹开了。
+  const inProjectTab = Boolean(activeProjectTab);
+  useEffect(() => {
+    if (inProjectTab) setShowAssistantDropdown(false);
+  }, [inProjectTab]);
+
   // ── 更新检查 ──
   // 放在 chat 窗口而不是 character 窗口：提示条就在这里，不需要跨窗口传状态。
   const [updateInfo, setUpdateInfo] = useState(null);
@@ -410,7 +716,9 @@ export const Chatbox = () => {
 
   // 标题栏显示/隐藏逻辑：淡入淡出都用延迟
   useEffect(() => {
-    const shouldShow = sidebarOpen || isMouseOver;
+    // 全 UI 模式下大标签常驻：这种尺寸下窗口是当作工作区在用的，
+    // 标签跟着鼠标进出淡入淡出会让人找不到它。
+    const shouldShow = isFullUiWidth || sidebarOpen || isMouseOver;
     
     if (shouldShow) {
       // 立即挂载组件（opacity: 0）
@@ -429,7 +737,7 @@ export const Chatbox = () => {
       }, 200); // 与 CSS transition 时间一致
       return () => clearTimeout(timer);
     }
-  }, [sidebarOpen, isMouseOver]);
+  }, [isFullUiWidth, sidebarOpen, isMouseOver]);
 
   // 监听后台更新的会话消息（处理非激活 Tab 的更新）
   useEffect(() => {
@@ -574,6 +882,23 @@ export const Chatbox = () => {
     setSidebarOpen(false);
     tauri.toggleSidebar?.(false);
   }, [isCompactChat, sidebarOpen]);
+
+  // ============ 监听唤出意图 ============
+  // 后端区分两个入口：点角色/点图标给完整对话框，全局快捷键给快捷提问气泡。
+  // 这个事件在窗口显示之后到达，所以它会盖掉 WINDOW_HIDDEN 留下的 COMPACT。
+  useEffect(() => {
+    const unlisten = tauri.onChatOpenIntent?.((payload) => {
+      const intent = payload?.intent;
+      if (intent !== 'chat' && intent !== 'quick') return;
+      setEmptyChatPresentation(current => nextEmptyChatPresentation(
+        current,
+        intent === 'quick'
+          ? EMPTY_CHAT_PRESENTATION_EVENT.QUICK_ASK_SUMMON
+          : EMPTY_CHAT_PRESENTATION_EVENT.CHAT_SUMMON,
+      ));
+    });
+    return () => { try { unlisten?.(); } catch { /* ignore */ } };
+  }, []);
 
   // ============ 监听窗口可见性变化 ============
   useEffect(() => {
@@ -821,6 +1146,17 @@ export const Chatbox = () => {
   ) => {
     if (!preserveEmptyPresentation) lockTabPresentation();
     conversationSelectionGenerationRef.current += 1;
+
+    // project 标签没有会话可拉。走下面的聊天路径会让它去 fetch 一个
+    // id 为 `project:<uuid>` 的对话，必然失败。
+    const clickedTab = tabs.find((tab) => tab.id === clickedId);
+    if (clickedTab?.kind === 'project') {
+      setActiveTabId(clickedId);
+      activeTabIdRef.current = clickedId;
+      setTabs((prev) => prev.map((tab) => ({ ...tab, isActive: tab.id === clickedId })));
+      return;
+    }
+
     // Even if clicking active tab, we might want to ensure sync? 
     // Repair the shared context even when the visual tab is already active.
     if (activeTabId === clickedId) {
@@ -873,6 +1209,9 @@ export const Chatbox = () => {
   const handleCloseTab = (e, closedId) => {
     conversationSelectionGenerationRef.current += 1;
     e.stopPropagation();
+
+    // 关掉 project 标签只收起 UI，会话留在后台继续跑 —— 侧边栏的运动
+    // 指示器会显示它们还在，用会话项上的「结束会话」才真正终止进程。
     
     let nextActiveId = activeTabId;
     
@@ -1033,15 +1372,13 @@ export const Chatbox = () => {
     // the desktop composer". Set this synchronously before the character-id
     // round trip creates and hydrates the conversation.
     lockTabPresentation();
-    const activeTab = tabs.find(tab => tab.id === activeTabId);
-    if (activeTab) {
-        // 如果有活跃的 Tab，使用其 petId 创建新对话
-        tauri.sendCharacterId?.(activeTab.petId);
-    } else if (tabs.length > 0) {
-        // 如果有其他 Tab，使用第一个 Tab 的 petId
-        tauri.sendCharacterId?.(tabs[0].petId);
+    // 不能直接读当前标签的 petId：project 标签没有这个字段，
+    // sendCharacterId(undefined) 不会有任何反应（按钮看着就是坏的）。
+    const petId = pickPetIdForNewChat(tabs, activeTabId);
+    if (petId) {
+        tauri.sendCharacterId?.(petId);
     } else {
-        // 没有任何 Tab，打开角色选择窗口
+        // 一个聊天标签都没有（比如只开着 project 标签）：让用户先选助手
         tauri.changeSelectCharacterWindow?.();
     }
   };
@@ -1237,6 +1574,12 @@ export const Chatbox = () => {
         e.preventDefault();
         e.stopPropagation();
         console.log('[ChatboxBody] Close tab hotkey triggered');
+        // project 标签里还有小标签时，先关小标签
+        const panes = projectPanesRef.current;
+        if (panes && panes.closablePaneCount > 0) {
+          panes.closeActivePane();
+          return;
+        }
         if (activeTabIdRef.current) {
           handleCloseTabRef.current({ stopPropagation: () => {} }, activeTabIdRef.current);
         }
@@ -1358,7 +1701,25 @@ export const Chatbox = () => {
           )}
         </div>
 
-        {/* List / Search Results */}
+        {/* Sessions（对话）— 与 Projects 同级的可折叠区块 */}
+        <div className={`flex min-h-0 flex-col ${chatsSectionOpen ? 'flex-1' : 'shrink-0'}`}>
+        <div
+          onClick={() => setChatsSectionOpen((v) => !v)}
+          className="flex h-10 shrink-0 cursor-pointer items-center gap-1 border-t border-gray-200/70 px-2 hover:bg-gray-200/40"
+        >
+          {chatsSectionOpen
+            ? <MdKeyboardArrowDown className="h-4 w-4 shrink-0 text-gray-400" />
+            : <MdChevronRight className="h-4 w-4 shrink-0 text-gray-400" />}
+          <span className="flex-1 text-[13px] font-semibold text-gray-500">
+            {t('Sessions')}
+          </span>
+          <MdAdd
+            onClick={(e) => { e.stopPropagation(); handleNewChat(); }}
+            title={t('New Chat')}
+            className="h-4 w-4 shrink-0 text-gray-400 hover:text-gray-700"
+          />
+        </div>
+        {chatsSectionOpen && (
         <div className="flex-1 overflow-y-auto px-2 py-2 space-y-0.5">
           {searchActive && searchQuery.trim() ? (
             /* === 搜索结果 === */
@@ -1466,7 +1827,31 @@ export const Chatbox = () => {
           </>
           )}
         </div>
+        )}
+        </div>
 
+        {/* Projects — 与 Sessions 同级 */}
+        <ProjectsSection
+          projects={projects}
+          onReload={handleReloadProjectsAndSessions}
+          onOpenProject={handleOpenProject}
+          sessionsByProject={sessionsByProject}
+          onFocusSession={handleFocusSession}
+          historyByProject={historyByProject}
+          runningSessions={runningSessions}
+          onResumeSession={handleResumeSession}
+          onEndSession={handleEndSession}
+          onDeleteSession={handleDeleteSession}
+        />
+
+        {/* 侧边栏底部：当前标签的身份。
+            project 标签下换成项目/分支/改动数 —— 「选择助手」在那里既没有
+            对应的对话可切，点下去还会走 transferConversation 去改一个不存在
+            的会话。 */}
+        {activeProjectTab ? (
+          <ProjectStatusBar project={activeProject} gitStatus={gitStatus} />
+        ) : (
+        <>
         {/* Quick New Chat - Assistant Dropdown */}
         <div className="p-3 border-t border-gray-200 relative">
             <div 
@@ -1545,6 +1930,8 @@ export const Chatbox = () => {
               </>
             )}
         </div>
+        </>
+        )}
       </div>
 
       {/* Main Chat Area */}
@@ -1596,6 +1983,31 @@ export const Chatbox = () => {
                 </div>
              ) : (
                 tabs.map(tab => {
+                    if (tab.kind === 'project') {
+                      const project = projects.find((p) => p.id === tab.projectId)
+                        || { id: tab.projectId, name: tab.label };
+                      return (
+                        <div
+                          key={tab.id}
+                          style={{ display: tab.id === activeTabId ? 'flex' : 'none' }}
+                          className="flex-1 flex flex-col h-full min-h-0"
+                        >
+                          <ProjectView
+                            project={project}
+                            active={tab.id === activeTabId}
+                            onPanesChange={handlePanesChange}
+                            onSessionsChanged={handleProjectSessionsChanged}
+                            resumeRequest={tab.id === activeTabId ? resumeRequest : null}
+                            onResumeHandled={handleResumeHandled}
+                            // 只有前台标签在轮询 git，后台标签拿到的会是
+                            // 别人的状态 —— 宁可不装饰，也不要标错
+                            gitDecorations={tab.id === activeTabId ? gitDecorations : undefined}
+                            deletedByDir={tab.id === activeTabId ? deletedByDir : undefined}
+                            onRefreshGit={refreshGitStatus}
+                          />
+                        </div>
+                      );
+                    }
                     const streamContent = streamingReplies?.[tab.id] ?? null;
                     return (
                     <div 
@@ -1620,7 +2032,23 @@ export const Chatbox = () => {
         </div>
         </div>
         
-        <div className="w-full">
+        {/* 空会话时把标语和输入框一起抬到接近视觉中线的位置，
+            而不是让输入框贴在窗口底部。 */}
+        <div
+          className={`w-full ${activeProjectTab ? 'hidden' : ''} ${
+            showEmptyGreeting && !activeProjectTab ? 'mb-[22vh] transition-[margin] duration-200' : ''
+          }`}
+        >
+            {showEmptyGreeting && !activeProjectTab && (
+              <div className="px-6 pb-5 text-center">
+                <h1
+                  data-i18n-ignore
+                  className="mx-auto max-w-2xl text-balance text-xl font-medium leading-snug tracking-tight text-gray-800 sm:text-2xl lg:text-[28px]"
+                >
+                  In this era, you can build anything, if you can pay the token.
+                </h1>
+              </div>
+            )}
             <ChatboxInputArea 
                 className="w-full" 
                 activePetId={tabs.find(t => t.id === activeTabId)?.petId}

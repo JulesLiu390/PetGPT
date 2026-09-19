@@ -74,3 +74,71 @@ test('Linux startup diagnostics are localized while raw log details are preserve
     '系统依赖安装已取消或失败（exit status: 126）。denied',
   );
 });
+
+// ==================== 项目 / PTY 的后端错误 ====================
+// 后端只出英文（messages.js 顶部：「Keep English first」），中文在渲染时生成。
+
+test('project and PTY backend errors localize while paths and OS text are preserved', () => {
+  const expected = new Map([
+    ["Project 'abc-123' is not registered", '项目「abc-123」未登记'],
+    ['Project folder no longer exists: /tmp/gone', '项目目录已不存在：/tmp/gone'],
+    ['Not a directory: /tmp/file.txt', '不是一个目录：/tmp/file.txt'],
+    ['Not found: src/a.js', '找不到：src/a.js'],
+    ['Path escapes the project: ../../etc/passwd', '路径越出项目范围：../../etc/passwd'],
+    ['Filesystem error: permission denied', '文件系统错误：permission denied'],
+    ['src/utils is a directory', 'src/utils 是目录'],
+    ["Session 'p1:claude:1:2' already exists", '会话「p1:claude:1:2」已存在'],
+    ["Session 'p1:claude:1:2' does not exist", '会话「p1:claude:1:2」不存在'],
+    ['Working directory does not exist: /tmp/gone', '工作目录不存在：/tmp/gone'],
+    ['Unknown session kind: bash', '未知的会话类型：bash'],
+    ['Failed to open PTY: out of ptys', '打开 PTY 失败：out of ptys'],
+    ['Failed to write to PTY: broken pipe', '写入 PTY 失败：broken pipe'],
+    ['Failed to resize PTY: bad size', '调整 PTY 尺寸失败：bad size'],
+    // 无参数的几条走 messages.js 的静态词条
+    ['Project name cannot be empty', '项目名不能为空'],
+    ['Terminal sessions cannot be resumed', '终端会话不支持恢复'],
+  ]);
+  for (const [source, translated] of expected) {
+    assert.equal(translateUiText(source, 'zh-CN'), translated);
+  }
+});
+
+test('the conflict marker survives translation so FilePreview can still detect it', () => {
+  // FilePreview 匹配的是**英文原文**（后端给什么就是什么），不是翻译结果。
+  // 这条测试锁的是 Rust 侧 projects::CONFLICT_MARKER 与规则的措辞一致。
+  const raw = 'File was changed by another program: src/a.js';
+  assert.ok(raw.includes('was changed by another program'));
+  assert.equal(translateUiText(raw, 'zh-CN'), '文件已被其它程序修改：src/a.js');
+});
+
+test('the generic "Failed to start" rule does not steal the social agent message', () => {
+  // 新规则追加在 zh-CN 数组末尾，且 kind 写死成枚举 —— 两道保险。
+  // 用 (.+) 的话这条会被翻成「启动 social agent 失败：…」
+  assert.equal(
+    translateUiText('Failed to start social agent: timeout', 'zh-CN'),
+    '启动社交 Agent 失败：timeout',
+  );
+  assert.equal(
+    translateUiText('Failed to start claude: No such file', 'zh-CN'),
+    '启动 claude 失败：No such file',
+  );
+  assert.equal(
+    translateUiText('Failed to start codex: No such file', 'zh-CN'),
+    '启动 codex 失败：No such file',
+  );
+  // 不在枚举里的就不翻，总好过翻错
+  assert.equal(
+    translateUiText('Failed to start something else: x', 'zh-CN'),
+    'Failed to start something else: x',
+  );
+});
+
+test('English locale leaves the backend errors untouched', () => {
+  for (const source of [
+    "Project 'abc' is not registered",
+    'Failed to open PTY: out of ptys',
+    'Project name cannot be empty',
+  ]) {
+    assert.equal(translateUiText(source, 'en'), source);
+  }
+});

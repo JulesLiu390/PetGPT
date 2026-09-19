@@ -470,9 +470,11 @@ export const Character = () => {
   // onConversationId 已移除：onCharacterId 已经直接用 petId 刷新当前角色上下文。
 
   // 各种点击事件 - 都会重置待机计时器
+  // 点角色本体和点聊天图标走同一条路：要的是完整对话框。
+  // 快捷提问只由全局快捷键唤出（后端传 'quick'）。
   const handleClick = useCallback(() => {
     resetIdleTimer();
-    tauri.toggleChatWindow();
+    tauri.toggleChatWindow('chat');
   }, [resetIdleTimer]);
   const handleClickApi = () => {
     resetIdleTimer();

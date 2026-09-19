@@ -16,6 +16,7 @@ import CapabilityDrawer, { CapabilityTag, CapabilityToggleAction } from './Capab
 import { buildActiveCapabilityTags, getCapabilityIslandMinWidth } from './capabilityIslandModel.js';
 import { createQuickReplyRequestGate, getQuickReplySelectionAction, parseQuickReplyResponse } from './quickReplyModel.js';
 import { subagentRegistry, initSubagentListeners, onSubagentChange, getActiveCount, killByConversation } from '../../utils/subagentManager';
+import { createStreamCoalescer } from '../../utils/streamCoalescer.js';
 import { getSubagentToolDefinition } from '../../utils/workspace/socialToolExecutor';
 import * as tauri from '../../utils/tauri';
 import { shouldInjectTime, buildTimeContext } from '../../utils/timeInjection';
@@ -1292,6 +1293,9 @@ export const ChatboxInputBox = ({
     let thisModel = null;
     let _userText = null;
     let controller = null;
+    // 逐 token 的 dispatch 会让整棵组件树按 token 频率重渲染（见
+    // streamCoalescer 的注释）。这里按帧合并，finally 里冲尾巴。
+    let streamCoalescer = null;
     const conversationContextReady = Boolean(
       authoritativeConversationId
       && String(currentConversationId || '') === String(authoritativeConversationId)
@@ -1354,6 +1358,15 @@ export const ChatboxInputBox = ({
     const initialConversationId = sendingConversationId;
     controller = new AbortController();
     abortControllersRef.current.set(initialConversationId, controller);
+    // 回调里读 sendingConversationId 而不是捕获副本：它在下面还可能被改写，
+    // 流式内容必须跟着落到当前那个会话上
+    streamCoalescer = createStreamCoalescer((text) => {
+      dispatch({
+        type: actionType.ADD_STREAMING_REPLY,
+        content: text,
+        id: sendingConversationId,
+      });
+    });
     quickReplyGateRef.current.invalidateConversation(sendingConversationId);
     console.log('[handleSend] ★ sendingConversationId:', sendingConversationId, 'conversationIdRef:', conversationIdRef.current, 'currentConversationId:', currentConversationId);
     
@@ -1661,12 +1674,8 @@ When using tools, please follow these guidelines:
           baseUrl: thisModel.modelUrl,
           mcpTools: allToolsArray,
           options: {},
-          onChunk: (deltaText, fullText) => {
-            dispatch({ 
-              type: actionType.ADD_STREAMING_REPLY, 
-              content: deltaText,
-              id: sendingConversationId 
-            });
+          onChunk: (deltaText) => {
+            streamCoalescer.push(deltaText);
           },
           onToolCall: (toolName, args, toolCallId) => {
             console.log('[Tools] Tool called:', toolName, args);
@@ -1774,11 +1783,7 @@ When using tools, please follow these guidelines:
         thisModel.modelUrl,
         (chunk) => {
             // 无论当前是否在同一个 tab，都更新对应 conversation 的流式内容
-            dispatch({ 
-                type: actionType.ADD_STREAMING_REPLY, 
-                content: chunk,
-                id: sendingConversationId 
-            });
+            streamCoalescer.push(chunk);
         },
         controller.signal, // Pass the signal
                 { 
@@ -1961,6 +1966,10 @@ When using tools, please follow these guidelines:
         reply = { content: `Error: ${error.message}`, mood: 'normal' };
       }
     } finally {
+      // 收尾路径（正常完成 / 出错 / 被取消）都已经 CLEAR 掉流式内容并换成
+      // 最终消息，所以这里要丢掉合并器里可能还压着的尾巴 —— 放任它在下一帧
+      // 追加上去，屏幕上会留一段本该消失的残影。
+      streamCoalescer?.discard();
       // ✅ 确保无论如何都会重置 thinking 状态，避免卡住
       // 更新 TabState 的 thinking 状态
       if (initialConversationId) {

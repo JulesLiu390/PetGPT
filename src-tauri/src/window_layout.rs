@@ -4,7 +4,7 @@
 
 use crate::platform::{LogicalRect, Platform, PlatformProvider, ScreenInfo};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64};
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64};
 use std::sync::Mutex;
 
 // ============ Constants ============
@@ -92,6 +92,24 @@ pub struct WindowState {
     /// Last applied window-size preset ("small" | "medium" | "large").
     /// Kept so a later min-width report can re-derive the preset width.
     pub chat_size_preset: Mutex<String>,
+    /// Whether the visible chat session was summoned as a large dialog
+    /// (character or dock icon) rather than as a quick-ask bubble (hotkey).
+    ///
+    /// Only large sessions write back `chatLargeGeometry` when hidden. Without
+    /// this distinction, hiding a quick-ask session would persist the small
+    /// window as the remembered large size.
+    pub chat_opened_as_large: AtomicBool,
+    /// Whether the chat window currently holds focus. Drives the character's
+    /// always-on-top state: a focused large chat must be able to cover the
+    /// character, but the character should float above other apps again as
+    /// soon as the chat is not the window being used.
+    pub chat_focused: AtomicBool,
+    /// 聊天窗最近一次失去焦点的时刻（毫秒）。仍有焦点时为 0。
+    ///
+    /// 点小人这个动作本身就会把焦点从聊天窗夺走，所以判断「聊天窗是不是本来
+    /// 在最前面」不能只看当前焦点 —— 那样永远是「否」，大窗就再也关不掉了。
+    /// 靠「刚刚才失焦」把这次点击引起的失焦和「早就被别的 app 盖住」区分开。
+    pub chat_focus_lost_at: AtomicI64,
 }
 
 impl WindowState {
@@ -120,6 +138,9 @@ impl WindowState {
             last_char_y: AtomicI32::new(i32::MIN),
             chat_min_width: Mutex::new(None),
             chat_size_preset: Mutex::new("medium".to_string()),
+            chat_opened_as_large: AtomicBool::new(false),
+            chat_focused: AtomicBool::new(false),
+            chat_focus_lost_at: AtomicI64::new(0),
         }
     }
 }
@@ -181,6 +202,152 @@ pub fn screen_info_from_tauri_monitor(monitor: &tauri::Monitor) -> ScreenInfo {
 }
 
 // ============ Baseline Sizes ============
+
+/// How much of the usable work area a large chat window takes.
+///
+/// Deliberately short of the full area: the window stays a real, draggable,
+/// resizable window rather than a maximized one, so the user can still reach
+/// whatever is behind it.
+pub const LARGE_CHAT_WORK_AREA_RATIO: f64 = 0.85;
+
+/// Width below which the chat window cannot show its full UI.
+///
+/// The sidebar only auto-reveals at Tailwind's `lg` breakpoint (1024px), and a
+/// project tab needs 776px of main area on top of the 256px sidebar to dock
+/// its Files panel. 1040 clears both, so a large window always opens with the
+/// whole interface visible instead of a bare message column.
+pub const CHAT_FULL_UI_MIN_WIDTH: f64 = 1040.0;
+
+/// Height below which the full UI gets uncomfortably cramped once the title
+/// bar, message area and composer are all stacked.
+pub const CHAT_FULL_UI_MIN_HEIGHT: f64 = 700.0;
+
+/// Fit a remembered window size onto the current screen.
+///
+/// The remembered size is honoured as-is: only the *first* summon defaults to
+/// a large full-UI window, after that whatever size the user left behind is
+/// what they get back. The only adjustment is clamping to the screen, for the
+/// case where the size was recorded on a larger display.
+///
+/// Deliberately no full-UI floor here. Forcing a remembered 900px window back
+/// up to 1040px reads as the app fighting the user's own resize.
+pub fn fit_remembered_chat_size(width: f64, height: f64, screen: &ScreenInfo) -> (f64, f64) {
+    let area = &screen.work_area;
+    (
+        width.max(CHAT_MIN_WIDTH_FLOOR).min(area.width),
+        height.max(CHAT_FULL_MIN_HEIGHT).min(area.height),
+    )
+}
+
+/// Whether the chat window is currently wide enough to be the full-UI layout.
+///
+/// Keyed on the window's *actual* width rather than on how it was summoned:
+/// after the first launch a chat-intent summon restores whatever size the user
+/// left behind, which is often a small window. Deciding pinning and character
+/// layering from the intent would then pin the wrong thing.
+pub fn is_full_ui_chat(width: f64) -> bool {
+    width >= CHAT_FULL_UI_MIN_WIDTH
+}
+
+/// What clicking the character should do to the chat window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChatSummonAction {
+    /// 窗口是隐藏的：按意图打开它
+    Show,
+    /// 窗口在最前面：收起它
+    Hide,
+    /// 窗口开着但被别的 app 盖住了：抬到前台，**不**改置顶状态
+    Raise,
+}
+
+/// 点小人时，刚失焦多久以内仍算「聊天窗本来在最前面」。
+///
+/// 点小人会先把焦点交给角色窗口，聊天窗的 Focused(false) 紧接着就到；
+/// 这个窗口期用来把那次失焦和「早就被 Chrome 盖住」区分开。
+pub const CHAT_RECENT_FOCUS_LOSS_MS: i64 = 400;
+
+/// 决定点小人（或点图标）时对聊天窗做什么。
+///
+/// 只有**全 UI 大窗**才有「被盖住」这个状态 —— 小窗是置顶的浮层，永远在最
+/// 前面，所以它只有显示/隐藏两种。
+pub fn chat_summon_action(
+    visible: bool,
+    is_full_ui: bool,
+    focused: bool,
+    ms_since_focus_lost: i64,
+) -> ChatSummonAction {
+    if !visible {
+        return ChatSummonAction::Show;
+    }
+    if !is_full_ui {
+        return ChatSummonAction::Hide;
+    }
+    // 本来就在最前面（还持有焦点，或焦点刚被这次点击夺走）→ 收起
+    if focused || (ms_since_focus_lost >= 0 && ms_since_focus_lost <= CHAT_RECENT_FOCUS_LOSS_MS) {
+        return ChatSummonAction::Hide;
+    }
+    ChatSummonAction::Raise
+}
+
+/// Whether the chat window should stay above other apps.
+///
+/// A small window is a companion overlay sitting next to the pet, so it floats.
+/// A full-UI window is something the user works inside, so other apps must be
+/// able to cover it. `pinned_when_large` is the user's explicit preference and
+/// overrides the full-UI rule.
+pub fn chat_should_pin(is_full_ui: bool, pinned_when_large: bool) -> bool {
+    !is_full_ui || pinned_when_large
+}
+
+/// Whether the chat window should track the character window's position.
+///
+/// A large, full-UI window is something the user places and works in, so
+/// dragging the pet must not drag it around. Only the small and compact
+/// layouts stay tethered to the character.
+pub fn chat_should_follow_character(follow_preference: bool, chat_is_large: bool) -> bool {
+    follow_preference && !chat_is_large
+}
+
+/// Geometry for a large (but not maximized) chat window, centered in the
+/// screen's usable area.
+///
+/// `work_area` already excludes the menu bar and Dock on macOS, so the result
+/// never lands under system UI.
+pub fn large_chat_geometry(screen: &ScreenInfo, min_width: f64, min_height: f64) -> WindowGeometry {
+    let ratio = LARGE_CHAT_WORK_AREA_RATIO;
+    let area = &screen.work_area;
+    let width = (area.width * ratio).max(min_width).min(area.width);
+    let height = (area.height * ratio).max(min_height).min(area.height);
+    WindowGeometry {
+        x: area.x + (area.width - width) / 2.0,
+        y: area.y + (area.height - height) / 2.0,
+        width,
+        height,
+    }
+}
+
+/// Whether the character window should currently sit above other apps.
+///
+/// macOS maps always-on-top onto two absolute window levels (floating 3 vs
+/// normal 0), and level ordering beats focus order, so a floating character
+/// can never be covered by a normal-level window. The only way to let a large
+/// chat window cover the character while still letting other apps cover that
+/// chat window is to drop the character to the normal level for exactly as
+/// long as the chat is the window being used.
+pub fn character_should_float(
+    chat_visible: bool,
+    chat_is_large: bool,
+    chat_focused: bool,
+    chat_pinned_while_large: bool,
+) -> bool {
+    // A pinned large chat stays on the floating level itself, so both windows
+    // share a level and focus order already puts the chat in front. Dropping
+    // the character there would push it below other apps for no benefit.
+    if chat_pinned_while_large {
+        return true;
+    }
+    !(chat_visible && chat_is_large && chat_focused)
+}
 
 /// Baseline logical sizes for each window at the "medium" preset.
 pub struct BaselineSize {
@@ -562,5 +729,213 @@ mod tests {
         let (x, y) =
             position_chat_relative_to_character(-100.0, -300.0, 390.0, 460.0, 400.0);
         assert_eq!(clamp_to_work_area(&screen, x, y, 460.0, 400.0), (x, y, false));
+    }
+}
+
+#[cfg(test)]
+mod large_chat_and_character_level_tests {
+    use super::*;
+    use crate::platform::{LogicalRect, ScreenInfo};
+
+    fn screen(x: f64, y: f64, w: f64, h: f64) -> ScreenInfo {
+        ScreenInfo {
+            total: LogicalRect::new(x, y, w, h + 60.0),
+            work_area: LogicalRect::new(x, y, w, h),
+            scale_factor: 2.0,
+        }
+    }
+
+    #[test]
+    fn a_large_chat_window_is_centered_and_stops_short_of_the_work_area() {
+        let geo = large_chat_geometry(&screen(0.0, 25.0, 1440.0, 875.0), 460.0, 300.0);
+        assert_eq!(geo.width, 1440.0 * 0.85);
+        assert_eq!(geo.height, 875.0 * 0.85);
+        // 居中：两侧留白相等
+        assert_eq!(geo.x, (1440.0 - geo.width) / 2.0);
+        assert_eq!(geo.y, 25.0 + (875.0 - geo.height) / 2.0);
+        // 不是最大化：四周都还留有空隙
+        assert!(geo.width < 1440.0 && geo.height < 875.0);
+    }
+
+    #[test]
+    fn the_work_area_offset_is_respected_so_the_window_clears_system_ui() {
+        // 副屏 + 菜单栏占位：work_area 的原点不是 (0,0)
+        let geo = large_chat_geometry(&screen(1440.0, 25.0, 1920.0, 1055.0), 460.0, 300.0);
+        assert!(geo.x >= 1440.0, "不能跑到主屏上去");
+        assert!(geo.y >= 25.0, "不能压在菜单栏下面");
+        assert!(geo.x + geo.width <= 1440.0 + 1920.0);
+        assert!(geo.y + geo.height <= 25.0 + 1055.0);
+    }
+
+    #[test]
+    fn a_large_window_always_opens_wide_enough_for_the_whole_interface() {
+        // 侧边栏在 1024px 才自动出现，project 标签的 Files 面板还要 776+256。
+        // 屏幕够大时 85% 本来就超过下限。
+        let big = large_chat_geometry(
+            &screen(0.0, 25.0, 1920.0, 1055.0),
+            CHAT_FULL_UI_MIN_WIDTH,
+            CHAT_FULL_UI_MIN_HEIGHT,
+        );
+        assert!(big.width >= CHAT_FULL_UI_MIN_WIDTH);
+        assert!(big.height >= CHAT_FULL_UI_MIN_HEIGHT);
+        assert_eq!(big.width, 1920.0 * 0.85);
+
+        // 屏幕偏小时，全 UI 下限接管，而不是退回 460px 那种连侧边栏都没有的宽度
+        let modest = large_chat_geometry(
+            &screen(0.0, 25.0, 1180.0, 760.0),
+            CHAT_FULL_UI_MIN_WIDTH,
+            CHAT_FULL_UI_MIN_HEIGHT,
+        );
+        assert_eq!(modest.width, CHAT_FULL_UI_MIN_WIDTH, "1180*0.85=1003 < 1040");
+        assert_eq!(modest.height, CHAT_FULL_UI_MIN_HEIGHT, "760*0.85=646 < 700");
+        assert!(modest.x >= 0.0 && modest.y >= 25.0, "仍要留在可视区内");
+    }
+
+    #[test]
+    fn the_full_ui_floor_clears_both_layout_breakpoints() {
+        // 侧边栏断点 1024 + project 视图需要的 256 侧栏 + 776 主区
+        assert!(CHAT_FULL_UI_MIN_WIDTH >= 1024.0);
+        assert!(CHAT_FULL_UI_MIN_WIDTH >= 256.0 + 776.0);
+    }
+
+    #[test]
+    fn a_remembered_size_is_returned_as_the_user_left_it() {
+        let scr = screen(0.0, 25.0, 1920.0, 1055.0);
+        assert_eq!(fit_remembered_chat_size(1400.0, 900.0, &scr), (1400.0, 900.0));
+        // 用户主动缩小过就尊重它 —— 只有首次开窗才默认大窗。
+        // 强行顶回全 UI 下限会让人觉得应用在跟自己的拖动对抗。
+        assert_eq!(fit_remembered_chat_size(700.0, 420.0, &scr), (700.0, 420.0));
+        // 但不能小于窗口本身的最小尺寸
+        assert_eq!(
+            fit_remembered_chat_size(100.0, 100.0, &scr),
+            (CHAT_MIN_WIDTH_FLOOR, CHAT_FULL_MIN_HEIGHT),
+        );
+        // 换到小屏幕上时不能超出可视区
+        let small = screen(0.0, 25.0, 1180.0, 760.0);
+        assert_eq!(fit_remembered_chat_size(1800.0, 1200.0, &small), (1180.0, 760.0));
+    }
+
+    #[test]
+    fn full_ui_is_decided_by_the_actual_width_not_by_how_the_window_was_summoned() {
+        assert!(is_full_ui_chat(CHAT_FULL_UI_MIN_WIDTH));
+        assert!(is_full_ui_chat(1600.0));
+        assert!(!is_full_ui_chat(CHAT_FULL_UI_MIN_WIDTH - 1.0));
+        assert!(!is_full_ui_chat(500.0));
+    }
+
+    #[test]
+    fn a_hidden_chat_window_is_shown() {
+        assert_eq!(chat_summon_action(false, true, false, 99_999), ChatSummonAction::Show);
+        assert_eq!(chat_summon_action(false, false, false, 99_999), ChatSummonAction::Show);
+    }
+
+    #[test]
+    fn a_buried_full_ui_window_is_raised_rather_than_hidden() {
+        // 大窗开着但早就被别的 app 盖住了：点小人该把它抬上来
+        assert_eq!(
+            chat_summon_action(true, true, false, 30_000),
+            ChatSummonAction::Raise,
+        );
+    }
+
+    #[test]
+    fn a_full_ui_window_that_was_frontmost_is_hidden_not_raised() {
+        // 关键场景：点小人这个动作本身会夺走聊天窗的焦点，紧接着 Focused(false)
+        // 就到了。若只看「当前有没有焦点」，结论永远是「被盖住」，大窗就再也
+        // 关不掉。靠「刚刚才失焦」把这次点击造成的失焦识别出来。
+        assert_eq!(
+            chat_summon_action(true, true, false, 50),
+            ChatSummonAction::Hide,
+        );
+        // 还持有焦点时同样是收起
+        assert_eq!(chat_summon_action(true, true, true, 0), ChatSummonAction::Hide);
+    }
+
+    #[test]
+    fn the_recent_focus_loss_window_has_a_boundary() {
+        assert_eq!(
+            chat_summon_action(true, true, false, CHAT_RECENT_FOCUS_LOSS_MS),
+            ChatSummonAction::Hide,
+        );
+        assert_eq!(
+            chat_summon_action(true, true, false, CHAT_RECENT_FOCUS_LOSS_MS + 1),
+            ChatSummonAction::Raise,
+        );
+    }
+
+    #[test]
+    fn a_small_pinned_window_only_toggles_because_it_is_never_buried() {
+        // 小窗是置顶浮层，没有「被盖住」这个状态
+        assert_eq!(chat_summon_action(true, false, false, 99_999), ChatSummonAction::Hide);
+        assert_eq!(chat_summon_action(true, false, true, 0), ChatSummonAction::Hide);
+    }
+
+    #[test]
+    fn a_negative_elapsed_time_does_not_count_as_recent() {
+        // 时钟回拨不该让「被盖住的窗口」被误判成「刚失焦」
+        assert_eq!(chat_summon_action(true, true, false, -5_000), ChatSummonAction::Raise);
+    }
+
+    #[test]
+    fn a_small_window_floats_and_a_full_ui_window_does_not() {
+        // 小窗是贴在小人旁边的浮层，要压在别的 app 之上
+        assert!(chat_should_pin(false, false));
+        // 全 UI 窗口是用来干活的，其它 app 必须能盖住它
+        assert!(!chat_should_pin(true, false));
+    }
+
+    #[test]
+    fn the_user_preference_can_pin_even_a_full_ui_window() {
+        assert!(chat_should_pin(true, true));
+        assert!(chat_should_pin(false, true));
+    }
+
+    #[test]
+    fn a_large_chat_window_is_not_dragged_around_by_the_character() {
+        // 全 UI 大窗是用户自己摆好、在里面干活的窗口，拖小人不该带走它
+        assert!(!chat_should_follow_character(true, true));
+        // 小窗和紧凑气泡仍然跟着小人
+        assert!(chat_should_follow_character(true, false));
+        // 用户关掉了跟随偏好，那两种情况都不跟
+        assert!(!chat_should_follow_character(false, false));
+        assert!(!chat_should_follow_character(false, true));
+    }
+
+    #[test]
+    fn a_tiny_screen_still_gets_at_least_the_window_minimums() {
+        // 85% 会小于窗口最小尺寸时，最小尺寸优先
+        let geo = large_chat_geometry(&screen(0.0, 0.0, 500.0, 320.0), 460.0, 300.0);
+        assert_eq!(geo.width, 460.0);
+        assert_eq!(geo.height, 300.0);
+    }
+
+    #[test]
+    fn a_screen_smaller_than_the_minimums_never_produces_an_oversized_window() {
+        let geo = large_chat_geometry(&screen(0.0, 0.0, 400.0, 250.0), 460.0, 300.0);
+        assert_eq!(geo.width, 400.0, "不能超出屏幕宽度");
+        assert_eq!(geo.height, 250.0);
+    }
+
+    #[test]
+    fn the_character_floats_whenever_the_chat_is_not_the_window_in_use() {
+        // 聊天窗不可见
+        assert!(character_should_float(false, true, true, false));
+        // 可见但是小窗
+        assert!(character_should_float(true, false, true, false));
+        // 大窗但没有焦点：小人要回到浮动层，压在其它 app 之上
+        assert!(character_should_float(true, true, false, false));
+    }
+
+    #[test]
+    fn only_a_focused_large_chat_drops_the_character_off_the_floating_level() {
+        assert!(!character_should_float(true, true, true, false));
+    }
+
+    #[test]
+    fn a_pinned_large_chat_leaves_the_character_floating() {
+        // 用户开了「最大化时保持置顶」：两个窗口同层，焦点顺序已经能让
+        // 聊天窗在前，把小人降下去只会让它掉到别的 app 后面。
+        assert!(character_should_float(true, true, true, true));
+        assert!(character_should_float(true, true, false, true));
     }
 }

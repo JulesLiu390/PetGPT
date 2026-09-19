@@ -1228,14 +1228,17 @@ async function executeStickerSave(petId, args, imageUrlMap) {
     return { content: [{ type: 'text', text: `该表情包已收藏过（#${existingWithUrl.id}：${existingWithUrl.meaning}），无需重复保存。` }] };
   }
 
-  // 4. 下载图片
+  // 4. 取图片数据。本地路径直接读文件 —— 图片现在优先解析成 NapCat 的本地
+  //    副本，而 QQ 图床那个 URL 外部根本拉不动（HTTP 400，要 QQ 自己的鉴权）。
   let base64Data, mimeType;
   try {
-    const result = await downloadUrlAsBase64(url);
+    const result = url.startsWith('/')
+      ? await tauri.readLocalImageAsBase64(url)
+      : await downloadUrlAsBase64(url);
     base64Data = result.data;
     mimeType = result.mime_type;
   } catch (e) {
-    return { error: `下载图片失败: ${e}` };
+    return { error: `读取图片失败: ${e}` };
   }
 
   if (!base64Data) {

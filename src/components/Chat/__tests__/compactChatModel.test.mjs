@@ -13,6 +13,7 @@ import {
   getCompactChatView,
   getCompactChatWindowHeight,
   nextEmptyChatPresentation,
+  pickPetIdForNewChat,
   normalizeTabStateSnapshot,
   shouldUseCompactChat,
 } from '../compactChatModel.js';
@@ -271,4 +272,80 @@ test('cancelling during a read blocks late state and removes the listener', asyn
 
   assert.equal(disposeCount, 1);
   assert.deepEqual(snapshots, []);
+});
+
+test('summoning from the character opens the full dialog, not the quick-ask bubble', () => {
+  // 点角色 / 点聊天图标：直接进常规布局
+  assert.equal(
+    nextEmptyChatPresentation(
+      EMPTY_CHAT_PRESENTATION.COMPACT,
+      EMPTY_CHAT_PRESENTATION_EVENT.CHAT_SUMMON,
+    ),
+    EMPTY_CHAT_PRESENTATION.TAB,
+  );
+});
+
+test('summoning from the shortcut key opens the quick-ask bubble', () => {
+  // 快捷键是唯一进紧凑气泡的入口，即使上一次停在常规布局
+  assert.equal(
+    nextEmptyChatPresentation(
+      EMPTY_CHAT_PRESENTATION.TAB,
+      EMPTY_CHAT_PRESENTATION_EVENT.QUICK_ASK_SUMMON,
+    ),
+    EMPTY_CHAT_PRESENTATION.COMPACT,
+  );
+});
+
+test('a quick-ask bubble still expands to the regular layout once content arrives', () => {
+  // 提问之后要变成常规小窗（能显示回复），而不是留在只有输入框的气泡里
+  let presentation = nextEmptyChatPresentation(
+    EMPTY_CHAT_PRESENTATION.TAB,
+    EMPTY_CHAT_PRESENTATION_EVENT.QUICK_ASK_SUMMON,
+  );
+  assert.equal(presentation, EMPTY_CHAT_PRESENTATION.COMPACT);
+  presentation = nextEmptyChatPresentation(
+    presentation,
+    EMPTY_CHAT_PRESENTATION_EVENT.CONTENT_ACTIVE,
+  );
+  assert.equal(presentation, EMPTY_CHAT_PRESENTATION.TAB);
+});
+
+// ==================== 新建对话挑哪个助手 ====================
+// project 标签与聊天标签同处一个 tabs 数组，但它没有 petId。
+
+const chatTab = (id, petId) => ({ id, petId, label: id });
+const projectTab = (id) => ({ id, kind: 'project', projectId: id.slice(8), label: id });
+
+test('当前是聊天标签时用它自己的助手', () => {
+  const tabs = [chatTab('c1', 'pet-a'), chatTab('c2', 'pet-b')];
+  assert.equal(pickPetIdForNewChat(tabs, 'c2'), 'pet-b');
+});
+
+test('当前是 project 标签时退回到还开着的聊天标签', () => {
+  // 这正是「+ 号点了没反应」的场景：project 标签没有 petId
+  const tabs = [chatTab('c1', 'pet-a'), projectTab('project:p1')];
+  assert.equal(pickPetIdForNewChat(tabs, 'project:p1'), 'pet-a');
+});
+
+test('project 标签排在前面也不会被选中', () => {
+  const tabs = [projectTab('project:p1'), chatTab('c1', 'pet-a')];
+  assert.equal(pickPetIdForNewChat(tabs, 'project:p1'), 'pet-a');
+  // activeTabId 对不上任何标签时同样跳过 project 标签
+  assert.equal(pickPetIdForNewChat(tabs, 'gone'), 'pet-a');
+});
+
+test('只剩 project 标签时返回 null，由调用方去让用户选助手', () => {
+  assert.equal(pickPetIdForNewChat([projectTab('project:p1')], 'project:p1'), null);
+});
+
+test('空列表和脏输入都返回 null 而不是抛错', () => {
+  assert.equal(pickPetIdForNewChat([], 'anything'), null);
+  assert.equal(pickPetIdForNewChat(null, 'anything'), null);
+  assert.equal(pickPetIdForNewChat(undefined, undefined), null);
+  assert.equal(pickPetIdForNewChat([null, undefined], 'x'), null);
+});
+
+test('petId 为空串的标签不算数', () => {
+  const tabs = [chatTab('c1', ''), chatTab('c2', 'pet-b')];
+  assert.equal(pickPetIdForNewChat(tabs, 'c1'), 'pet-b');
 });

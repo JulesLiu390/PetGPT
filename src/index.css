@@ -1,5 +1,12 @@
 @import "tailwindcss";
 
+/* 终端与文件预览用的等宽栈。必须带 CJK 等宽回退：xterm 按字符数算列宽，
+   中文如果落到非等宽字体上，整个终端的列对齐会崩。 */
+:root {
+  --petgpt-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Noto Sans Mono CJK SC", "Sarasa Mono SC", "PingFang SC", monospace;
+}
+
 html, body, #root {
   background: transparent;
   overflow: clip;

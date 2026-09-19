@@ -31,7 +31,7 @@ use tokio::sync::{Mutex, RwLock};
 use url::Url;
 use uuid::Uuid;
 
-const QQ_MCP_SOURCE: &str = "git+https://github.com/JulesLiu390/Amadeus-QQ-MCP.git@41be98028383ab80745a164ae75f9e8840525e18";
+const QQ_MCP_SOURCE: &str = "git+https://github.com/JulesLiu390/Amadeus-QQ-MCP.git@2ec3c8140afd433c42f7d65108bc15fd87283b18";
 const DEFAULT_WEBUI_URL: &str = "http://127.0.0.1:6099";
 const MACOS_SOURCE_QQ_APP: &str = "/Applications/QQ.app";
 const MACOS_BRIDGE_APP_NAME: &str = "PetGPT QQ Bridge.app";

@@ -13,7 +13,7 @@ import { createRoot } from 'react-dom/client';
 import html2canvas from 'html2canvas';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import hljs from 'highlight.js';
+import hljs from '../../utils/highlighter.js';
 import * as tauri from '../../utils/tauri';
 
 // ========== 分享卡片专用的静态子组件 ==========

@@ -424,9 +424,14 @@ fn handle_command(app: &tauri::AppHandle, cmd: &str) {
                         log::error!("[LinuxShortcuts] Failed to hide chat: {}", error);
                     }
                 } else {
-                    if let Err(error) =
-                        crate::show_chat_window_inner(app, win_state.inner().as_ref())
-                    {
+                    // 快捷键是“快捷提问”入口：要小气泡，不要大对话框
+                    let db = app.state::<crate::DbState>();
+                    if let Err(error) = crate::open_chat_with_intent(
+                        app,
+                        win_state.inner().as_ref(),
+                        db.inner().as_ref(),
+                        "quick",
+                    ) {
                         log::error!("[LinuxShortcuts] Failed to show chat: {}", error);
                     } else if !win_state.chat_compact.load(std::sync::atomic::Ordering::SeqCst) {
                         if let Some((x, y)) = SAVED_CHAT_POS.lock().unwrap().take() {
