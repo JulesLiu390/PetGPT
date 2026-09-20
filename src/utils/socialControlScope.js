@@ -41,6 +41,7 @@ export function createDefaultSocialConfig(petId = '') {
     explicitPromptCache: true,
     ttsConfig: null,
     imageGenConfig: null,
+    moodTagConfig: null,
   };
 }
 

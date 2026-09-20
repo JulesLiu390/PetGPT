@@ -387,6 +387,18 @@ export const llmProxyCall = (endpoint, headers, body) => {
 };
 
 /**
+ * 消息打标代理（TypeSafe Jev）。
+ *
+ * 不能用前端 fetch：TypeSafe 网关有 origin 白名单，webview 带 Authorization
+ * 的请求会触发 CORS 预检，预检直接返回 `400 Disallowed CORS origin`。
+ * 走 Rust 的 reqwest 就没有同源策略这回事。
+ *
+ * 独立于 llm_proxy_call：那边 2 路并发 / 180s 超时，这边 16 路 / 3s。
+ */
+export const moodTagProxyCall = (endpoint, apiKey, body) =>
+  invoke('mood_tag_proxy_call', { endpoint, apiKey, body });
+
+/**
  * LLM HTTP GET 代理调用
  * 用于 /models 这类端点，绕过 WKWebView/CORS 对本地或局域网 HTTP endpoint 的限制。
  */

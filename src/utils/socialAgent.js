@@ -5,15 +5,27 @@
  * 每次调用 LLM 都是独立的单轮请求，不累积上下文。
  */
 
-import { buildSocialPrompt, buildIntentSystemPrompt } from './socialPromptBuilder';
-import { buildCacheKey, shouldUseExplicitCache, formatUsageLogMessage } from './promptCache';
+import { buildSocialPrompt } from './socialPromptBuilder';
 import { writeIntentTrace } from './intentTraining';
-import { createIntentOptionalToolLedger, formatIntentOptionalToolLedgerResume, recordIntentOptionalToolUse } from './intentToolLedger';
+import { buildCacheKey, shouldUseExplicitCache, formatUsageLogMessage } from './promptCache';
 import { socialTargetDir } from './socialTargetType.js';
 import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getIntentPlanToolDefinitions, executeStickerBuiltinTool, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition, getSituationToolDefinition, autoFixPlanArgs } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition } from './workspace/socialToolExecutor';
+import { getTurnNoteToolDefinition, getCheckNewMessagesToolDefinition } from './workspace/socialToolExecutor';
+import {
+  createSession, beginTurn, endTurn, appendHistory, canInject, recordInjection,
+  recordSend, canSendNow, sendWindowState, sessionStats, REGISTER_SILENT,
+  shouldRemindBacklog, markBacklogReminded,
+  BACKLOG_REMINDER_AT, SEND_WINDOW_MAX, SEND_WINDOW_MS,
+} from './social/sessionState.js';
+import { prepareRequestItems, estimateTokens, COMPACT_THRESHOLD_TOKENS } from './social/compaction.js';
+import { recycleSessionImages } from './social/contextTrim.js';
+import { toProviderTurns, ensureUserLast, renderTurnNote, formatSelfMessage } from './social/sessionTurn.js';
+import { tagBatch, renderMoodTag, MOOD_TAG_TIMEOUT_MS } from './social/moodTag.js';
+import { createMoodTagStore } from './social/moodTagStore.js';
+import { readBarometer, renderBarometer, BAROMETER_WINDOW } from './social/barometer.js';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource, reapSubagentRegistry } from './subagentManager';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -300,27 +312,6 @@ function logUsageRecord(record) {
 /** 保留最近多少条 Intent 行动记录（防漂移的客观历史） */
 const INTENT_HISTORY_LIMIT = 5;
 
-/**
- * 追加一条 Intent 行动记录到 scratch/intent_history.jsonl，
- * 并保证文件只保留最近 INTENT_HISTORY_LIMIT 条。
- *
- * entry 形状:
- *   { ts, actions: [{type, ...}], briefDigest }
- */
-async function appendIntentHistory(petId, targetId, targetType, entry) {
-  if (!petId || !targetId || !entry) return;
-  const dir = socialTargetDir(targetType);
-  const path = `social/${dir}/scratch_${targetId}/intent_history.jsonl`;
-  let existing = '';
-  try { existing = await tauri.workspaceRead(petId, path); } catch { /* file may not exist */ }
-  const prev = (existing || '').split('\n').filter(line => line.trim());
-  const next = [...prev, JSON.stringify(entry)].slice(-INTENT_HISTORY_LIMIT);
-  try {
-    await tauri.workspaceWrite(petId, path, next.join('\n') + '\n');
-  } catch (e) {
-    console.warn('[IntentHistory] write failed:', e);
-  }
-}
 
 /**
  * 把 write_intent_plan 的 args 拆成结构化 markdown，作为日志的可展开详情。
@@ -385,171 +376,6 @@ function _buildPlanDetails(args = {}) {
   return parts.join('\n');
 }
 
-/**
- * Intent eval 前写 recent_self.md，记录"我刚做了什么"。
- * Intent 系统提示要求 LLM 调 social_read 这个文件作为第一步，强迫它处理已表达的内容，
- * 防止下一轮 plan 派一个重复的 reply。
- *
- * 内容包含：
- *  - 最近 N 条 sentMessagesCache 原文（带时间戳）
- *  - 在途 Reply brief（上轮 plan 派了 reply 但 sentCache 里还没出现新消息）
- *  - 上轮已发送 Reply brief（sentCache 已有此 plan 之后的消息）
- *  - 上轮派出的图片文件名
- */
-async function writeRecentSelfFile(petId, targetId, targetType, lastPlan, prevEvalTime) {
-  if (!petId || !targetId) return;
-  const dir = socialTargetDir(targetType);
-  const path = `social/${dir}/scratch_${targetId}/recent_self.md`;
-  const cached = sentMessagesCache.get(targetId) || [];
-  const recent = cached.slice(-5);
-  const lines = ['# 你最近的动作（必读）', ''];
-
-  if (recent.length > 0) {
-    lines.push('## 最近发出的原文');
-    for (const m of recent) {
-      const ts = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
-      const content = (m.content || '').slice(0, 300);
-      lines.push(`- ${ts}: ${content}`);
-    }
-    lines.push('');
-  } else {
-    lines.push('## 最近发出的原文');
-    lines.push('（暂无最近发送记录）');
-    lines.push('');
-  }
-
-  if (lastPlan?.actions?.some(a => a.type === 'reply')) {
-    let brief = '';
-    try {
-      brief = await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/reply_brief.md`).catch(() => '');
-    } catch { /* ignore */ }
-    if (brief && brief.trim()) {
-      const hasSentAfterPlan = cached.some(m => new Date(m.timestamp).getTime() > prevEvalTime);
-      if (hasSentAfterPlan) {
-        lines.push('## 上轮已发送的 Reply（brief，已经说完）');
-        lines.push(brief.trim());
-        lines.push('');
-        lines.push('🚫 以上观点已经表达完毕。严禁再 reply 一个内容相同/相似的（包括"换说法重复结论"或"把长内容拆开再发"）。');
-        lines.push('只在出现以下情况才可以再 reply：');
-        lines.push('- 有人针对你刚才那句话追问或反驳');
-        lines.push('- 出现你没回应过的新人新话题');
-        lines.push('- 你有实质性的新论据/新角度/新信息要补充');
-        lines.push('');
-      } else {
-        lines.push('## 正在发送中的 Reply（brief，Reply 层正在生成内容）');
-        lines.push(brief.trim());
-        lines.push('');
-        lines.push('🚫 以上 brief 即将由 Reply 层说出。本轮 plan 严禁派一个内容相同或相似的 reply。');
-        lines.push('');
-      }
-    }
-  }
-
-  if (lastPlan?.actions?.some(a => a.type === 'image')) {
-    const sentFiles = lastPlan.actions.filter(a => a.type === 'image').map(a => a.file).filter(Boolean);
-    if (sentFiles.length > 0) {
-      lines.push('## 上轮发出的图片');
-      for (const f of sentFiles) lines.push(`- ${f}`);
-      lines.push('');
-      lines.push('🚫 以上图片已发过，不要再发同一张。');
-      lines.push('');
-    }
-  }
-
-  // 在途/最近的 AI 生图任务（generate_image_send 是 fire-and-forget，
-  // 状态通过 sentCache 占位条 _genImageFileName 跟踪）
-  // 把 filename / reason / prompt 全展开，让 Intent 做主题级去重
-  const imageGenEntries = cached.filter(m => m && m._genImageFileName);
-
-  // 孤儿检测：扫 pending_gen/ 锁文件，dispatchTs > 11 分钟还没被清的视为 IIFE 死亡
-  // （IIFE 自己有 10 分钟 fetch 超时；超时还会自清锁。锁还在=进程被杀）
-  // 用 Map 合并去重：同 fileName 优先用 sentCache 状态（活进程更新过的），锁文件只补缺失的孤儿
-  const ORPHAN_AGE_MS = 11 * 60 * 1000;
-  const seenFileNames = new Set(imageGenEntries.map(m => m._genImageFileName));
-  const orphans = [];
-  try {
-    const lockDir = `social/${dir}/scratch_${targetId}/pending_gen`;
-    const list = await tauri.workspaceListDir(petId, lockDir).catch(() => null);
-    if (Array.isArray(list)) {
-      for (const f of list) {
-        const name = (f && f.name) ? f.name : '';
-        if (!name.endsWith('.json')) continue;
-        const fileNameFromLock = name.replace(/\.json$/, '');
-        try {
-          const raw = await tauri.workspaceRead(petId, `${lockDir}/${name}`).catch(() => '');
-          if (!raw) continue;
-          const info = JSON.parse(raw);
-          const ageMs = Date.now() - (info?.dispatchTs || 0);
-          // 同 fileName 在 sentCache 已经有状态记录 → 跳过（活进程已经管它了）
-          if (seenFileNames.has(fileNameFromLock)) continue;
-          // 老于 11 分钟的 → 孤儿（IIFE 死亡）
-          if (ageMs > ORPHAN_AGE_MS) {
-            orphans.push({
-              fileName: fileNameFromLock,
-              prompt: (info.prompt || '').slice(0, 200),
-              reason: (info.reason || '(未记录)').slice(0, 200),
-              dispatchTs: info.dispatchTs || 0,
-              ageMin: Math.round(ageMs / 60000),
-            });
-            // 顺手清掉孤儿锁文件，避免下次又算一遍
-            await tauri.workspaceDeleteFile(petId, `${lockDir}/${name}`).catch(() => {});
-          }
-          // 11 分钟以内的还可能在生成中（10min timeout 缓冲），不动
-        } catch { /* 单条解析失败不影响其他 */ }
-      }
-    }
-  } catch { /* 没有 pending_gen 目录就跳过 */ }
-
-  if (imageGenEntries.length > 0 || orphans.length > 0) {
-    const recentGen = imageGenEntries.slice(-6);
-    lines.push('## 在途 / 最近的 AI 生图任务（generate_image_send 状态）');
-    lines.push('（**判断重复**：看 reason 字段——同主题/同请求只画一次。filename 不同 prompt 不同但 reason 相近=重复）');
-    lines.push('');
-    for (const m of recentGen) {
-      const ts = new Date(m.timestamp).toLocaleTimeString('zh-CN', { hour12: false });
-      const status = m._genImageStatus || 'unknown';
-      const tag = status === 'dispatching' ? '⏳ 派发中'
-        : status === 'sent' ? '✅ 已发'
-        : status === 'failed' ? '❌ 失败'
-        : status;
-      lines.push(`- ${ts} ${tag}`);
-      lines.push(`    filename: ${m._genImageFileName || '?'}`);
-      lines.push(`    reason:   ${(m._genImageReason || '(未填)').slice(0, 200)}`);
-      lines.push(`    prompt:   ${(m._genImagePrompt || '').slice(0, 200)}`);
-    }
-    for (const o of orphans) {
-      const ts = o.dispatchTs ? new Date(o.dispatchTs).toLocaleTimeString('zh-CN', { hour12: false }) : '?';
-      lines.push(`- ${ts} ☠️ 孤儿（${o.ageMin} 分钟前派发，IIFE 没走完——大概是 HMR 重载或 app 重启杀了进程）`);
-      lines.push(`    filename: ${o.fileName}`);
-      lines.push(`    reason:   ${o.reason}`);
-      lines.push(`    prompt:   ${o.prompt}`);
-    }
-    lines.push('');
-    const hasFailed = recentGen.some(m => m._genImageStatus === 'failed');
-    const hasDispatching = recentGen.some(m => m._genImageStatus === 'dispatching');
-    const hasSent = recentGen.some(m => m._genImageStatus === 'sent');
-    const hasOrphan = orphans.length > 0;
-    if (hasDispatching) {
-      lines.push('⏳ 有正在派发中的 AI 生图任务（最多 10 分钟会出结果）→ 同主题**本轮严禁再调**（不论换什么 filename / prompt 风格）。无关的另一张可以并发。');
-    }
-    if (hasSent) {
-      lines.push('✅ 有已发出的 AI 生图任务 → 看 reason，本轮如果"为什么"和已发的相近 → **不要再画**。一张就够了。');
-    }
-    if (hasFailed) {
-      lines.push('❌ 有失败的 AI 生图任务 → 同主题**不要立刻重试**。失败原因常是配置/网络/参数问题，改 reply 告诉用户或换 image_send 发已有截图。');
-    }
-    if (hasOrphan) {
-      lines.push('☠️ 有孤儿派发（IIFE 死亡）→ 通常是 dev 模式 HMR 或重启导致。如果用户的请求还在等，可以**有节制地重画一次**；如果已经过去很久或话题转移了，就别画了。');
-    }
-    lines.push('');
-  }
-
-  try {
-    await tauri.workspaceWrite(petId, path, lines.join('\n'));
-  } catch (e) {
-    console.warn('[RecentSelf] write failed:', e);
-  }
-}
 
 /**
  * 获取社交日志
@@ -916,7 +742,7 @@ async function describeImage(resolvedImage, contextBefore, contextAfter, senderN
  * @param {boolean} options.sanitizeAtMe - 是否把 @me 替换为 @[已读]（用于历史消息）
  * @returns {Array<{role: string, content: string}>}
  */
-function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', ownerName = '', ownerSecret = '', nameL = '', nameR = '', msgL = '', msgR = '', imageUrlMap = null } = {}) {
+function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', ownerName = '', ownerSecret = '', nameL = '', nameR = '', msgL = '', msgR = '', imageUrlMap = null, moodTags = null } = {}) {
   if (!messages || messages.length === 0) return [];
 
   // 用于从文本中剥离所有安全分隔符和令牌的辅助函数
@@ -975,7 +801,11 @@ function buildTurnsFromMessages(messages, { sanitizeAtMe = false, ownerQQ = '', 
       const msgIdTag = msg.message_id ? ` [#${msg.message_id}]` : '';
       let msgContent = stripSecrets(msg.content || '');
       const tsPrefix = tsTag ? `[${tsTag}] ` : '';
-      text = `${tsPrefix}${nameL}${name}(${idTag})${msgIdTag}${nameR} ${msgL}${msgContent}${msgR}`;
+      // 状态标签放在名字块内（可信区）——它是运行时产出的元数据，不是用户输入。
+      // 值来自 Jev 的受限枚举并在 parseMoodAnswers 里过了白名单，这里再 strip 一次
+      // 分隔符做纵深防御。
+      const moodTag = moodTags ? stripSecrets(renderMoodTag(moodTags.get(String(msg.message_id)))) : '';
+      text = `${tsPrefix}${nameL}${name}(${idTag})${moodTag}${msgIdTag}${nameR} ${msgL}${msgContent}${msgR}`;
     }
 
     if (sanitizeAtMe) {
@@ -2308,16 +2138,6 @@ export async function startSocialLoop(config, onStatusChange) {
   }
 
   // 解析 Intent API provider（独立时用独立配置，否则用 Reply + 可选模型名覆盖）
-  let intentLLMConfig = replyLLMConfig;
-  if (config.intentApiProviderId) {
-    const resolved = await resolveApiProvider(config.intentApiProviderId, config.intentModelName || '');
-    if (resolved) {
-      intentLLMConfig = resolved;
-      addLog('info', `Intent LLM resolved: ${resolved.modelName} (${resolved.apiFormat})`);
-    } else {
-      addLog('warn', 'Intent API provider not resolved, falling back to Reply LLM');
-    }
-  }
 
   // 解析 Compress API provider（独立时用独立配置，否则用 Reply）
   let compressLLMConfig = replyLLMConfig;
@@ -2436,6 +2256,16 @@ export async function startSocialLoop(config, onStatusChange) {
     // customGroupRules 从 live map 读取（支持运行时热更新）
   };
   
+  // 状态打标（"敬酒系统"）配置。关掉时整条链路不产生任何调用、也不渲染标签。
+  const moodConfig = {
+    enabled: config.moodTagConfig?.enabled === true && !!config.moodTagConfig?.apiKey,
+    apiKey: config.moodTagConfig?.apiKey || '',
+    model: config.moodTagConfig?.model || 'jev-latest',
+  };
+  if (moodConfig.enabled) {
+    addLog('info', `🏷️ 状态打标已启用（${moodConfig.model}）`);
+  }
+
   const replyIntervalMs = (config.replyInterval ?? 0) * 1000;
   const observerIntervalMs = (config.observerInterval || 180) * 1000;
   const BATCH_POLL_INTERVAL_MS = 1000; // 始终 1s 拉取
@@ -2491,21 +2321,13 @@ export async function startSocialLoop(config, onStatusChange) {
   // 2 分钟没开始新一轮说明 setTimeout 链断了（未捕获异常 / invoke 永不 settle）。
   const FETCHER_WATCHDOG_TIMEOUT_MS = 2 * 60 * 1000;
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
-  // ── Reply 并发派发 ──
-  // 旧机制：replyWakeFlag (one-shot) → Reply loop 消费后启动单一 LLM。问题：Reply LLM 慢时，
-  // 新派的 wake flag 可能被消费但因 llmRunning=true 而丢弃。
-  // 新机制：Intent 派 reply 时直接 spawnReplyTask 并发起 task，并发上限 3 条。
-  // 每个在途任务携带 brief 快照——在 executeGetSituation 中按时间顺序伪装成"即将送达"的消息块，
-  // 让下轮 Intent eval 看到自己已经派出但群友还没看到的 reply，避免重复派同主题。
-  // 任务进入 finally（成功 / 失败 / 取消）即被 splice 删除——【发送后就删除该伪装消息】。
-  // 旧 replyWakeFlag/replyWakeResolvers 已废弃。
-  const inFlightReplies = new Map();              // target → Array<{ id, brief, createdAt }>（按 push 顺序即时间顺序）
-  const MAX_CONCURRENT_REPLY = 3;                 // 每 target Reply 并发上限
-  // 在途 Reply 的最大存活时间：超过即视为僵死并回收并发槽位。
-  // 正常一轮 Reply（含 Vision 预算 + LLM 重试 + MCP 发送）远低于此值。
-  const REPLY_TASK_MAX_AGE_MS = 10 * 60 * 1000;
+  // Reply 并发机制（inFlightReplies / MAX_CONCURRENT_REPLY / 僵死槽位回收）已随
+  // session 化删除：实测 4483 次 Reply 里 97.4% 并发度为 1，只有 4 次摸到上限 3。
+  // 现在一个 target 一条 session 串行跑，多条回复在同一个 turn 内顺序发出。
 
   // === Lessons Review 机制 ===
+  // 暂未接入 session 循环（消耗偏大，先留着不用）。保留完整实现是为了将来
+  // 想复用时不用从 git 历史里刨；接线点是 runSessionTurn 收尾处。
   const LESSONS_MAX_WAIT_MS = 30 * 60 * 1000;       // 最长 30 分钟必须 review
   const pendingReviews = new Map();                  // target → [{ intentSnapshot, replyTime, chatSnapshot }]
   const lessonsReviewTimers = new Map();             // target → setTimeout id（30 分钟兜底计时器）
@@ -2513,6 +2335,7 @@ export async function startSocialLoop(config, onStatusChange) {
   /**
    * 快照 INTENT 文件 + 对话记录，加入待 review 队列
    */
+  // eslint-disable-next-line no-unused-vars -- 见上：lessons review 暂时保留不接线
   const snapshotForReview = async (target, targetType) => {
     try {
       if (!isRuntimeGenerationCurrent()) return;
@@ -2901,15 +2724,6 @@ JSON 数组格式，每条：
     return { changed, hasAtMe, atMeIds, newCount: newMessages.length, isFirstRun };
   };
 
-  /** 当前 buffer 内仍未被任何 Reply 消费/预留的 @me。 */
-  const getUnconsumedAtMeIds = (target) => {
-    const buf = dataBuffer.get(target);
-    if (!buf) return [];
-    const consumed = consumedAtMe.get(target) || new Set();
-    return buf.messages
-      .filter(m => m.is_at_me && !m.is_self && m.message_id && !consumed.has(m.message_id))
-      .map(m => m.message_id);
-  };
 
   /** 检查 intentWatermarks 之后是否有非自身的新消息（不更新水位线）*/
   const hasNewNonSelfMessages = (target) => {
@@ -2980,14 +2794,14 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             { role: 'system', content: systemPrompt },
             { role: 'user', content: userMsg },
           ],
-          apiFormat: intentLLMConfig.apiFormat,
-          apiKey: intentLLMConfig.apiKey,
-          model: intentLLMConfig.modelName,
-          baseUrl: intentLLMConfig.baseUrl,
+          apiFormat: replyLLMConfig.apiFormat,
+          apiKey: replyLLMConfig.apiKey,
+          model: replyLLMConfig.modelName,
+          baseUrl: replyLLMConfig.baseUrl,
           mcpTools: tools,
           options: {
             temperature: 0.2,
-            explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
+            explicitCache: shouldUseExplicitCache(config, replyLLMConfig.apiFormat),
             cacheKey: buildCacheKey(config.petId, '', 'MdOrganizer'),
           },
           builtinToolContext: { petId: config.petId },
@@ -3035,67 +2849,6 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     await tauri.workspaceWrite(config.petId, `social/${dir}/PEOPLE_CACHE_${target}.md`, combined);
   };
 
-  /**
-   * 从 dataBuffer 获取单个 target 的最近消息，构建与 Reply 完全一致的多轮消息数组。
-   * 返回 { turns: [{role, content}], ephemeral: {ownerSecret, nameL, nameR, msgL, msgR} }
-   */
-  const buildIntentTurns = (target) => {
-    const MAX_MSGS = INTENT_IMAGE_WINDOW;
-    const buf = dataBuffer.get(target);
-    if (!buf || buf.messages.length === 0) return { turns: [], ephemeral: null };
-    // Intent 只用文本描述（_imageDescs），剥离未 resolve 的原始图片 URL
-    // 避免把未知 MIME 的原始 URL 传给 Gemini（会因 GIF 等不支持格式报错）
-    let recent = buf.messages.slice(-MAX_MSGS).map(m => {
-      if (config.enableImages === false) return { ...m, _images: [] };
-      // 保留 _imageDescs（文字描述），剥离未经 resolve 的原始 _images
-      // 只保留已 resolve 为 base64 的图片（data 不以 http 开头的）
-      const safeImages = (m._images || []).filter(img => img.data && !img.data.startsWith('http'));
-      return { ...m, _images: safeImages };
-    });
-    // 注入 sentMessagesCache 中的 bot 消息（让 Intent 看到已发送的表情包等）
-    const cachedSent = sentMessagesCache.get(target) || [];
-    if (cachedSent.length > 0) {
-      const existingIds = new Set(
-        recent.filter(m => m.is_self && m.message_id).map(m => m.message_id)
-      );
-      const oldest = recent.length > 0 ? recent[0].timestamp : null;
-      for (const cached of cachedSent) {
-        if (cached.message_id && existingIds.has(cached.message_id)) continue;
-        if (oldest && cached.timestamp < oldest) continue;
-        recent.push({
-          message_id: cached.message_id || `local_${cached.timestamp}`,
-          timestamp: cached.timestamp,
-          sender_id: 'self',
-          sender_name: 'bot',
-          content: cached.content,
-          is_at_me: false,
-          is_self: true,
-          _images: [],
-        });
-      }
-      recent.sort((a, b) => (a.timestamp || '').localeCompare(b.timestamp || ''));
-    }
-    // 生成本轮临时安全令牌（每次评估都不同）
-    const _rnd = () => crypto.randomUUID().slice(0, 6);
-    const eph = {
-      ownerSecret: _rnd(),
-      nameL: `«${_rnd()}»`,
-      nameR: `«/${_rnd()}»`,
-      msgL:  `‹${_rnd()}›`,
-      msgR:  `‹/${_rnd()}›`,
-    };
-    const turns = buildTurnsFromMessages(recent, {
-      sanitizeAtMe: false,
-      ownerQQ: promptConfig.ownerQQ,
-      ownerName: promptConfig.ownerName,
-      ownerSecret: eph.ownerSecret,
-      nameL: eph.nameL,
-      nameR: eph.nameR,
-      msgL: eph.msgL,
-      msgR: eph.msgR,
-    });
-    return { turns, ephemeral: eph };
-  };
 
   /**
    * VLM 关闭时的图片预处理：把 buffer 里的图 resolve 成 base64 就地写回，
@@ -3246,693 +2999,6 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   };
 
   /**
-   * intentLoop: 每群独立的意图循环
-   * 
-   * 生命周期：
-   *   sleeping → (新消息到达) → awake → 每 1min 评估 → LLM 输出 idle 或 3min 无新消息 → sleep（保留历史）
-   *
-   * @param {string} target - 群号/好友号
-   */
-  const intentLoop = async (target, targetType) => {
-    const state = getIntentState(target);
-    const tName = () => targetNamesCache.get(target) || target;
-    state.targetType = targetType;
-    // 本实例的代次快照：看门狗重启会 +1，旧实例从阻塞中解冻后凭此退出，
-    // 避免同一 target 出现两个并发 Intent 循环。
-    const myEpoch = state.epoch;
-    const isMyEpochCurrent = () => state.epoch === myEpoch;
-    touchIntent(state);
-
-    while (activeLoop && activeLoop._generation === loopGeneration && isMyEpochCurrent()) {
-      try {
-        touchIntent(state);
-        // ── 暂停检查 ──
-        if (pausedTargets.get(target)) {
-          await sleepInterruptible(state, 2000);
-          continue;
-        }
-
-        const now = Date.now();
-
-        // ── 模式感知的评估触发 ──
-        const intentLurkMode = lurkModes.get(target) || 'normal';
-        // ── post-reply 休息：发完消息后等 20s 再重评（有新消息则立即跳过等待） ──
-        if (state.postReplyRestUntil) {
-          const remaining = state.postReplyRestUntil - now;
-          if (remaining > 0 && !hasNewNonSelfMessages(target)) {
-            await sleepInterruptible(state, remaining);
-          }
-          state.postReplyRestUntil = 0;
-          state.forceEval = 'reply'; // 休息结束后必定触发一次 eval
-        }
-
-        const wasForceEval = state.forceEval; // null | 'reply' | 'subagent' | 'newmsg'
-        if (state.forceEval) {
-          state.forceEval = null;
-          const sourceLabel = wasForceEval === 'subagent' ? 'Subagent done' : wasForceEval === 'newmsg' ? 'new msgs during eval' : 'Reply';
-          addLog('intent', `🧠 [${tName()}] force-eval: ${sourceLabel}`, null, target);
-        } else if (intentLurkMode === 'normal') {
-          // normal 模式：等新消息触发
-          const sinceLastEval = state.lastEvalTime > 0 ? now - state.lastEvalTime : Infinity;
-          const intentDetection = detectChange(target, intentWatermarks);
-          // 首次运行：设水位线后立即评估（苏醒启始评估）
-          if (intentDetection?.isFirstRun) {
-            const buf = dataBuffer.get(target);
-            const lastMsg = buf?.messages?.[buf.messages.length - 1];
-            if (lastMsg?.message_id) intentWatermarks.set(target, lastMsg.message_id);
-            // 不 continue，直接进入评估
-          } else {
-            const hasNewMessages = intentDetection && intentDetection.changed;
-            if (!hasNewMessages) {
-              const lastNonSelfTime = getLastNonSelfMessageTime(target);
-              const idleMs = lastNonSelfTime > 0 ? Date.now() - lastNonSelfTime : 0;
-              if (idleMs > INTENT_IDLE_SLEEP_MS) {
-                addLog('intent', `🧠 [${tName()}] idle sleep (${Math.round(idleMs / 60000)}min no msgs)`, null, target);
-                await sleepInterruptible(state, 30000);
-                continue;
-              }
-              await sleepInterruptible(state, 500);
-              continue;
-            }
-            if (sinceLastEval < INTENT_MIN_INTERVAL_MS) {
-              await sleepInterruptible(state, 1000);
-              continue;
-            }
-          }
-        } else {
-          // semi-lurk / full-lurk 模式：保持 1 分钟冷却
-          if (state.lastEvalTime > 0 && now - state.lastEvalTime < INTENT_EVAL_COOLDOWN_MS) {
-            const waitMs = INTENT_EVAL_COOLDOWN_MS - (now - state.lastEvalTime) + 1000;
-            await sleepInterruptible(state, Math.min(waitMs, 10000));
-            continue;
-          }
-        }
-
-        // ── 常规意图评估（带重试） ──
-        const intentModel = intentLLMConfig.modelName;
-        addLog('intent', `🧠 [${tName()}] eval starting (model=${intentModel})`, null, target);
-        const prevEvalTime = state.lastEvalTime; // 上轮 eval 时间，用于 writeRecentSelfFile 区分"在途"与"已发送"
-        state.lastEvalTime = Date.now(); // 冷却从 eval 开始计时（start-to-start）
-
-        // 构建工具集（get_situation + write_intent_plan + social_read + history + groupLog + 外部 MCP 只读工具）
-        const intentPlanDefs = getIntentPlanToolDefinitions();
-        const intentFileDefs = getSocialFileToolDefinitions().filter(t => t.function.name === 'social_read');
-        const intentToolDefs = [getSituationToolDefinition(), ...intentPlanDefs, ...intentFileDefs, ...getHistoryToolDefinitions(), ...getGroupLogToolDefinitions()];
-        if (config.subagentEnabled !== false) {
-          intentToolDefs.push(getSubagentToolDefinition());
-          intentToolDefs.push(getCcHistoryToolDefinition());
-          intentToolDefs.push(getCcReadToolDefinition());
-          intentToolDefs.push(getMdOrganizeToolDefinition());
-        }
-        intentToolDefs.push(getScreenshotToolDefinition());
-        intentToolDefs.push(getImageListToolDefinition());
-        intentToolDefs.push(getWebshotToolDefinition());
-        intentToolDefs.push(getChatSearchToolDefinition());
-        intentToolDefs.push(getChatContextToolDefinition());
-        // full-lurk 下只观察：不向模型暴露任何即时发送工具。
-        if (intentLurkMode !== 'full-lurk') {
-          intentToolDefs.push(getImageSendToolDefinition());
-          intentToolDefs.push(getWebshotSendToolDefinition());
-          // voice_send 仅在 ttsConfig 启用时暴露给 LLM
-          if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
-            intentToolDefs.push(getVoiceSendToolDefinition());
-          }
-          // generate_image_send 仅在 imageGenConfig 启用且 provider 解析成功时暴露
-          if (imageGenLLMConfig) {
-            intentToolDefs.push(getGenerateImageSendToolDefinition());
-          }
-        }
-        const intentImmediateSendToolNames = new Set([
-          'image_send',
-          'webshot_send',
-          'voice_send',
-          'generate_image_send',
-        ]);
-        const intentExternalToolNames = new Set();
-        let intentMcpTools = intentToolDefs.map(t => ({
-          name: t.function.name,
-          description: t.function.description,
-          inputSchema: t.function.parameters,
-          serverName: null,
-        }));
-        // 注入外部 MCP 工具（排除主 MCP 的 send_message 等，只保留额外服务器的只读工具）
-        try {
-          const allTools = await getMcpTools();
-          const extraServers = new Set(promptConfig.enabledMcpServers || []);
-          const externalTools = allTools.filter(t =>
-            extraServers.has(t.serverName)
-            && t.serverName !== config.mcpServerName
-            && isReadOnlyIntentExternalTool(t)
-          );
-          for (const tool of externalTools) {
-            intentExternalToolNames.add(tool.serverName ? `${tool.serverName}__${tool.name}` : tool.name);
-          }
-          if (intentLurkMode !== 'full-lurk' && externalTools.length > 0) {
-            intentMcpTools = [...intentMcpTools, ...externalTools];
-          }
-        } catch { /* 非致命：外部工具不可用不影响 Intent 评估 */ }
-
-        // 构建新消息数量提示（仅 wait 触发的常规 eval）
-        let newMsgHint = '';
-        if (!wasForceEval && state.lastPlan) {
-          const lastHadReply = state.lastPlan.actions?.some(a => a.type === 'reply');
-          if (!lastHadReply) {
-            const wm = intentWatermarks.get(target);
-            const buf = dataBuffer.get(target);
-            let newMsgCount = 0;
-            if (buf && wm) {
-              let afterWm = false;
-              for (const m of buf.messages) {
-                if (m.message_id === wm) { afterWm = true; continue; }
-                if (afterWm && !m.is_self) newMsgCount++;
-              }
-            }
-            if (newMsgCount === 0) {
-              newMsgHint = '\n\n此后没有任何新消息，保持原来的判断。';
-            } else if (newMsgCount <= 5) {
-              newMsgHint = `\n\n此后有 ${newMsgCount} 条新消息，只在有人直接互动或出现全新话题时才改变决定。`;
-            } else {
-              newMsgHint = `\n\n此后有 ${newMsgCount} 条新消息，重新评估。`;
-            }
-          }
-        }
-
-        // ── 写 recent_self.md（Intent 系统提示要求 LLM 必须先 social_read 这个文件） ──
-        // 文件包含：最近 sentCache 原文 + 在途/已完成 brief + 上轮发出的图片
-        // 数据从 prompt 内联注入改为强制工具读取，迫使 LLM 处理"我刚说过什么"再决定 plan
-        const intentDir = socialTargetDir(targetType);
-        const recentSelfPath = `social/${intentDir}/scratch_${target}/recent_self.md`;
-        await writeRecentSelfFile(config.petId, target, targetType, state.lastPlan, prevEvalTime);
-
-        let intentEvalPrompt;
-        const readSelfDirective = `必须先调用 get_situation() 拿到现场快照（聊天记录 + 你最近动作 recent_self），然后调用 write_intent_plan(state, brief, actions) **一次性**提交完整决策（state 和 brief 都打包在这次调用里，不要分开 social_edit / social_write）。`;
-        if (wasForceEval === 'reply') {
-          intentEvalPrompt = `你的 Reply 模块刚刚发了消息。请重新评估当前状态。\n\n⚠️ 严格遵守以下规则：\n- 你已经 @ 过的人 + 已经表达过的观点 = 结束。不要对同一个人的同一个话题再说第二遍，即使是"展开"或"补充细节"也不行\n- 已经发过的图片不要再发\n- 只有以下情况才可以 reply：(1) 有你还没回应过的新人发言；(2) 已有的人提出了你之前没见过的全新质疑或全新话题\n- 当你决定补充时，必须有实质性的新内容（新论据、新角度、新信息），并详细展开，不要敷衍\n- 如果没有上述情况，actions 必须为空数组\n${readSelfDirective}`;
-        } else if (wasForceEval === 'subagent') {
-          intentEvalPrompt = `你的后台研究任务（CC）刚刚完成。请查看上方"后台任务状态"中标记为 ✅ 的任务，用 social_read 读取结果文件，然后基于结果决定下一步行动。\n如果结果有用，可以 reply 把研究结论分享到群里（详细展开，不要只说一句"查到了"）。\n如果结果不理想，可以重新 dispatch 或放弃。\n${readSelfDirective}`;
-        } else if (wasForceEval === 'newmsg') {
-          intentEvalPrompt = `评估期间有新消息到达。请重新评估当前状态。\n注意不要重复已经表达过的内容或已发的图片。\n${readSelfDirective}`;
-        } else if (state.lastPlan === null) {
-          intentEvalPrompt = `你刚刚苏醒，开始观察「${tName()}」的聊天。先静静看看群里在聊什么、气氛如何，不要急着发言。除非有人正在等你回复或 @了你，否则 actions 建议只放空数组。${readSelfDirective}`;
-        } else {
-          intentEvalPrompt = `请分析当前想法和行为倾向。${readSelfDirective}${newMsgHint}`;
-        }
-
-        // 预处理 buffer 中未描述的图片（结果缓存，Reply 直接命中）
-        // 关键路径不允许被图片描述无限期阻塞：超出预算就放手，未完成的描述在后台继续
-        // 落进 imageDescCache，下一轮 eval 命中缓存即可。
-        try {
-          await withHardTimeout(
-            preprocessBufferImages(target),
-            VISION_PREPROCESS_BUDGET_MS,
-            'Vision-pre',
-          );
-        } catch (e) {
-          addLog('warn', `🖼️ [${tName()}] 图片预处理超出预算，本轮跳过：${e.message || e}`, null, target);
-        }
-        touchIntent(state);
-
-        // 记录 eval 前的水位线，用于检测 eval 期间是否有新消息到达
-        const wmBeforeEval = intentWatermarks.get(target);
-
-        let intentResult;
-        let capturedPlan = null;
-        let intentStickerSent = false; // 追踪 Intent 是否通过工具调用发送了表情包
-
-        // Training trace: compute once per eval (not per retry attempt)
-        const _targetStr = String(target);
-        const _shouldCollectTraining =
-          !!_currentTrainingCollectionEnabled && !!trainingTargetsMap.get(_targetStr);
-        // "Last trace wins" — each attempt overwrites; we write to disk once after the loop
-        let _latestTrace = null;
-        const _onTraceFn = _shouldCollectTraining
-          ? (trace) => { _latestTrace = trace; }
-          : undefined;
-        // 单次 Intent eval 级账本：固定流程工具不计数；跨本 eval 的外层 LLM retry 保留。
-        const optionalToolLedger = createIntentOptionalToolLedger();
-
-        for (let attempt = 0; ; attempt++) {
-          // 每次尝试都重新构建 prompt（拉取最新 buffer，覆盖重试期间到达的新消息）
-          capturedPlan = null;
-          // write_intent_plan 暂存 args（onToolCall 收到，onToolResult 看到结果后决定是否真的捕获）
-          let _pendingPlanArgs = null;
-          // 回收已被消费/已通报过/已过期的 subagent 条目。
-          // 放在构建 prompt 之前：本轮 prompt 只包含仍然值得 Intent 知道的任务。
-          reapSubagentRegistry();
-          const { turns: intentTurns, ephemeral: eph } = buildIntentTurns(target);
-          const sinceMin = state.lastEvalTime > 0
-            ? Math.round((Date.now() - state.lastEvalTime) / 60000) : 0;
-          const targetLurkMode = lurkModes.get(target) || 'normal';
-          const intentPrompt = await buildIntentSystemPrompt({
-            petId: config.petId,
-            targetName: tName(),
-            targetId: target,
-            targetType,
-            sinceLastEvalMin: sinceMin,
-            socialPersonaPrompt: promptConfig.socialPersonaPrompt,
-            botQQ: promptConfig.botQQ,
-            ownerQQ: promptConfig.ownerQQ,
-            ownerName: promptConfig.ownerName,
-            ownerSecret: eph?.ownerSecret || '',
-            nameDelimiterL: eph?.nameL || '',
-            nameDelimiterR: eph?.nameR || '',
-            msgDelimiterL: eph?.msgL || '',
-            msgDelimiterR: eph?.msgR || '',
-            lurkMode: targetLurkMode,
-            atMustReply: promptConfig.atMustReply,
-            agentCanEditStrategy: promptConfig.agentCanEditStrategy,
-            subagentRegistry,
-            customGroupRules: customGroupRulesMap.get(target) || '',
-            voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
-            imageGenEnabled: !!imageGenLLMConfig,
-          });
-
-          // 初始化本次 Intent eval 的注入水位线（= buffer 当前最后一条消息 id）
-          {
-            const bufInit = dataBuffer.get(target);
-            const lastInitMsg = bufInit?.messages?.[bufInit.messages.length - 1];
-            intentInjectionWatermarks.set(target, lastInitMsg?.message_id || '');
-            intentInterceptCounts.set(target, 0);
-          }
-          const intentSituationSeen = { current: false };
-
-          try {
-            const ledgerResume = formatIntentOptionalToolLedgerResume(optionalToolLedger);
-            const raw = await callLLMWithTools({
-              messages: [
-                { role: 'system', content: intentPrompt },
-                // chat 历史不再作为 turns 注入——LLM 用 get_situation 工具一次性拿到
-                // intentTurns 仍生成（保留 ephemeral 安全令牌给 buildIntentSystemPrompt 用），但不推到对话里
-                { role: 'user', content: ledgerResume ? `${intentEvalPrompt}\n\n${ledgerResume}` : intentEvalPrompt },
-              ],
-              apiFormat: intentLLMConfig.apiFormat,
-              apiKey: intentLLMConfig.apiKey,
-              model: intentModel,
-              baseUrl: intentLLMConfig.baseUrl,
-              mcpTools: intentMcpTools,
-              options: {
-                temperature: 0.4,
-                explicitCache: shouldUseExplicitCache(config, intentLLMConfig.apiFormat),
-                cacheKey: buildCacheKey(config.petId, target, 'Intent:msg'),
-              },
-              builtinToolContext: { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, memoryEnabled: false, sentCache: sentMessagesCache, subagentRegistry, subagentConfig: { enabled: config.subagentEnabled !== false, model: config.subagentModel || 'sonnet', timeoutSecs: config.subagentTimeoutSecs || 300 }, dispatchMdOrganizer, dataBuffer, botQQ: promptConfig.botQQ, ownerQQ: promptConfig.ownerQQ, ownerName: promptConfig.ownerName, ownerSecret: eph?.ownerSecret || '', intentInjectionWatermarks, intentInterceptCounts, intentSituationSeen, consumedAtMeIds: consumedAtMe.get(target) || new Set(), addLog, customGroupRules: customGroupRulesMap.get(target) || '', ttsConfig: config.ttsConfig, imageModel: imageGenLLMConfig, inFlightReplies, lurkMode: targetLurkMode, hasUnconsumedAtMe: getUnconsumedAtMeIds(target).length > 0, runtimeGuard: () => canTargetDispatch(target) },
-              toolCallFilter: (name, args) => {
-                touchIntent(state);
-                if (
-                  socialLoopGeneration !== loopGeneration
-                  || activeLoop?._generation !== loopGeneration
-                  || pausedTargets.get(target)
-                ) {
-                  return 'Intent 已取消：Social Agent 已停止或目标已暂停。';
-                }
-                if (!isMyEpochCurrent()) {
-                  return 'Intent 已取消：本轮评估已被看门狗判定卡死并重启。';
-                }
-                if (
-                  lurkModes.get(target) === 'full-lurk'
-                  && (intentImmediateSendToolNames.has(name) || intentExternalToolNames.has(name))
-                ) {
-                  return `full-lurk 禁止调用可能产生外部副作用的工具 ${name}。`;
-                }
-                if (
-                  lurkModes.get(target) === 'semi-lurk'
-                  && (intentImmediateSendToolNames.has(name) || intentExternalToolNames.has(name))
-                  && getUnconsumedAtMeIds(target).length === 0
-                ) {
-                  return `semi-lurk 只有存在当前未消费的 @me 时才允许调用发送/外部工具 ${name}。`;
-                }
-                if (
-                  promptConfig.agentCanEditStrategy !== true
-                  && name === 'md_organize'
-                  && (
-                    canonicalSocialPath(args?.file) == null
-                    || canonicalSocialPath(args?.file) === 'social/reply_strategy.md'
-                  )
-                ) {
-                  return '当前配置禁止 Agent 修改 social/REPLY_STRATEGY.md。';
-                }
-                return null;
-              },
-              // 拦截时（formattedResult 含"write_intent_plan 暂缓"）不退出循环，让 LLM 重新评估再次提交
-              stopAfterTool: (name, formattedResult) => {
-                if (name !== 'write_intent_plan') return false;
-                const text = typeof formattedResult === 'string' ? formattedResult : '';
-                if (text.includes('write_intent_plan 暂缓')) return false;
-                return true;
-              },
-              usageLabel: 'Intent:msg',
-              usageTarget: target,
-              usagePetId: config.petId,
-              onUsageLogged: (record) => {
-                if (isRuntimeGenerationCurrent()) logUsageRecord(record);
-              },
-              onTrace: _onTraceFn,
-              // 每次 optional 工具执行完成后，把短账本附到该工具结果末尾，供同一 eval 的下一次 LLM 调用查看。
-              // get_situation / write_intent_plan 由 ledger 模块精确排除，不显示也不计数。
-              toolResultAnnotation: ({ name, args, isError }) =>
-                recordIntentOptionalToolUse(optionalToolLedger, { name, args, isError }),
-              onToolCall: (name, args) => {
-                touchIntent(state);
-                if (!isRuntimeGenerationCurrent()) return;
-                if (name === 'write_intent_plan') {
-                  // 与 executor 同步应用 auto-fix（brief 非空但 actions 缺 reply → 自动补 reply）
-                  // 这样 capturedPlan / 日志和 executor 实际写入的文件保持一致
-                  const fixed = autoFixPlanArgs(args);
-                  const fixedArgs = { state: fixed.state, brief: fixed.brief, actions: fixed.actions };
-                  _pendingPlanArgs = fixedArgs;  // 暂存修正后的 args
-                  // write_intent_plan 的主消息行用摘要替代裸名字，让用户一眼看出写了啥
-                  const stateLen = fixed.state.length;
-                  const briefRaw = fixed.brief.trim();
-                  const briefFirstLine = briefRaw.split('\n')[0]?.trim() || '';
-                  const briefTier = briefFirstLine.match(/^\[(接梗|闲扯|观点|展开|深答)\]/)?.[0] || '';
-                  const briefSummary = briefRaw
-                    ? `brief=${briefTier || '(无标签)'}(${briefRaw.length}字)`
-                    : 'brief=(无 reply)';
-                  const actionsSummary = fixed.actions.map(a => {
-                    if (a?.type === 'reply') return a.atTarget ? `reply@${a.atTarget}` : 'reply';
-                    if (a?.type === 'sticker') return `sticker#${a.id ?? '?'}`;
-                    if (a?.type === 'wait') return 'wait';
-                    return a?.type || '?';
-                  });
-                  const actionsLabel = actionsSummary.length > 0 ? `actions=[${actionsSummary.join(',')}]` : 'actions=[]';
-                  const fixTag = fixed.autoFixed ? ' 🔧auto-fix' : '';
-                  addLog(
-                    'intent',
-                    `🧠 [${tName()}] tool: write_intent_plan → INTENT(${stateLen}字), ${briefSummary}, ${actionsLabel}${fixTag}`,
-                    _buildPlanDetails(fixedArgs),
-                    target,
-                  );
-                  return;
-                }
-                // get_situation 的 args 仅 {n}，无意义；改在 onToolResult 中合并记录"调用 + 结果"
-                if (name === 'get_situation') return;
-                addLog('intent', `🧠 [${tName()}] tool: ${name}`, JSON.stringify(args, null, 2), target);
-              },
-              onToolResult: (name, result, _toolCallId, isError) => {
-                touchIntent(state);
-                if (!isRuntimeGenerationCurrent()) return;
-                if (
-                  lurkModes.get(target) === 'semi-lurk'
-                  && intentImmediateSendToolNames.has(name)
-                  && !isToolResultFailure(result, isError)
-                ) {
-                  const consumed = consumedAtMe.get(target) || new Set();
-                  for (const id of getUnconsumedAtMeIds(target)) consumed.add(id);
-                  consumedAtMe.set(target, consumed);
-                }
-                if (name === 'get_situation') {
-                  // 把 bot 看到的快照（chat 记录 + recent_self）作为 details，前端展开即显示
-                  const text = typeof result === 'string' ? result : (result == null ? '' : JSON.stringify(result, null, 2));
-                  if (isError) {
-                    addLog('intent', `🧠 [${tName()}] tool: get_situation ❌ 错误`, text, target);
-                  } else {
-                    const lines = text.split('\n').length;
-                    addLog('intent', `🧠 [${tName()}] tool: get_situation ✓ (${text.length}字 / ${lines}行 — 展开查看 bot 视角)`, text, target);
-                  }
-                  return;
-                }
-                if (name !== 'write_intent_plan') return;
-                const text = typeof result === 'string' ? result : '';
-                const wasIntercepted = text.includes('write_intent_plan 暂缓');
-                if (isError) {
-                  addLog('intent', `🧠 [${tName()}] write_intent_plan ❌ 错误`, text, target);
-                  _pendingPlanArgs = null;
-                  return;
-                }
-                if (wasIntercepted) {
-                  // 拦截已经在 executeIntentPlanTool 里 addLog 过了，这里不重复
-                  _pendingPlanArgs = null;
-                  return;
-                }
-                // 成功提交：捕获 plan + 记成功日志（含写入了哪些文件）
-                capturedPlan = { actions: _pendingPlanArgs?.actions || [] };
-                const hasReply = (_pendingPlanArgs?.actions || []).some(a => a?.type === 'reply');
-                addLog(
-                  'intent',
-                  `🧠 [${tName()}] ✓ plan 已写入：INTENT_${target}.md${hasReply ? ' + reply_brief.md' : ''}`,
-                  _buildPlanDetails(_pendingPlanArgs || {}),
-                  target,
-                );
-                addLog('intent-plan', '', JSON.stringify(_pendingPlanArgs || {}), target);
-                _pendingPlanArgs = null;
-              },
-            });
-            intentResult = { content: raw.content, error: null };
-            touchIntent(state);
-            break;
-          } catch (e) {
-            touchIntent(state);
-            if (!isRuntimeGenerationCurrent() || !isMyEpochCurrent()) return;
-            if (attempt < INTENT_LLM_MAX_RETRIES) {
-              // 上游 503/UNAVAILABLE（Gemini high demand 等）用更长退避让上游恢复
-              const errStr = String(e.message || e);
-              const isOverload = errStr.includes('503') || errStr.includes('UNAVAILABLE') || errStr.includes('high demand');
-              const delays = isOverload ? INTENT_RETRY_DELAYS_OVERLOAD : INTENT_RETRY_DELAYS;
-              const retryDelay = delays[attempt] || 5000;
-              addLog('intent', `🧠 [${tName()}] eval LLM error (retry ${attempt + 1}/${INTENT_LLM_MAX_RETRIES} in ${retryDelay / 1000}s${isOverload ? ', overload backoff' : ''}): ${e.message || e}`, e._debugBody || null, target);
-              await sleepInterruptible(state, retryDelay);
-              touchIntent(state);
-              continue;
-            }
-            intentResult = { content: e.message || e, error: true };
-          }
-        }
-
-        if (!isRuntimeGenerationCurrent() || !isMyEpochCurrent()) return;
-        touchIntent(state);
-
-        // Write training trace exactly once per eval (final attempt outcome only)
-        if (_shouldCollectTraining && _latestTrace) {
-          writeIntentTrace(config.petId, {
-            target_id: _targetStr,
-            target_type: targetType,
-            label: (wasForceEval === 'newmsg' || (!wasForceEval && intentLurkMode === 'normal')) ? 'Intent:msg' : 'Intent:idle',
-            provider: intentLLMConfig.apiFormat,
-            model: intentLLMConfig.modelName,
-            pet_id: config.petId,
-          }, _latestTrace);
-        }
-
-        // 清理本次 eval 的注入水位线
-        intentInjectionWatermarks.delete(target);
-        intentInterceptCounts.delete(target);
-
-        if (intentResult.error) {
-          addLog('intent', `Intent LLM error [${tName()}]: ${intentResult.content}`, null, target);
-          await sleepInterruptible(state, 2000);
-          continue;
-        }
-
-        // ── 处理 Intent 计划（并发执行动作） ──
-        if (capturedPlan) {
-          // 读取 LLM 已通过 social_edit 更新的 INTENT 文件，作为 state 供 Reply 读取
-          const intentDir = socialTargetDir(targetType);
-          try {
-            capturedPlan.state = await tauri.workspaceRead(config.petId, `social/${intentDir}/INTENT_${target}.md`) || '';
-          } catch { capturedPlan.state = ''; }
-          state.lastPlan = capturedPlan;
-
-          // 保留最近 N 次 Intent 行动记录（客观历史，防漂移）
-          try {
-            const planActions = capturedPlan.actions || [];
-            let briefDigest = '';
-            if (planActions.some(a => a.type === 'reply')) {
-              const brief = await tauri.workspaceRead(
-                config.petId,
-                `social/${intentDir}/scratch_${target}/reply_brief.md`,
-              ).catch(() => '');
-              // 与 digest 同时冻结 Reply brief，避免后续 Intent 覆盖共享文件。
-              capturedPlan.briefSnapshot = brief || '';
-              briefDigest = (brief || '').replace(/\s+/g, ' ').trim().slice(0, 200);
-            }
-            await appendIntentHistory(config.petId, target, targetType, {
-              ts: new Date().toISOString(),
-              actions: planActions,
-              briefDigest,
-            });
-          } catch (e) {
-            addLog('warn', `Intent history append failed: ${e.message || e}`, null, target);
-          }
-        }
-        let actions = capturedPlan?.actions || [];
-        const liveLurkMode = lurkModes.get(target) || 'normal';
-        const plannedActionAtMeIds = liveLurkMode === 'semi-lurk'
-          ? getUnconsumedAtMeIds(target)
-          : [];
-        if (liveLurkMode === 'full-lurk') {
-          const blockedCount = actions.filter(a => ['reply', 'sticker', 'image'].includes(a?.type)).length;
-          if (blockedCount > 0) {
-            addLog('warn', `full-lurk 硬拦截 ${blockedCount} 个 Intent 发送动作`, null, target);
-          }
-          actions = actions.filter(a => !['reply', 'sticker', 'image'].includes(a?.type));
-        } else if (liveLurkMode === 'semi-lurk' && plannedActionAtMeIds.length === 0) {
-          const blockedCount = actions.filter(a => ['reply', 'sticker', 'image'].includes(a?.type)).length;
-          if (blockedCount > 0) {
-            addLog('warn', `semi-lurk 且无未消费 @me，硬拦截 ${blockedCount} 个 Intent 发送动作`, null, target);
-          }
-          actions = actions.filter(a => !['reply', 'sticker', 'image'].includes(a?.type));
-        }
-        const replyAction = actions.find(a => a.type === 'reply');
-        const stickerActions = actions.filter(a => a.type === 'sticker');
-        const canPlannedActionDispatch = () => {
-          if (!canTargetDispatch(target)) return false;
-          // 被看门狗重启过的旧实例不得再产生任何外部副作用
-          if (!isMyEpochCurrent()) return false;
-          const mode = lurkModes.get(target) || 'normal';
-          return mode !== 'semi-lurk' || plannedActionAtMeIds.length > 0;
-        };
-
-        // 更新 intent 水位线到 buffer 最新消息，并检测 eval 期间是否有新消息被跳过
-        const bufAfterEval = dataBuffer.get(target);
-        if (bufAfterEval && bufAfterEval.messages.length > 0) {
-          const lastMsgAfterEval = bufAfterEval.messages[bufAfterEval.messages.length - 1];
-          if (lastMsgAfterEval?.message_id) {
-            // 检查 eval 期间是否有新的非自身消息到达（水位线会跳过它们）
-            if (wmBeforeEval && lastMsgAfterEval.message_id !== wmBeforeEval) {
-              let wmIdx = -1;
-              for (let i = bufAfterEval.messages.length - 1; i >= 0; i--) {
-                if (bufAfterEval.messages[i].message_id === wmBeforeEval) { wmIdx = i; break; }
-              }
-              if (wmIdx >= 0) {
-                const skippedNonSelf = bufAfterEval.messages.slice(wmIdx + 1).filter(m => !m.is_self);
-                if (skippedNonSelf.length > 0) {
-                  addLog('intent', `🧠 [${tName()}] +${skippedNonSelf.length} new msg during eval → re-eval`, null, target);
-                  state.forceEval = 'newmsg';
-                }
-              }
-            }
-            intentWatermarks.set(target, lastMsgAfterEval.message_id);
-          }
-        }
-
-        // 日志
-        const actionDesc = actions.filter(a => a.type !== 'wait')
-          .map(a => a.type === 'sticker' ? `📎sticker#${a.id}` : a.type === 'image' ? `🖼️image(${a.file})` : '💬reply').join(' + ')
-          || 'wait';
-        addLog('intent', `🧠 [${tName()}] ${actionDesc}`, JSON.stringify({ state: capturedPlan?.state || '', actions: capturedPlan?.actions || [] }), target);
-
-        // 并发执行：sticker 立即发送，reply 唤醒 Reply 模块。
-        // 每个副作用前都重查 generation / pause / full-lurk。
-        const successfulStickers = [];
-        const dispatchPromises = stickerActions.map(async (sa) => {
-          if (!canPlannedActionDispatch()) return;
-          try {
-            const result = await executeStickerBuiltinTool('sticker_send', { sticker_id: sa.id },
-              { petId: config.petId, targetId: target, targetType, mcpServerName: config.mcpServerName, sentCache: sentMessagesCache });
-            if (!isRuntimeGenerationCurrent()) return;
-            if (isToolResultFailure(result)) throw new Error('sticker_send returned an error result');
-            successfulStickers.push(sa);
-            addLog('intent-action-done', '', JSON.stringify({ type: 'sticker', id: sa.id }), target);
-            addLog('send', `📎 sticker#${sa.id} → ${tName()}`, null, target);
-          } catch (e) {
-            if (!isRuntimeGenerationCurrent()) return;
-            addLog('warn', 'sticker_send failed', e.message || e, target);
-          }
-        });
-        if (dispatchPromises.length > 0) {
-          await Promise.all(dispatchPromises);
-          // 发完 sticker 后立刻回写 INTENT 文件的【我刚做了】，防止下次 eval 不知道刚发过表情包
-          const intentDir = socialTargetDir(targetType);
-          const intentPath = `social/${intentDir}/INTENT_${target}.md`;
-          try {
-            const current = await tauri.workspaceRead(config.petId, intentPath) || '';
-            const stickerDesc = successfulStickers.map(sa => `#${sa.id}`).join('、');
-            const updated = stickerDesc
-              ? current.replace(/【我刚做了】[^\n]*/, `【我刚做了】发了表情包 ${stickerDesc}`)
-              : current;
-            if (updated !== current) await tauri.workspaceWrite(config.petId, intentPath, updated);
-          } catch { /* 非致命 */ }
-        }
-
-        // Image actions: 发送已保存的图片（和 sticker 类似，fire-and-forget）
-        const imageActions = actions.filter(a => a.type === 'image');
-        const successfulImages = [];
-        if (imageActions.length > 0) {
-          const imagePromises = imageActions.map(async (ia) => {
-            try {
-              if (!canPlannedActionDispatch()) return;
-              const base64Data = await tauri.workspaceReadBinary(config.petId, `social/images/${ia.file}`);
-              if (!base64Data) {
-                addLog('warn', `image_send failed: file empty ${ia.file}`, null, target);
-                return;
-              }
-              if (!canPlannedActionDispatch()) return;
-              const sendToolName = `${config.mcpServerName}__send_image`;
-              const result = await tauri.mcp.callToolByName(sendToolName, {
-                target,
-                target_type: targetType,
-                image: base64Data,
-              });
-              if (!isRuntimeGenerationCurrent()) return;
-              if (isToolResultFailure(result)) throw new Error('send_image returned an error result');
-              successfulImages.push(ia);
-              addLog('intent-action-done', '', JSON.stringify({ type: 'image', file: ia.file }), target);
-              addLog('send', `🖼️ image → ${tName()}: ${ia.file}`, null, target);
-            } catch (e) {
-              if (!isRuntimeGenerationCurrent()) return;
-              addLog('warn', `image_send failed: ${e.message}`, null, target);
-            }
-          });
-          await Promise.all(imagePromises);
-          // 发完图片后回写 INTENT 文件的【我刚做了】
-          const intentDir2 = socialTargetDir(targetType);
-          const intentPath2 = `social/${intentDir2}/INTENT_${target}.md`;
-          try {
-            const current2 = await tauri.workspaceRead(config.petId, intentPath2) || '';
-            const imageDesc = successfulImages.map(ia => ia.file).join('、');
-            const prefix = imageDesc
-              ? (current2.includes('发了表情包') ? current2.match(/【我刚做了】[^\n]*/)?.[0] + '，并发了图片 ' + imageDesc
-                : `【我刚做了】发了图片 ${imageDesc}`)
-              : '';
-            const updated2 = prefix ? current2.replace(/【我刚做了】[^\n]*/, prefix) : current2;
-            if (updated2 !== current2) await tauri.workspaceWrite(config.petId, intentPath2, updated2);
-          } catch { /* 非致命 */ }
-        }
-
-        // semi-lurk 的任意成功直接发送动作都会消费本次 @；若同时有 Reply，
-        // Reply 仍通过显式 reservation 快照看到该 @，但其他并发任务看不到。
-        if (
-          liveLurkMode === 'semi-lurk'
-          && (successfulStickers.length > 0 || successfulImages.length > 0)
-        ) {
-          const consumed = consumedAtMe.get(target) || new Set();
-          for (const id of plannedActionAtMeIds) consumed.add(id);
-          consumedAtMe.set(target, consumed);
-        }
-
-        // 并行预取当前对话人物档案，供下次 eval 注入（fire-and-forget）
-        updatePeopleCache(target, targetType).catch(() => {});
-
-        if (replyAction && isMyEpochCurrent()) {
-          addLog('send', `💬 reply → ${tName()}`, null, target);
-          // 直接派发 Reply 任务（fire-and-forget，并发上限 3 由 spawnReplyTask 内部管理）
-          spawnReplyTask(target, targetType, {
-            briefSnapshot: capturedPlan?.briefSnapshot || '',
-            intentPlanSnapshot: capturedPlan,
-            atMeIds: plannedActionAtMeIds,
-            keepAtMeConsumedOnFailure: successfulStickers.length > 0 || successfulImages.length > 0,
-          }).catch(e => {
-            if (!isRuntimeGenerationCurrent()) return;
-            addLog('error', `spawnReplyTask 启动失败 ${tName()}`, e?.message || e, target);
-          });
-        }
-        // 已被看门狗替换的实例不得再进入 sleepInterruptible——否则会把 state._wake
-        // 覆盖成自己的 resolver，新实例的唤醒通道就失效了。
-        if (!isMyEpochCurrent()) break;
-        await sleepInterruptible(state, 500);
-      } catch (e) {
-        touchIntent(state);
-        if (!isRuntimeGenerationCurrent() || !isMyEpochCurrent()) return;
-        addLog('intent', `Intent loop error [${tName()}]`, e.message || e, target);
-        await sleepInterruptible(state, 2000);
-      }
-    }
-    if (!isMyEpochCurrent()) {
-      addLog('debug', `Intent [${tName()}] 旧实例退出（已被看门狗替换）`, null, target);
-    }
-  };
-
-  /**
    * Intent 看门狗：兜住任何"await 永不返回"导致的静默睡死。
    *
    * Intent 是唯一的发言派发者——它一卡，Fetcher/Observer 日志照刷、状态照显示
@@ -3968,7 +3034,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       const tName = targetNamesCache.get(target) || target;
       addLog(
         'error',
-        `🐕 看门狗：[${tName}] Intent 循环已停滞 ${Math.round(stalledMs / 1000)}s，判定卡死并重启`,
+        `🐕 看门狗：[${tName}] Session 循环已停滞 ${Math.round(stalledMs / 1000)}s，判定卡死并重启`,
         `epoch ${state.epoch} → ${state.epoch + 1}；上次 eval 于 ${state.lastEvalTime ? new Date(state.lastEvalTime).toISOString() : '从未'}`,
         target,
       );
@@ -3980,10 +3046,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         state.loopTimeoutId = null;
       }
       if (state._wake) { state._wake(); state._wake = null; }
-      // 卡死那轮可能残留了"评估中"的痕迹，强制新实例立刻重评一次
-      state.forceEval = state.forceEval || 'newmsg';
       state.postReplyRestUntil = 0;
-      intentLoop(target, state.targetType); // fire-and-forget，新 epoch
+      sessionLoop(target, state.targetType); // fire-and-forget，新 epoch
     }
   };
 
@@ -4310,244 +3374,6 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     }
     addLog('debug', `Observer ${label} stopped`, null, target);
   };
-
-  // ============ 层3: Reply ============
-  // 新模型：Intent 派 reply 时直接调 spawnReplyTask 启动（fire-and-forget）。
-  // replyLoop 仅做被动监听（推水位 + 日志），不再做触发。
-  // 同 target 并发上限 MAX_CONCURRENT_REPLY=3——超出则丢弃本次派发并 warn。
-
-  /**
-   * spawnReplyTask: 启动一次 Reply LLM 调用（独立异步）
-   * - 检查 lurk mode / paused / replyIntervalMs 冷却 / 并发上限
-   * - 通过即扣减计数 → 调 pollTarget → finally 减计数
-   */
-  const spawnReplyTask = async (target, targetType, {
-    briefSnapshot: providedBriefSnapshot,
-    intentPlanSnapshot: providedIntentPlanSnapshot,
-    atMeIds: providedAtMeIds,
-    keepAtMeConsumedOnFailure = false,
-  } = {}) => {
-    const label = `${targetType}:${target}`;
-    if (!isRuntimeGenerationCurrent() || pausedTargets.get(target)) {
-      addLog('info', `${label} paused → skip reply`, null, target);
-      return;
-    }
-    const targetLurkMode = lurkModes.get(target) || 'normal';
-    if (targetLurkMode === 'full-lurk') {
-      addLog('info', `${label} full-lurk → skip reply`, null, target);
-      return;
-    }
-
-    if (replyIntervalMs > 0) {
-      const sinceLastReply = Date.now() - (lastReplyTime.get(target) || 0);
-      if (sinceLastReply < replyIntervalMs) {
-        addLog('info', `${label} reply 冷却中（剩 ${replyIntervalMs - sinceLastReply}ms），跳过`, null, target);
-        return;
-      }
-    }
-    const list = inFlightReplies.get(target) || [];
-    // 回收僵死槽位：若某个 Reply 任务因底层 await 永不返回而进不到 finally，
-    // 它会永久占着并发额度，最终让这个 target 的所有 reply 都被"并发已达上限"丢弃。
-    // 这里按最大存活时间强制回收（原任务真的醒来时 finally 里 findIndex 会落空，无副作用）。
-    for (let i = list.length - 1; i >= 0; i--) {
-      const age = Date.now() - (list[i].createdAt || 0);
-      if (age > REPLY_TASK_MAX_AGE_MS) {
-        addLog('warn', `⚠️ ${label} Reply 任务已 ${Math.round(age / 60000)} 分钟未结束，回收并发槽位`, null, target);
-        list.splice(i, 1);
-      }
-    }
-    if (list.length >= MAX_CONCURRENT_REPLY) {
-      addLog('warn', `⚠️ ${label} Reply 并发已达上限 (${list.length}/${MAX_CONCURRENT_REPLY})，本次 reply 跳过`, null, target);
-      return;
-    }
-
-    // semi-lurk 必须由“当前仍未消费的 @me”触发。所有会提前 return 的
-    // admission checks 通过后再预留，防止冷却/并发拒绝误吞 @。
-    const reservedAtMeIds = targetLurkMode === 'semi-lurk'
-      ? (Array.isArray(providedAtMeIds) && providedAtMeIds.length > 0
-        ? [...providedAtMeIds]
-        : getUnconsumedAtMeIds(target))
-      : [];
-    if (targetLurkMode === 'semi-lurk' && reservedAtMeIds.length === 0) {
-      addLog('info', `${label} semi-lurk 且无未消费 @me → skip reply`, null, target);
-      return;
-    }
-    const consumedBeforeReservation = new Set(consumedAtMe.get(target) || []);
-    for (const id of reservedAtMeIds) consumedBeforeReservation.delete(id);
-    if (reservedAtMeIds.length > 0) {
-      const consumed = consumedAtMe.get(target) || new Set();
-      for (const id of reservedAtMeIds) consumed.add(id);
-      consumedAtMe.set(target, consumed);
-    }
-    const replyDispatchGuard = () => {
-      if (!canTargetDispatch(target)) return false;
-      const liveMode = lurkModes.get(target) || 'normal';
-      return liveMode !== 'semi-lurk' || reservedAtMeIds.length > 0;
-    };
-
-    // 派发瞬间快照 brief——后续若有第二个 Intent 覆盖 reply_brief.md，本任务携带的 brief 不受影响
-    const briefDir = socialTargetDir(targetType);
-    let briefSnapshot = providedBriefSnapshot;
-    if (briefSnapshot === undefined) {
-      try {
-        briefSnapshot = (await tauri.workspaceRead(config.petId, `social/${briefDir}/scratch_${target}/reply_brief.md`).catch(() => '')) || '';
-      } catch {
-        briefSnapshot = '';
-      }
-    }
-    const inFlightEntry = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-      brief: briefSnapshot.trim(),
-      createdAt: Date.now(),
-    };
-    list.push(inFlightEntry);
-    inFlightReplies.set(target, list);
-    addLog('info', `🔔 Reply ${label}: 启动 (并发 ${list.length}/${MAX_CONCURRENT_REPLY})`, null, target);
-
-    // ── Lessons Review: 在下一次 Reply 启动前 review 上一次 ──
-    dispatchLessonsReview(target, targetType).catch(() => {});
-
-    let replySucceeded = false;
-    try {
-      if (!replyDispatchGuard()) return;
-      const buf = dataBuffer.get(target);
-      if (!buf || buf.messages.length === 0) {
-        return;
-      }
-
-      const result = await pollTarget({
-        target,
-        targetType,
-        mcpServerName: config.mcpServerName,
-        llmConfig: replyLLMConfig,
-        petId: config.petId,
-        promptConfig,
-        watermarks: replyWatermarks,
-        sentCache: sentMessagesCache,
-        bufferMessages: buf.messages,
-        compressedSummary: buf.compressedSummary,
-        groupName: buf.metadata?.group_name || buf.metadata?.friend_name || target,
-        // 本任务预留的 @ 对当前 Reply 仍可见；其他历史已消费 @ 会被消毒。
-        consumedAtMeIds: consumedBeforeReservation,
-        lurkMode: targetLurkMode,
-        role: 'reply',
-        intentPlan: providedIntentPlanSnapshot || getIntentState(target).lastPlan,
-        replyBriefOverride: inFlightEntry.brief,
-        dispatchGuard: replyDispatchGuard,
-        enableImages: config.enableImages !== false,
-        imageDescMode: config.imageDescMode || 'off',
-        visionLLMConfig,
-        botName: targetNamesCache.get(config.botQQ) || config.botQQ || 'bot',
-        socialConfig: config,
-      });
-
-      if (!isRuntimeGenerationCurrent()) return;
-      if (replyIntervalMs > 0) lastReplyTime.set(target, Date.now());
-      if (result && result.action === 'replied') {
-        replySucceeded = true;
-        addLog('intent-action-done', '', JSON.stringify({ type: 'reply' }), target);
-        const intentState = getIntentState(target);
-        intentState.postReplyRestUntil = Date.now() + 1000;
-        intentState.forceEval = 'reply';
-        if (intentState._wake) {
-          intentState._wake();
-          intentState._wake = null;
-        }
-        snapshotForReview(target, targetType).catch(() => {});
-      }
-    } catch (e) {
-      if (!isRuntimeGenerationCurrent()) return;
-      addLog('error', `Reply ${label} LLM error`, e.message || e, target);
-    } finally {
-      if (
-        isRuntimeGenerationCurrent()
-        && !replySucceeded
-        && !keepAtMeConsumedOnFailure
-        && reservedAtMeIds.length > 0
-      ) {
-        const consumed = consumedAtMe.get(target);
-        if (consumed) {
-          for (const id of reservedAtMeIds) consumed.delete(id);
-          if (consumed.size === 0) consumedAtMe.delete(target);
-        }
-      }
-      const cur = inFlightReplies.get(target) || [];
-      const idx = cur.findIndex(e => e.id === inFlightEntry.id);
-      if (idx >= 0) {
-        cur.splice(idx, 1);
-        if (cur.length === 0) inFlightReplies.delete(target);
-        else inFlightReplies.set(target, cur);
-      }
-    }
-  };
-
-  /**
-   * replyLoop: 监听 buffer 变化、推水位线、记日志。**不再做 LLM 触发**。
-   * Intent 派 reply 时直接调 spawnReplyTask；这里只是被动观察。
-   */
-  const replyLoop = async (target, targetType) => {
-    const label = `${targetType}:${target}`;
-    /** Reply loop 普通 sleep（旧 wake 机制已废弃，不再需要可中断） */
-    const replySleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-    let lastLoggedNewCount = 0;    // 上次日志记录的新消息条数（去重用）
-
-    while (activeLoop && activeLoop._generation === loopGeneration) {
-      try {
-        // ── 暂停检查 ──
-        if (pausedTargets.get(target)) {
-          await replySleep(1000);
-          continue;
-        }
-
-        const buf = dataBuffer.get(target);
-        if (!buf || buf.messages.length === 0) {
-          await replySleep(1000);
-          continue;
-        }
-
-        // ── 检测变化 ──
-        const detection = detectChange(target, replyWatermarks);
-        if (!detection) {
-          await replySleep(1000);
-          continue;
-        }
-        const { changed, hasAtMe, isFirstRun, newCount } = detection;
-
-        // ── 检测日志：仅当新消息条数变化时记录 ──
-        if (changed && newCount > 0 && newCount !== lastLoggedNewCount) {
-          const runningCount = inFlightReplies.get(target)?.length || 0;
-          const busyTag = runningCount > 0 ? ` [并发 ${runningCount}/${MAX_CONCURRENT_REPLY}]` : '';
-          addLog('info', `📨 Reply ${label}: +${newCount} new messages${hasAtMe ? ' (has @me)' : ''}${busyTag}`, null, target);
-          lastLoggedNewCount = newCount;
-        }
-
-        if (isFirstRun) {
-          const lastMsg = buf.messages[buf.messages.length - 1];
-          if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-          addLog('info', `${label} reply first run, watermark set`, null, target);
-          await replySleep(1000);
-          continue;
-        }
-
-        // ── 推进水位线（不再做 LLM 触发；触发由 Intent 派 spawnReplyTask 完成）──
-        // hasAtMe 不再触发额外 reply（Intent 会处理 @me 信号）
-        if (changed) {
-          const lastMsg = buf.messages[buf.messages.length - 1];
-          if (lastMsg?.message_id) replyWatermarks.set(target, lastMsg.message_id);
-        }
-
-        // 重置去重日志计数
-        if (newCount === 0) lastLoggedNewCount = 0;
-
-        await replySleep(1000);
-      } catch (e) {
-        addLog('error', `Reply ${label} loop error`, e.message || e, target);
-        await new Promise(r => setTimeout(r, 3000));
-      }
-    }
-    addLog('debug', `Reply ${label} stopped`, null, target);
-  };
   
   // 异步初始化期间可能收到 stop；旧启动流程不得重新“复活” runtime。
   if (!startupStillCurrent()) return false;
@@ -4709,6 +3535,756 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     addLog('warn', 'Failed to refresh latest training settings', error?.message || error);
   }
 
+  // ============ 层3+4 合并: Session Loop（取代 Intent Loop + Reply Loop） ============
+  // 一个 target 一个 session，串行跑 turn。
+  //
+  // 为什么合并：实测 4483 次 Reply 里 4366 次（97.4%）并发度为 1，只有 4 次摸到
+  // 上限 3——为并发付出的复杂度（在途任务伪装、僵死槽位回收、两套水位线、
+  // INTENT_*.md 跨调用传状态）几乎全是白付的。串行之后这些全可以去掉，
+  // 而且 prompt 前缀在整个 session 内逐字不变，cache 命中率能从 Reply 的 14% 拉上来。
+  const sessionMap = new Map();  // target → SocialSession
+
+  /** 所有"会被群友看到"的工具。发送闸门和 full-lurk 禁令共用这一份，避免两处漂移。 */
+  const SEND_TOOL_RE = /(send_message|send_image|sticker_send|image_send|webshot_send|voice_send|generate_image_send)/i;
+  /** session 内最多跑几轮工具循环。单个 turn 的保险丝。 */
+  const SESSION_MAX_ITERATIONS = 30;
+  /** 无新消息时的巡检间隔。 */
+  const SESSION_IDLE_POLL_MS = 500;
+  /** 长时间没人说话后降频。 */
+  const SESSION_IDLE_SLEEP_MS = 3 * 60 * 1000;
+  /** 发完消息后的冷静期，期间有新消息则提前结束。 */
+  const SESSION_POST_SEND_REST_MS = 20 * 1000;
+  /** 给 Jev 打标时带多少条上文。32 条足够读出语气，成本约 $0.25/月/群。 */
+  const MOOD_CONTEXT_WINDOW = 32;
+
+  const getSession = (target, targetType) => {
+    let s = sessionMap.get(target);
+    if (!s) {
+      s = createSession({ targetId: target, targetType });
+      // 安全令牌整个 session 固定：每轮换一次会让 system prompt 逐字变化，
+      // 前缀缓存直接作废——这正是原 Reply 只有 14% 命中率的原因之一。
+      const rnd = () => crypto.randomUUID().slice(0, 6);
+      s.ephemeral = {
+        ownerSecret: rnd(),
+        nameL: `«${rnd()}»`, nameR: `«/${rnd()}»`,
+        msgL: `‹${rnd()}›`, msgR: `‹/${rnd()}›`,
+      };
+      s.systemPrompt = null;
+      s.lastMessageId = null;
+      s.selfSentTexts = new Set();
+      // 标签是冻结的：标过一次就不再重标。不落盘的话每次重启都要把窗口里的
+      // 64 条重标一遍——既花钱，又会出现同一条消息前后两次标得不一样。
+      s.moodStore = createMoodTagStore(target, targetType, {
+        read: (path) => tauri.workspaceRead(config.petId, path),
+        write: (path, content) => tauri.workspaceWrite(config.petId, path, content),
+      });
+      sessionMap.set(target, s);
+      addLog('info', `🧵 [${targetNamesCache.get(target) || target}] session 建立 ${s.sessionId.slice(0, 8)}`, null, target);
+    }
+    return s;
+  };
+
+  /** buffer 里 lastId 之后的消息。没有 lastId 就取最近一个窗口。 */
+  const messagesSince = (target, lastId) => {
+    const buf = dataBuffer.get(target);
+    if (!buf?.messages?.length) return [];
+    if (!lastId) return buf.messages.slice(-INTENT_IMAGE_WINDOW);
+    let idx = -1;
+    for (let i = buf.messages.length - 1; i >= 0; i--) {
+      if (buf.messages[i].message_id === lastId) { idx = i; break; }
+    }
+    return idx < 0 ? buf.messages.slice(-INTENT_IMAGE_WINDOW) : buf.messages.slice(idx + 1);
+  };
+
+  /**
+   * 合并后的工具集 = Intent ∪ Reply。
+   *
+   * 实测这个并集相对 Intent 只多 675 字节（cc_history + cc_read），所以"工具全给"
+   * 在 token 上几乎是免费的。真正的变化是能力打通了：原先 Intent 能发图不能说话、
+   * Reply 能说话不能发图，现在一轮里图文可以一起发。
+   */
+  const buildSessionTools = async (target, lurkMode) => {
+    const defs = [
+      ...getSocialFileToolDefinitions().filter(t => t.function.name === 'social_read'),
+      ...getHistoryToolDefinitions(),
+      ...getGroupLogToolDefinitions(),
+      getScreenshotToolDefinition(),
+      getImageListToolDefinition(),
+      getWebshotToolDefinition(),
+      getChatSearchToolDefinition(),
+      getChatContextToolDefinition(),
+      getCcHistoryToolDefinition(),
+      getCcReadToolDefinition(),
+      getCheckNewMessagesToolDefinition(),
+      getTurnNoteToolDefinition(),
+    ];
+    if (config.subagentEnabled !== false) {
+      defs.push(getSubagentToolDefinition());
+      defs.push(getMdOrganizeToolDefinition());
+    }
+    // full-lurk 下不暴露任何发送工具——只观察。
+    if (lurkMode !== 'full-lurk') {
+      defs.push(getImageSendToolDefinition());
+      defs.push(getWebshotSendToolDefinition());
+      defs.push(...getStickerToolDefinitions().filter(t => ['sticker_send', 'sticker_list'].includes(t.function.name)));
+      if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
+        defs.push(getVoiceSendToolDefinition());
+      }
+      if (imageGenLLMConfig) defs.push(getGenerateImageSendToolDefinition());
+    }
+
+    let tools = defs.map(t => ({
+      name: t.function.name,
+      description: t.function.description,
+      inputSchema: t.function.parameters,
+      serverName: null,
+    }));
+
+    try {
+      const allTools = await getMcpTools();
+      const extraServers = new Set(promptConfig.enabledMcpServers || []);
+      // 外部 MCP：非 full-lurk 全给（Reply 一侧本来就不过滤）。
+      // 只读闸 isReadOnlyIntentExternalTool 保留给「本轮还没决定发言」的场景，见下。
+      const external = allTools.filter(t =>
+        extraServers.has(t.serverName) && t.serverName !== config.mcpServerName
+      );
+      if (lurkMode === 'full-lurk') {
+        tools = [...tools, ...external.filter(isReadOnlyIntentExternalTool)];
+      } else {
+        tools = [...tools, ...external];
+        // 主 MCP 只取 send_message，并剥掉 num_chunks / split_content——分段统一走 </分段>
+        const send = allTools.find(t => t.serverName === config.mcpServerName && t.name === 'send_message');
+        if (send) {
+          const props = send.inputSchema?.properties || {};
+          const { num_chunks: _nc, split_content: _sc, ...rest } = props;
+          tools.push({
+            ...send,
+            inputSchema: {
+              ...send.inputSchema,
+              properties: rest,
+              required: (send.inputSchema?.required || []).filter(k => k !== 'num_chunks' && k !== 'split_content'),
+            },
+          });
+        }
+      }
+    } catch (e) {
+      addLog('warn', 'session 取 MCP 工具失败，本轮只用内置工具', e.message || e, target);
+    }
+    return tools;
+  };
+
+  /** 压缩用的摘要器。用 compress 档模型，不占主模型。 */
+  const makeSessionSummarizer = (target) => async ({ priorSummary, items }) => {
+    const transcript = toProviderTurns(items)
+      .map(m => `${m.role === 'assistant' ? '我' : '群里'}：${typeof m.content === 'string' ? m.content : '[多模态内容]'}`)
+      .join('\n');
+    const sys = '把下面这段群聊经历压缩成一份自述式摘要，供"我"在后续对话中继续使用。'
+      + '保留：正在进行的话题、我已经表态过的观点、我答应过要做的事、关键的人和他们的立场、我查过什么结论是什么。'
+      + '丢弃：寒暄、复读、与我无关的闲聊细节。用第一人称，纯文本，不要 Markdown，不超过 800 字。';
+    const user = (priorSummary ? `【此前的摘要】\n${priorSummary}\n\n` : '')
+      + `【这段新经历】\n${transcript}`;
+    const startedAt = Date.now();
+    const out = await callLLM({
+      messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
+      apiFormat: compressLLMConfig.apiFormat,
+      apiKey: compressLLMConfig.apiKey,
+      model: compressLLMConfig.modelName,
+      baseUrl: compressLLMConfig.baseUrl,
+      options: { temperature: 0.3 },
+      conversationId: `session-compact-${target}-${startedAt}`,
+    });
+    const text = typeof out === 'string' ? out : (out?.content || '');
+    try {
+      const { normalizeUsage, appendUsageLog } = await import('./mcp/toolExecutor.js');
+      const u = normalizeUsage(out?.usage);
+      const record = {
+        ts: new Date().toISOString(), label: 'SessionCompact', target,
+        model: compressLLMConfig.modelName || '', apiFormat: compressLLMConfig.apiFormat || '',
+        inputTokens: u.inputTokens, outputTokens: u.outputTokens, cachedTokens: u.cachedTokens,
+        toolCalls: 0, iterations: 1, durationMs: Date.now() - startedAt,
+      };
+      appendUsageLog(config.petId, record);
+      logUsageRecord(record);
+    } catch { /* 记账失败不影响压缩本身 */ }
+    addLog('memory', `🗜️ [${targetNamesCache.get(target) || target}] session 压缩完成（${text.length} 字）`, null, target);
+    return text;
+  };
+
+  /**
+   * 跑一个 turn。
+   *
+   * turn 的边界：新消息进来 → 一直做事 → 不再调工具时检查有没有新消息 →
+   * 有且未达上限就注入继续，否则收尾。这就是原先 write_intent_plan 的
+   * "暂缓提交"拦截逻辑，从卡在某个工具上挪到了卡在 turn 边界上。
+   */
+  const runSessionTurn = async (session, target, targetType, { trigger, epoch }) => {
+    const state = getIntentState(target);
+    const tName = () => targetNamesCache.get(target) || target;
+    const lurkMode = lurkModes.get(target) || 'normal';
+    const turn = beginTurn(session, { trigger });
+    const ep = session.ephemeral;
+
+    // ── system prompt：整个 session 固定，只有材料被外部改动时才重建 ──
+    if (!session.systemPrompt || session.materialsDirty) {
+      // 档案只能在建 prompt 之前刷——建完就固化进前缀了。中途来的新人
+      // 靠模型自己 social_read social/people/{QQ号}.md 现拉。
+      try { await updatePeopleCache(target, targetType); } catch { /* 非致命 */ }
+      session.systemPrompt = await buildSocialPrompt({
+        petId: config.petId,
+        socialPersonaPrompt: promptConfig.socialPersonaPrompt,
+        atMustReply: promptConfig.atMustReply,
+        targetName: tName(),
+        targetId: target,
+        targetType,
+        botQQ: promptConfig.botQQ,
+        ownerQQ: promptConfig.ownerQQ,
+        ownerName: promptConfig.ownerName,
+        ownerSecret: ep.ownerSecret,
+        nameDelimiterL: ep.nameL, nameDelimiterR: ep.nameR,
+        msgDelimiterL: ep.msgL, msgDelimiterR: ep.msgR,
+        agentCanEditStrategy: promptConfig.agentCanEditStrategy,
+        lurkMode,
+        role: 'session',
+        customGroupRules: customGroupRulesMap.get(target) || '',
+        subagentRegistry,
+        voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
+        imageGenEnabled: !!imageGenLLMConfig,
+        maxSends: SEND_WINDOW_MAX,
+        sendWindowSec: Math.round(SEND_WINDOW_MS / 1000),
+        backlogRemindAt: BACKLOG_REMINDER_AT,
+        moodTagEnabled: moodConfig.enabled,
+      });
+      session.materialsDirty = false;
+      session.staticPrefixTokens = estimateTokens(session.systemPrompt);
+    }
+
+    // 循环水位线必须跟着 session.lastMessageId 走，**不能**跟 buffer 末尾。
+    // 注入到上限之后还没消费的消息，得继续算作"有变化"，否则 detectChange
+    // 看不见它们，要等再来一条新消息才会被顺带捞出去——那几条就被装死了。
+    // 两个出口（空 turn 提前返回 / 正常收尾）都要同步，漏一个就会空转。
+    const syncWatermark = () => {
+      if (session.lastMessageId) intentWatermarks.set(target, session.lastMessageId);
+    };
+
+    // ── 状态打标（"敬酒系统"）──
+    // 每条消息单独一次 Jev 调用，state 是截止到它为止的**原文**窗口（不含标签，
+    // 否则 Jev 会被前面的标签锚定）。正因为不带标签，条与条之间没有顺序依赖，
+    // 可以完全并发。标过的消息永不重标。
+    const tagFreshMessages = async (fresh) => {
+      if (!moodConfig.enabled || !moodConfig.apiKey) return;
+      const buf = dataBuffer.get(target);
+      const all = buf?.messages || [];
+      const targets = [];
+      for (const m of fresh) {
+        if (m.is_self || !m.message_id) continue;
+        if (session.moodStore.has(m.message_id)) continue;   // 冻结：标过就跳过
+        const idx = all.indexOf(m);
+        const start = idx >= 0 ? Math.max(0, idx - MOOD_CONTEXT_WINDOW) : 0;
+        const window = (idx >= 0 ? all.slice(start, idx + 1) : [m]).map(x => ({
+          time: x.timestamp ? new Date(x.timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '',
+          sender: x.sender_name || String(x.sender_id || ''),
+          text: x.content || '',
+          isSelf: !!x.is_self,
+        }));
+        targets.push({ id: String(m.message_id), window });
+      }
+      if (targets.length === 0) return;
+
+      const started = Date.now();
+      let failed = 0;
+      let firstError = '';
+      const tags = await tagBatch(targets, {
+        apiKey: moodConfig.apiKey,
+        model: moodConfig.model,
+        timeoutMs: MOOD_TAG_TIMEOUT_MS,
+        botName: targetNamesCache.get(config.botQQ) || config.ownerName || 'the bot',
+        // 只记次数不记原因，出问题时根本无从下手——第一条 CORS 故障就是这么
+        // 变成一行"5 次失败"的。原因必须带出来。
+        onError: (e) => { failed += 1; if (!firstError) firstError = String(e?.message || e); },
+      });
+      for (const [id, tag] of tags) {
+        if (tag) session.moodStore.set(id, tag);
+      }
+      session.moodStore.scheduleFlush();
+      const ok = [...tags.values()].filter(Boolean).length;
+
+      // 明细带上原文——中文阴阳判得准不准，只能靠人眼看标签和原文的对照。
+      // 没有这个，"准确率"就无从评估。
+      const byId = new Map(fresh.map(m => [String(m.message_id), m]));
+      const items = [...tags.entries()].map(([id, tag]) => {
+        const m = byId.get(id);
+        return {
+          id,
+          sender: m?.sender_name || String(m?.sender_id || ''),
+          text: (m?.content || '').slice(0, 120),
+          tag: tag || null,
+          render: renderMoodTag(tag),
+        };
+      });
+      const suffix = failed ? `，${failed} 次失败：${firstError}` : '';
+      addLog(failed === targets.length && failed > 0 ? 'warn' : 'mood-tag',
+        `🏷️ [${tName()}] 打标 ${ok}/${targets.length} 条（${Date.now() - started}ms${suffix}）`,
+        JSON.stringify({ items }), target);
+    };
+
+    // ── 新消息进 history ──
+    const imageUrlMap = new Map();
+    const appendNewMessages = async (msgs, kind) => {
+      if (!msgs.length) return 0;
+      // 水位线按原始批次推进，不管去重滤掉多少——否则全是自发消息的一批会让它卡死
+      const lastRaw = msgs[msgs.length - 1];
+      if (lastRaw?.message_id) session.lastMessageId = lastRaw.message_id;
+      const raw = msgs.filter(m => !(m.is_self && session.selfSentTexts.has((m.content || '').trim())));
+      if (!raw.length) return 0;
+
+      // 复制一份再解析：base64 只进 session history，不回写 buffer。
+      // buffer 里留着原始路径/URL，靠 resolveBufferImagesInPlace 的窗口回收控内存。
+      const fresh = raw.map(m => ({ ...m, _images: m._images || (m.image_urls || []).map(u => ({ data: u, mimeType: 'image/jpeg' })) }));
+      if (config.enableImages !== false) {
+        let resolvedCount = 0;
+        for (const m of fresh) {
+          if (!m._images?.length) { m._images = []; continue; }
+          try {
+            m._images = await resolveImagesForModel(m._images);
+            resolvedCount += m._images.length;
+          } catch (e) {
+            addLog('warn', `图片解析失败 msg=${m.message_id}：${e.message || e}`, null, target);
+            m._images = [];
+          }
+        }
+        if (resolvedCount > 0) {
+          addLog('info', `🖼️ 解析 ${resolvedCount} 张图为 base64`, null, target);
+        }
+      } else {
+        for (const m of fresh) m._images = [];
+      }
+
+      await tagFreshMessages(fresh);
+
+      const provider = buildTurnsFromMessages(fresh, {
+        sanitizeAtMe: false,
+        ownerQQ: promptConfig.ownerQQ, ownerName: promptConfig.ownerName,
+        ownerSecret: ep.ownerSecret,
+        nameL: ep.nameL, nameR: ep.nameR, msgL: ep.msgL, msgR: ep.msgR,
+        imageUrlMap,
+        moodTags: moodConfig.enabled ? session.moodStore : null,
+      });
+      for (const t of provider) appendHistory(session, { role: t.role, content: t.content, kind });
+      return fresh.length;
+    };
+
+    if (moodConfig.enabled) {
+      try { await session.moodStore.load(); } catch { /* 标签丢了不该拖垮 turn */ }
+    }
+
+    try {
+      await withHardTimeout(preprocessBufferImages(target), VISION_PREPROCESS_BUDGET_MS, 'Vision-pre');
+    } catch (e) {
+      addLog('warn', `🖼️ [${tName()}] 图片预处理超出预算，本轮跳过：${e.message || e}`, null, target);
+    }
+    touchIntent(state);
+
+    const initialCount = await appendNewMessages(messagesSince(target, session.lastMessageId), 'message');
+    if (initialCount === 0 && turn.seq > 1) {
+      // 水位线推进与 detectChange 之间有竞态窗口，偶尔会开出一个没有新输入的
+      // turn。没有新东西就没什么可想的，直接收掉，不烧一次 LLM。
+      endTurn(session, turn, { note: { register: REGISTER_SILENT, summary: '无新消息，空转', inferred: true } });
+      syncWatermark();
+      return turn;
+    }
+    addLog('intent', `🧵 [${tName()}] turn #${turn.seq} 开始（${trigger}，+${initialCount} 条）`, null, target);
+    // turn-state 专供右侧面板做实时显示，不进日志流（前端见到这个 level 直接吃掉）
+    const emitTurnState = (extra = {}) => addLog('turn-state', '', JSON.stringify({
+      seq: turn.seq, trigger, ended: false,
+      sends: turn.sends, toolCalls: turn.toolCalls, injections: turn.injections,
+      maxSends: SEND_WINDOW_MAX, backlogRemindAt: BACKLOG_REMINDER_AT,
+      injectedMessages: turn.injectedMessages, backlog: turn.backlog,
+      register: turn.note?.register ?? null, summary: turn.note?.summary ?? null,
+      ...extra,
+    }), target);
+    emitTurnState({ newMessages: initialCount });
+
+    // ── 群气压计 ──
+    // 和消息打标是两回事：那个冻结、进 history、每条一次；这个实时、**不进
+    // history**、每 turn 一次。不进 history 是硬要求——它每轮都变，塞进去
+    // 就把整个 session 的前缀缓存打穿了。所以它作为请求尾部的一次性块注入。
+    const readGroupBarometer = async () => {
+      if (!moodConfig.enabled || !moodConfig.apiKey) return null;
+      const buf = dataBuffer.get(target);
+      const all = buf?.messages || [];
+      if (all.length === 0) return null;
+      const window = all.slice(-BAROMETER_WINDOW).map(x => ({
+        time: x.timestamp ? new Date(x.timestamp).toLocaleTimeString('zh-CN', { hour12: false }) : '',
+        at: x.timestamp ? new Date(x.timestamp).getTime() : null,
+        sender: x.sender_name || String(x.sender_id || ''),
+        text: x.content || '',
+        isSelf: !!x.is_self,
+      }));
+      const started = Date.now();
+      let err = '';
+      const out = await readBarometer(window, {
+        apiKey: moodConfig.apiKey,
+        model: moodConfig.model,
+        botName: targetNamesCache.get(config.botQQ) || config.ownerName || 'the bot',
+        onError: (e) => { if (!err) err = String(e?.message || e); },
+      });
+      if (out) {
+        addLog('mood-tag',
+          `🌡️ [${tName()}] 气压：${renderBarometer(out.reading).split('\n').slice(1, 4).map(l => l.replace(/^· /, '')).join(' / ')}（${Date.now() - started}ms）`,
+          JSON.stringify({ barometer: out.reading, stats: out.stats }), target);
+      } else {
+        addLog('warn', `🌡️ [${tName()}] 气压读取失败（${Date.now() - started}ms）${err ? `：${err}` : ''}`, null, target);
+      }
+      return out;
+    };
+
+    const mcpTools = await buildSessionTools(target, lurkMode);
+    let capturedNote = null;
+    let pendingSendContent = null;
+    let pendingReplyTo = null;
+    // 发送闸门：每次开口之前都必须先 check_new_messages。
+    // 发完一条后重新置位——连发多条时每条之前都要重查，因为上一条发出去
+    // 本身就会改变群里的状态。
+    let checkedSinceLastSend = false;
+    /** 刚注入过。用来让 check_new_messages 的"空结果"说对话，见该工具注释。 */
+    let justInjected = false;
+    const collectTraining = !!_currentTrainingCollectionEnabled && !!trainingTargetsMap.get(String(target));
+    let latestTrace = null;
+    const turnStartedAt = Date.now();
+
+    const guard = () => isRuntimeGenerationCurrent()
+      && state.epoch === epoch
+      && !pausedTargets.get(target);
+
+    // ── 注入循环 ──
+    for (;;) {
+      if (!guard()) { addLog('info', `${targetType}:${target} session turn 取消`, null, target); break; }
+      touchIntent(state);
+
+      const prepared = await prepareRequestItems(session, {
+        thresholdTokens: COMPACT_THRESHOLD_TOKENS,
+        staticPrefixTokens: session.staticPrefixTokens || 0,
+        summarize: makeSessionSummarizer(target),
+        onEvent: (type, detail) => {
+          if (type === 'trim') {
+            addLog('info', `✂️ [${tName()}] 裁掉 ${detail.trimmedCount} 条旧工具输出（省 ${detail.savedChars} 字符）`, null, target);
+          } else if (type === 'compact') {
+            addLog('memory', `🗜️ [${tName()}] session 压缩：${detail.tokensBefore} → ${detail.tokensAfter} tok`, null, target);
+          }
+        },
+      });
+
+      // 气压计每轮重读。它**不经过 appendHistory** —— 作为请求最后一条 user
+      // 消息挂上去，用完即弃，history 里不留痕迹。
+      const baro = await readGroupBarometer();
+      const baroBlock = baro ? renderBarometer(baro.reading, baro.stats) : '';
+
+      const messages = [
+        { role: 'system', content: session.systemPrompt },
+        ...ensureUserLast(toProviderTurns(prepared.items)),
+      ];
+      if (baroBlock) messages.push({ role: 'user', content: baroBlock });
+
+      let result;
+      try {
+        result = await retryLLM(() => callLLMWithTools({
+          messages,
+          apiFormat: replyLLMConfig.apiFormat,
+          apiKey: replyLLMConfig.apiKey,
+          model: replyLLMConfig.modelName,
+          baseUrl: replyLLMConfig.baseUrl,
+          mcpTools,
+          options: {
+            temperature: 0.7,
+            explicitCache: shouldUseExplicitCache(config, replyLLMConfig.apiFormat),
+            cacheKey: buildCacheKey(config.petId, target, 'Session'),
+          },
+          maxIterations: SESSION_MAX_ITERATIONS,
+          builtinToolContext: {
+            petId: config.petId, targetId: target, targetType,
+            mcpServerName: config.mcpServerName, memoryEnabled: true,
+            imageUrlMap, sentCache: sentMessagesCache, subagentRegistry,
+            bufferMessages: dataBuffer.get(target)?.messages,
+            dataBuffer,
+            subagentConfig: {
+              enabled: config.subagentEnabled !== false,
+              model: config.subagentModel || 'sonnet',
+              timeoutSecs: config.subagentTimeoutSecs || 300,
+            },
+            dispatchMdOrganizer,
+            botQQ: promptConfig.botQQ,
+            ownerQQ: promptConfig.ownerQQ,
+            ownerName: promptConfig.ownerName,
+            ownerSecret: ep.ownerSecret,
+            addLog,
+            customGroupRules: customGroupRulesMap.get(target) || '',
+            ttsConfig: config.ttsConfig,
+            imageModel: imageGenLLMConfig,
+            lurkMode,
+            runtimeGuard: () => canTargetDispatch(target),
+            onTurnNote: (note) => { capturedNote = note; },
+            // 模型主动拉过的消息，turn 边界不该再当"新消息"注入一遍
+            sessionCursor: {
+              get: () => session.lastMessageId,
+              set: (id) => { session.lastMessageId = id; },
+            },
+            wasJustInjected: () => justInjected,
+            onNewMessagesChecked: (count) => {
+              checkedSinceLastSend = true;
+              justInjected = false;   // 只影响紧跟注入的那一次查询
+              if (count > 0) {
+                addLog('intent', `👀 [${tName()}] 模型主动查到 ${count} 条新消息`, null, target);
+              }
+            },
+          },
+          usageLabel: 'Session',
+          usageTarget: target,
+          usagePetId: config.petId,
+          onTrace: collectTraining ? (t) => { latestTrace = t; } : undefined,
+          onUsageLogged: (record) => { if (guard()) logUsageRecord(record); },
+          toolCallFilter: (name, args) => {
+            if (!guard()) return 'Session 已取消：Social Agent 已停止或目标已暂停。';
+            if (lurkMode === 'full-lurk' && SEND_TOOL_RE.test(name)) {
+              return `当前是纯观察模式，禁止调用发送工具 ${name}。`;
+            }
+            // 限流按**滑动时间窗**算，跨 turn 生效。之前是 per-turn 计数，
+            // 但撞注入上限会开新 turn、计数归零，一波消息里就成了 5+5+5…
+            if (SEND_TOOL_RE.test(name) && !canSendNow(session)) {
+              const w = sendWindowState(session);
+              return `最近 ${Math.round(w.windowMs / 1000)} 秒里已经发了 ${w.used} 条，到上限了`
+                + `（约 ${Math.ceil(w.retryInMs / 1000)} 秒后恢复）。剩下想说的缓一缓再说，别刷屏。`;
+            }
+            // 开口前强制看一眼群里的最新情况。不是死锁——调一次 check_new_messages 就放行。
+            if (SEND_TOOL_RE.test(name) && !checkedSinceLastSend) {
+              return '开口之前先调 check_new_messages 看一眼群里有没有新消息——你刚才想事情/查资料花了些时间，情况可能已经变了。看完再决定还要不要发、发什么。';
+            }
+            if (promptConfig.agentCanEditStrategy !== true) {
+              const mutation = new Set(['social_write', 'social_edit', 'social_delete', 'social_rename']);
+              const touchesStrategy = [args?.path, args?.from, args?.to].some(p =>
+                p != null && (canonicalSocialPath(p) == null || canonicalSocialPath(p) === 'social/reply_strategy.md'));
+              if (mutation.has(name) && touchesStrategy) return '当前配置禁止 Agent 修改 social/REPLY_STRATEGY.md。';
+            }
+            return null;
+          },
+          toolArgTransform: (name, args) => {
+            if (!name.includes('send_message')) return args;
+            let content = args?.content || '';
+            for (const sec of Object.values(ep)) content = content.replaceAll(sec, '');
+            content = content
+              .replace(/\[图片\]/g, '').replace(/\[视频\]/g, '')
+              .replace(/\[语音\]/g, '').replace(/\[文件\]/g, '').trim();
+            const extra = {};
+            if (args?.reply_to) extra.reply_to = String(args.reply_to);
+            return { ...args, content, ...extra, target, target_type: targetType };
+          },
+          onLLMText: (iter) => {
+            if (!guard()) return;
+            const text = (iter?.content || '').trim();
+            if (text) appendHistory(session, { role: 'assistant', content: text, kind: 'message' });
+          },
+          onToolCall: (name, args) => {
+            if (!guard()) return;
+            turn.toolCalls += 1;
+            appendHistory(session, {
+              role: 'assistant', kind: 'tool_call', toolName: name,
+              content: JSON.stringify(args ?? {}),
+            });
+            addLog('info', `LLM called tool: ${name}`, JSON.stringify(args, null, 2), target);
+            if (name.includes('send_message')) {
+              pendingSendContent = args?.content || '';
+              pendingReplyTo = args?.reply_to ? String(args.reply_to) : null;
+            }
+          },
+          onToolResult: (name, toolRes, _id, isError) => {
+            if (!guard()) return;
+            const text = typeof toolRes === 'string' ? toolRes : JSON.stringify(toolRes);
+            appendHistory(session, {
+              role: 'tool', kind: 'tool_result', toolName: name,
+              content: text, isError: !!isError,
+            });
+            addLog(isError ? 'error' : 'info', `Tool result: ${name}`, String(text).slice(0, 100), target);
+            if (name.includes('send_message') && !isToolResultFailure(toolRes, isError)) {
+              recordSend(session, turn);
+              lastReplyTime.set(target, Date.now());
+              checkedSinceLastSend = false;   // 下一条之前要重新查
+              if (pendingSendContent) {
+                let msgId = null;
+                let msgTs = new Date().toISOString();
+                try {
+                  const parsed = typeof toolRes === 'string' ? JSON.parse(toolRes) : toolRes;
+                  msgId = parsed?.message_ids?.[0]?.toString() || parsed?.message_id || null;
+                  if (parsed?.timestamp) msgTs = parsed.timestamp;
+                } catch { /* 结果不是 JSON 也无妨 */ }
+                // 和 buildTurnsFromMessages 的 is_self 分支同形，并额外带上引用标记。
+                // 之前这里塞的是裸内容：prompt 说自发消息带 [我的回复] 前缀、实际没有，
+                // 而且连发两条合并后分不清发了几次、哪条带引用——模型于是在正文里
+                // 手写「回 yesname：」补偿。
+                appendHistory(session, {
+                  role: 'assistant', kind: 'message',
+                  content: formatSelfMessage({
+                    text: pendingSendContent,
+                    time: (() => { try { return new Date(msgTs).toLocaleTimeString('zh-CN', { hour12: false }); } catch { return ''; } })(),
+                    replyTo: pendingReplyTo,
+                  }),
+                });
+                // 去重比对的是原始正文——buffer 回灌的那条不带前缀
+                session.selfSentTexts.add(pendingSendContent.trim());
+                const arr = sentMessagesCache.get(target) || [];
+                arr.push({ content: pendingSendContent, timestamp: msgTs, message_id: msgId });
+                sentMessagesCache.set(target, arr);
+                addLog('send', `💬 [${tName()}] ${pendingSendContent.slice(0, 60)}`, null, target);
+                emitTurnState();
+              }
+              pendingSendContent = null;
+              pendingReplyTo = null;
+            }
+          },
+        }), { label: `Session ${target}`, target });
+      } catch (e) {
+        addLog('error', `❌ [${tName()}] turn #${turn.seq} LLM 失败：${e.message || e}`, null, target);
+        break;
+      }
+
+      if (result?.content && !capturedNote) {
+        const tail = String(result.content).trim();
+        if (tail) appendHistory(session, { role: 'assistant', content: tail, kind: 'message' });
+      }
+
+      // ── turn 边界：有新消息就注入继续，否则收尾 ──
+      if (!guard()) break;
+      const fresh = messagesSince(target, session.lastMessageId).filter(m => !m.is_self);
+      if (!canInject(turn, fresh.length)) break;
+
+      const added = await appendNewMessages(messagesSince(target, session.lastMessageId), 'message');
+      recordInjection(turn, added || fresh.length);
+      // 注入本身就是一次"看过最新状态"。不置位的话，模型想回复时会被闸门拦下，
+      // 而被强制调用的 check_new_messages 此时必然返回空（注入已经推进了游标），
+      // 于是它收到"没有新消息"的误导信号 —— 线上那条「那你发个你自拍呗」就是
+      // 这样被吞掉的。
+      checkedSinceLastSend = true;
+      justInjected = true;
+      let injectionText = `（以上 ${added} 条是你思考期间新到的消息，**已经是群里最新的了**。`
+        + `把它们纳入判断：可能让你从不打算说变成该说了，也可能让你原本想说的话过时了。）`;
+      // 积压过多时提醒，而不是切断——和 Codex 的 reminder_threshold 一个路子。
+      if (shouldRemindBacklog(turn)) {
+        markBacklogReminded(turn);
+        injectionText += `\n\n⚠️ 你上次开口之后，群里已经堆了 ${turn.backlog} 条你还没回应的消息。`
+          + `要么说点什么，要么调 turn_note 明确收尾——别就这么挂着。`;
+        addLog('intent', `📬 [${tName()}] turn #${turn.seq} 积压 ${turn.backlog} 条未回应，已提醒`, null, target);
+      }
+      appendHistory(session, { role: 'user', kind: 'injection', content: injectionText });
+      addLog('intent', `🛑 [${tName()}] turn #${turn.seq} 注入 ${added} 条（积压 ${turn.backlog}，本轮累计 ${turn.injectedMessages}）`, null, target);
+      emitTurnState({ newMessages: added });
+    }
+
+    // ── 收尾 ──
+    endTurn(session, turn, { note: capturedNote });
+    appendHistory(session, {
+      role: 'assistant', kind: 'note',
+      turnId: turn.turnId,   // endTurn 已清空 currentTurn，这里要显式带上
+      content: renderTurnNote(turn.note, turn.seq),
+    });
+    syncWatermark();
+    if (turn.sends > 0) state.postReplyRestUntil = Date.now() + SESSION_POST_SEND_REST_MS;
+    // selfSentTexts 只用于去重刚发出、buffer 还没回灌的消息。整个 clear() 会把
+    // 尚未回灌的条目也丢掉，那条消息就会进两次——按 FIFO 只淘汰最旧的。
+    while (session.selfSentTexts.size > 32) {
+      session.selfSentTexts.delete(session.selfSentTexts.values().next().value);
+    }
+    // base64 图片只留最近几张，其余换占位符——否则 append-only 的 history 会一直涨
+    const recycled = recycleSessionImages(session.history);
+    if (recycled.recycled > 0) {
+      addLog('info', `🖼️ 回收 ${recycled.recycled} 张旧图（保留最近 ${recycled.kept} 张）`, null, target);
+    }
+
+    addLog('intent', `🧵 [${tName()}] turn #${turn.seq} 结束 [${turn.note?.register || '—'}] ${turn.note?.summary || ''}（${turn.toolCalls} 次工具，${turn.sends} 条发送，${turn.injections} 次注入）`, JSON.stringify(sessionStats(session)), target);
+    emitTurnState({ ended: true, stats: sessionStats(session) });
+
+    if (collectTraining && latestTrace) {
+      writeIntentTrace(config.petId, {
+        target_id: target, target_type: targetType, pet_id: config.petId,
+        provider: replyLLMConfig.apiFormat, model: replyLLMConfig.modelName, label: 'Session',
+      }, { ...latestTrace, durationMs: latestTrace.durationMs ?? (Date.now() - turnStartedAt) });
+    }
+    return turn;
+  };
+
+  /** 每 target 一条 session 循环。 */
+  const sessionLoop = async (target, targetType) => {
+    const state = getIntentState(target);
+    const tName = () => targetNamesCache.get(target) || target;
+    state.targetType = targetType;
+    const myEpoch = state.epoch;
+    const session = getSession(target, targetType);
+    touchIntent(state);
+
+    while (activeLoop && activeLoop._generation === loopGeneration && state.epoch === myEpoch) {
+      try {
+        touchIntent(state);
+        if (pausedTargets.get(target)) { await sleepInterruptible(state, 2000); continue; }
+
+        const now = Date.now();
+        const lurkMode = lurkModes.get(target) || 'normal';
+
+        // 发完消息后的冷静期，有新消息则提前结束
+        if (state.postReplyRestUntil) {
+          const remaining = state.postReplyRestUntil - now;
+          if (remaining > 0 && !hasNewNonSelfMessages(target)) {
+            await sleepInterruptible(state, remaining);
+          }
+          state.postReplyRestUntil = 0;
+        }
+
+        // semi-lurk / full-lurk 保持冷却，避免空转
+        if (lurkMode !== 'normal') {
+          const since = session.lastTurnAt ? now - session.lastTurnAt : Infinity;
+          if (since < INTENT_EVAL_COOLDOWN_MS) {
+            await sleepInterruptible(state, Math.min(INTENT_EVAL_COOLDOWN_MS - since + 1000, 10000));
+            continue;
+          }
+        }
+
+        const detection = detectChange(target, intentWatermarks);
+        if (detection?.isFirstRun) {
+          const buf = dataBuffer.get(target);
+          const lastMsg = buf?.messages?.[buf.messages.length - 1];
+          if (lastMsg?.message_id) intentWatermarks.set(target, lastMsg.message_id);
+        } else if (!detection?.changed) {
+          const lastNonSelf = getLastNonSelfMessageTime(target);
+          const idleMs = lastNonSelf > 0 ? Date.now() - lastNonSelf : 0;
+          if (idleMs > SESSION_IDLE_SLEEP_MS) {
+            await sleepInterruptible(state, 30000);
+          } else {
+            await sleepInterruptible(state, SESSION_IDLE_POLL_MS);
+          }
+          continue;
+        }
+
+        if (replyIntervalMs > 0) {
+          const sinceLastReply = Date.now() - (lastReplyTime.get(target) || 0);
+          if (sinceLastReply < replyIntervalMs) {
+            await sleepInterruptible(state, Math.min(replyIntervalMs - sinceLastReply, 5000));
+            continue;
+          }
+        }
+
+        session.lastTurnAt = Date.now();
+        await runSessionTurn(session, target, targetType, { trigger: 'newmsg', epoch: myEpoch });
+      } catch (e) {
+        if (state.epoch !== myEpoch) return;
+        // runSessionTurn 中途抛出会绕过 endTurn，留下一个永远"活跃"的 turn，
+        // 之后每次 beginTurn 都会撞 "已有活跃 turn"，这个群就永久停摆。
+        if (session.currentTurn && !session.currentTurn.ended) {
+          endTurn(session, session.currentTurn, {
+            note: { register: REGISTER_SILENT, summary: `异常中断：${e.message || e}`.slice(0, 60), inferred: true },
+          });
+        }
+        addLog('error', `❌ [${tName()}] session loop 异常：${e.message || e}`, e.stack, target);
+        await sleepInterruptible(state, 5000);
+      }
+    }
+  };
+
   // 启动层 1: Fetcher 循环（每 1s batch 拉取）
   fetcherLoop();
   
@@ -4717,15 +4293,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     observerLoop(t.target, t.targetType); // fire-and-forget
   }
   
-  // 启动层 3: 每个 target 独立的 Reply 循环（决定回复）
+  // 启动层 3+4: 每个 target 独立的 Session 循环（取代 Reply + Intent 两层）
   for (const t of targets) {
-    replyLoop(t.target, t.targetType); // fire-and-forget
-  }
-  
-  // 启动层 4: 每个 target 独立的 Intent Loop（意图分析）
-  for (const t of targets) {
-    getIntentState(t.target); // 预注册
-    intentLoop(t.target, t.targetType); // fire-and-forget
+    getIntentState(t.target); // 预注册（循环控制状态：epoch / heartbeat / wake）
+    sessionLoop(t.target, t.targetType); // fire-and-forget
   }
 
   // 看门狗：监控 Fetcher 轮询链 + 各 target 的 Intent 循环是否卡死

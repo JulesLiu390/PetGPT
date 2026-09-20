@@ -19,7 +19,7 @@ import tauri from '../tauri';
 import { downloadUrlAsBase64, llmProxyCall, llmProxyStream, readLocalImageAsBase64 } from '../tauri';
 import { isBuiltinTool, executeBuiltinTool } from '../workspace/builtinToolExecutor.js';
 import { createImageCache } from '../imageCache.js';
-import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool } from '../workspace/socialToolExecutor.js';
+import { isSocialFileTool, executeSocialFileTool, isHistoryBuiltinTool, executeHistoryBuiltinTool, isGroupLogBuiltinTool, executeGroupLogBuiltinTool, isStickerBuiltinTool, executeStickerBuiltinTool, isBufferSearchTool, executeBufferSearchTool, isIntentPlanTool, executeIntentPlanTool, isSubagentTool, executeSubagentTool, isTurnNoteTool, executeTurnNoteTool } from '../workspace/socialToolExecutor.js';
 import { isSkillTool, executeSkillTool } from '../skills/index.js';
 import { appendToolResultAnnotation } from './toolResultAnnotation.js';
 import { createAbortError, throwIfAborted } from '../cancellation.js';
@@ -902,6 +902,8 @@ export const callLLMWithTools = async ({
               toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
             } else if (isIntentPlan && builtinToolContext) {
               toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
+            } else if (isTurnNoteTool(call.name) && builtinToolContext) {
+              toolResult = await executeTurnNoteTool(call.name, call.arguments, builtinToolContext);
             } else if (isSubagent && builtinToolContext) {
               toolResult = await executeSubagentTool(call.name, call.arguments, builtinToolContext);
             } else {
@@ -1453,6 +1455,8 @@ export const callLLMStreamWithTools = async ({
             toolResult = executeBufferSearchTool(call.name, call.arguments, builtinToolContext);
           } else if (isIntentPlan && builtinToolContext) {
             toolResult = await executeIntentPlanTool(call.name, call.arguments, builtinToolContext);
+          } else if (isTurnNoteTool(call.name) && builtinToolContext) {
+            toolResult = await executeTurnNoteTool(call.name, call.arguments, builtinToolContext);
           } else if (isSubagent && builtinToolContext) {
             toolResult = await executeSubagentTool(call.name, call.arguments, builtinToolContext);
           } else {

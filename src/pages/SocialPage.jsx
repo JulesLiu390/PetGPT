@@ -48,7 +48,11 @@ export default function SocialPage() {
   const [exportRunning, setExportRunning] = useState(false);
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
-  const [intentPlans, setIntentPlans] = useState({}); // { [target]: { planLogId, actions, state, doneTypes[] } }
+  const [turnStates, setTurnStates] = useState({});
+  const [moodFeed, setMoodFeed] = useState({}); // { [target]: [{id, sender, text, tag, render}] } 最近若干条
+  const [barometers, setBarometers] = useState({}); // { [target]: { current, stats, history[] } } 群级实时读数
+  const [showMood, setShowMood] = useState(true);
+  const [panelMoodExpanded, setPanelMoodExpanded] = useState(true); // { [target]: { seq, register, summary, sends, toolCalls, injections, ended, stats } }
   const [preflight, setPreflight] = useState(null); // dependency chain: NapCat → QQ account → MCP process
 
   useEffect(() => {
@@ -385,24 +389,42 @@ export default function SocialPage() {
         const ids = seenLogIdsRef.current;
         if (entry.id != null && ids.has(entry.id)) return; // already seen
         if (entry.id != null) ids.add(entry.id);
-        // Intent plan updates — drive the dynamic todolist
-        if (entry.level === 'intent-plan' && entry.target && entry.details) {
+        // 打标明细 / 气压读数 — 进右侧面板；日志流里只留摘要行
+        if (entry.level === 'mood-tag' && entry.target && entry.details) {
           try {
-            const plan = JSON.parse(entry.details);
-            setIntentPlans(prev => ({
-              ...prev,
-              [entry.target]: { planLogId: entry.id, actions: plan.actions || [], state: plan.state || '', done: [] },
-            }));
+            const { items, barometer, stats } = JSON.parse(entry.details);
+            if (barometer) {
+              setBarometers(prev => {
+                const cur = prev[entry.target] || { history: [] };
+                // 留一小段时间线，能看出气压怎么变的
+                const history = [{ ...barometer, stats }, ...cur.history].slice(0, 12);
+                return { ...prev, [entry.target]: { current: barometer, stats, history } };
+              });
+            }
+            if (Array.isArray(items) && items.length) {
+              setMoodFeed(prev => {
+                const cur = prev[entry.target] || [];
+                // 新的在前，按 message_id 去重，最多留 60 条
+                const seen = new Set(items.map(i => i.id));
+                const merged = [...items, ...cur.filter(i => !seen.has(i.id))].slice(0, 60);
+                return { ...prev, [entry.target]: merged };
+              });
+            }
           } catch { /* ignore */ }
-          return; // don't add to log list
         }
-        if (entry.level === 'intent-action-done' && entry.target && entry.details) {
+
+        // Turn 实时状态 — 驱动顶部的 turn 指示条，不进日志流
+        if (entry.level === 'turn-state' && entry.target && entry.details) {
           try {
-            const data = JSON.parse(entry.details);
-            setIntentPlans(prev => {
+            const st = JSON.parse(entry.details);
+            setTurnStates(prev => {
               const cur = prev[entry.target];
-              if (!cur) return prev;
-              return { ...prev, [entry.target]: { ...cur, done: [...cur.done, data] } };
+              // 收尾后的 note 要留住：下一个 turn 开始前，面板显示的是上一轮的小结
+              const carry = st.ended || st.register ? {} : {
+                lastRegister: cur?.register ?? cur?.lastRegister ?? null,
+                lastSummary: cur?.summary ?? cur?.lastSummary ?? null,
+              };
+              return { ...prev, [entry.target]: { ...carry, ...st, logId: entry.id } };
             });
           } catch { /* ignore */ }
           return; // don't add to log list
@@ -498,7 +520,9 @@ export default function SocialPage() {
     setLogs([]);
     setTargetNames({});
     setLogFilter('all');
-    setIntentPlans({});
+    setTurnStates({});
+    setMoodFeed({});
+    setBarometers({});
     setCacheResetAt(0);
   }, [selectedPetId]);
 
@@ -594,7 +618,6 @@ export default function SocialPage() {
   const PER_SERVER_KEYS = [
     'apiProviderId', 'modelName',
     'observerApiProviderId', 'observerModelName',
-    'intentApiProviderId', 'intentModelName',
     'compressApiProviderId', 'compressModelName',
     'imageDescProviderId', 'imageDescModelName', 'imageDescMode',
     'replyInterval', 'observerInterval',
@@ -745,8 +768,6 @@ export default function SocialPage() {
   const observerProvider = apiProviders.find(p => (p._id || p.id) === config.observerApiProviderId);
   const observerProviderModels = sortModels(observerProvider?.cachedModels);
 
-  const intentProvider = apiProviders.find(p => (p._id || p.id) === config.intentApiProviderId);
-  const intentProviderModels = sortModels(intentProvider?.cachedModels);
 
   const compressProvider = apiProviders.find(p => (p._id || p.id) === config.compressApiProviderId);
   const compressProviderModels = sortModels(compressProvider?.cachedModels);
@@ -788,6 +809,7 @@ export default function SocialPage() {
   // Memoized filtered logs (based on sorted data)
   const filteredLogs = useMemo(() => sortedLogs.filter(log => {
     // Intent logs have target — apply target filter normally
+    if (log.level === 'mood-tag') return showMood && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (log.level === 'intent' || log.level === 'send') return showIntent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (log.level === 'subagent') return showSubagent && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
     if (log.level === 'reflect') return showReflect && (logFilter === 'all' || logFilter === 'system' || log.target === logFilter);
@@ -797,7 +819,7 @@ export default function SocialPage() {
     if (log.level === 'poll') return true;
     if (!showSystem) return false;
     return true;
-  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent, showReflect, showUsage]);
+  }), [sortedLogs, logFilter, showSystem, showIntent, showSubagent, showReflect, showUsage, showMood]);
 
   // Newest first — just reverse the already-sorted filtered logs (O(N))
   const reversedFilteredLogs = useMemo(() => [...filteredLogs].reverse(), [filteredLogs]);
@@ -836,7 +858,7 @@ export default function SocialPage() {
         output_path: outputPath,
         redact: exportOptions.redact,
         status: exportOptions.statusSuccessOnly ? 'success' : null,
-        termination: exportOptions.terminationStrict ? 'write_intent_plan' : null,
+        termination: exportOptions.terminationStrict ? 'end_turn' : null,
       });
       setExportResult({ ...result, outputPath });
     } catch (e) {
@@ -1162,86 +1184,6 @@ export default function SocialPage() {
                     </div>
                   </Card>
 
-                  {/* Intent LLM — independent toggle */}
-                  <Card title="Intent LLM" description="Independent API for willingness analysis">
-                    <div className="space-y-3">
-                      <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={!!config.intentApiProviderId}
-                          onChange={(e) => {
-                            if (!e.target.checked) {
-                              handleConfigChange('intentApiProviderId', '');
-                              handleConfigChange('intentModelName', '');
-                            } else {
-                              handleConfigChange('intentApiProviderId', config.apiProviderId);
-                            }
-                          }}
-                          className="rounded border-slate-300"
-                        />
-                        Use independent API (uncheck to use Reply LLM)
-                      </label>
-                      {config.intentApiProviderId ? (
-                        <>
-                          <FormGroup label="API Provider">
-                            <Select
-                              value={config.intentApiProviderId}
-                              onChange={(e) => {
-                                handleConfigChange('intentApiProviderId', e.target.value);
-                                handleConfigChange('intentModelName', '');
-                              }}
-                            >
-                              <option value="">Select provider...</option>
-                              {apiProviders.map(p => (
-                                <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
-                              ))}
-                            </Select>
-                          </FormGroup>
-                          <FormGroup label="Model">
-                            {intentProviderModels.length > 0 ? (
-                              <Select
-                                value={config.intentModelName}
-                                onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                              >
-                                <option value="">Select model...</option>
-                                {intentProviderModels.map(m => {
-                                  const modelId = typeof m === 'string' ? m : m.id;
-                                  return <option key={modelId} value={modelId}>{modelId}</option>;
-                                })}
-                              </Select>
-                            ) : (
-                              <Input
-                                value={config.intentModelName}
-                                onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                                placeholder="e.g. gpt-4o-mini"
-                              />
-                            )}
-                          </FormGroup>
-                        </>
-                      ) : (
-                        <FormGroup label="Model (optional, use different model from same provider)">
-                          {providerModels.length > 0 ? (
-                            <Select
-                              value={config.intentModelName}
-                              onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                            >
-                              <option value="">Same as Reply model</option>
-                              {providerModels.map(m => {
-                                const modelId = typeof m === 'string' ? m : m.id;
-                                return <option key={modelId} value={modelId}>{modelId}</option>;
-                              })}
-                            </Select>
-                          ) : (
-                            <Input
-                              value={config.intentModelName}
-                              onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                              placeholder="Leave empty to use Reply model"
-                            />
-                          )}
-                        </FormGroup>
-                      )}
-                    </div>
-                  </Card>
 
                   {/* Compress LLM — independent toggle */}
                   <Card title="Compress LLM" description="Independent API for daily compression and MCP sampling">
@@ -1597,6 +1539,44 @@ export default function SocialPage() {
                     )}
                   </Card>
 
+                  {/* 状态打标（Jev / TypeSafe）—— "敬酒系统" */}
+                  <Card>
+                    <div className="flex items-center gap-2 mb-2">
+                      <input
+                        type="checkbox"
+                        checked={!!config.moodTagConfig?.enabled}
+                        onChange={(e) => handleConfigChange('moodTagConfig', { ...(config.moodTagConfig || {}), enabled: e.target.checked })}
+                        className="rounded"
+                      />
+                      <span className="text-sm font-medium text-gray-700">Mood Tagging (TypeSafe Jev)</span>
+                      <span className="text-xs text-gray-400">Tag every incoming message with 【act·tone·earnestness】</span>
+                    </div>
+                    {config.moodTagConfig?.enabled && (
+                      <div className="grid grid-cols-2 gap-3">
+                        <FormGroup label="API Key" hint="TypeSafe API key">
+                          <Input
+                            type="password"
+                            value={config.moodTagConfig?.apiKey || ''}
+                            onChange={(e) => handleConfigChange('moodTagConfig', { ...(config.moodTagConfig || {}), apiKey: e.target.value })}
+                            placeholder="sk-..."
+                          />
+                        </FormGroup>
+                        <FormGroup label="Model" hint="Default jev-latest">
+                          <Input
+                            value={config.moodTagConfig?.model || ''}
+                            onChange={(e) => handleConfigChange('moodTagConfig', { ...(config.moodTagConfig || {}), model: e.target.value })}
+                            placeholder="jev-latest"
+                          />
+                        </FormGroup>
+                        <div className="col-span-2 text-xs text-gray-400 leading-relaxed">
+                          Tags are frozen at ingest and persisted, so each message is labelled once.
+                          Labels render inside the trusted name block; on failure the message shows 【—】 and the bot falls back to reading the raw text.
+                          Note: Jev is text-only and optimised for English, so Chinese sarcasm detection is the weak spot worth watching.
+                        </div>
+                      </div>
+                    )}
+                  </Card>
+
                   {/* TTS / 语音 (ElevenLabs) */}
                   <Card>
                     <div className="flex items-center gap-2 mb-2">
@@ -1873,7 +1853,8 @@ export default function SocialPage() {
               <ToggleBtn active={showLlm} onClick={() => setShowLlm(!showLlm)} icon="🧠" label="LLM" />
               <ToggleBtn active={showTools} onClick={() => setShowTools(!showTools)} icon="🔧" label="Tools" />
               <ToggleBtn active={showSystem} onClick={() => setShowSystem(!showSystem)} icon="📋" label="System" />
-              <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Intent" />
+              <ToggleBtn active={showIntent} onClick={() => setShowIntent(!showIntent)} icon="🧠" label="Turn" />
+              <ToggleBtn active={showMood} onClick={() => setShowMood(!showMood)} icon="🏷️" label="Mood" />
               <ToggleBtn active={showSubagent} onClick={() => setShowSubagent(!showSubagent)} icon="🤖" label="Subagent" />
               <ToggleBtn active={showReflect} onClick={() => setShowReflect(!showReflect)} icon="🪞" label="Reflect" />
               <ToggleBtn active={showUsage} onClick={() => setShowUsage(!showUsage)} icon="💾" label="Usage" />
@@ -1946,52 +1927,36 @@ export default function SocialPage() {
               />
             )}
 
-            {/* Intent Plan — pinned above logs when a target is selected */}
+            {/* Turn 状态条 — 选中 target 时钉在日志上方 */}
             {selectedTarget && (() => {
-              const plan = intentPlans[selectedTarget];
-              const actionLabel = (a) => {
-                if (a.type === 'sticker') return `📎 sticker#${a.id}`;
-                if (a.type === 'image') return `🖼️ ${a.file || 'image'}`;
-                if (a.type === 'reply') return `💬 reply${a.numChunks > 1 ? ` ×${a.numChunks}` : ''}${a.replyLen ? ` ~${a.replyLen} chars` : ''}`;
-                if (a.type === 'intent') return `⏱ intent (${a.delaySeconds ?? 5}s)`;
-                return `⏸ wait`;
-              };
-              if (!plan) return (
+              const st = turnStates[selectedTarget];
+              if (!st) return (
                 <div className="shrink-0 border-b border-slate-100 bg-slate-50/80 px-3 py-1.5">
-                  <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Plan</span>
-                  <span className="text-[9px] text-slate-400 ml-2">Waiting for Intent evaluation…</span>
+                  <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Turn</span>
+                  <span className="text-[9px] text-slate-400 ml-2">Waiting for new messages…</span>
                 </div>
               );
-              const doneStickers = plan.done.filter(d => d.type === 'sticker').length;
-              const doneReplies = plan.done.filter(d => d.type === 'reply').length;
-              const doneImages = plan.done.filter(d => d.type === 'image').length;
-              let stickerIdx = 0, replyIdx = 0, imageIdx = 0;
-              const isDone = (a) => {
-                if (a.type === 'sticker') return stickerIdx++ < doneStickers;
-                if (a.type === 'reply') return replyIdx++ < doneReplies;
-                if (a.type === 'image') return imageIdx++ < doneImages;
-                return false;
-              };
-              const planHasAction = plan.actions.some(a => a.type === 'sticker' || a.type === 'reply' || a.type === 'image');
+              const chip = (text, tone) => (
+                <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${tone}`}>{text}</span>
+              );
+              const idle = 'text-slate-500 bg-white border-slate-200';
+              const live = 'text-cyan-700 bg-cyan-50 border-cyan-200';
+              const done = 'text-slate-400 bg-slate-100 border-slate-200';
+              const reg = st.register ?? st.lastRegister;
+              const sum = st.summary ?? st.lastSummary;
               return (
                 <div className="shrink-0 border-b border-slate-200 bg-slate-50/80 px-3 py-1.5 space-y-1">
                   <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide shrink-0">Plan</span>
-                    {plan.actions
-                      .filter(a => !(planHasAction && (a.type === 'wait' || a.type === 'intent')))
-                      .map((a, i) => {
-                        const done = isDone(a);
-                        return (
-                          <span key={i} className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${
-                            done ? 'text-slate-400 bg-slate-100 border-slate-200 line-through' :
-                            a.type === 'wait' || a.type === 'intent' ? 'text-slate-500 bg-white border-slate-200' :
-                            'text-cyan-700 bg-cyan-50 border-cyan-200'
-                          }`}>
-                            {done ? '✓' : '○'} {actionLabel(a)}
-                          </span>
-                        );
-                      })}
-                    {/* Running subagent tasks for this target */}
+                    <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide shrink-0">Turn</span>
+                    {chip(`#${st.seq}${st.ended ? '' : ' ●'}`, st.ended ? done : live)}
+                    {reg && chip(`[${reg}]`, st.ended ? done : live)}
+                    {st.sends > 0 && chip(`💬 ${st.sends}/${st.maxSends ?? 5}`, st.ended ? done : live)}
+                    {st.toolCalls > 0 && chip(`🔧 ${st.toolCalls}`, idle)}
+                    {st.injections > 0 && chip(`🛑 注入 ${st.injectedMessages ?? 0} 条`, idle)}
+                    {(st.backlog ?? 0) > 0 && chip(`📬 积压 ${st.backlog}${st.backlog >= (st.backlogRemindAt ?? 20) ? ' ⚠️' : ''}`,
+                      st.backlog >= (st.backlogRemindAt ?? 20) ? 'text-amber-700 bg-amber-50 border-amber-300' : idle)}
+                    {st.stats?.sealedWindows > 0 && chip(`🗜️ ×${st.stats.sealedWindows}`, idle)}
+                    {/* 该 target 下在跑的子 agent */}
                     {(() => {
                       const targetRunning = [];
                       for (const [tid, e] of subagentRegistry) {
@@ -2011,6 +1976,9 @@ export default function SocialPage() {
                       ));
                     })()}
                   </div>
+                  {sum && (
+                    <div data-i18n-ignore className="text-[10px] text-slate-500 font-mono truncate">{sum}</div>
+                  )}
                 </div>
               );
             })()}
@@ -2040,6 +2008,8 @@ export default function SocialPage() {
                     <ReflectLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : log.level === 'usage' ? (
                     <UsageLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
+                  ) : log.level === 'mood-tag' ? (
+                    <MoodLogEntry key={log.id ?? log.timestamp} log={log} logFilter={logFilter} />
                   ) : (
                     <div key={log.id ?? log.timestamp} className={`py-0.5 ${
                       log.level === 'error' ? 'text-red-600' :
@@ -2102,17 +2072,40 @@ export default function SocialPage() {
                 <div className="flex-1 min-h-0 overflow-y-auto">
                   {/* Intent State */}
                   <CollapsibleSection
-                    title={`Intent State${selectedTarget ? ` · ${targetNames[selectedTarget] || selectedTarget}` : ''}`}
+                    title={`Session${selectedTarget ? ` · ${targetNames[selectedTarget] || selectedTarget}` : ''}`}
                     expanded={panelStateExpanded}
                     onToggle={() => setPanelStateExpanded(v => !v)}
                   >
-                    {selectedTarget && intentPlans[selectedTarget]?.state ? (
-                      <div data-i18n-ignore className="text-[10px] text-slate-600 font-mono whitespace-pre-wrap leading-relaxed">
-                        {intentPlans[selectedTarget].state}
-                      </div>
-                    ) : (
+                    {selectedTarget && turnStates[selectedTarget] ? (() => {
+                      const st = turnStates[selectedTarget];
+                      const row = (k, v) => (
+                        <div className="flex justify-between gap-2">
+                          <span className="text-slate-400">{k}</span>
+                          <span data-i18n-ignore className="text-slate-600 tabular-nums">{v}</span>
+                        </div>
+                      );
+                      return (
+                        <div className="text-[10px] font-mono space-y-0.5 leading-relaxed">
+                          {row('turn', `#${st.seq}${st.ended ? '' : ' (运行中)'}`)}
+                          {row('本轮发送', `${st.sends ?? 0} 条（限流 ${st.maxSends ?? 3}/60s，跨轮）`)}
+                          {row('本轮工具', st.toolCalls ?? 0)}
+                          {row('本轮注入', `${st.injectedMessages ?? 0} 条（${st.injections ?? 0} 轮，不设上限）`)}
+                          {row('未回应积压', `${st.backlog ?? 0}（到 ${st.backlogRemindAt ?? 20} 提醒一次）`)}
+                          {st.stats && row('history 条目', `${st.stats.liveItems} 活 / ${st.stats.historyItems} 总`)}
+                          {st.stats && row('窗口', `${st.stats.windows}（已压缩 ${st.stats.sealedWindows}）`)}
+                          {(st.summary ?? st.lastSummary) && (
+                            <div className="pt-1 mt-1 border-t border-slate-100">
+                              <span className="text-slate-400">最近小结</span>
+                              <div data-i18n-ignore className="text-slate-600 whitespace-pre-wrap">
+                                [{st.register ?? st.lastRegister ?? '—'}] {st.summary ?? st.lastSummary}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })() : (
                       <div className="text-[10px] text-slate-400 font-mono">
-                        {selectedTarget ? 'Waiting for Intent evaluation…' : 'No target selected'}
+                        {selectedTarget ? 'Waiting for the first turn…' : 'No target selected'}
                       </div>
                     )}
                   </CollapsibleSection>
@@ -2124,6 +2117,19 @@ export default function SocialPage() {
                     onToggle={() => setPanelCacheExpanded(v => !v)}
                   >
                     <PromptCachePanel logs={usageLogsAfterReset} />
+                  </CollapsibleSection>
+
+                  {/* 气压计 —— 打标结果与原文对照 */}
+                  <CollapsibleSection
+                    title={`Mood 气压计${selectedTarget ? ` · ${targetNames[selectedTarget] || selectedTarget}` : ''}`}
+                    expanded={panelMoodExpanded}
+                    onToggle={() => setPanelMoodExpanded(v => !v)}
+                  >
+                    <MoodPanel
+                      items={selectedTarget ? (moodFeed[selectedTarget] || []) : []}
+                      barometer={selectedTarget ? barometers[selectedTarget] : null}
+                      hasTarget={!!selectedTarget}
+                    />
                   </CollapsibleSection>
 
                   {/* Training Data */}
@@ -2190,7 +2196,7 @@ export default function SocialPage() {
               onChange={(e) => setExportOptions({ ...exportOptions, terminationStrict: e.target.checked })}
               disabled={exportRunning}
             />
-            Only evals that reached write_intent_plan
+            Only turns that ended cleanly (end_turn)
           </label>
 
           {exportRunning && (
@@ -2370,6 +2376,135 @@ function IntentLogEntry({ log, logFilter, petId }) {
           ) : (
             <ToolDetailsBlock details={log.details} />
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 打标日志行。默认分支会把整份 items JSON 倒进日志流，太脏——
+ * 这里只显示摘要 + 每条的标签，原文对照留给右侧气压计面板。
+ */
+function MoodLogEntry({ log, logFilter }) {
+  let tags = [];
+  try {
+    const { items } = JSON.parse(log.details || '{}');
+    if (Array.isArray(items)) tags = items.map(i => i.render).filter(Boolean);
+  } catch { /* 详情坏了就只显示摘要 */ }
+  return (
+    <div className="py-0.5 text-teal-600">
+      <span className="text-slate-400">{new Date(log.timestamp).toLocaleTimeString()}</span>
+      {' '}
+      <span className="font-semibold">[mood]</span>
+      {log.target && logFilter === 'all' && <span className="text-cyan-500 ml-1">[{log.target}]</span>}
+      {' '}
+      {log.message}
+      {tags.length > 0 && (
+        <span className="text-slate-500 ml-1" data-i18n-ignore>{tags.join('')}</span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * 气压计面板。两块内容，对应两个**不同尺度**的判断：
+ *
+ *   上半：群级实时读数 —— 每个 turn 一次 Jev 调用，看最近 30 条的整体形态。
+ *   下半：消息级标签 + 原文 —— 每条一次，冻结不变。
+ *
+ * 这两块曾经是一回事：上半原本是把下半的 tone 做直方图。那是错的——
+ * 一屋子人各说各的平静话，和两个人在平静地对线，直方图一模一样，气压天差地别。
+ * 群的状态是涌现的，不是单条情绪的和，所以现在是独立的一次判断。
+ *
+ * 下半保留原文对照，是因为 Jev 的中文准确率是未知数（文档：非英语 lower
+ * accuracy），尤其「阴阳」这档既最值钱也最容易错。不把标签和原文摆在一起，
+ * 就没办法评估它到底靠不靠谱。
+ */
+function MoodPanel({ items, barometer, hasTarget }) {
+  // 情绪配色。阴阳单独给最扎眼的颜色——它是最需要人工复核的那一档。
+  const TONE_STYLE = {
+    平静: 'text-slate-500 bg-slate-100 border-slate-200',
+    兴奋: 'text-amber-700 bg-amber-50 border-amber-200',
+    阴阳: 'text-purple-700 bg-purple-100 border-purple-300 font-semibold',
+    烦躁: 'text-rose-700 bg-rose-50 border-rose-200',
+    着急: 'text-orange-700 bg-orange-50 border-orange-200',
+  };
+  // 群级温度配色。刻意和上面用不同的词，避免两个尺度混读。
+  const CLIMATE_STYLE = {
+    融洽: 'text-emerald-700 bg-emerald-50 border-emerald-200',
+    平淡: 'text-slate-500 bg-slate-100 border-slate-200',
+    紧张: 'text-rose-700 bg-rose-100 border-rose-300 font-semibold',
+    尬住: 'text-amber-700 bg-amber-100 border-amber-300',
+    刷屏亢奋: 'text-fuchsia-700 bg-fuchsia-50 border-fuchsia-200',
+  };
+  const SHAPE_CN = { crowd: '多人热聊', duel: '两人对线', monologue: '单人连发', scattered: '各说各的', quiet: '冷场' };
+  const CLIMATE_CN = { warm: '融洽', plain: '平淡', tense: '紧张', awkward: '尬住', rowdy: '刷屏亢奋' };
+  const TOPIC_CN = { deep: '深聊一个', parallel: '多线并行', shifting: '刚切换', drifting: '无主题漂着' };
+
+  if (!hasTarget) {
+    return <div className="text-[10px] text-slate-400 font-mono">No target selected</div>;
+  }
+
+  const cur = barometer?.current;
+  const stats = barometer?.stats;
+
+  return (
+    <div className="space-y-2">
+      {/* ── 群级实时读数 ── */}
+      <div className="pb-1.5 border-b border-slate-100">
+        <div className="text-[9px] text-slate-400 uppercase tracking-wide mb-1">群气压（最近 30 条 · 每轮重算）</div>
+        {cur ? (
+          <>
+            <div className="flex flex-wrap gap-1">
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border text-slate-600 bg-white border-slate-200">
+                {SHAPE_CN[cur.shape] || cur.shape}
+              </span>
+              <span className={`text-[10px] font-mono px-1.5 py-0.5 rounded border ${CLIMATE_STYLE[CLIMATE_CN[cur.climate]] || CLIMATE_STYLE.平淡}`}>
+                {CLIMATE_CN[cur.climate] || cur.climate}
+              </span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded border text-slate-600 bg-white border-slate-200">
+                {TOPIC_CN[cur.topic] || cur.topic}
+              </span>
+              {stats && (
+                <span className="text-[9px] font-mono px-1 py-0.5 text-slate-400">
+                  {stats.distinct_speakers} 人
+                  {stats.span_minutes != null ? ` / ${stats.span_minutes} 分钟` : ''}
+                </span>
+              )}
+            </div>
+            {barometer.history?.length > 1 && (
+              <div className="mt-1 text-[9px] font-mono text-slate-400 truncate" title="气压变化时间线（新→旧）">
+                {barometer.history.slice(0, 8).map((h, i) => (
+                  <span key={i}>{i > 0 && ' ← '}{CLIMATE_CN[h.climate] || h.climate}</span>
+                ))}
+              </div>
+            )}
+          </>
+        ) : (
+          <div className="text-[10px] text-slate-400 font-mono">还没有读数</div>
+        )}
+      </div>
+
+      {/* ── 消息级标签 + 原文对照 ── */}
+      {!items.length ? (
+        <div className="text-[10px] text-slate-400 font-mono leading-relaxed">
+          还没有打标记录。<br />
+          需要在上方 Mood Tagging 卡片里启用并填入 TypeSafe API key。
+        </div>
+      ) : (
+        <div className="space-y-1 max-h-72 overflow-y-auto">
+          {items.map((it) => {
+            const tone = it.tag ? (it.render.match(/【[^·】]+·([^·】]+)/) || [])[1] : null;
+            const style = tone ? (TONE_STYLE[tone] || TONE_STYLE.平静) : 'text-slate-400 bg-white border-slate-200';
+            return (
+              <div key={it.id} className="text-[10px] font-mono leading-relaxed">
+                <span className={`px-1 py-0.5 rounded border mr-1 ${style}`} data-i18n-ignore>{it.render}</span>
+                <span className="text-cyan-600" data-i18n-ignore>{it.sender}</span>
+                <span className="text-slate-600" data-i18n-ignore>：{it.text}</span>
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

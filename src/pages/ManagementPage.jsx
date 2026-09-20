@@ -4104,8 +4104,6 @@ const SocialPanel = ({ assistants, apiProviders }) => {
   const providerModels = sortModels(selectedProvider?.cachedModels);
   const observerProvider = apiProviders.find(p => (p._id || p.id) === config.observerApiProviderId);
   const observerProviderModels = sortModels(observerProvider?.cachedModels);
-  const intentProvider = apiProviders.find(p => (p._id || p.id) === config.intentApiProviderId);
-  const intentProviderModels = sortModels(intentProvider?.cachedModels);
   const compressProvider = apiProviders.find(p => (p._id || p.id) === config.compressApiProviderId);
   const compressProviderModels = sortModels(compressProvider?.cachedModels);
   const visionProvider = apiProviders.find(p => (p._id || p.id) === config.imageDescProviderId);
@@ -4312,86 +4310,6 @@ const SocialPanel = ({ assistants, apiProviders }) => {
             </div>
           </Card>
 
-          {/* Intent LLM */}
-          <Card title="Intent LLM" description="Independent API for willingness analysis">
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 text-xs text-slate-600 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={!!config.intentApiProviderId}
-                  onChange={(e) => {
-                    if (!e.target.checked) {
-                      handleConfigChange('intentApiProviderId', '');
-                      handleConfigChange('intentModelName', '');
-                    } else {
-                      handleConfigChange('intentApiProviderId', config.apiProviderId);
-                    }
-                  }}
-                  className="rounded border-slate-300"
-                />
-                Use independent API (uncheck to use Reply LLM)
-              </label>
-              {config.intentApiProviderId ? (
-                <>
-                  <FormGroup label="API Provider">
-                    <Select
-                      value={config.intentApiProviderId}
-                      onChange={(e) => {
-                        handleConfigChange('intentApiProviderId', e.target.value);
-                        handleConfigChange('intentModelName', '');
-                      }}
-                    >
-                      <option value="">Select provider...</option>
-                      {apiProviders.map(p => (
-                        <option key={p._id || p.id} value={p._id || p.id}>{p.name}</option>
-                      ))}
-                    </Select>
-                  </FormGroup>
-                  <FormGroup label="Model">
-                    {intentProviderModels.length > 0 ? (
-                      <Select
-                        value={config.intentModelName}
-                        onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                      >
-                        <option value="">Select model...</option>
-                        {intentProviderModels.map(m => {
-                          const modelId = typeof m === 'string' ? m : m.id;
-                          return <option key={modelId} value={modelId}>{modelId}</option>;
-                        })}
-                      </Select>
-                    ) : (
-                      <Input
-                        value={config.intentModelName}
-                        onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                        placeholder="e.g. gpt-4o-mini"
-                      />
-                    )}
-                  </FormGroup>
-                </>
-              ) : (
-                <FormGroup label="Model (optional, use different model from same provider)">
-                  {providerModels.length > 0 ? (
-                    <Select
-                      value={config.intentModelName}
-                      onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                    >
-                      <option value="">Same as Reply model</option>
-                      {providerModels.map(m => {
-                        const modelId = typeof m === 'string' ? m : m.id;
-                        return <option key={modelId} value={modelId}>{modelId}</option>;
-                      })}
-                    </Select>
-                  ) : (
-                    <Input
-                      value={config.intentModelName}
-                      onChange={(e) => handleConfigChange('intentModelName', e.target.value)}
-                      placeholder="Leave empty to use Reply model"
-                    />
-                  )}
-                </FormGroup>
-              )}
-            </div>
-          </Card>
 
           {/* Compress LLM */}
           <Card title="Compress LLM" description="Independent API for daily compression and MCP sampling">

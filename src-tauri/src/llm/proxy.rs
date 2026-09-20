@@ -25,6 +25,11 @@ pub struct LlmProxy {
     image_gen_client: Client,
     /// 图像生成专用 semaphore（独立并发额度，不挤占 LLM）
     image_gen_semaphore: Semaphore,
+    /// 消息打标（TypeSafe Jev）专用 client：超时短得多，标一条只有秒级预算
+    mood_tag_client: Client,
+    /// 打标专用 semaphore：一条消息一次调用，冷启动要一次标几十条，
+    /// 额度必须独立——挤在 LLM 那 2 个许可里会把主循环饿死
+    mood_tag_semaphore: Semaphore,
     /// Active tool-capable chat streams, keyed by the frontend request id.
     active_streams: Mutex<HashMap<String, Arc<ProxyStreamCancellation>>>,
 }
@@ -81,6 +86,13 @@ const IMAGE_GEN_TIMEOUT_SECS: u64 = 600;
 /// 图像生成最大并发数（可同时画多张主题不同的图）
 const MAX_CONCURRENT_IMAGE_GEN: usize = 4;
 
+/// 打标单次请求超时。Jev 官方标称 70–500ms；给到 3s 已经很宽松，
+/// 超过这个数说明链路有问题，与其干等不如放弃这条的标签。
+const MOOD_TAG_TIMEOUT_SECS: u64 = 3;
+/// 打标最大并发。和 JS 侧 MOOD_TAG_CONCURRENCY 对齐；
+/// 官方限速 1200 req/min，16 路留足了余量。
+const MAX_CONCURRENT_MOOD_TAG: usize = 16;
+
 impl LlmProxy {
     pub fn new() -> Self {
         Self {
@@ -94,6 +106,11 @@ impl LlmProxy {
                 .build()
                 .expect("Failed to build image-gen reqwest client"),
             image_gen_semaphore: Semaphore::new(MAX_CONCURRENT_IMAGE_GEN),
+            mood_tag_client: Client::builder()
+                .timeout(Duration::from_secs(MOOD_TAG_TIMEOUT_SECS))
+                .build()
+                .expect("Failed to build mood-tag reqwest client"),
+            mood_tag_semaphore: Semaphore::new(MAX_CONCURRENT_MOOD_TAG),
             active_streams: Mutex::new(HashMap::new()),
         }
     }
@@ -195,6 +212,58 @@ pub async fn llm_proxy_call(
         .map_err(|e| format!("JSON parse error: {}", e))?;
 
     Ok(data)
+}
+
+/// 代理消息打标请求（TypeSafe Jev）。
+///
+/// 必须走 Rust 而不是前端 fetch：TypeSafe 的网关有 origin 白名单，
+/// webview 发出的带 Authorization 的请求会触发 CORS 预检，而预检返回
+/// `400 Disallowed CORS origin`（没有 access-control-allow-origin），
+/// 于是 fetch 在几百毫秒内直接失败。reqwest 不受同源策略约束。
+///
+/// 与 llm_proxy_call 分开是因为两者的负载特征完全不同：那边 2 路并发、
+/// 180s 超时，这边 16 路并发、3s 超时，混用会互相拖累。
+#[tauri::command]
+pub async fn mood_tag_proxy_call(
+    proxy: tauri::State<'_, Arc<LlmProxy>>,
+    endpoint: String,
+    api_key: String,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let _permit = proxy
+        .mood_tag_semaphore
+        .acquire()
+        .await
+        .map_err(|e| format!("Semaphore closed: {}", e))?;
+
+    let response = proxy
+        .mood_tag_client
+        .post(&endpoint)
+        .header("Content-Type", "application/json")
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                format!("mood tag request timed out after {}s", MOOD_TAG_TIMEOUT_SECS)
+            } else {
+                format!("HTTP error: {}", e)
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let error_text = response.text().await.unwrap_or_default();
+        // 截断：422 的校验错误可能很长，日志里不需要全文
+        let snippet: String = error_text.chars().take(300).collect();
+        return Err(format!("API error {}: {}", status.as_u16(), snippet));
+    }
+
+    response
+        .json()
+        .await
+        .map_err(|e| format!("JSON parse error: {}", e))
 }
 
 /// 代理 LLM HTTP GET 请求（用于 /models 等浏览器 fetch 可能被 CORS/ATS 拦截的端点）

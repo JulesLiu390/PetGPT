@@ -4300,6 +4300,7 @@ pub fn run() {
             llm_reset_cancellation,
             llm::proxy::llm_proxy_call,
             llm::proxy::llm_proxy_get,
+            llm::proxy::mood_tag_proxy_call,
             llm::proxy::llm_proxy_stream,
             llm::proxy::llm_proxy_cancel_stream,
             llm::proxy::image_gen_proxy_call,
