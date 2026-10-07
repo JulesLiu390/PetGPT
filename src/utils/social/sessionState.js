@@ -32,19 +32,6 @@
  */
 export const BACKLOG_REMINDER_AT = 20;
 
-/**
- * 发送频率：滑动时间窗内最多几条。
- *
- * **刻意做成跨 turn 的。** 原来是 per-turn 计数（上限 5），但撞上注入上限会
- * 开新 turn，计数跟着归零 —— 一波消息里实际变成 5+5+5…，限流形同虚设。
- * 而 postReplyRestUntil 那 20 秒冷静期的条件是"没有新的非自身消息"，
- * 高峰期永远为假，同样无效。
- *
- * 挪到时间窗之后，turn 边界就纯粹是事务边界，不再承担限流职责。
- */
-export const SEND_WINDOW_MS = 60_000;
-export const SEND_WINDOW_MAX = 3;
-
 /** turn_note 的档位标签。沿用原 write_intent_plan 的 brief 五档。 */
 export const TURN_REGISTERS = ['接梗', '闲扯', '观点', '展开', '深答'];
 
@@ -78,8 +65,6 @@ export function createSession({ targetId, targetType, now = Date.now() } = {}) {
     currentTurn: null,
     /** 静态材料被外部（Observer）改动后置位，下个 turn 开头做增量追加。 */
     materialsDirty: false,
-    /** 最近的发送时刻，用于跨 turn 的滑动窗口限流。 */
-    sendTimes: [],
   };
 }
 
@@ -148,42 +133,19 @@ export function recordInjection(turn, messageCount = 1) {
   return turn.injections;
 }
 
-/** 丢掉滑出窗口的记录，返回窗口内还剩几条。 */
-function pruneSendWindow(session, now) {
-  const cutoff = now - SEND_WINDOW_MS;
-  session.sendTimes = (session.sendTimes || []).filter(t => t > cutoff);
-  return session.sendTimes.length;
-}
-
-/** 现在还能不能发。跨 turn 生效——turn 边界不重置它。 */
-export function canSendNow(session, now = Date.now()) {
-  return pruneSendWindow(session, now) < SEND_WINDOW_MAX;
-}
-
-/** 窗口内还剩多少额度，以及最早什么时候恢复（给模型一个可读的理由）。 */
-export function sendWindowState(session, now = Date.now()) {
-  const used = pruneSendWindow(session, now);
-  const oldest = session.sendTimes?.[0];
-  return {
-    used,
-    max: SEND_WINDOW_MAX,
-    windowMs: SEND_WINDOW_MS,
-    retryInMs: used >= SEND_WINDOW_MAX && oldest ? Math.max(0, oldest + SEND_WINDOW_MS - now) : 0,
-  };
-}
-
-/** 记一次成功发送：turn 计数用于 note/遥测，时间窗用于真正的限流。 */
-export function recordSend(session, turn, now = Date.now()) {
-  if (turn) {
-    turn.sends += 1;
-    // 说过话了，账清了。积压重新从 0 算——这正是"上次发消息以来"的含义。
-    turn.backlog = 0;
-    turn.backlogReminded = false;
-  }
-  session.sendTimes = session.sendTimes || [];
-  session.sendTimes.push(now);
-  pruneSendWindow(session, now);
-  return canSendNow(session, now);
+/**
+ * 记一次成功发送。
+ *
+ * **没有任何限流。** 运行时的三道闸（60 秒 3 条滑动窗口、开口前强制
+ * check_new_messages、同一张表情 60 秒冷却）都已按要求移除——发多少、发多快
+ * 完全交给模型自己把握，prompt 里讲清楚就行。这里只留计数：turn.sends 供
+ * turn_note 和遥测用，backlog 清零是"上次发消息以来"这个语义的一部分。
+ */
+export function recordSend(session, turn) {
+  if (!turn) return;
+  turn.sends += 1;
+  turn.backlog = 0;
+  turn.backlogReminded = false;
 }
 
 /**

@@ -25,17 +25,40 @@ test('连续同 role 被合并 —— Gemini 不接受连续同 role', () => {
   for (let i = 1; i < out.length; i++) assert.notEqual(out[i].role, out[i - 1].role);
 });
 
-test('工具调用降级成 assistant 自述，结果降级成 user 文本', () => {
+test('工具调用和结果都降级成 user 侧的系统记录', () => {
   const out = toProviderTurns([
     { kind: 'tool_call', toolName: 'tavily_search', content: '{"q":"反代"}' },
     { kind: 'tool_result', toolName: 'tavily_search', content: '搜到三条' },
   ]);
-  assert.equal(out.length, 2);
-  assert.equal(out[0].role, 'assistant');
-  assert.match(out[0].content, /我调用了 tavily_search/);
-  assert.equal(out[1].role, 'user');
-  assert.match(out[1].content, /\[tavily_search 的结果\]/);
-  assert.match(out[1].content, /搜到三条/);
+  assert.equal(out.length, 1, '调用和结果相邻同为 user，合并成一条');
+  assert.equal(out[0].role, 'user');
+  assert.match(out[0].content, /\[系统记录\] 你调用了 tavily_search/);
+  assert.match(out[0].content, /\[tavily_search 的结果\]/);
+  assert.match(out[0].content, /搜到三条/);
+});
+
+// 线上抓到的：模型照着历史里 assistant 角色的「（我调用了 …）」写了一段文字，
+// 以为自己发了消息，其实群里什么都没收到。
+test('assistant 角色里只剩真正发进群里的话——没有可以照抄的「调用工具」模板', () => {
+  const out = toProviderTurns([
+    { kind: 'message', role: 'user', content: '[00:15:49] Jules: 能看见这个图吗？' },
+    { kind: 'unsent', role: 'assistant', content: '我先看看' },
+    { kind: 'tool_call', role: 'assistant', toolName: 'Telegram__send_message', content: '{"content":"看到了"}' },
+    { kind: 'tool_result', role: 'tool', toolName: 'Telegram__send_message', content: '{"success":true}' },
+    { kind: 'message', role: 'assistant', content: '[00:16:01 我的回复] 看到了' },
+    { kind: 'note', role: 'assistant', content: '（第 3 轮小结 [接梗] 回了图）' },
+  ]);
+  const assistantText = out.filter(m => m.role === 'assistant').map(m => m.content).join('\n');
+  assert.equal(assistantText, '[00:16:01 我的回复] 看到了');
+  assert.doesNotMatch(assistantText, /调用了|系统记录|小结/);
+});
+
+test('写了但没发出去的文字照实标出来：群里看不到', () => {
+  const out = toProviderTurns([
+    { kind: 'unsent', role: 'assistant', content: '（我调用了 Telegram__send_message：{"content":"…"}）' },
+  ]);
+  assert.equal(out[0].role, 'user');
+  assert.match(out[0].content, /\[系统记录\] 你写了下面这段文字，但没有调用发送工具，群里看不到/);
 });
 
 test('降级后不会出现孤立的 tool_call —— 这正是原生格式最容易 400 的地方', () => {
@@ -71,11 +94,12 @@ test('注入的新消息是 user', () => {
   assert.equal(out[1].content, '张三: 等等，我搞定了');
 });
 
-test('turn_note 是 assistant 的自述', () => {
+test('turn_note 是 user 侧的系统记录', () => {
   const out = toProviderTurns([
     { kind: 'note', content: '（第 3 轮小结 [观点] 回了反代的问题）' },
   ]);
-  assert.equal(out[0].role, 'assistant');
+  assert.equal(out[0].role, 'user');
+  assert.match(out[0].content, /^\[系统记录\]/);
   assert.match(out[0].content, /第 3 轮小结/);
 });
 
@@ -174,4 +198,102 @@ test('连发两条合并后边界仍然可辨 —— 这正是之前丢掉的信
   assert.match(out[0].content, /\[19:19:54 我的回复 →#8842\]/);
   assert.match(out[0].content, /\[19:19:55 我的回复\]/);
   assert.equal((out[0].content.match(/我的回复/g) || []).length, 2);
+});
+
+// ── prependToLastUser：每轮现算的背景块不能把新消息顶掉 ──
+
+import { prependToLastUser, classifyRoundOutput } from '../social/sessionTurn.js';
+
+const BARO = '# 此刻群里的气压\n· 对话形态：多人热聊';
+
+test('字符串内容：块在前，群友的话仍是模型最后读到的', () => {
+  const out = prependToLastUser([
+    { role: 'assistant', content: '[09:56:02 我的回复] 不信你试试' },
+    { role: 'user', content: '[09:56:29 阿萨姆 →@你] 你是做题区吗宝宝' },
+  ], BARO);
+  assert.equal(out.length, 2, '并进去，不另起一条');
+  assert.equal(out[1].role, 'user');
+  assert.ok(out[1].content.startsWith(BARO));
+  assert.ok(out[1].content.endsWith('你是做题区吗宝宝'), '最后一样东西必须是群友的话');
+});
+
+test('多模态内容：块成为第一个 text part，图片原样保留', () => {
+  const img = { type: 'image_url', image_url: { url: 'data:image/jpeg;base64,xx' } };
+  const txt = { type: 'text', text: '[12:04:25 海鲜] 看这个' };
+  const out = prependToLastUser([{ role: 'user', content: [img, txt] }], BARO);
+  assert.deepEqual(out[0].content, [{ type: 'text', text: BARO }, img, txt]);
+});
+
+test('不修改传入的数组和对象——history 里不能留下气压计', () => {
+  const content = [{ type: 'text', text: 'hi' }];
+  const turns = [{ role: 'user', content }];
+  const snapshot = JSON.stringify(turns);
+  prependToLastUser(turns, BARO);
+  assert.equal(JSON.stringify(turns), snapshot);
+  assert.equal(turns[0].content, content, '原数组引用也不能被替换');
+  assert.equal(content.length, 1);
+});
+
+test('没有块时原样返回', () => {
+  const turns = [{ role: 'user', content: 'x' }];
+  assert.deepEqual(prependToLastUser(turns, ''), turns);
+  assert.deepEqual(prependToLastUser(turns, null), turns);
+});
+
+test('最后一条不是 user（没调 ensureUserLast）：没有可顶掉的消息，单独追加', () => {
+  const out = prependToLastUser([{ role: 'assistant', content: 'a' }], BARO);
+  assert.deepEqual(out, [{ role: 'assistant', content: 'a' }, { role: 'user', content: BARO }]);
+  assert.deepEqual(prependToLastUser([], BARO), [{ role: 'user', content: BARO }]);
+});
+
+test('空字符串内容不留多余分隔符', () => {
+  const out = prependToLastUser([{ role: 'user', content: '' }], BARO);
+  assert.equal(out[0].content, BARO);
+});
+
+test('和 toProviderTurns + ensureUserLast 串起来：最后一条是 user，且以新消息结尾', () => {
+  const out = prependToLastUser(ensureUserLast(toProviderTurns([
+    { kind: 'message', role: 'user', content: '[09:55:55 阿萨姆] 真的吗' },
+    { kind: 'message', role: 'assistant', content: '[09:56:02 我的回复] 不信你试试' },
+    { kind: 'message', role: 'user', content: '[09:56:29 阿萨姆 →@你] 你是做题区吗宝宝' },
+  ])), BARO);
+  const last = out[out.length - 1];
+  assert.equal(last.role, 'user');
+  assert.ok(last.content.endsWith('你是做题区吗宝宝'));
+  assert.equal(out.filter(m => m.role === 'user' && m.content === BARO).length, 0, '气压计不能单独成条');
+});
+
+// ── classifyRoundOutput：话有没有送进群里 ──
+
+const isSend = (n) => /(send_message|sticker_send|image_send)/.test(n);
+
+test('调了发送工具就是 sent，哪怕还带着文字旁白', () => {
+  assert.equal(classifyRoundOutput({ toolNames: ['send_message'], text: '好的已回复', isSendTool: isSend }), 'sent');
+  assert.equal(classifyRoundOutput({ toolNames: ['qq-3825478002__send_message'], isSendTool: isSend }), 'sent');
+  assert.equal(classifyRoundOutput({ toolNames: ['group_log_read', 'sticker_send'], isSendTool: isSend }), 'sent');
+});
+
+test('调了 turn_note 就是明确收尾', () => {
+  assert.equal(classifyRoundOutput({ toolNames: ['turn_note'], text: '这条不用回', isSendTool: isSend }), 'noted');
+  assert.equal(classifyRoundOutput({ toolNames: ['x__turn_note'], isSendTool: isSend }), 'noted');
+});
+
+test('发送优先于收尾', () => {
+  assert.equal(classifyRoundOutput({ toolNames: ['turn_note', 'send_message'], isSendTool: isSend }), 'sent');
+});
+
+test('没发送也没收尾但有文字——就是被吞掉的那种', () => {
+  assert.equal(classifyRoundOutput({ toolNames: [], text: '中国时间是10月2号', isSendTool: isSend }), 'text_only');
+  // 查完资料把回答写成了文字，同样没发出去
+  assert.equal(classifyRoundOutput({ toolNames: ['group_log_read'], text: '查到了，是…', isSendTool: isSend }), 'text_only');
+});
+
+test('只查了东西没出声、也没文字', () => {
+  assert.equal(classifyRoundOutput({ toolNames: ['group_log_read'], text: '', isSendTool: isSend }), 'tools_only');
+});
+
+test('什么都没有；纯空白按空处理', () => {
+  assert.equal(classifyRoundOutput({ toolNames: [], text: '', isSendTool: isSend }), 'empty');
+  assert.equal(classifyRoundOutput({ toolNames: [], text: '  \n ', isSendTool: isSend }), 'empty');
+  assert.equal(classifyRoundOutput({}), 'empty');
 });

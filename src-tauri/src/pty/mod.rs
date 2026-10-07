@@ -245,6 +245,12 @@ fn command_for_kind(
     // /usr/bin:/bin:/usr/sbin:/sbin，claude 和 codex 都不在里面。
     // 从终端跑 tauri dev 时看不出问题，因为那时继承的是终端的 PATH。
     cmd.env("PATH", crate::shell_env::augmented_path());
+    // LANG 同理：没有它整个终端跑在 C locale 下，复制出去的汉字经 pbcopy
+    // 变成「Â§çÂà∂Ê±â」。而且 claude/codex 会话不经过 shell 直接 spawn，
+    // 用户在 rc 里补也救不了——只能在这里给。见 shell_env::utf8_lang。
+    if let Some(lang) = crate::shell_env::utf8_lang() {
+        cmd.env("LANG", lang);
+    }
     Ok(cmd)
 }
 
@@ -632,6 +638,23 @@ mod tests {
         assert!(command_for_kind("shell", None, Some("abc-123")).is_err());
     }
 
+    /// 子进程拿到的 LANG 必须是 UTF-8 的——不管是继承来的（dev 模式，从终端
+    /// 起的）还是这里补上的（打包版，launchd 没给）。两种环境各跑一遍都得过。
+    #[test]
+    fn every_session_kind_gets_a_utf8_lang() {
+        // 测试进程自己显式设了 LC_ALL / LC_CTYPE 时 utf8_lang 会尊重它们、不补 LANG，这条测不了
+        let explicit = |k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+        if explicit("LC_ALL") || explicit("LC_CTYPE") {
+            return;
+        }
+        for (kind, shell) in [("claude", None), ("codex", None), ("shell", Some("/bin/zsh"))] {
+            let cmd = command_for_kind(kind, shell, None).unwrap();
+            let lang = cmd.get_env("LANG").and_then(|v| v.to_str()).unwrap_or("");
+            let lower = lang.to_ascii_lowercase();
+            assert!(lower.contains("utf-8") || lower.contains("utf8"), "{kind} 的 LANG 是 {lang:?}");
+        }
+    }
+
     #[test]
     fn a_blank_resume_id_is_treated_as_no_resume() {
         // 前端传空串不应该变成 `claude --resume ""`
@@ -652,12 +675,13 @@ mod tests {
         let mut sb = Scrollback::default();
         // 用三字节的中文字符填满，裁剪点必须落在字符边界上，否则 drain 会 panic
         let chunk = "中".repeat(1000); // 3000 字节
-        let mut total = 0u64;
-        while sb.data.len() <= SCROLLBACK_MAX_BYTES {
-            total = sb.push(&chunk);
+        // 写到必然已经触发过裁剪为止。不能拿 data.len() 当条件：push 每次都把
+        // data 裁回上限以内，`data.len() <= 上限` 永远成立——这里曾经死循环。
+        while sb.written <= SCROLLBACK_MAX_BYTES as u64 {
+            sb.push(&chunk);
         }
-        total = sb.push(&chunk);
-        assert!(sb.data.len() <= SCROLLBACK_MAX_BYTES + chunk.len());
+        let total = sb.push(&chunk);
+        assert!(sb.data.len() <= SCROLLBACK_MAX_BYTES, "裁剪后不该超过上限");
         // 偏移不因裁剪而回退
         assert_eq!(total, sb.written);
         assert!(sb.written > SCROLLBACK_MAX_BYTES as u64);

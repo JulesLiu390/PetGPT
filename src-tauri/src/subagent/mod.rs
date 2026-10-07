@@ -107,6 +107,12 @@ pub async fn subagent_spawn(
         .env("PATH", crate::shell_env::augmented_path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped());
+    // LANG 同理：C locale 下 subagent 跑的 sed、cut、wc -m 按字节而不是按字符
+    // 处理中文——实测 `cut -c1-2` 会把一个汉字从中间切开，`sed 's/./X/g'`
+    // 把「中文」换成六个 X
+    if let Some(lang) = crate::shell_env::utf8_lang() {
+        cmd.env("LANG", lang);
+    }
 
     let mut child = cmd.spawn()
         .map_err(|e| format!("Failed to spawn claude: {}", e))?;

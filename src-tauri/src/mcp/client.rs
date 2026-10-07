@@ -125,6 +125,25 @@ impl McpClient {
         *self.is_connected.lock().unwrap() = false;
     }
 
+    /// 起服务器进程用的命令。单独拆出来是为了能测环境变量的先后顺序。
+    fn build_command(&self) -> Command {
+        let mut cmd = Command::new(&self.command);
+        cmd.args(&self.args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // PATH 要在 envs 之前设：打包后进程 PATH 只有系统目录，npx/uvx
+            // 这些一个都找不到（见 shell_env）；而放在前面意味着用户在服务器
+            // 配置里显式写的 PATH 仍然能覆盖掉它。
+            .env("PATH", crate::shell_env::augmented_path());
+        // LANG 同理，也必须在 envs 之前：用户在服务器配置里写了就以用户的为准
+        if let Some(lang) = crate::shell_env::utf8_lang() {
+            cmd.env("LANG", lang);
+        }
+        cmd.envs(&self.env);
+        cmd
+    }
+
     /// Start the MCP server process and initialize connection
     pub async fn connect(&self) -> Result<(), String> {
         if *self.is_connected.lock().unwrap() {
@@ -135,17 +154,7 @@ impl McpClient {
         log::info!("[MCP][{}] Starting server: {} {:?}", self.server_name, self.command, self.args);
 
         // Spawn the process
-        let mut cmd = Command::new(&self.command);
-        cmd.args(&self.args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // PATH 要在 envs 之前设：打包后进程 PATH 只有系统目录，npx/uvx
-            // 这些一个都找不到（见 shell_env）；而放在前面意味着用户在服务器
-            // 配置里显式写的 PATH 仍然能覆盖掉它。
-            .env("PATH", crate::shell_env::augmented_path())
-            .envs(&self.env);
-
+        let mut cmd = self.build_command();
         let mut child = cmd.spawn().map_err(|e| format!("Failed to spawn process: {}", e))?;
 
         // Get stdin handle
@@ -838,5 +847,58 @@ async fn handle_sampling_job(
 impl Drop for McpClient {
     fn drop(&mut self) {
         self.disconnect();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsStr;
+
+    fn client(env: &[(&str, &str)]) -> McpClient {
+        McpClient::new(
+            "id".into(),
+            "fixture".into(),
+            "fixture-server".into(),
+            vec![],
+            env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+        )
+    }
+
+    /// 命令上显式设了的值（继承来的不算）
+    fn explicit_env(cmd: &Command, key: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(k, _)| *k == OsStr::new(key))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned())
+    }
+
+    #[test]
+    fn the_server_ends_up_with_a_utf8_lang() {
+        // 测试进程自己显式设了 LC_ALL / LC_CTYPE 时 utf8_lang 会尊重它们、不补 LANG，这条测不了
+        let explicit = |k| std::env::var(k).is_ok_and(|v| !v.trim().is_empty());
+        if explicit("LC_ALL") || explicit("LC_CTYPE") {
+            return;
+        }
+        let cmd = client(&[]).build_command();
+        // 没显式设就是继承父进程的——那说明父进程本来就是 UTF-8，不用补
+        let lang = explicit_env(&cmd, "LANG")
+            .or_else(|| std::env::var("LANG").ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        assert!(lang.contains("utf-8") || lang.contains("utf8"), "LANG 是 {lang:?}");
+    }
+
+    #[test]
+    fn a_lang_in_the_server_config_wins_over_ours() {
+        let cmd = client(&[("LANG", "ja_JP.UTF-8")]).build_command();
+        assert_eq!(explicit_env(&cmd, "LANG").as_deref(), Some("ja_JP.UTF-8"));
+    }
+
+    #[test]
+    fn a_path_in_the_server_config_still_wins_over_ours() {
+        // 拆 build_command 之前就有的约定，拆的时候顺手钉住
+        let cmd = client(&[("PATH", "/custom/bin")]).build_command();
+        assert_eq!(explicit_env(&cmd, "PATH").as_deref(), Some("/custom/bin"));
     }
 }

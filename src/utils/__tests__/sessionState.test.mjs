@@ -5,8 +5,7 @@ import {
   createSession, beginTurn, endTurn, appendHistory, canInject, recordInjection,
   recordSend, sealWindow, buildRequestItems, latestSummary,
   currentWindowId, itemsOfTurn, sessionStats,
-  BACKLOG_REMINDER_AT, SEND_WINDOW_MAX, SEND_WINDOW_MS,
-  canSendNow, sendWindowState, shouldRemindBacklog, markBacklogReminded, REGISTER_SILENT,
+  BACKLOG_REMINDER_AT, shouldRemindBacklog, markBacklogReminded, REGISTER_SILENT,
 } from '../social/sessionState.js';
 
 const mk = () => createSession({ targetId: '902317662', targetType: 'group', now: 1000 });

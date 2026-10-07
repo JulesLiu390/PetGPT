@@ -48,12 +48,31 @@ const asText = (content) => {
   return '';
 };
 
-/** 工具调用渲染成一行自述。参数太长就截断——完整参数对后续判断没什么用。 */
+/**
+ * 系统替模型记的流水，统一用这个前缀、放在 **user** 角色里。
+ *
+ * 以前工具调用渲染成 assistant 角色的「（我调用了 send_message：{…}）」。模型翻看
+ * 自己的历史，看到的是「我每次说话都是这么一句」，于是照着写——写出来的只是
+ * 文字，群里看不见。线上抓到过原样的：
+ *
+ *   （我调用了 Telegram__send_message：{"content":"我这边没有收到新的图片消息耶…"}）
+ *
+ * 所以 assistant 角色里只留它在群里**真正说过**的话（[HH:MM:SS 我的回复] …），
+ * 其余一律是 user 侧的系统记录，没有可以照抄的「说话模板」。
+ */
+export const SYSTEM_RECORD = '[系统记录]';
+
+/** 工具调用渲染成一行系统记录。参数太长就截断——完整参数对后续判断没什么用。 */
 export function renderToolCall(item, { maxArgChars = 200 } = {}) {
   const name = item.toolName || '工具';
   let args = asText(item.content);
   if (args.length > maxArgChars) args = args.slice(0, maxArgChars) + '…';
-  return args ? `（我调用了 ${name}：${args}）` : `（我调用了 ${name}）`;
+  return args ? `${SYSTEM_RECORD} 你调用了 ${name}：${args}` : `${SYSTEM_RECORD} 你调用了 ${name}`;
+}
+
+/** 模型写了、但没经过发送工具的文字。照实告诉它：群里看不到。 */
+export function renderUnsentText(item) {
+  return `${SYSTEM_RECORD} 你写了下面这段文字，但没有调用发送工具，群里看不到：\n${asText(item.content)}`;
 }
 
 /** 工具结果渲染成一块带标记的文本。 */
@@ -74,11 +93,12 @@ export function renderTurnNote(note, seq) {
  * 把 session history 条目转成 provider 消息。
  *
  * 角色归属：
- *   message      → 原 role（群聊消息本来就是 user / assistant 交替）
- *   tool_call    → assistant（是"我"做的）
- *   tool_result  → user（外部世界返回给"我"的）
+ *   message      → 原 role（群聊消息；assistant 只有真正发进群里的话）
+ *   tool_call    → user（系统记录：你调用了什么，见 SYSTEM_RECORD）
+ *   tool_result  → user（外部世界返回的）
+ *   unsent       → user（系统记录：写了但没发出去的文字）
  *   injection    → user（打断进来的新消息）
- *   note         → assistant（我给自己记的）
+ *   note         → user（系统记录：每轮小结）
  *   summary      → user（压缩摘要，作为背景材料）
  *
  * @returns [{ role, content }]，已合并连续同 role
@@ -90,16 +110,20 @@ export function toProviderTurns(items, { maxArgChars = 200 } = {}) {
     let text;
     switch (item.kind) {
       case 'tool_call':
-        role = 'assistant';
+        role = 'user';
         text = renderToolCall(item, { maxArgChars });
+        break;
+      case 'unsent':
+        role = 'user';
+        text = renderUnsentText(item);
         break;
       case 'tool_result':
         role = 'user';
         text = renderToolResult(item);
         break;
       case 'note':
-        role = 'assistant';
-        text = typeof item.content === 'string' ? item.content : renderTurnNote(item.note, item.seq);
+        role = 'user';
+        text = `${SYSTEM_RECORD} ${typeof item.content === 'string' ? item.content : renderTurnNote(item.note, item.seq)}`;
         break;
       case 'summary':
         role = 'user';
@@ -157,4 +181,62 @@ export function ensureUserLast(turns, filler = '（以上是当前情况。）')
   if (out.length === 0) return [{ role: 'user', content: filler }];
   if (out[out.length - 1].role === 'assistant') out.push({ role: 'user', content: filler });
   return out;
+}
+
+/**
+ * 把一段每轮现算的背景块（比如气压计）并进最后一条 user 消息的**开头**。
+ *
+ * 不能单独挂成最后一条 user 消息。之前就是这么挂的，模型最后读到的是一块
+ * 场面读数而不是群友的话。flash-lite 上用生产同款 prompt 和工具集整轮实测：
+ * 有实际内容的 @ 问句前后都是 8/8 回答，但「@bot 啵啵」这种短 @ 从 1/8 回到
+ * 6/8——挂在最后时它 7/8 都 turn_note 收尾不说话了。（只有两三个工具的简化
+ * 环境里差得更狠：8/8 → 0/8。）ensureUserLast 保证的就是"新消息在最后"，
+ * 这里不能把它顶掉。
+ *
+ * 代价是前缀缓存少一截：上一轮的最后一条 user 消息带着块，这一轮它已经不在
+ * 末尾、不带块了，缓存从它开始对不上。丢的只是一批新消息的量，可以接受。
+ *
+ * 最后一条不是 user 时（只有没调 ensureUserLast 才会这样）说明没有待回应的
+ * 消息可以被顶掉，那就单独追加一条。不修改传入的数组和对象。
+ */
+export function prependToLastUser(turns, block) {
+  const out = [...(turns || [])];
+  if (!block) return out;
+  const last = out[out.length - 1];
+  if (!last || last.role !== 'user') {
+    out.push({ role: 'user', content: block });
+    return out;
+  }
+  out[out.length - 1] = {
+    ...last,
+    content: Array.isArray(last.content)
+      ? [{ type: 'text', text: block }, ...last.content]
+      : [block, asText(last.content)].filter(Boolean).join(JOIN),
+  };
+  return out;
+}
+
+/**
+ * 一轮 LLM 调用结束时，模型的话去了哪。
+ *
+ * 只有发送类工具能把话送进群里；模型直接输出的文字只进 history。以前这件事
+ * 不留痕：「答进肚子里」和「主动沉默」在 usage 日志里都是 迭代=1 工具=0，
+ * flash-lite 一天丢掉上百次回复，一个星期没人发现。
+ *
+ *   sent        调了发送工具（文字只是旁白）
+ *   noted       调了 turn_note，明确收尾
+ *   text_only   有文字，但没发送也没收尾——这段话群里看不见
+ *   tools_only  只调了查询类工具，没文字、没收尾
+ *   empty       什么都没有
+ *
+ * @param toolNames  本轮调用过的工具名（可能带 MCP server 前缀）
+ * @param text       本轮最终的文字输出
+ * @param isSendTool (name) => boolean
+ */
+export function classifyRoundOutput({ toolNames = [], text = '', isSendTool = () => false } = {}) {
+  const names = (toolNames || []).map(n => String(n || ''));
+  if (names.some(n => isSendTool(n))) return 'sent';
+  if (names.some(n => n === 'turn_note' || n.endsWith('__turn_note'))) return 'noted';
+  if (String(text || '').trim()) return 'text_only';
+  return names.length > 0 ? 'tools_only' : 'empty';
 }

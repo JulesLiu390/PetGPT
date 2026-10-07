@@ -10,6 +10,7 @@ import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { normalizeApiProviders } from "../utils/apiProviders";
 import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
 import SocialPreflightBar from "../components/Social/SocialPreflightBar";
+import { normalizeTargetId, normalizeTargetIds } from "../utils/social/targetId";
 import { listen, emit } from "@tauri-apps/api/event";
 
 // ==================== SocialPage ====================
@@ -64,6 +65,9 @@ export default function SocialPage() {
   const [mcpFriends, setMcpFriends] = useState(null); // [{ user_id, nickname }] or null
   const [fetchingGroups, setFetchingGroups] = useState(false);
   const [fetchingFriends, setFetchingFriends] = useState(false);
+  // 拉列表失败的原因。以前失败被 catch 吞掉、显示成「未找到群聊」——telegram-mcp
+  // 没实现 get_group_list 时看起来就像一个群都没有，没人知道是工具不存在。
+  const [mcpListError, setMcpListError] = useState({ groups: null, friends: null });
 
   // ── ElevenLabs TTS models ──
   // 兜底模型列表：当 API key 没有 models_read 权限时仍可选择
@@ -147,9 +151,11 @@ export default function SocialPage() {
     try {
       const data = await callMcpTool('get_group_list');
       setMcpGroups(data.groups || []);
+      setMcpListError(prev => ({ ...prev, groups: null }));
     } catch (e) {
       console.error('Failed to fetch group list:', e);
       setMcpGroups([]);
+      setMcpListError(prev => ({ ...prev, groups: String(e?.message || e) }));
     }
     setFetchingGroups(false);
   };
@@ -160,9 +166,11 @@ export default function SocialPage() {
     try {
       const data = await callMcpTool('get_friend_list');
       setMcpFriends(data.friends || []);
+      setMcpListError(prev => ({ ...prev, friends: null }));
     } catch (e) {
       console.error('Failed to fetch friend list:', e);
       setMcpFriends([]);
+      setMcpListError(prev => ({ ...prev, friends: String(e?.message || e) }));
     }
     setFetchingFriends(false);
   };
@@ -171,6 +179,7 @@ export default function SocialPage() {
   useEffect(() => {
     setMcpGroups(null);
     setMcpFriends(null);
+    setMcpListError({ groups: null, friends: null });
   }, [config.mcpServerName]);
 
   // Manual add input state
@@ -187,9 +196,21 @@ export default function SocialPage() {
     }
   };
 
+  // 已选但不在拉取结果里的 ID（手动填的、或 MCP 没列出来的，比如还没人说过话的
+  // Telegram 话题）也要列出来——不然勾着却看不见，也删不掉。
+  const withSelectedExtras = (fetched, text, idKey, nameKey) => {
+    const seen = new Set(fetched.map(x => String(x[idKey])));
+    const extras = text.split(',').map(s => s.trim())
+      .filter(id => id && !seen.has(id))
+      .map(id => ({ [idKey]: id, [nameKey]: targetNames[id] || '' }));
+    return [...fetched, ...extras];
+  };
+  const isTelegramServer = /telegram/i.test(config.mcpServerName || '');
+
   // Helper: add a new ID to the comma-separated text
   const addTarget = (input, setInput, text, setText) => {
-    const id = input.trim();
+    // 粘进来的 Telegram 链接当场换成规范 ID，见 normalizeTargetId
+    const id = normalizeTargetId(input);
     if (!id) return;
     const items = text.split(',').map(s => s.trim()).filter(Boolean);
     if (!items.includes(id)) {
@@ -668,8 +689,9 @@ export default function SocialPage() {
   };
 
   const buildConfigToSave = useCallback(() => {
-    const groups = groupsText.split(',').map(s => s.trim()).filter(Boolean);
-    const friends = friendsText.split(',').map(s => s.trim()).filter(Boolean);
+    // 存之前再规范化一遍：以前存下来的链接，下次保存就会被修正
+    const groups = normalizeTargetIds(groupsText.split(','));
+    const friends = normalizeTargetIds(friendsText.split(','));
     const updatedTargets = { ...(config.targetsByServer || {}) };
     if (config.mcpServerName) {
       updatedTargets[config.mcpServerName] = { groups, friends };
@@ -1343,8 +1365,9 @@ export default function SocialPage() {
                       <FormGroup label="Groups">
                         {mcpGroups ? (
                           /* Fetched: show full checkbox list */
+                          <>
                           <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg">
-                            {mcpGroups.map(g => {
+                            {withSelectedExtras(mcpGroups, groupsText, 'group_id', 'group_name').map(g => {
                               const selected = groupsText.split(',').map(s => s.trim()).includes(String(g.group_id));
                               return (
                                 <label key={g.group_id} className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0 ${selected ? 'bg-blue-50' : ''}`}>
@@ -1360,8 +1383,19 @@ export default function SocialPage() {
                                 </label>
                               );
                             })}
-                            {mcpGroups.length === 0 && <div className="text-xs text-slate-400 px-3 py-2">No groups found</div>}
+                            {withSelectedExtras(mcpGroups, groupsText, 'group_id', 'group_name').length === 0 && (
+                              <ManualEntryHint error={mcpListError.groups} kind="group" />
+                            )}
                           </div>
+                          <ManualTargetInput
+                            className="mt-2"
+                            value={addGroupInput}
+                            onChange={setAddGroupInput}
+                            onAdd={() => addTarget(addGroupInput, setAddGroupInput, groupsText, setGroupsText)}
+                            placeholder="Enter group ID..."
+                          />
+                          {isTelegramServer && <TelegramTopicHint />}
+                          </>
                         ) : (
                           /* Not fetched: show selected items as scrollable list + add input */
                           <>
@@ -1377,20 +1411,13 @@ export default function SocialPage() {
                                 ))}
                               </div>
                             )}
-                            <div className="flex items-center gap-2">
-                              <Input
-                                value={addGroupInput}
-                                onChange={(e) => setAddGroupInput(e.target.value)}
-                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTarget(addGroupInput, setAddGroupInput, groupsText, setGroupsText); } }}
-                                placeholder="Enter group ID..."
-                                className="flex-1"
-                              />
-                              <button
-                                onClick={() => addTarget(addGroupInput, setAddGroupInput, groupsText, setGroupsText)}
-                                disabled={!addGroupInput.trim()}
-                                className="shrink-0 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                              >+ Add</button>
-                            </div>
+                            <ManualTargetInput
+                              value={addGroupInput}
+                              onChange={setAddGroupInput}
+                              onAdd={() => addTarget(addGroupInput, setAddGroupInput, groupsText, setGroupsText)}
+                              placeholder="Enter group ID..."
+                            />
+                            {isTelegramServer && <TelegramTopicHint />}
                           </>
                         )}
                         {config.mcpServerName && (
@@ -1408,8 +1435,9 @@ export default function SocialPage() {
                       {/* Private Chats */}
                       <FormGroup label="Private Chats">
                         {mcpFriends ? (
+                          <>
                           <div className="max-h-56 overflow-y-auto border border-slate-200 rounded-lg">
-                            {mcpFriends.map(f => {
+                            {withSelectedExtras(mcpFriends, friendsText, 'user_id', 'nickname').map(f => {
                               const selected = friendsText.split(',').map(s => s.trim()).includes(String(f.user_id));
                               return (
                                 <label key={f.user_id} className={`flex items-center gap-3 px-3 py-1.5 cursor-pointer hover:bg-slate-50 transition-colors border-b border-slate-100 last:border-b-0 ${selected ? 'bg-blue-50' : ''}`}>
@@ -1425,8 +1453,18 @@ export default function SocialPage() {
                                 </label>
                               );
                             })}
-                            {mcpFriends.length === 0 && <div className="text-xs text-slate-400 px-3 py-2">No friends found</div>}
+                            {withSelectedExtras(mcpFriends, friendsText, 'user_id', 'nickname').length === 0 && (
+                              <ManualEntryHint error={mcpListError.friends} kind="user" />
+                            )}
                           </div>
+                          <ManualTargetInput
+                            className="mt-2"
+                            value={addFriendInput}
+                            onChange={setAddFriendInput}
+                            onAdd={() => addTarget(addFriendInput, setAddFriendInput, friendsText, setFriendsText)}
+                            placeholder="Enter user ID..."
+                          />
+                          </>
                         ) : (
                           <>
                             {friendsText.trim() && (
@@ -1441,20 +1479,12 @@ export default function SocialPage() {
                                 ))}
                               </div>
                             )}
-                            <div className="flex items-center gap-2">
-                              <Input
-                                value={addFriendInput}
-                                onChange={(e) => setAddFriendInput(e.target.value)}
-                                onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); addTarget(addFriendInput, setAddFriendInput, friendsText, setFriendsText); } }}
-                                placeholder="Enter user ID..."
-                                className="flex-1"
-                              />
-                              <button
-                                onClick={() => addTarget(addFriendInput, setAddFriendInput, friendsText, setFriendsText)}
-                                disabled={!addFriendInput.trim()}
-                                className="shrink-0 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-                              >+ Add</button>
-                            </div>
+                            <ManualTargetInput
+                              value={addFriendInput}
+                              onChange={setAddFriendInput}
+                              onAdd={() => addTarget(addFriendInput, setAddFriendInput, friendsText, setFriendsText)}
+                              placeholder="Enter user ID..."
+                            />
                           </>
                         )}
                         {config.mcpServerName && (
@@ -3150,6 +3180,54 @@ function PollEntry({ log, showChat, showLlm, showTools, logFilter }) {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+/** 手动填 ID 的输入框。拉取前后都显示：MCP 列不出来的会话只能靠它加。 */
+function ManualTargetInput({ value, onChange, onAdd, placeholder, className = '' }) {
+  return (
+    <div className={`flex items-center gap-2 ${className}`}>
+      <Input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onAdd(); } }}
+        placeholder={placeholder}
+        className="flex-1"
+      />
+      <button
+        onClick={onAdd}
+        disabled={!value.trim()}
+        className="shrink-0 px-3 py-2 text-xs font-medium rounded-lg border border-slate-300 bg-white hover:bg-slate-50 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+      >+ Add</button>
+    </div>
+  );
+}
+
+/**
+ * 列表为空时的提示：告诉用户去下面手动填，而不是只说「没找到」。
+ * 拉取失败时额外带上原始报错。文案是固定字符串，走 DOM 翻译桥。
+ */
+function ManualEntryHint({ error, kind }) {
+  return (
+    <div className="px-3 py-2 text-xs">
+      {error && <div className="text-amber-600">Could not fetch the list from this MCP server</div>}
+      <div className="text-slate-500">
+        {kind === 'group'
+          ? "This MCP didn't list any groups. Enter the group ID below to add it manually."
+          : "This MCP didn't list any chats. Enter the user ID below to add it manually."}
+      </div>
+      {error && <div className="mt-0.5 text-slate-400 break-all">{error}</div>}
+    </div>
+  );
+}
+
+/** Telegram 论坛话题的填法。每个话题是一个独立的群。 */
+function TelegramTopicHint() {
+  return (
+    <div className="mt-1.5 text-xs text-slate-400 leading-relaxed">
+      <div>Telegram forum topics are separate groups: enter chat_id:topic_id.</div>
+      <div>From a topic link t.me/c/1234567890/45 → -1001234567890:45</div>
     </div>
   );
 }

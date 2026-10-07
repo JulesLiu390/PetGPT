@@ -12,21 +12,25 @@ import { socialTargetDir } from './socialTargetType.js';
 import { seedToolDocs } from './toolDocs';
 import { executeToolByName, getMcpTools, resolveImageUrls } from './mcp/toolExecutor';
 import { callLLMWithTools } from './mcp/toolExecutor';
-import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, resetStickerCooldown, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition } from './workspace/socialToolExecutor';
+import { getSocialFileToolDefinitions, getHistoryToolDefinitions, getGroupLogToolDefinitions, getStickerToolDefinitions, getBufferSearchToolDefinitions, getSubagentToolDefinition, getCcHistoryToolDefinition, getCcReadToolDefinition, getMdOrganizeToolDefinition, getScreenshotToolDefinition, getImageSendToolDefinition, getImageListToolDefinition, getWebshotToolDefinition, getWebshotSendToolDefinition, getChatSearchToolDefinition, getChatContextToolDefinition, getVoiceSendToolDefinition, getGenerateImageSendToolDefinition } from './workspace/socialToolExecutor';
 import { getTurnNoteToolDefinition, getCheckNewMessagesToolDefinition } from './workspace/socialToolExecutor';
 import {
   createSession, beginTurn, endTurn, appendHistory, canInject, recordInjection,
-  recordSend, canSendNow, sendWindowState, sessionStats, REGISTER_SILENT,
-  shouldRemindBacklog, markBacklogReminded,
-  BACKLOG_REMINDER_AT, SEND_WINDOW_MAX, SEND_WINDOW_MS,
+  recordSend, sessionStats, REGISTER_SILENT,
+  shouldRemindBacklog, markBacklogReminded, BACKLOG_REMINDER_AT,
 } from './social/sessionState.js';
 import { prepareRequestItems, estimateTokens, COMPACT_THRESHOLD_TOKENS } from './social/compaction.js';
 import { recycleSessionImages } from './social/contextTrim.js';
-import { toProviderTurns, ensureUserLast, renderTurnNote, formatSelfMessage } from './social/sessionTurn.js';
+import { toProviderTurns, ensureUserLast, prependToLastUser, classifyRoundOutput, renderTurnNote, formatSelfMessage, SYSTEM_RECORD } from './social/sessionTurn.js';
 import { tagBatch, renderMoodTag, MOOD_TAG_TIMEOUT_MS } from './social/moodTag.js';
 import { createMoodTagStore } from './social/moodTagStore.js';
 import { readBarometer, renderBarometer, BAROMETER_WINDOW } from './social/barometer.js';
+import { createCursor, messagesAfter, advanceCursor, sortByTime, isCursorUnset } from './social/messageCursor.js';
 import { subagentRegistry, initSubagentListeners, destroySubagentListeners, killBySource, reapSubagentRegistry } from './subagentManager';
+import { startKeepAwake, stopKeepAwake } from './keepAwake.js';
+import { normalizeTargetIds } from './social/targetId.js';
+import { normalizeSplitTags, stripSplitTagsForSpeech } from './social/outgoingText.js';
+import { applyIncomingEdit } from './social/messageEdits.js';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
@@ -1961,6 +1965,13 @@ ${globalInput}`;
  * @param {Function} [onStatusChange] - 状态变化回调 (active: boolean) => void
  */
 export async function startSocialLoop(config, onStatusChange) {
+  // 配置里可能存着用户粘进来的 Telegram 链接。不在这里换成规范 ID，MCP 回来的
+  // 结果对不上号、以 target 命名的文件也写不进去，见 normalizeTargetId。
+  config = {
+    ...config,
+    watchedGroups: normalizeTargetIds(config.watchedGroups),
+    watchedFriends: normalizeTargetIds(config.watchedFriends),
+  };
   const restartingSamePet = activeLoop?.petId === config.petId;
   const carriedKnownTargets = restartingSamePet ? new Set(knownTargets) : new Set();
   const carriedLurkModes = restartingSamePet ? new Map(lurkModes) : new Map();
@@ -2296,6 +2307,7 @@ export async function startSocialLoop(config, onStatusChange) {
   let dailyCompressTimeoutId = null; // 每日压缩定时器
   let socialWatchdogTimeoutId = null; // 看门狗定时器（Intent 循环 + Fetcher 链）
   let fetcherTickAt = Date.now();     // Fetcher 最近一次开始拉取的时间（看门狗用）
+  let watchdogScheduledAt = Date.now(); // 本次看门狗 tick 是什么时候排进去的（算漂移用）
   const isRuntimeGenerationCurrent = () =>
     socialLoopGeneration === loopGeneration && activeLoop?._generation === loopGeneration;
   const canTargetDispatch = (target, { allowFullLurk = false } = {}) =>
@@ -2320,6 +2332,8 @@ export async function startSocialLoop(config, onStatusChange) {
   // Fetcher 正常每 BATCH_POLL_INTERVAL_MS 一轮、单轮受 10s 工具超时约束；
   // 2 分钟没开始新一轮说明 setTimeout 链断了（未捕获异常 / invoke 永不 settle）。
   const FETCHER_WATCHDOG_TIMEOUT_MS = 2 * 60 * 1000;
+  // 看门狗自己迟到多少算"整个 webview 刚被挂起过"。正常抖动在毫秒级。
+  const WATCHDOG_DRIFT_REPORT_MS = 5 * 1000;
   const intentWatermarks = new Map();            // target → lastProcessedMessageId（用于 normal 模式新消息检测）
   // Reply 并发机制（inFlightReplies / MAX_CONCURRENT_REPLY / 僵死槽位回收）已随
   // session 化删除：实测 4483 次 Reply 里 97.4% 并发度为 1，只有 4 次摸到上限 3。
@@ -2623,13 +2637,30 @@ JSON 数组格式，每条：
     buf.compressedSummary = metadata?.compressed_summary ?? buf.compressedSummary;
     
     let added = 0;
+    const editEvents = [];
     for (const msg of newMessages) {
       const id = msg.message_id;
-      if (id && buf.seenIds.has(id)) continue; // 去重
+      if (id && buf.seenIds.has(id)) {
+        // 去重——但被编辑过的要更新内容，并补一条编辑事件，见 messageEdits.js
+        const existing = msg.edited ? buf.messages.find(m => m.message_id === id) : null;
+        const event = applyIncomingEdit(existing, msg);
+        if (event && !buf.seenIds.has(event.message_id)) editEvents.push(event);
+        continue;
+      }
       if (id) buf.seenIds.add(id);
       buf.messages.push(msg);
       added++;
     }
+    for (const event of editEvents) {
+      buf.seenIds.add(event.message_id);
+      buf.messages.push(event);
+      added++;
+    }
+
+    // 纯追加只在"MCP 返回的一定有序"时成立。qq-mcp 把历史回填改成后台任务之后
+    // 这个前提破了：回填完成时插进来的几十条历史，对这里是"没见过的"，会被
+    // 追加到实时消息**后面**。排一道底，让下游所有按下标切片的地方仍然安全。
+    if (added > 0) sortByTime(buf.messages);
     
     // 安全阀：超过硬上限时丢弃最旧的
     if (buf.messages.length > BUFFER_HARD_CAP) {
@@ -2879,7 +2910,13 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       if (!msg._images.some(img => String(img.data || '').startsWith('http'))) continue;
       try {
         const resolved = await resolveImagesForModel(msg._images);
-        // resolveImageUrls 会丢弃下载失败或非图片的条目，所以可能变短甚至为空
+        // resolveImageUrls 会丢弃下载失败或非图片的条目，所以可能变短甚至为空。
+        // 一张都没拿到就保留原始 URL，下次再试——写成空数组的话，后面所有读
+        // buffer 的地方都当它「没有图」，这张图就永久消失了
+        if (resolved.length === 0) {
+          addLog('warn', `🖼️ msg=${msg.message_id} 的 ${msg._images.length} 张图都没下载下来，下次再试`, null, target);
+          continue;
+        }
         msg._images = resolved;
         resolvedCount += resolved.length;
       } catch (e) {
@@ -3010,6 +3047,20 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     if (!isRuntimeGenerationCurrent()) return;
     const now = Date.now();
 
+    // ── 定时器漂移 ──
+    // 看门狗自己也是 setTimeout 驱动的：webview 被系统挂起时它和被监控对象
+    // 一起停摆，醒来后所有"停滞了多久"的墙上时钟差都虚高，下面的判定会误报。
+    // 这里只**记录**不干预——保活（keepAwake.js）到底管不管用，看这条就知道：
+    // 保活生效后这条日志应该一次都不再出现。
+    const tickDrift = now - watchdogScheduledAt - INTENT_WATCHDOG_CHECK_MS;
+    if (tickDrift > WATCHDOG_DRIFT_REPORT_MS) {
+      addLog(
+        'warn',
+        `⏱️ 定时器漂移 ${Math.round(tickDrift / 1000)}s —— webview 刚从挂起/阻塞中恢复，本轮停滞判定不可信`,
+        `预期 ${INTENT_WATCHDOG_CHECK_MS}ms 后触发，实际 ${now - watchdogScheduledAt}ms`,
+      );
+    }
+
     // ── Fetcher 链：断了就没有任何 target 会再收到新消息 ──
     const fetcherStalledMs = now - fetcherTickAt;
     if (fetcherStalledMs > FETCHER_WATCHDOG_TIMEOUT_MS) {
@@ -3053,6 +3104,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
   const scheduleSocialWatchdog = () => {
     if (!isRuntimeGenerationCurrent()) return;
+    watchdogScheduledAt = Date.now();
     socialWatchdogTimeoutId = setTimeout(() => {
       try {
         socialWatchdogTick();
@@ -3153,7 +3205,6 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
       // --- 有新消息（排除自己发的消息）→ 清除表情包冷却 + 唤醒 Intent ---
       if (effectiveAdded > 0) {
-        resetStickerCooldown(target);
         // 唤醒 Intent（中断 sleepInterruptible 等待，触发下一轮 detectChange）
         const iState = getIntentState(target);
         if (iState._wake) { iState._wake(); iState._wake = null; }
@@ -3570,7 +3621,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         msgL: `‹${rnd()}›`, msgR: `‹/${rnd()}›`,
       };
       s.systemPrompt = null;
-      s.lastMessageId = null;
+      s.cursor = createCursor();
       s.selfSentTexts = new Set();
       // 标签是冻结的：标过一次就不再重标。不落盘的话每次重启都要把窗口里的
       // 64 条重标一遍——既花钱，又会出现同一条消息前后两次标得不一样。
@@ -3584,16 +3635,15 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     return s;
   };
 
-  /** buffer 里 lastId 之后的消息。没有 lastId 就取最近一个窗口。 */
-  const messagesSince = (target, lastId) => {
+  /**
+   * 游标之后的新消息。游标是**时间**语义而不是数组下标语义——见 messageCursor.js。
+   * 游标还没起步（session 刚建）时取最近一个窗口当起点。
+   */
+  const messagesSince = (target, cursor) => {
     const buf = dataBuffer.get(target);
     if (!buf?.messages?.length) return [];
-    if (!lastId) return buf.messages.slice(-INTENT_IMAGE_WINDOW);
-    let idx = -1;
-    for (let i = buf.messages.length - 1; i >= 0; i--) {
-      if (buf.messages[i].message_id === lastId) { idx = i; break; }
-    }
-    return idx < 0 ? buf.messages.slice(-INTENT_IMAGE_WINDOW) : buf.messages.slice(idx + 1);
+    if (isCursorUnset(cursor)) return buf.messages.slice(-INTENT_IMAGE_WINDOW);
+    return messagesAfter(buf.messages, cursor);
   };
 
   /**
@@ -3676,7 +3726,12 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   /** 压缩用的摘要器。用 compress 档模型，不占主模型。 */
   const makeSessionSummarizer = (target) => async ({ priorSummary, items }) => {
     const transcript = toProviderTurns(items)
-      .map(m => `${m.role === 'assistant' ? '我' : '群里'}：${typeof m.content === 'string' ? m.content : '[多模态内容]'}`)
+      .map(m => {
+        const text = typeof m.content === 'string' ? m.content : '[多模态内容]';
+        // [系统记录] 是 user 侧的流水，不是群友说的话，别在摘要里记成「群里」
+        const who = m.role === 'assistant' ? '我' : (text.startsWith(SYSTEM_RECORD) ? '系统' : '群里');
+        return `${who}：${text}`;
+      })
       .join('\n');
     const sys = '把下面这段群聊经历压缩成一份自述式摘要，供"我"在后续对话中继续使用。'
       + '保留：正在进行的话题、我已经表态过的观点、我答应过要做的事、关键的人和他们的立场、我查过什么结论是什么。'
@@ -3749,8 +3804,6 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         subagentRegistry,
         voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
         imageGenEnabled: !!imageGenLLMConfig,
-        maxSends: SEND_WINDOW_MAX,
-        sendWindowSec: Math.round(SEND_WINDOW_MS / 1000),
         backlogRemindAt: BACKLOG_REMINDER_AT,
         moodTagEnabled: moodConfig.enabled,
       });
@@ -3758,12 +3811,20 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       session.staticPrefixTokens = estimateTokens(session.systemPrompt);
     }
 
-    // 循环水位线必须跟着 session.lastMessageId 走，**不能**跟 buffer 末尾。
-    // 注入到上限之后还没消费的消息，得继续算作"有变化"，否则 detectChange
-    // 看不见它们，要等再来一条新消息才会被顺带捞出去——那几条就被装死了。
-    // 两个出口（空 turn 提前返回 / 正常收尾）都要同步，漏一个就会空转。
+    // detectChange 用的是 message_id 水位线，所以这里把时间游标翻译回一个 id：
+    // 取"已消费部分里最后的那条"，而不是 buffer 末尾。还没消化完的消息必须继续
+    // 算作"有变化"，否则 detectChange 看不见它们，要等再来一条新消息才会被顺带
+    // 捞出去——那几条就被装死了。两个出口都要同步，漏一个就会空转。
     const syncWatermark = () => {
-      if (session.lastMessageId) intentWatermarks.set(target, session.lastMessageId);
+      const buf = dataBuffer.get(target);
+      const msgs = buf?.messages || [];
+      if (msgs.length === 0 || isCursorUnset(session.cursor)) return;
+      const unconsumed = new Set(messagesAfter(msgs, session.cursor));
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (unconsumed.has(msgs[i])) continue;
+        if (msgs[i]?.message_id) intentWatermarks.set(target, msgs[i].message_id);
+        return;
+      }
     };
 
     // ── 状态打标（"敬酒系统"）──
@@ -3827,29 +3888,53 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         JSON.stringify({ items }), target);
     };
 
+    // ── poll 日志采集 ──
+    // 前端的 💬 Chat / 🧠 LLM / 🔧 Tools 三个开关和 PollEntry 全靠 'poll' 级日志。
+    // 那个日志原本由 pollTarget 发，而 pollTarget 现在只剩 Observer 在调——
+    // 删掉 Reply 路径时把群消息显示的数据源一起带走了，UI 上只剩
+    // "turn #N 开始（+10 条）"这种摘要，看不到任何内容。这里补回来。
+    const pollChat = [];
+    const pollIters = [];
+    const pollTools = [];
+    const pollSent = [];
+    let lastRequestMessages = null;
+
     // ── 新消息进 history ──
     const imageUrlMap = new Map();
-    const appendNewMessages = async (msgs, kind) => {
+    // stats（可选）带回这批里真正解析出来的图片数——check_new_messages 据此决定
+    // 要不要结束本次请求、让模型在下一次请求里看到图
+    const appendNewMessages = async (msgs, kind, stats = null) => {
       if (!msgs.length) return 0;
-      // 水位线按原始批次推进，不管去重滤掉多少——否则全是自发消息的一批会让它卡死
-      const lastRaw = msgs[msgs.length - 1];
-      if (lastRaw?.message_id) session.lastMessageId = lastRaw.message_id;
+      // 按原始批次推进，不管去重滤掉多少——否则全是自发消息的一批会让它卡死。
+      // 时间语义：乱序的批次也能算对，且游标只前进不后退。
+      advanceCursor(session.cursor, msgs);
       const raw = msgs.filter(m => !(m.is_self && session.selfSentTexts.has((m.content || '').trim())));
       if (!raw.length) return 0;
 
       // 复制一份再解析：base64 只进 session history，不回写 buffer。
       // buffer 里留着原始路径/URL，靠 resolveBufferImagesInPlace 的窗口回收控内存。
-      const fresh = raw.map(m => ({ ...m, _images: m._images || (m.image_urls || []).map(u => ({ data: u, mimeType: 'image/jpeg' })) }));
+      // buffer 里的 _images 是空数组也要退回原始 URL：空数组是真值，`||` 兜不住，
+      // 之前某次下载失败把它清空过的话，这张图就再也没有机会被重新拉取
+      const fresh = raw.map(m => ({
+        ...m,
+        _images: m._images?.length ? m._images : (m.image_urls || []).map(u => ({ data: u, mimeType: 'image/jpeg' })),
+      }));
+      let resolvedCount = 0;
       if (config.enableImages !== false) {
-        let resolvedCount = 0;
         for (const m of fresh) {
           if (!m._images?.length) { m._images = []; continue; }
+          const wanted = m._images.length;
           try {
             m._images = await resolveImagesForModel(m._images);
             resolvedCount += m._images.length;
           } catch (e) {
             addLog('warn', `图片解析失败 msg=${m.message_id}：${e.message || e}`, null, target);
             m._images = [];
+          }
+          // resolveImageUrls 对下载失败、不是图片的条目是静默丢弃的（只打 console），
+          // 这里不报的话，模型说「看不到图」时日志里什么都没有
+          if (m._images.length < wanted) {
+            addLog('warn', `🖼️ msg=${m.message_id} 有 ${wanted - m._images.length}/${wanted} 张图没拿到（下载失败或不是有效图片）`, null, target);
           }
         }
         if (resolvedCount > 0) {
@@ -3870,6 +3955,19 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         moodTags: moodConfig.enabled ? session.moodStore : null,
       });
       for (const t of provider) appendHistory(session, { role: t.role, content: t.content, kind });
+
+      // 供前端 💬 Chat 显示。只收群友的，bot 自己的走 pollSent。
+      for (const m of fresh) {
+        if (m.is_self) continue;
+        let body = (m.content || '').substring(0, 200);
+        if (m._imageDescs?.length) {
+          body = (body + ' ' + m._imageDescs.map(d => `[图片: ${d}]`).join(' ')).substring(0, 400);
+        } else if (m._images?.length) {
+          body += ` [图片x${m._images.length}]`;
+        }
+        pollChat.push({ sender: m.sender_name || String(m.sender_id || ''), content: body, isAtMe: !!m.is_at_me });
+      }
+      if (stats) stats.images = resolvedCount;
       return fresh.length;
     };
 
@@ -3884,7 +3982,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     }
     touchIntent(state);
 
-    const initialCount = await appendNewMessages(messagesSince(target, session.lastMessageId), 'message');
+    const initialCount = await appendNewMessages(messagesSince(target, session.cursor), 'message');
     if (initialCount === 0 && turn.seq > 1) {
       // 水位线推进与 detectChange 之间有竞态窗口，偶尔会开出一个没有新输入的
       // turn。没有新东西就没什么可想的，直接收掉，不烧一次 LLM。
@@ -3897,7 +3995,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     const emitTurnState = (extra = {}) => addLog('turn-state', '', JSON.stringify({
       seq: turn.seq, trigger, ended: false,
       sends: turn.sends, toolCalls: turn.toolCalls, injections: turn.injections,
-      maxSends: SEND_WINDOW_MAX, backlogRemindAt: BACKLOG_REMINDER_AT,
+      backlogRemindAt: BACKLOG_REMINDER_AT,
       injectedMessages: turn.injectedMessages, backlog: turn.backlog,
       register: turn.note?.register ?? null, summary: turn.note?.summary ?? null,
       ...extra,
@@ -3942,12 +4040,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     let capturedNote = null;
     let pendingSendContent = null;
     let pendingReplyTo = null;
-    // 发送闸门：每次开口之前都必须先 check_new_messages。
-    // 发完一条后重新置位——连发多条时每条之前都要重查，因为上一条发出去
-    // 本身就会改变群里的状态。
-    let checkedSinceLastSend = false;
     /** 刚注入过。用来让 check_new_messages 的"空结果"说对话，见该工具注释。 */
     let justInjected = false;
+    /**
+     * check_new_messages 刚把一批消息并进了 history。
+     *   added    本次并入几条（工具结果在 history 里就不必再抄一遍全文）
+     *   images   其中解析出的图片数。> 0 时结束本次请求：工具结果里只有文字，
+     *            图片要等下一次请求从 history 重建时才看得到
+     */
+    let checkIngest = null;
+
     const collectTraining = !!_currentTrainingCollectionEnabled && !!trainingTargetsMap.get(String(target));
     let latestTrace = null;
     const turnStartedAt = Date.now();
@@ -3974,16 +4076,17 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         },
       });
 
-      // 气压计每轮重读。它**不经过 appendHistory** —— 作为请求最后一条 user
-      // 消息挂上去，用完即弃，history 里不留痕迹。
+      // 气压计每轮重读。它**不经过 appendHistory**，用完即弃，history 里不留痕迹。
+      // 并进最后一条 user 消息的开头，不能单独挂在最后——那样模型最后读到的是
+      // 场面读数而不是群友的话，短的 @ 容易被当成不用回，见 prependToLastUser。
       const baro = await readGroupBarometer();
       const baroBlock = baro ? renderBarometer(baro.reading, baro.stats) : '';
 
       const messages = [
         { role: 'system', content: session.systemPrompt },
-        ...ensureUserLast(toProviderTurns(prepared.items)),
+        ...prependToLastUser(ensureUserLast(toProviderTurns(prepared.items)), baroBlock),
       ];
-      if (baroBlock) messages.push({ role: 'user', content: baroBlock });
+      lastRequestMessages = messages;   // 供前端 🧠 LLM 里的 Input Prompt 查看
 
       let result;
       try {
@@ -4025,18 +4128,30 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             onTurnNote: (note) => { capturedNote = note; },
             // 模型主动拉过的消息，turn 边界不该再当"新消息"注入一遍
             sessionCursor: {
-              get: () => session.lastMessageId,
-              set: (id) => { session.lastMessageId = id; },
+              get: () => session.cursor,
+              advance: (msgs) => advanceCursor(session.cursor, msgs),
             },
             wasJustInjected: () => justInjected,
+            // 表情挑选也走 Jev：主模型只决定"该不该发"，"发哪个"交给它
+            moodApiKey: moodConfig.apiKey,
+            moodModel: moodConfig.model,
+            // turn 中途主动查到的消息也要走 appendNewMessages：那是唯一下载图片、
+            // 拼多模态的路径。只回文字的话图就永久丢了，见 check_new_messages 注释
+            ingestNewMessages: async (msgs) => {
+              const stats = {};
+              const added = await appendNewMessages(msgs, 'message', stats);
+              checkIngest = { added, images: stats.images || 0 };
+              return checkIngest;
+            },
             onNewMessagesChecked: (count) => {
-              checkedSinceLastSend = true;
               justInjected = false;   // 只影响紧跟注入的那一次查询
               if (count > 0) {
                 addLog('intent', `👀 [${tName()}] 模型主动查到 ${count} 条新消息`, null, target);
               }
             },
           },
+          // 查到带图的新消息就收住这次请求，下一次请求从 history 重建、带上图
+          stopAfterTool: (name) => name === 'check_new_messages' && checkIngest?.images > 0,
           usageLabel: 'Session',
           usageTarget: target,
           usagePetId: config.petId,
@@ -4047,17 +4162,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             if (lurkMode === 'full-lurk' && SEND_TOOL_RE.test(name)) {
               return `当前是纯观察模式，禁止调用发送工具 ${name}。`;
             }
-            // 限流按**滑动时间窗**算，跨 turn 生效。之前是 per-turn 计数，
-            // 但撞注入上限会开新 turn、计数归零，一波消息里就成了 5+5+5…
-            if (SEND_TOOL_RE.test(name) && !canSendNow(session)) {
-              const w = sendWindowState(session);
-              return `最近 ${Math.round(w.windowMs / 1000)} 秒里已经发了 ${w.used} 条，到上限了`
-                + `（约 ${Math.ceil(w.retryInMs / 1000)} 秒后恢复）。剩下想说的缓一缓再说，别刷屏。`;
-            }
-            // 开口前强制看一眼群里的最新情况。不是死锁——调一次 check_new_messages 就放行。
-            if (SEND_TOOL_RE.test(name) && !checkedSinceLastSend) {
-              return '开口之前先调 check_new_messages 看一眼群里有没有新消息——你刚才想事情/查资料花了些时间，情况可能已经变了。看完再决定还要不要发、发什么。';
-            }
+            // 发送类工具没有任何运行时限制：限流窗口、开口前强制 check、
+            // 表情冷却三道闸都已移除。节奏完全交给模型自己把握。
             if (promptConfig.agentCanEditStrategy !== true) {
               const mutation = new Set(['social_write', 'social_edit', 'social_delete', 'social_rename']);
               const touchesStrategy = [args?.path, args?.from, args?.to].some(p =>
@@ -4067,10 +4173,17 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             return null;
           },
           toolArgTransform: (name, args) => {
+            // 语音：分隔符和分段标记都得去掉，不然 TTS 会把它们念出来
+            if (name === 'voice_send') {
+              let text = args?.text || '';
+              for (const sec of Object.values(ep)) text = text.replaceAll(sec, '');
+              return { ...args, text: stripSplitTagsForSpeech(text) };
+            }
             if (!name.includes('send_message')) return args;
             let content = args?.content || '';
             for (const sec of Object.values(ep)) content = content.replaceAll(sec, '');
-            content = content
+            // 先剥分隔符再归一分段标记：模型会照着 ‹…› 分隔符的样子写成 ‹/分段›
+            content = normalizeSplitTags(content)
               .replace(/\[图片\]/g, '').replace(/\[视频\]/g, '')
               .replace(/\[语音\]/g, '').replace(/\[文件\]/g, '').trim();
             const extra = {};
@@ -4079,12 +4192,23 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           },
           onLLMText: (iter) => {
             if (!guard()) return;
+            pollIters.push(iter);
+            // 模型的文字**只从这里**进 history：每次迭代都会回调，包括最后那次不调工具的。
+            // 轮次结束后别再拿 result.content 补一遍——之前补过，被吞掉的回复存了两份；
+            // 被截断时还会把系统提示「[Maximum tool call iterations reached]」当成 bot
+            // 自己说的话写进去。
             const text = (iter?.content || '').trim();
-            if (text) appendHistory(session, { role: 'assistant', content: text, kind: 'message' });
+            // 不记成 assistant 的 message：这段话没经过发送工具，群里看不见。记成
+            // assistant 会让模型以为自己说过，下一轮照着「直接写文字」的样子继续，
+            // 见 sessionTurn 的 SYSTEM_RECORD。
+            if (text) appendHistory(session, { role: 'assistant', content: text, kind: 'unsent' });
           },
           onToolCall: (name, args) => {
             if (!guard()) return;
             turn.toolCalls += 1;
+            // 每次查询各算各的：同一次请求里第二次查到空，不能沿用上一次的并入结果
+            if (name === 'check_new_messages') checkIngest = null;
+            pollTools.push({ name, args: JSON.stringify(args ?? {}).substring(0, 300) });
             appendHistory(session, {
               role: 'assistant', kind: 'tool_call', toolName: name,
               content: JSON.stringify(args ?? {}),
@@ -4097,16 +4221,24 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           },
           onToolResult: (name, toolRes, _id, isError) => {
             if (!guard()) return;
-            const text = typeof toolRes === 'string' ? toolRes : JSON.stringify(toolRes);
+            let text = typeof toolRes === 'string' ? toolRes : JSON.stringify(toolRes);
+            // 这批消息已经按原样进了 history（就在这条结果前面），之后的请求里
+            // 不用再把渲染过的全文存一份
+            if (name === 'check_new_messages' && checkIngest?.added > 0 && !isError) {
+              text = `新到的 ${checkIngest.added} 条消息已经按原样放进上面的对话里了。`;
+            }
             appendHistory(session, {
               role: 'tool', kind: 'tool_result', toolName: name,
               content: text, isError: !!isError,
             });
+            if (pollTools.length && pollTools[pollTools.length - 1].name === name) {
+              pollTools[pollTools.length - 1].result = String(text).slice(0, 100);
+              pollTools[pollTools.length - 1].isError = !!isError;
+            }
             addLog(isError ? 'error' : 'info', `Tool result: ${name}`, String(text).slice(0, 100), target);
             if (name.includes('send_message') && !isToolResultFailure(toolRes, isError)) {
               recordSend(session, turn);
               lastReplyTime.set(target, Date.now());
-              checkedSinceLastSend = false;   // 下一条之前要重新查
               if (pendingSendContent) {
                 let msgId = null;
                 let msgTs = new Date().toISOString();
@@ -4128,6 +4260,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
                   }),
                 });
                 // 去重比对的是原始正文——buffer 回灌的那条不带前缀
+                pollSent.push(pendingSendContent);
                 session.selfSentTexts.add(pendingSendContent.trim());
                 const arr = sentMessagesCache.get(target) || [];
                 arr.push({ content: pendingSendContent, timestamp: msgTs, message_id: msgId });
@@ -4145,23 +4278,62 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         break;
       }
 
-      if (result?.content && !capturedNote) {
-        const tail = String(result.content).trim();
-        if (tail) appendHistory(session, { role: 'assistant', content: tail, kind: 'message' });
+      // 这一轮的话有没有送进群里。只有发送类工具能出声，直接输出的文字只进
+      // history——以前这里不留任何痕迹，丢回复和主动沉默在日志里分不出来。
+      if (guard()) {
+        // 被截断时 content 是 callLLMWithTools 拼的系统提示，不是模型的话
+        const truncated = result?.termination === 'max_iterations' || result?.termination === 'server_iteration_limit';
+        if (truncated) {
+          addLog('warn', `⛔ [${tName()}] turn #${turn.seq} 工具循环被截断（${result.termination}）：${result.content}`, null, target);
+        }
+        const roundText = truncated ? '' : String(result?.content || '').trim();
+        const outcome = classifyRoundOutput({
+          toolNames: (result?.toolCallHistory || []).map(h => h.name),
+          text: roundText,
+          isSendTool: (name) => SEND_TOOL_RE.test(name),
+        });
+        // 非正常结束（MALFORMED_FUNCTION_CALL / SAFETY / MAX_TOKENS …）时附上，
+        // 那是「想说但没说出来」，和模型自己选择不说是两回事
+        const fr = result?.finishReason;
+        const frTag = fr && !/^(stop|end_turn)$/i.test(fr) ? `（finishReason=${fr}）` : '';
+        if (outcome === 'text_only') {
+          const snippet = roundText.replace(/\s+/g, ' ');
+          addLog('warn',
+            `🕳️ [${tName()}] turn #${turn.seq} 模型只出了文字、没调发送工具，这段话群里看不见${frTag}：「${snippet.slice(0, 100)}${snippet.length > 100 ? '…' : ''}」`,
+            roundText, target);
+        } else if (outcome === 'empty' && !capturedNote) {
+          // 之前已经 turn_note 收过尾的话，注入轮空着回来是正常的，不记。
+          // 非正常结束说明它想做事但没做成，升成 warn
+          addLog(frTag ? 'warn' : 'info', `🕳️ [${tName()}] turn #${turn.seq} 模型空响应：没调工具、没出文字，也还没收尾${frTag}`, null, target);
+        }
       }
 
       // ── turn 边界：有新消息就注入继续，否则收尾 ──
       if (!guard()) break;
-      const fresh = messagesSince(target, session.lastMessageId).filter(m => !m.is_self);
+
+      // check_new_messages 查到了带图的消息、收住了上一次请求：图已经在 history 里，
+      // 再跑一次让模型看到。游标已经推过去了，下面的常规注入不会再算这批
+      if (checkIngest?.images > 0) {
+        const ingested = checkIngest;
+        checkIngest = null;
+        recordInjection(turn, ingested.added);
+        justInjected = true;
+        appendHistory(session, {
+          role: 'user', kind: 'injection',
+          content: `（上面你刚查到的新消息里有 ${ingested.images} 张图，现在能看到了。把它们纳入判断再决定说什么。）`,
+        });
+        addLog('intent', `🖼️ [${tName()}] turn #${turn.seq} 查到带图的新消息（${ingested.images} 张），带图重跑一次`, null, target);
+        emitTurnState({ newMessages: ingested.added });
+        continue;
+      }
+      checkIngest = null;
+      const fresh = messagesSince(target, session.cursor).filter(m => !m.is_self);
       if (!canInject(turn, fresh.length)) break;
 
-      const added = await appendNewMessages(messagesSince(target, session.lastMessageId), 'message');
+      const added = await appendNewMessages(messagesSince(target, session.cursor), 'message');
       recordInjection(turn, added || fresh.length);
-      // 注入本身就是一次"看过最新状态"。不置位的话，模型想回复时会被闸门拦下，
-      // 而被强制调用的 check_new_messages 此时必然返回空（注入已经推进了游标），
-      // 于是它收到"没有新消息"的误导信号 —— 线上那条「那你发个你自拍呗」就是
-      // 这样被吞掉的。
-      checkedSinceLastSend = true;
+      // 注入之后紧跟的那次 check_new_messages 必然返回空（注入已经推进了游标），
+      // 这个标记让它的措辞说对话：「你刚收到的那批就是最新的」而不是「群里没动静」。
       justInjected = true;
       let injectionText = `（以上 ${added} 条是你思考期间新到的消息，**已经是群里最新的了**。`
         + `把它们纳入判断：可能让你从不打算说变成该说了，也可能让你原本想说的话过时了。）`;
@@ -4179,6 +4351,19 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
     // ── 收尾 ──
     endTurn(session, turn, { note: capturedNote });
+
+    // 前端的 💬 Chat / 🧠 LLM / 🔧 Tools 靠这条日志渲染（PollEntry）。
+    // action 沿用 pollTarget 的取值，这样 actionIcons/actionColors 直接复用。
+    addLog('poll', `Poll: ${turn.sends > 0 ? 'replied' : 'silent'}`, {
+      chatMessages: pollChat,
+      inputPrompt: lastRequestMessages,
+      llmIters: pollIters,
+      sentMessages: pollSent,
+      toolCalls: pollTools,
+      action: turn.sends > 0 ? 'replied' : 'silent',
+      role: 'reply',
+    }, target);
+
     appendHistory(session, {
       role: 'assistant', kind: 'note',
       turnId: turn.turnId,   // endTurn 已清空 currentTurn，这里要显式带上
@@ -4303,6 +4488,17 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   scheduleSocialWatchdog();
 
   onStatusChange?.(true);
+  // 保活：所有循环都靠 setTimeout 驱动，宿主 webview 一旦被系统挂起就整体
+  // 静默停摆（实测一晚断 6 次、累计 43 分钟）。放到最后启动，这样启动失败的
+  // 那些提前 return 不会留下一个开着的 AudioContext。详见 keepAwake.js。
+  startKeepAwake({ onLog: (level, message, detail) => addLog(level, message, detail) })
+    .then((status) => {
+      if (status.running) {
+        addLog('info', '🔊 webview 保活已开启（防止 WebContent 进程被系统挂起）');
+      }
+    })
+    .catch((e) => addLog('warn', `🔇 webview 保活启动失败：${e?.message || e}`));
+
   addLog('info', 'Social loop started successfully');
   return true;
 }
@@ -4314,6 +4510,9 @@ export function stopSocialLoop() {
   // 无论 activeLoop 是否已经建立，都先使 STARTING/运行中的旧 generation 失效。
   socialLoopGeneration++;
   startingPetId = null;
+  // 保活只为 agent 服务，agent 一停就放掉——它会阻止系统 idle 休眠。
+  // 放在最前面：startSocialLoop 开头就会调本函数，重启时由它末尾重新打开。
+  stopKeepAwake();
 
   if (activeLoop) {
     // 持久化 lurk modes 在清空之前

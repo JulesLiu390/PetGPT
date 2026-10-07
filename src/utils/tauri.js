@@ -1065,8 +1065,9 @@ export const chatHistorySearch = (params) =>
  * @param {number} after - 取后几条
  * @returns {Promise<{before: Array, anchor: Object|null, after: Array}>}
  */
-export const chatHistoryContext = (messageId, before = 5, after = 5) =>
-  invoke('chat_history_context', { messageId, before, after });
+// targetId：Telegram 的 message_id 每个会话各自从 1 数起，只给 ID 会对到别的会话
+export const chatHistoryContext = (messageId, before = 5, after = 5, targetId = null) =>
+  invoke('chat_history_context', { messageId, targetId, before, after });
 
 // ==================== Subagent (CC CLI 子进程) ====================
 

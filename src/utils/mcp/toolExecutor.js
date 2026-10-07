@@ -44,6 +44,24 @@ export const normalizeUsage = (usage) => {
   };
 };
 
+/** 内部消息格式里的图片 part 数（非 text 的 part 都算）。 */
+export const countMessageImages = (messages) => (messages || []).reduce((n, m) => (
+  n + (Array.isArray(m?.content) ? m.content.filter(p => p && p.type !== 'text').length : 0)
+), 0);
+
+/** 已经转换成 provider 请求体之后的图片数：OpenAI / Gemini / Anthropic 三种形状都认。 */
+export const countBodyImages = (body) => {
+  if (!body) return 0;
+  let n = 0;
+  for (const m of body.messages || []) {
+    if (Array.isArray(m.content)) n += m.content.filter(p => p?.type === 'image_url' || p?.type === 'image').length;
+  }
+  for (const c of body.contents || []) {
+    n += (c.parts || []).filter(p => p?.inline_data || p?.inlineData || p?.file_data || p?.fileData).length;
+  }
+  return n;
+};
+
 /**
  * Append a usage record to the daily usage log file.
  * File: social/usage/YYYY-MM-DD.jsonl
@@ -401,12 +419,21 @@ const toGeminiInlineData = async (data, mimeType) => {
  * 验证 base64 数据是否为有效图片（magic bytes + 大小检查）
  * 防止 QQ CDN 返回 HTML 错误页被当作图片发给 LLM
  */
+const IMAGE_BASE64_MAGICS = ['/9j/', 'iVBOR', 'R0lGOD', 'UklGR', 'Qk0']; // JPEG, PNG, GIF, WebP, BMP
+
 const isValidImageBase64 = (b64) => {
   if (!b64 || typeof b64 !== 'string') return false;
   if (b64.length > 20 * 1024 * 1024) return false; // > ~15MB raw 太大
-  const magics = ['/9j/', 'iVBOR', 'R0lGOD', 'UklGR', 'Qk0']; // JPEG, PNG, GIF, WebP, BMP
-  return magics.some(m => b64.startsWith(m));
+  return IMAGE_BASE64_MAGICS.some(m => b64.startsWith(m));
 };
+
+/**
+ * 这段数据是不是已经解析好的图片 base64（只看文件头，不管大小）。
+ * 没有路径会以 `/9j/` 开头，所以和本地路径不会撞。
+ */
+export const looksLikeImageBase64 = (data) => (
+  typeof data === 'string' && IMAGE_BASE64_MAGICS.some(m => data.startsWith(m))
+);
 
 /**
  * 从 base64 前缀推断图片 MIME type（用于修正 octet-stream）
@@ -433,6 +460,15 @@ export const resolveImageUrls = async (images) => {
 
   const resolved = [];
   for (const img of images) {
+    // 已经是 base64 的原样放行，而且必须排在本地路径判断前面：JPEG 的 base64
+    // 以 `/9j/` 开头，会被下面的 startsWith('/') 当成本地路径去读文件，读不到就
+    // 静默丢掉。off 模式下 buffer 里的图先被 resolveBufferImagesInPlace 就地转成
+    // base64，之后 appendNewMessages / pollTarget 再解析一遍——Telegram 的照片
+    // （全是 JPEG）就这样一张不剩，贴纸（WebP）和 PNG 不受影响。
+    if (looksLikeImageBase64(img.data)) {
+      resolved.push(img);
+      continue;
+    }
     // 本地绝对路径：qq-mcp 现在优先给出 NapCat 下载好的本地副本。
     // QQ 图床那个 URL 外部拉不动（HTTP 400，要 QQ 自己的鉴权上下文），
     // 读本地文件既可靠又省一次网络往返。
@@ -642,9 +678,13 @@ export const callLLMWithTools = async ({
   const MAX_TOTAL_ITERATIONS = maxIterations ?? 100;
   let stopEarly = false; // set by stopAfterTool
 
+  // 诊断：这次请求里有几张图——交给我们的消息里几张、adapter 转换后真正发出去几张。
+  // 图片在哪一步丢的，看 usage 日志的 images 字段就知道。只记第一次迭代。
+  let requestImages = null;
   const _writeUsage = (record) => {
     const _petId = usagePetId || builtinToolContext?.petId;
     if (!_petId || !usageLabel) return;
+    if (requestImages) record = { ...record, images: requestImages };
     // appendUsageLog is async fire-and-forget; it swallows its own errors internally.
     appendUsageLog(_petId, record);
     if (typeof onUsageLogged === 'function') {
@@ -670,6 +710,9 @@ export const callLLMWithTools = async ({
           tools: llmTools.length > 0 ? llmTools : undefined
         }
       });
+      if (requestImages === null) {
+        requestImages = { given: countMessageImages(currentMessages), sent: countBodyImages(req.body) };
+      }
 
       // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
       let data;
@@ -762,6 +805,10 @@ export const callLLMWithTools = async ({
           reasoningContent: result.reasoningContent,
           toolCallHistory,
           usage: totalUsage,
+          // 没调工具就结束时，是正常说完了还是被截断/拦截/工具调用格式坏了——
+          // 调用方靠它区分「模型选择不说话」和「模型想说但没说出来」。
+          finishReason: result.finishReason ?? null,
+          termination: 'end_turn',
         };
       }
 
@@ -1000,9 +1047,11 @@ export const callLLMWithTools = async ({
         });
         _fireTrace('partial', 'server_iteration_limit', null);
         return {
+          // 这是系统拼的提示，不是模型说的话。调用方凭 termination 区分，别当成模型输出
           content: `[${limitMessage}]`,
           toolCallHistory,
           usage: totalUsage,
+          termination: 'server_iteration_limit',
         };
       }
 
@@ -1068,7 +1117,7 @@ export const callLLMWithTools = async ({
           toolCalls: toolCallHistory.length, iterations: totalIterations, durationMs: Date.now() - usageStartTime,
         });
         _fireTrace('success', typeof stopAfterTool === 'string' ? stopAfterTool : 'stopAfterTool', null);
-        return { content: result.content || '', toolCallHistory, usage: totalUsage };
+        return { content: result.content || '', toolCallHistory, usage: totalUsage, termination: 'stop_after_tool' };
       }
     }
 
@@ -1082,9 +1131,11 @@ export const callLLMWithTools = async ({
     });
     _fireTrace('partial', 'max_iterations', null);
     return {
+      // 同上：系统提示，不是模型输出
       content: '[Maximum tool call iterations reached]',
       toolCallHistory,
       usage: totalUsage,
+      termination: 'max_iterations',
     };
   } catch (err) {
     _fireTrace('failed', 'error', err);

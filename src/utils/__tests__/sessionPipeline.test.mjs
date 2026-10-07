@@ -10,8 +10,7 @@ import { createServer } from 'vite';
 import {
   createSession, beginTurn, endTurn, appendHistory, canInject, recordInjection,
   recordSend, sessionStats, latestSummary,
-  BACKLOG_REMINDER_AT, SEND_WINDOW_MAX, SEND_WINDOW_MS,
-  canSendNow, sendWindowState, shouldRemindBacklog, markBacklogReminded, REGISTER_SILENT,
+  BACKLOG_REMINDER_AT, shouldRemindBacklog, markBacklogReminded, REGISTER_SILENT,
 } from '../social/sessionState.js';
 import { prepareRequestItems, estimateItemsTokens } from '../social/compaction.js';
 import { toProviderTurns, ensureUserLast, renderTurnNote } from '../social/sessionTurn.js';
@@ -113,23 +112,15 @@ test('阶段2：积压提醒进了 history，模型看得见', () => {
   assert.match(rendered, /堆了 20 条你还没回应/);
 });
 
-test('阶段1：连发受滑动时间窗限制，且跨 turn 生效', () => {
+test('阶段1：连发不受限 —— 运行时三道闸已全部移除', () => {
   const s = createSession({ targetId: 'g1', targetType: 'group' });
-  const T = 1_000_000;
-  const t = beginTurn(s, { now: T });
-  let blocked = 0;
-  for (let i = 0; i < 8; i++) {
-    if (!canSendNow(s, T + i * 1000)) { blocked += 1; continue; }
-    recordSend(s, t, T + i * 1000);
-  }
-  assert.equal(t.sends, SEND_WINDOW_MAX);
-  assert.equal(blocked, 5, '超出的被挡在 toolCallFilter 那一层');
-
-  // 换个 turn 也不重置——这正是旧 per-turn 计数的洞
-  endTurn(s, t, { now: T + 8500 });
-  const t2 = beginTurn(s, { now: T + 9000 });
-  assert.equal(canSendNow(s, T + 9000), false);
-  assert.equal(t2.sends, 0);
+  const t = beginTurn(s);
+  for (let i = 0; i < 8; i++) recordSend(s, t);
+  assert.equal(t.sends, 8, '限流窗口、开口前强制 check、表情冷却都没了');
+  endTurn(s, t);
+  const t2 = beginTurn(s);
+  recordSend(s, t2);
+  assert.equal(t2.sends, 1, '换 turn 计数归零，但那只是计数，不是额度');
 });
 
 test('阶段3：长工具输出被裁，对话消息完好', async () => {
@@ -232,68 +223,94 @@ test('多群互不干扰：各自独立的 session 与 turn 计数', () => {
 
 // ────────────── check_new_messages（turn 内的实时感知通道） ──────────────
 
-const bufMsg = (id, who, text) => ({
+import { createCursor, advanceCursor } from '../social/messageCursor.js';
+
+const bufMsg = (id, who, text, sec = 0) => ({
   message_id: String(id), sender_id: '111', sender_name: who,
   content: text, is_self: false, is_at_me: false,
-  timestamp: '2026-09-19T05:29:12+08:00',
+  timestamp: `2026-09-20T05:${String(sec).padStart(2, '0')}:00+08:00`,
 });
 
-const ctxWith = (messages, cursorRef, onChecked) => ({
+const ctxWith = (messages, cursor, onChecked) => ({
   petId: 'p1', targetId: 'g1', targetType: 'group',
   dataBuffer: new Map([['g1', { messages }]]),
-  sessionCursor: { get: () => cursorRef.v, set: (id) => { cursorRef.v = id; } },
+  sessionCursor: { get: () => cursor, advance: (msgs) => advanceCursor(cursor, msgs) },
   onNewMessagesChecked: onChecked,
 });
 
-test('拉到水位线之后的新消息', async () => {
+test('拉到游标之后的新消息', async () => {
   const { executeCheckNewMessages } = socialTools;
-  const msgs = [bufMsg(1, '张三', 'a'), bufMsg(2, '李四', 'b'), bufMsg(3, '王五', 'c')];
-  const cursor = { v: '1' };
+  const msgs = [bufMsg(1, '张三', 'a', 1), bufMsg(2, '李四', 'b', 2), bufMsg(3, '王五', 'c', 3)];
+  const cursor = createCursor();
+  advanceCursor(cursor, [msgs[0]]);
   const r = await executeCheckNewMessages({}, ctxWith(msgs, cursor));
   const text = r.content[0].text;
   assert.match(text, /新到了 2 条/);
   assert.match(text, /李四/);
   assert.match(text, /王五/);
-  assert.doesNotMatch(text, /张三/, '水位线之前的不该再出现');
+  assert.doesNotMatch(text, /张三/, '游标之前的不该再出现');
 });
 
-test('拉完推进水位线 —— turn 边界不该把同一批再注入一遍', async () => {
+test('拉完推进游标 —— turn 边界不该把同一批再注入一遍', async () => {
   const { executeCheckNewMessages } = socialTools;
-  const msgs = [bufMsg(1, '张三', 'a'), bufMsg(2, '李四', 'b')];
-  const cursor = { v: '1' };
+  const msgs = [bufMsg(1, '张三', 'a', 1), bufMsg(2, '李四', 'b', 2)];
+  const cursor = createCursor();
+  advanceCursor(cursor, [msgs[0]]);
   await executeCheckNewMessages({}, ctxWith(msgs, cursor));
-  assert.equal(cursor.v, '2', '游标要走到 buffer 末尾');
   const again = await executeCheckNewMessages({}, ctxWith(msgs, cursor));
-  assert.match(again.content[0].text, /没有新消息/, '第二次就没有了');
+  assert.match(again.content[0].text, /没有新消息|没有更新的了/, '第二次就没有了');
 });
 
 test('没有新消息时明确说没有，不让模型卡住', async () => {
   const { executeCheckNewMessages } = socialTools;
-  const msgs = [bufMsg(1, '张三', 'a')];
-  const r = await executeCheckNewMessages({}, ctxWith(msgs, { v: '1' }));
+  const msgs = [bufMsg(1, '张三', 'a', 1)];
+  const cursor = createCursor();
+  advanceCursor(cursor, msgs);
+  const r = await executeCheckNewMessages({}, ctxWith(msgs, cursor));
   assert.match(r.content[0].text, /没有新消息/);
+});
+
+test('⚠️ 回填插进来的旧消息不会被报成"新消息"', async () => {
+  const { executeCheckNewMessages } = socialTools;
+  // 线上形态：后台回填完成后，历史被 appendToBuffer 追加到实时消息**之后**
+  const live = [bufMsg(101, '张三', '实时1', 50), bufMsg(102, '李四', '实时2', 51)];
+  const old = [bufMsg(1, '很久以前', '历史1', 1), bufMsg(2, '很久以前', '历史2', 2)];
+  const scrambled = [...live, ...old];
+  const cursor = createCursor();
+  advanceCursor(cursor, live);
+
+  const r = await executeCheckNewMessages({}, ctxWith(scrambled, cursor));
+  assert.match(r.content[0].text, /没有新消息|没有更新的了/,
+    '旧实现会把这两条历史当新消息报出去，而且顺序是乱的');
+
+  // 真正的新消息照常识别，且渲染按时间排好
+  const withNew = [...scrambled, bufMsg(103, '王五', '真的新消息', 52)];
+  const r2 = await executeCheckNewMessages({}, ctxWith(withNew, cursor));
+  assert.match(r2.content[0].text, /新到了 1 条/);
+  assert.match(r2.content[0].text, /真的新消息/);
 });
 
 test('buffer 为空不报错', async () => {
   const { executeCheckNewMessages } = socialTools;
-  const r = await executeCheckNewMessages({}, ctxWith([], { v: null }));
-  assert.match(r.content[0].text, /没有新消息/);
+  const r = await executeCheckNewMessages({}, ctxWith([], createCursor()));
+  assert.match(r.content[0].text, /没有新消息|没有更新的了/);
   assert.equal(r.error, undefined);
 });
 
-test('水位线已被裁出 buffer 时只回最后几条，不倒整个 buffer', async () => {
+test('游标还没起步时只回最近几条，不倒整个 buffer', async () => {
   const { executeCheckNewMessages } = socialTools;
-  const msgs = Array.from({ length: 50 }, (_, i) => bufMsg(i + 100, `人${i}`, `x${i}`));
-  const r = await executeCheckNewMessages({}, ctxWith(msgs, { v: 'early-id-已不在buffer' }));
+  const msgs = Array.from({ length: 50 }, (_, i) => bufMsg(i + 100, `人${i}`, `x${i}`, i % 60));
+  const r = await executeCheckNewMessages({}, ctxWith(msgs, createCursor()));
   assert.match(r.content[0].text, /新到了 10 条/);
 });
 
 test('无论有没有新消息都回调 —— 发送闸门靠它放行', async () => {
   const { executeCheckNewMessages } = socialTools;
   const seen = [];
-  const msgs = [bufMsg(1, '张三', 'a')];
-  await executeCheckNewMessages({}, ctxWith(msgs, { v: '1' }, (n) => seen.push(n)));
-  await executeCheckNewMessages({}, ctxWith([], { v: null }, (n) => seen.push(n)));
+  const msgs = [bufMsg(1, '张三', 'a', 1)];
+  const c1 = createCursor(); advanceCursor(c1, msgs);
+  await executeCheckNewMessages({}, ctxWith(msgs, c1, (n) => seen.push(n)));
+  await executeCheckNewMessages({}, ctxWith([], createCursor(), (n) => seen.push(n)));
   assert.deepEqual(seen, [0, 0], '没有新消息也要放行，否则模型永远发不出去');
 });
 
@@ -309,4 +326,66 @@ test('工具 schema 是空参数的 —— 不给模型编造的机会', () => {
   assert.equal(def.function.name, 'check_new_messages');
   assert.deepEqual(def.function.parameters.properties, {});
   assert.match(def.function.description, /必须先调/);
+});
+
+// ── check_new_messages 查到的消息要进 history（图片只有那条路会被下载、拼多模态） ──
+
+test('⚠️ 查到的新消息交给 ingestNewMessages 进 history，图片不能只剩占位符', async () => {
+  const { executeCheckNewMessages } = socialTools;
+  // 线上形态：turn 中途到了一张图，模型开口前按要求调了本工具。以前只回一段文字
+  // 「[图片] [图片x1]」并推进游标，turn 边界再也不碰这条，图就永久丢了
+  const photo = { ...bufMsg(2, '李四', '[图片]', 2), image_urls: ['https://x/photos/file_8.jpg'] };
+  const msgs = [bufMsg(1, '张三', 'a', 1), photo];
+  const cursor = createCursor();
+  advanceCursor(cursor, [msgs[0]]);
+
+  const ingested = [];
+  const ctx = {
+    ...ctxWith(msgs, cursor),
+    ingestNewMessages: async (fresh) => {
+      ingested.push(...fresh.map(m => m.message_id));
+      advanceCursor(cursor, fresh);           // 真实实现（appendNewMessages）自己推游标
+      return { added: fresh.length, images: 1 };
+    },
+  };
+  const r = await executeCheckNewMessages({}, ctx);
+  assert.deepEqual(ingested, ['2']);
+  assert.match(r.content[0].text, /新到了 1 条/);
+  assert.match(r.content[0].text, /1 张图片/, '要告诉模型图在下一步给它看，别对着占位符回答');
+
+  const again = await executeCheckNewMessages({}, ctx);
+  assert.match(again.content[0].text, /没有新消息|没有更新的了/);
+  assert.deepEqual(ingested, ['2'], '没有新消息时不该再并入');
+});
+
+test('没图的新消息照常回全文，不提图片', async () => {
+  const { executeCheckNewMessages } = socialTools;
+  const msgs = [bufMsg(1, '张三', 'a', 1), bufMsg(2, '李四', '在吗', 2)];
+  const cursor = createCursor();
+  advanceCursor(cursor, [msgs[0]]);
+  const r = await executeCheckNewMessages({}, {
+    ...ctxWith(msgs, cursor),
+    ingestNewMessages: async (fresh) => { advanceCursor(cursor, fresh); return { added: fresh.length, images: 0 }; },
+  });
+  assert.match(r.content[0].text, /在吗/);
+  assert.doesNotMatch(r.content[0].text, /张图片/);
+  assert.match(r.content[0].text, /纳入判断/);
+});
+
+test('并入失败时退回自己推游标，不让同一批在 turn 边界再注入一遍', async () => {
+  const { executeCheckNewMessages } = socialTools;
+  const msgs = [bufMsg(1, '张三', 'a', 1), bufMsg(2, '李四', 'b', 2)];
+  const cursor = createCursor();
+  advanceCursor(cursor, [msgs[0]]);
+  const logs = [];
+  const ctx = {
+    ...ctxWith(msgs, cursor),
+    addLog: (level, message) => logs.push([level, message]),
+    ingestNewMessages: async () => { throw new Error('boom'); },
+  };
+  const r = await executeCheckNewMessages({}, ctx);
+  assert.match(r.content[0].text, /李四/, '模型当下还是要看到内容');
+  assert.equal(logs[0]?.[0], 'warn');
+  const again = await executeCheckNewMessages({}, ctx);
+  assert.match(again.content[0].text, /没有新消息|没有更新的了/);
 });

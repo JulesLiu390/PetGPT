@@ -334,8 +334,6 @@ export async function buildSocialPrompt({
   subagentRegistry = null,
   voiceEnabled = false,
   imageGenEnabled = false,
-  maxSends = 3,
-  sendWindowSec = 60,
   backlogRemindAt = 20,
   moodTagEnabled = false,
 }) {
@@ -527,7 +525,7 @@ export async function buildSocialPrompt({
 
   // === 本轮怎么算一轮 —— 仅 session ===
   if (isSession) {
-    sections.push(buildTurnInstruction({ maxSends, sendWindowSec, backlogRemindAt }));
+    sections.push(buildTurnInstruction({ backlogRemindAt }));
   }
 
   // === Intent 交接 —— 仅 Reply 模式 ===
@@ -549,7 +547,7 @@ export async function buildSocialPrompt({
     sections.push(buildLurkToolInstruction(targetName, targetId));
   } else if (isSession) {
     sections.push(buildSessionToolInstruction(targetName, targetId, {
-      maxSends, sendWindowSec, voiceEnabled, imageGenEnabled, lurkMode,
+      voiceEnabled, imageGenEnabled, lurkMode,
     }));
   } else {
     sections.push(buildReplyToolInstruction(targetName, targetId));
@@ -586,6 +584,7 @@ function buildSocialModeInstruction(targetName, targetId, botQQ) {
 - assistant 消息 = 你之前的回复，每条以 [HH:MM:SS 我的回复] 开头标注发送时间——这是你**已经说过的话**，是判断"是否会重复"的硬证据
 - 用了引用回复的那条写成 [HH:MM:SS 我的回复 →#被引用的消息ID]。看到 →# 就说明那条**已经**引用过对方了，不用再在正文里补称呼
 - ⚠️ 同一轮连发的多条会并在同一个 assistant 块里，靠各自的 [HH:MM:SS 我的回复] 前缀区分——那是多条独立消息，不是一条长的
+- 以 [系统记录] 开头的是系统替你记的流水：你调用过哪些工具、每轮小结、你写了但没发出去的文字。它们**不是你说过的话**。想在群里说话只能调用发送工具——照着 [系统记录] 的样子写一段文字，群里什么都看不到
 
 ⚠️ 媒体说明：图片会以真实图片传递，你可以看到并回应图片内容。但消息中的 [视频]、[语音]、[文件]、[请在最新版qq查看] 等方括号标记只是纯文本占位符，你**看不到实际内容**，不要假装看懂了，也不要做任何特殊回应。
 
@@ -773,17 +772,17 @@ function buildReplyStrategySection(strategy, { role, agentCanEditStrategy }) {
  * 合并之后一个 turn 可以横跨多次工具调用、多条发送，还可能被新消息打断重来，
  * 所以必须把这个节奏讲清楚，否则模型会按老习惯发一条就收手。
  */
-function buildTurnInstruction({ maxSends = 3, sendWindowSec = 60, backlogRemindAt = 20 } = {}) {
+function buildTurnInstruction({ backlogRemindAt = 20 } = {}) {
   return `# 本轮怎么算一轮
 
 你现在处在一段持续的对话里，不是每次从头开始。上面的历史就是你这次开机以来在这个群的全部经历——你说过的话、调过的工具、上一轮给自己记的小结，都在里面。
 
 **一轮（turn）的边界**：从收到新消息开始，到你不再想做任何事为止。一轮之内你可以：
 - 调任意多次工具（查资料、翻历史、看图、派活给 CC）
-- 发消息（正常情况下 1 条就够，别凑数）
+- 发消息、发表情、发图（正常情况下一两条就够，别凑数）
 - 想清楚之后选择什么都不做
 
-**发送频率按时间算，不按轮算**：${sendWindowSec} 秒内最多 ${maxSends} 条。换一轮不会重置这个额度——它就是为了防刷屏。到顶了就等一会儿，把想说的攒成一条。
+**发多少、发多快没有任何硬限制**，全靠你自己把握分寸。没人会拦你，所以也没人替你兜底——连着刷屏是真的会刷出去的。想说的话尽量并成一条，别拆成三四条连发。
 
 **沉默也是一种结果。** 群友之间在聊跟你无关的事、你没有新东西可说、刚说过的话还没人接——这些时候就不要开口。但沉默不等于什么都不能干：不懂的东西照样去查，查完发现值得说再说，发现不值得就继续沉默。
 
@@ -804,7 +803,7 @@ function buildTurnInstruction({ maxSends = 3, sendWindowSec = 60, backlogRemindA
  *   2. 图文能在同一轮里发（原来发图的能力在 Intent，发文的在 Reply，各干各的）
  *   3. 收尾要调 turn_note
  */
-function buildSessionToolInstruction(targetName, targetId, { maxSends = 3, sendWindowSec = 60, voiceEnabled = false, imageGenEnabled = false, lurkMode = 'normal' } = {}) {
+function buildSessionToolInstruction(targetName, targetId, { voiceEnabled = false, imageGenEnabled = false, lurkMode = 'normal' } = {}) {
   const groupLabel = targetName ? `「${targetName}」(${targetId})` : targetId;
   const lines = [];
 
@@ -813,17 +812,17 @@ function buildSessionToolInstruction(targetName, targetId, { maxSends = 3, sendW
   lines.push('🚨 最重要的规则：你的纯文本输出【不会】被发送到群聊。群友看不到你的纯文本。想说话就【必须】调用 send_message 工具，这是唯一的发送方式。');
   lines.push('');
   lines.push('## 开口之前');
-  lines.push('🔴 **每次发东西之前（send_message / 发图 / 发表情 / 发语音），先调一次 check_new_messages。**');
+  lines.push('**想清楚了准备开口时，建议先调一次 check_new_messages。**（不是强制，但很值。）');
   lines.push('你从看到消息到决定开口，中间可能已经过去几十秒——查了资料、翻了历史、想了几轮。这段时间群里不会停下来等你：');
   lines.push('- 别人可能已经把问题答了，你再答一遍就是废话');
   lines.push('- 话题可能已经过去了，你接上去很突兀');
   lines.push('- 也可能有人追问了你，那你要回应的东西就变了');
-  lines.push('没有新消息它会直接告诉你没有，一句话的事。连发多条时，**每条之前都要重新查**——你上一条发出去本身就改变了群里的状态。');
+  lines.push('没有新消息它会直接告诉你没有，一句话的事。刚被系统塞过新消息的话就不用再查了，那批就是最新的。');
   lines.push('');
   lines.push('## 发消息');
-  lines.push(`- ${sendWindowSec} 秒内最多 ${maxSends} 条 send_message（按时间算，换轮不重置）。**绝大多数情况下 1 条就够**——多条是留给"要回复好几个人、话题差别很大"的场合，不是让你把一句话拆开说。`);
+  lines.push('- 条数没有硬上限，但**绝大多数情况下 1 条就够**——多条是留给"要回复好几个人、话题差别很大"的场合，不是让你把一句话拆开说。');
   lines.push('- 调用时只需提供 content；target 和 target_type 会自动填充，不要自己填。');
-  lines.push('- 分段：在 content 里用 </分段> 标签打点，qq-mcp 会按标签切成多条。**最多 2 段**。');
+  lines.push('- 分段：在 content 里用 </分段> 标签打点，会按标签切成多条。**最多 2 段**。');
   lines.push('- 引用回复：想回应某条特定消息（记录中标注了 [#消息ID]）时传 reply_to（填数字）。只在明确回应某人某句话时用。');
   lines.push('- ✅ **每一次 send_message 都可以独立传自己的 reply_to**。这一轮发第二条、第三条时照样能引用，不存在"引用名额用完了"。');
   lines.push('- ⚠️ 注意区分「条」和「段」：一次 send_message 里用 </分段> 切出来的多个**段**共享同一个 reply_to（只挂在第一段上），所以用了 reply_to 就把正面回应写在第一段。这个限制只针对段，不针对条。');
@@ -887,7 +886,7 @@ function buildReplyToolInstruction(targetName, targetId) {
 回复规则：
 - 🚫 一次调用严格只能使用一次 send_message 工具。如果需要回复多个人或多个话题，把内容合并到一条消息里发送（可以用换行分隔），而不是多次调用 send_message。
 - 调用 send_message 时只需提供 content 参数（回复内容），target 和 target_type 会自动填充，不要自己填写
-- 分段：在 content 里用 </分段> 标签在想拆开的地方打点，qq-mcp 会按标签自动切成多条。**最多 2 段**。分段示例见下方「字数与分段」段落
+- 分段：在 content 里用 </分段> 标签在想拆开的地方打点，会按标签自动切成多条。**最多 2 段**。分段示例见下方「字数与分段」段落
 - 引用回复：如果想回复某条特定消息（对话记录中标注了 [#消息ID]），可以在 send_message 中传 reply_to 参数（填消息 ID 数字）。不是每次都要引用，只在明确回应某人某句话时使用。如果 Intent 的 reply_brief 中指定了 replyTo，优先使用它
 - ⚠️ 引用回复 + 拆分消息时：reply_to 只会应用到第一条拆分消息。所以如果使用了 reply_to，被引用回复的内容必须写在消息最前面
 - send_message 的返回结果中会附带最近的群消息（包括你自己的回复，标注为 [bot(你自己)]）。请仔细查看，避免重复表达相同观点
@@ -932,7 +931,7 @@ CC 研究结果工具（只读）：
 
 **分段**（用 </分段> 标签自主打点）：
 - 想一口气发完：不加标签，写成一整段
-- 想分多句说："第一句</分段>第二句" → qq-mcp 会自动按标签切
+- 想分多句说："第一句</分段>第二句" → 会自动按标签切
 - ⚠️ **最多分 2 段**，再多就刷屏
 - 技术长答：一条发完，不要拆段
 

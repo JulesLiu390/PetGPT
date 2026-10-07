@@ -352,10 +352,11 @@ fn chat_history_search(db: State<DbState>, params: ChatSearchParams) -> Result<C
 fn chat_history_context(
     db: State<DbState>,
     message_id: String,
+    target_id: Option<String>,
     before: i64,
     after: i64,
 ) -> Result<ChatContextResult, String> {
-    db.chat_context(&message_id, before, after).map_err(|e| e.to_string())
+    db.chat_context(&message_id, target_id.as_deref(), before, after).map_err(|e| e.to_string())
 }
 
 // ============ Settings Commands ============

@@ -18,8 +18,11 @@ const toolResult = (chars, toolName = 'tavily_search') => ({
   kind: 'tool_result', role: 'tool', toolName, content: 'x'.repeat(chars),
 });
 
-test('阈值是 256k', () => {
-  assert.equal(COMPACT_THRESHOLD_TOKENS, 256_000);
+test('阈值 64k —— 倒推自"估算比真实低约 33k"这个实测偏差', () => {
+  assert.equal(COMPACT_THRESHOLD_TOKENS, 64_000);
+  // 线上：阈值 96k 时真实触发点落在 128–129k。少算的是工具 schema（~4.5k）、
+  // 图片（记 0）、气压计块。64 + 33 ≈ 97k 真实，压在 100k 延迟拐点之前。
+  assert.ok(COMPACT_THRESHOLD_TOKENS > 36_000, '仍要明显大于静态前缀，否则一开机就压');
 });
 
 test('中文按 1 字 1 token，拉丁按 4 字符 1 token', () => {
