@@ -9,9 +9,14 @@ fn main() {
   {
     // WebKitGTK's DMA-BUF renderer can fail to allocate GBM buffers with
     // NVIDIA (including XWayland), leaving otherwise running windows blank.
-    // Set this before creating any WebViews; preserve explicit user overrides.
-    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none() {
-      std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    // Shared-memory buffers avoid GBM. Disabling the renderer instead (the
+    // legacy path) never clears transparent pixels, so anything moving in a
+    // transparent window leaves trails. Set this before creating any WebViews;
+    // preserve explicit user overrides.
+    if std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").is_none()
+      && std::env::var_os("WEBKIT_DMABUF_RENDERER_FORCE_SHM").is_none()
+    {
+      std::env::set_var("WEBKIT_DMABUF_RENDERER_FORCE_SHM", "1");
     }
     let session = std::env::var("XDG_SESSION_TYPE").unwrap_or_default().to_lowercase();
     if session.contains("wayland") {

@@ -523,12 +523,15 @@ If an older Linux build opens blank windows and the terminal reports
 `Failed to create GBM buffer`, launch it with:
 
 ```bash
-WEBKIT_DISABLE_DMABUF_RENDERER=1 petgpt
+WEBKIT_DMABUF_RENDERER_FORCE_SHM=1 petgpt
 ```
 
-Linux builds now default to this WebKitGTK compatibility setting to avoid
-NVIDIA/XWayland buffer allocation failures. An explicit environment value takes
-precedence; use `WEBKIT_DISABLE_DMABUF_RENDERER=0` to try the DMA-BUF renderer.
+Linux builds now default to this WebKitGTK setting: the DMA-BUF renderer with
+shared-memory buffers, which avoids NVIDIA/XWayland GBM allocation failures.
+`WEBKIT_DISABLE_DMABUF_RENDERER=1` also avoids them, but that legacy renderer
+leaves trails behind anything that moves in a transparent window. An explicit
+value for either variable takes precedence; use
+`WEBKIT_DMABUF_RENDERER_FORCE_SHM=0` to try GBM buffers.
 
 #### Windows
 
