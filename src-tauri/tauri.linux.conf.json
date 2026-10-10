@@ -1,0 +1,18 @@
+{
+  "bundle": {
+    "targets": ["deb"],
+    "resources": {
+      "assets/": "assets/",
+      "../scripts/export_intent_training.mjs": "scripts/export_intent_training.mjs"
+    },
+    "linux": {
+      "deb": {
+        "depends": ["libayatana-appindicator3-1"],
+        "recommends": ["nodejs"],
+        "files": {
+          "/usr/share/doc/pet-gpt/copyright": "../LICENSE"
+        }
+      }
+    }
+  }
+}

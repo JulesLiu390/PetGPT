@@ -2744,7 +2744,11 @@ fn position_character_window(app: &AppHandle) {
         if let Some(monitor) = character.current_monitor().ok().flatten() {
             let screen = screen_info_from_tauri_monitor(&monitor);
             let scale_factor = monitor.scale_factor();
-            let char_size = character.outer_size().unwrap_or(tauri::PhysicalSize {
+            // GTK can report Ok(0x0) before the window is mapped. Treat it as
+            // unavailable, otherwise the pet starts beyond the screen edge.
+            let char_size = character.outer_size().ok()
+                .filter(|size| size.width > 0 && size.height > 0)
+                .unwrap_or(tauri::PhysicalSize {
                 width: (window_layout::CHARACTER_BASELINE_WIDTH * scale_factor).round() as u32,
                 height: (window_layout::CHARACTER_BASELINE_HEIGHT * scale_factor).round() as u32,
             });

@@ -6,6 +6,7 @@ import mouthSmallUrl from '../../../pseudo_live2d_renderer/images/new_images/reb
 import mouthMediumUrl from '../../../pseudo_live2d_renderer/images/new_images/rebuilt/mouth_shapes/medium.png?url';
 import mouthLargeUrl from '../../../pseudo_live2d_renderer/images/new_images/rebuilt/mouth_shapes/large.png?url';
 import './PseudoLive2DCharacter.css';
+import { blinkScaleAt, mouthFrameAt, repairGeneratedEdgeColors } from './avatarRendering.js';
 
 const componentAssets = import.meta.glob(
   '../../../pseudo_live2d_renderer/images/new_images/rebuilt/components/*.png',
@@ -24,46 +25,12 @@ const mouthAssets = {
 const assetModules = { ...componentAssets, ...generatedAssets, ...mouthAssets };
 
 const ASSET_PREFIX = '../../../pseudo_live2d_renderer/images/new_images/rebuilt/';
-const HEAD_PIVOT = [640, 350];
-const BODY_PIVOT = [640, 650];
-const BLINK_INITIAL_DELAY = 1.8;
-const BLINK_INTERVAL = 4.0;
-const BLINK_DURATION = 0.24;
-const BLINK_DOUBLE_DELAY = 0.18;
 const FIT_SCALE = 0.96;
 const VERTICAL_NUDGE = 0.015;
 
 function assetUrl(relativePath) {
   const key = `${ASSET_PREFIX}${relativePath}`;
   return assetModules[key] || '';
-}
-
-function blinkPulseScale(age) {
-  if (age < 0 || age > BLINK_DURATION) return 1;
-  const close = Math.sin((age / BLINK_DURATION) * Math.PI);
-  return 1 - close * 0.92;
-}
-
-function blinkScaleAt(t) {
-  if (t < BLINK_INITIAL_DELAY) return 1;
-  const local = t - BLINK_INITIAL_DELAY;
-  const cycle = Math.floor(local / BLINK_INTERVAL);
-  const cycleAge = local - cycle * BLINK_INTERVAL;
-  const first = blinkPulseScale(cycleAge);
-  const hasDoubleBlink = cycle % 5 === 2;
-  const second = hasDoubleBlink ? blinkPulseScale(cycleAge - BLINK_DOUBLE_DELAY) : 1;
-  return Math.min(first, second);
-}
-
-function motionKind(name) {
-  if (name.includes('mouth')) return 'mouth';
-  if (name.includes('eyelash') || name.includes('eyewhite') || name.includes('irides')) return 'eye';
-  if (name.includes('front hair')) return 'frontHair';
-  if (name.includes('back hair')) return 'backHair';
-  if (name.includes('face') || name.includes('nose') || name.includes('ears') || name.includes('eyebrow') || name.includes('neck-fallback')) return 'head';
-  if (name.includes('object') || name.includes('hands') || name.includes('sleeves')) return 'object';
-  if (name.includes('topwear') || name.includes('neck') || name.includes('bottomwear') || name.includes('legwear') || name.includes('footwear') || name.includes('thigh')) return 'body';
-  return 'still';
 }
 
 function isBlinkLayer(name) {
@@ -74,32 +41,98 @@ function sanitizeMood(mood) {
   return String(mood || 'normal').replace(/[^a-zA-Z0-9-]/g, '');
 }
 
-function useAnimationSeconds(enabled = true) {
-  const [seconds, setSeconds] = useState(0);
+// Decode and repair the three legacy fallback patches once per WebView.
+const repairedSprites = new Map();
+function repairedSpriteUrl(src) {
+  if (!repairedSprites.has(src)) {
+    const promise = (async () => {
+      const image = new Image();
+      image.src = src;
+      await image.decode();
+      const canvas = document.createElement('canvas');
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context) throw new Error('Canvas 2D is unavailable');
+      context.drawImage(image, 0, 0);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+      repairGeneratedEdgeColors(pixels.data, canvas.width, canvas.height);
+      context.putImageData(pixels, 0, 0);
+      return canvas.toDataURL('image/png');
+    })().catch((error) => {
+      repairedSprites.delete(src);
+      throw error;
+    });
+    repairedSprites.set(src, promise);
+  }
+  return repairedSprites.get(src);
+}
 
+function useSpriteUrl(src, repair) {
+  const [prepared, setPrepared] = useState(null);
   useEffect(() => {
-    if (!enabled) {
-      setSeconds(0);
-      return undefined;
-    }
-
-    let rafId = null;
+    if (!repair || !src) return undefined;
     let cancelled = false;
-    const startedAt = performance.now();
-    const tick = () => {
-      if (!cancelled) {
-        setSeconds((performance.now() - startedAt) / 1000);
-        rafId = requestAnimationFrame(tick);
+    repairedSpriteUrl(src).then((url) => {
+      if (!cancelled) setPrepared({ src, url });
+    }).catch((error) => {
+      console.warn('[Avatar] Could not repair fallback edges:', error);
+      if (!cancelled) setPrepared({ src, url: src });
+    });
+    return () => { cancelled = true; };
+  }, [src, repair]);
+  return repair ? (prepared?.src === src ? prepared.url : '') : src;
+}
+
+/** Animate only the eye transform and discrete mouth frame, outside React. */
+function useDetailAnimation(ref, mood, animated) {
+  const startedAt = useRef(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return undefined;
+    const mouthFrames = [...element.querySelectorAll('.pl2d-mouth-frame')];
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let rafId = null;
+    let lastBlink = null;
+    let lastMouth = null;
+
+    const paint = (seconds, moving) => {
+      const blink = moving ? blinkScaleAt(seconds) : 1;
+      if (blink !== lastBlink) {
+        element.style.setProperty('--blink-scale', String(blink));
+        element.style.setProperty('--blink-shift', `${(1 - blink) * 1.5}px`);
+        lastBlink = blink;
+      }
+      const frame = mouthFrameAt(mood, moving ? seconds : 0, mouthFrames.length);
+      if (frame !== lastMouth) {
+        mouthFrames.forEach((image, index) => {
+          image.style.visibility = index === frame ? 'visible' : 'hidden';
+        });
+        lastMouth = frame;
       }
     };
-    rafId = requestAnimationFrame(tick);
-    return () => {
-      cancelled = true;
-      if (rafId !== null) cancelAnimationFrame(rafId);
+    const tick = (now) => {
+      startedAt.current ??= now;
+      paint((now - startedAt.current) / 1000, true);
+      rafId = requestAnimationFrame(tick);
     };
-  }, [enabled]);
-
-  return seconds;
+    const resume = () => {
+      cancelAnimationFrame(rafId);
+      rafId = null;
+      const moving = animated && !reducedMotion.matches;
+      element.classList.toggle('pl2d-paused', !moving || document.hidden);
+      paint(0, false);
+      if (moving && !document.hidden) rafId = requestAnimationFrame(tick);
+    };
+    resume();
+    document.addEventListener('visibilitychange', resume);
+    reducedMotion.addEventListener('change', resume);
+    return () => {
+      cancelAnimationFrame(rafId);
+      document.removeEventListener('visibilitychange', resume);
+      reducedMotion.removeEventListener('change', resume);
+    };
+  }, [ref, mood, animated]);
 }
 
 function useElementSize() {
@@ -112,7 +145,8 @@ function useElementSize() {
 
     const update = () => {
       const rect = element.getBoundingClientRect();
-      setSize({ width: rect.width, height: rect.height });
+      setSize((previous) => previous.width === rect.width && previous.height === rect.height
+        ? previous : { width: rect.width, height: rect.height });
     };
 
     update();
@@ -154,40 +188,22 @@ function layerBounds(layers) {
   };
 }
 
-function mouthLevelForMood(mood, seconds) {
-  if (mood === 'thinking') {
-    return 0.22 + Math.abs(Math.sin(seconds * 8.2)) * 0.62;
-  }
-  if (mood === 'shocked') return 1;
-  if (mood === 'smile') return 0.42;
-  if (mood === 'sad') return 0.08;
-  if (mood?.startsWith('idle-')) {
-    return Math.max(0, Math.sin(seconds * 1.2) * 0.05);
-  }
-  return 0;
-}
-
-function LayerSprite({ layer, blinkScale }) {
+function LayerSprite({ layer }) {
   const [x, y] = layer.origin;
   const [w, h] = layer.size;
-  const kind = motionKind(layer.name);
-  const pivot = kind === 'head' || kind === 'frontHair' || kind === 'backHair' || kind === 'eye' || kind === 'mouth'
-    ? HEAD_PIVOT
-    : BODY_PIVOT;
-  const src = assetUrl(layer.crop_file);
+  const src = useSpriteUrl(assetUrl(layer.crop_file),
+    ['thigh-fallback', 'sleeves-fallback', 'hands-fallback'].includes(layer.name));
 
   if (!src) return null;
 
   return (
     <div
-      className={`pl2d-layer pl2d-motion-${kind}`}
+      className="pl2d-layer"
       style={{
         '--x': `${x}px`,
         '--y': `${y}px`,
         '--w': `${w}px`,
         '--h': `${h}px`,
-        '--pivot-x': `${pivot[0] - x}px`,
-        '--pivot-y': `${pivot[1] - y}px`,
         zIndex: Math.round(layer.order * 10),
       }}
       data-layer={layer.name}
@@ -197,43 +213,24 @@ function LayerSprite({ layer, blinkScale }) {
         src={src}
         alt=""
         draggable={false}
-        style={isBlinkLayer(layer.name) ? {
-          '--blink-scale': blinkScale,
-          '--blink-shift': `${(1 - blinkScale) * 1.5}px`,
-          '--blink-angle': '-12deg',
-          '--blink-angle-inverse': '12deg',
-        } : undefined}
       />
     </div>
   );
 }
 
-function MouthSequence({ layer, shapes, mouthLevel }) {
+function MouthSequence({ layer, shapes }) {
   const [x, y] = shapes?.origin ?? layer.origin;
   const [w, h] = shapes?.size ?? layer.size;
   const names = shapes?.shapes?.length ? shapes.shapes : ['closed', 'small', 'medium', 'large'];
-  const mouthAmount = mouthLevel < 0.08 ? 0 : Math.min(1, Math.max(0, (mouthLevel - 0.08) / 0.82));
-  const activeIndex = mouthAmount === 0
-    ? 0
-    : Math.min(names.length - 1, Math.max(1, Math.round(mouthAmount * (names.length - 1))));
-  const bandStart = activeIndex <= 0 ? 0 : (activeIndex - 0.5) / Math.max(1, names.length - 1);
-  const bandEnd = activeIndex <= 0 ? 0.08 : (activeIndex + 0.5) / Math.max(1, names.length - 1);
-  const bandProgress = activeIndex <= 0
-    ? 0
-    : Math.min(1, Math.max(0, (mouthAmount - bandStart) / Math.max(0.01, bandEnd - bandStart)));
-  const mouthScaleY = activeIndex <= 0 ? 1 : 0.88 + bandProgress * 0.22;
 
   return (
     <div
-      className="pl2d-layer pl2d-motion-mouth pl2d-mouth-sequence"
+      className="pl2d-layer pl2d-mouth-sequence"
       style={{
         '--x': `${x}px`,
         '--y': `${y}px`,
         '--w': `${w}px`,
         '--h': `${h}px`,
-        '--pivot-x': `${HEAD_PIVOT[0] - x}px`,
-        '--pivot-y': `${HEAD_PIVOT[1] - y}px`,
-        '--mouth-scale': mouthScaleY,
         zIndex: Math.round((layer.order + 0.1) * 10),
       }}
       data-layer="mouth-sequence"
@@ -245,11 +242,11 @@ function MouthSequence({ layer, shapes, mouthLevel }) {
         return (
           <img
             key={name}
-            className={`pl2d-layer-image pl2d-mouth-frame ${index === activeIndex ? 'pl2d-mouth-frame-active' : ''}`}
+            className="pl2d-layer-image pl2d-mouth-frame"
             src={src}
             alt=""
             draggable={false}
-            style={{ opacity: index === activeIndex ? 1 : 0 }}
+            style={{ visibility: index === 0 ? 'visible' : 'hidden' }}
           />
         );
       })}
@@ -259,9 +256,8 @@ function MouthSequence({ layer, shapes, mouthLevel }) {
 
 export default function PseudoLive2DCharacter({ mood = 'normal', animated = true }) {
   const [containerRef, size] = useElementSize();
-  const seconds = useAnimationSeconds(animated);
   const safeMood = sanitizeMood(mood);
-  const blinkScale = animated ? blinkScaleAt(seconds) : 1;
+  useDetailAnimation(containerRef, safeMood, animated);
 
   const layers = useMemo(() => {
     return [...(manifestData.layers ?? []), ...(manifestData.generated_layers ?? [])]
@@ -302,20 +298,20 @@ export default function PseudoLive2DCharacter({ mood = 'normal', animated = true
           '--pl2d-offset-y': `${placement.offsetY}px`,
         }}
       >
-        {layers.map((layer) => (
-          <LayerSprite
-            key={`${layer.order}-${layer.name}`}
-            layer={layer}
-            blinkScale={blinkScale}
-          />
-        ))}
-        {mouthLayer && (
-          <MouthSequence
-            layer={mouthLayer}
-            shapes={mouthShapesData}
-            mouthLevel={mouthLevelForMood(safeMood, seconds)}
-          />
-        )}
+        <div className="pl2d-pose">
+          {layers.map((layer) => (
+            <LayerSprite
+              key={`${layer.order}-${layer.name}`}
+              layer={layer}
+            />
+          ))}
+          {mouthLayer && (
+            <MouthSequence
+              layer={mouthLayer}
+              shapes={mouthShapesData}
+            />
+          )}
+        </div>
       </div>
     </div>
   );

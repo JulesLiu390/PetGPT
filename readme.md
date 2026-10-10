@@ -463,10 +463,72 @@ sh scripts/create-dmg-intel.sh
 
 #### Linux
 
+Use the native packaging script on **Arch Linux** or **Ubuntu/Debian**:
+
 ```bash
-# Build .deb package
-npm run tauri:build -- --bundles deb
+# Check the compiler, Node.js, packaging tools and native libraries
+npm run tauri:build:linux -- --check
+
+# Build a release package for the current distro
+npm run tauri:build:linux
+
+# Alternatively, install missing native build dependencies first (uses sudo)
+npm run tauri:build:linux -- --install-deps
 ```
+
+Install **Node.js 22+** and a **current stable Rust toolchain** (`cargo` and
+`rustc`) first. Run the build as your regular user. The script runs `npm ci`,
+builds the frontend and Rust application with the committed Cargo lockfile,
+then copies the package into `release/linux/`. Use `--skip-npm-ci` to reuse
+dependencies already installed in this checkout, and `CARGO_BUILD_JOBS=2` to
+reduce peak memory on smaller machines (default: 4 parallel jobs).
+
+| Build host | Output | Install |
+|------------|--------|---------|
+| Arch Linux | `petgpt-<version>-1-<arch>.pkg.tar.zst` | `sudo pacman -U ./release/linux/petgpt-<version>-1-<arch>.pkg.tar.zst` |
+| Ubuntu/Debian | `PetGPT_<version>_<arch>.deb` | `sudo apt install ./release/linux/PetGPT_<version>_<arch>.deb` |
+
+Both packages include the desktop entry, application icons, built-in skin assets,
+and the Intent training export script. PetGPT appears in the application launcher;
+it can also be started with `petgpt`. Model credentials, QQ setup and optional
+Claude/Codex CLIs are configured separately. The build script never installs the
+resulting PetGPT package automatically.
+
+Build each package on its destination distro family: an Arch-built binary is
+**not** an Ubuntu-compatible binary simply because it is put in a `.deb` file.
+For Ubuntu 22.04 and newer, build the Debian package on Ubuntu 22.04 (for example,
+in a VM or container); building on a newer Ubuntu can raise its required glibc
+version. This follows [Tauri's Linux compatibility guidance](https://v2.tauri.app/distribute/debian/#limitations).
+The script supports native x86_64 and aarch64 GNU/Linux toolchains; it does not
+cross-compile. `--format arch` or `--format deb` explicitly selects the format
+and rejects a mismatched host.
+
+Native prerequisites can also be installed manually:
+
+```bash
+# Arch Linux (keep the system up to date before installing build dependencies)
+sudo pacman -S --needed base-devel pkgconf webkit2gtk-4.1 libayatana-appindicator librsvg openssl
+
+# Ubuntu 22.04+ / Debian 12+
+sudo apt-get update
+sudo apt-get install build-essential pkg-config libwebkit2gtk-4.1-dev \
+  libayatana-appindicator3-dev librsvg2-dev libssl-dev patchelf file dpkg-dev
+```
+
+The Linux-only Tauri configuration selects Debian bundling without changing the
+macOS default. `scripts/create-deb.sh` remains an alias for the new script's
+Debian build, replacing the previous manual packager with hard-coded metadata.
+
+If an older Linux build opens blank windows and the terminal reports
+`Failed to create GBM buffer`, launch it with:
+
+```bash
+WEBKIT_DISABLE_DMABUF_RENDERER=1 petgpt
+```
+
+Linux builds now default to this WebKitGTK compatibility setting to avoid
+NVIDIA/XWayland buffer allocation failures. An explicit environment value takes
+precedence; use `WEBKIT_DISABLE_DMABUF_RENDERER=0` to try the DMA-BUF renderer.
 
 #### Windows
 
@@ -488,7 +550,8 @@ running the script. Bundle output is placed in `src-tauri/target/release/bundle/
 | `scripts/build-windows.ps1` | Windows | Set up MSVC environment + release build |
 | `scripts/create-dmg.sh` | macOS (ARM) | Package DMG installer |
 | `scripts/create-dmg-intel.sh` | macOS (x86) | Package Intel DMG installer |
-| `scripts/create-deb.sh` | Linux | Alternative manual .deb packaging; inspect its version metadata before use |
+| `scripts/build-linux.sh` | Linux | Native Arch/Ubuntu release build, dependency checks, and installable packages |
+| `scripts/create-deb.sh` | Ubuntu/Debian | Alias for `build-linux.sh --format deb` |
 | `scripts/generate-all-icons.sh` | macOS | Generate all platform icons from source images |
 
 ---

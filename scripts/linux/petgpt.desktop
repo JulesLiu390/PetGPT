@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=PetGPT
+Comment=AI desktop pet assistant
+Exec=petgpt
+Icon=petgpt
+Terminal=false
+Type=Application
+Categories=Utility;
+StartupWMClass=petgpt

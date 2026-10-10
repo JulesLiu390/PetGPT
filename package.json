@@ -14,6 +14,7 @@
     "tauri:dev:win": "powershell -NoProfile -ExecutionPolicy Bypass -File dev-windows.ps1",
     "tauri:build:win": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows.ps1",
     "tauri:build": "tauri build",
+    "tauri:build:linux": "bash scripts/build-linux.sh",
     "build:dmg": "npm run tauri:build && sh scripts/create-dmg.sh"
   },
   "dependencies": {

@@ -38,6 +38,10 @@ const preloadAllChunks = () => ({
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [tailwindcss(), react(), preloadAllChunks()],
+  optimizeDeps: {
+    // 只扫描主应用入口，避免把独立 Live2D 实验页面的依赖带入桌面应用。
+    entries: ['index.html'],
+  },
   css: {
     postcss: {},
   },

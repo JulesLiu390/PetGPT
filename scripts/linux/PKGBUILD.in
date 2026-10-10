@@ -1,0 +1,18 @@
+pkgname=petgpt
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='AI desktop pet assistant with local memory and MCP tools'
+arch=('@ARCH@')
+url='https://github.com/JulesLiu390/PetGPT'
+license=('MIT')
+depends=('glibc' 'gcc-libs' 'gtk3' 'webkit2gtk-4.1' 'libsoup3' 'libayatana-appindicator' 'openssl' 'hicolor-icon-theme')
+optdepends=('nodejs: Intent training export and Node-based MCP servers'
+            'gnome-screenshot: screen capture on GNOME'
+            'grim: screen capture on wlroots Wayland desktops'
+            'imagemagick: screen capture on X11')
+options=('!debug' '!strip')
+PKGEXT='.pkg.tar.zst'
+
+package() {
+  cp -a "$startdir/payload/." "$pkgdir/"
+}

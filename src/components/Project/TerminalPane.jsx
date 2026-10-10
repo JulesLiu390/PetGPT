@@ -4,6 +4,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { WebglAddon } from '@xterm/addon-webgl';
 import '@xterm/xterm/css/xterm.css';
 import * as tauri from '../../utils/tauri';
+import { installLinuxTerminalImeGuard } from './linuxTerminalIme';
 
 /**
  * 拖动停止多久之后才把新尺寸下发给 PTY。
@@ -109,6 +110,7 @@ function TerminalPane({ session, hidden, onExit }) {
     const fit = new FitAddon();
     term.loadAddon(fit);
     term.open(host);
+    const imeGuard = installLinuxTerminalImeGuard(term, document.documentElement.dataset.platform);
     // WebGL 只能在 open() 之后挂：它要拿终端已经建好的那个 canvas 层
     const webgl = attachWebglRenderer(term);
     termRef.current = term;
@@ -121,6 +123,7 @@ function TerminalPane({ session, hidden, onExit }) {
 
     return () => {
       keyDisposable.dispose();
+      imeGuard.dispose();
       // 先收渲染器再 dispose 终端，反过来会在已经拆掉的 canvas 上收尾
       try { webgl?.dispose(); } catch { /* 上下文丢失时已经自己 dispose 过 */ }
       term.dispose();
