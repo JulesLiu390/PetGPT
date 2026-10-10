@@ -19,6 +19,7 @@ pub struct Pet {
     pub api_format: Option<String>,
     pub system_instruction: Option<String>,
     pub appearance: Option<String>,
+    pub skin_id: Option<String>,
     pub has_mood: bool,
     #[serde(rename = "imageName")]
     pub icon: Option<String>,
@@ -42,6 +43,7 @@ pub struct CreatePetData {
     pub api_format: Option<String>,
     pub system_instruction: Option<String>,
     pub appearance: Option<String>,
+    pub skin_id: Option<String>,
     pub has_mood: Option<bool>,
     #[serde(rename = "imageName")]
     pub icon: Option<String>,
@@ -60,6 +62,7 @@ pub struct UpdatePetData {
     pub api_format: Option<String>,
     pub system_instruction: Option<String>,
     pub appearance: Option<String>,
+    pub skin_id: Option<String>,
     pub has_mood: Option<bool>,
     #[serde(rename = "imageName")]
     pub icon: Option<String>,
@@ -73,7 +76,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, type, model_name, model_url, model_api_key, model_config_id,
                     api_format, system_instruction, appearance, has_mood, icon, user_memory,
-                    toolbar_order, created_at, updated_at 
+                    toolbar_order, created_at, updated_at, skin_id
              FROM pets 
              WHERE is_deleted = 0 
              ORDER BY toolbar_order"
@@ -97,6 +100,7 @@ impl Database {
                 toolbar_order: row.get(13)?,
                 created_at: row.get(14)?,
                 updated_at: row.get(15)?,
+                skin_id: row.get(16)?,
             })
         })?.collect::<Result<Vec<_>>>()?;
         
@@ -108,7 +112,7 @@ impl Database {
         let mut stmt = conn.prepare(
             "SELECT id, name, type, model_name, model_url, model_api_key, model_config_id,
                     api_format, system_instruction, appearance, has_mood, icon, user_memory,
-                    toolbar_order, created_at, updated_at 
+                    toolbar_order, created_at, updated_at, skin_id
              FROM pets WHERE id = ?"
         )?;
         
@@ -132,6 +136,7 @@ impl Database {
                 toolbar_order: row.get(13)?,
                 created_at: row.get(14)?,
                 updated_at: row.get(15)?,
+                skin_id: row.get(16)?,
             }))
         } else {
             Ok(None)
@@ -143,13 +148,14 @@ impl Database {
         let id = data.id.clone().unwrap_or_else(|| Uuid::new_v4().to_string());
         let now = Utc::now().to_rfc3339();
         let has_mood = data.has_mood.unwrap_or(true);
+        let skin_id = validate_skin_binding(&conn, data.skin_id.as_deref().unwrap_or(""))?;
         let pet_type = data.pet_type.clone().unwrap_or_else(|| "assistant".to_string());
         
         conn.execute(
             "INSERT INTO pets (id, name, type, model_name, model_url, model_api_key, 
                               model_config_id, api_format, system_instruction, appearance,
-                              has_mood, icon, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                              has_mood, icon, created_at, updated_at, skin_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 id,
                 data.name,
@@ -164,7 +170,8 @@ impl Database {
                 has_mood as i32,
                 data.icon,
                 now,
-                now
+                now,
+                skin_id
             ],
         )?;
         
@@ -179,6 +186,7 @@ impl Database {
             api_format: data.api_format,
             system_instruction: data.system_instruction,
             appearance: data.appearance,
+            skin_id,
             has_mood,
             icon: data.icon,
             user_memory: None,
@@ -232,6 +240,10 @@ impl Database {
             updates.push("appearance = ?");
             values.push(Box::new(appearance.clone()));
         }
+        if let Some(skin_id) = &data.skin_id {
+            updates.push("skin_id = ?");
+            values.push(Box::new(validate_skin_binding(&conn, skin_id)?));
+        }
         if let Some(has_mood) = data.has_mood {
             updates.push("has_mood = ?");
             values.push(Box::new(has_mood as i32));
@@ -269,4 +281,13 @@ impl Database {
         let rows = conn.execute("UPDATE pets SET is_deleted = 1 WHERE id = ?", params![id])?;
         Ok(rows > 0)
     }
+}
+
+// Empty string explicitly restores the default; omitted updates preserve the binding.
+fn validate_skin_binding(conn: &rusqlite::Connection, id: &str) -> Result<Option<String>> {
+    let id = id.trim();
+    if id.is_empty() { return Ok(None); }
+    let exists: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM skins WHERE id = ?)", [id], |row| row.get(0))?;
+    if !exists { return Err(rusqlite::Error::InvalidParameterName("Skin no longer exists".into())); }
+    Ok(Some(id.to_string()))
 }

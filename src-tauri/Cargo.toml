@@ -88,6 +88,7 @@ codegen-units = 1
 codegen-units = 1
 
 [dev-dependencies]
+tauri = { version = "2.9.5", features = ["test"] }
 # 仅用于在测试里合成 GIF 样本（gif_to_contact_sheet 的用例）。
 # 版本对齐 image 0.25 传递依赖的那个，避免 Cargo.lock 里出现两份。
 gif = "0.14"

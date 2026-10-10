@@ -98,7 +98,7 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["**"]
+        "scope": ["**", "$APPDATA/skins/**"]
       }
     }
   },
@@ -106,7 +106,7 @@
     "active": true,
     "targets": ["app"],
     "resources": [
-      "assets/*",
+      "assets/**/*",
       "../scripts/**/*"
     ],
     "icon": [

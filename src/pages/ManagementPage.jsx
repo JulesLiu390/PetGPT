@@ -19,7 +19,8 @@ import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
 import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
 import { emit, listen } from '@tauri-apps/api/event';
-import PseudoLive2DCharacter from "../components/Avatar/PseudoLive2DCharacter";
+import CharacterAppearance from "../components/Avatar/CharacterAppearance";
+import SkinForm from "../components/Settings/SkinImportForm";
 import SkillsPanel from "../components/Settings/SkillsPanel";
 import AssistantSkillsSelector from "../components/Settings/AssistantSkillsSelector";
 import QqConnectorPanel from "../components/Settings/QqConnectorPanel";
@@ -38,10 +39,10 @@ import {
 
 // ==================== Shared Components ====================
 
-const AvatarPreview = () => (
+const AvatarPreview = ({ skinId, mood = "normal" }) => (
   <div className="w-16 h-16 rounded-xl overflow-hidden bg-slate-100 shrink-0">
-    <div className="w-full h-full scale-[1.28] translate-y-1">
-      <PseudoLive2DCharacter mood="normal" animated={false} />
+    <div className={skinId ? "w-full h-full" : "w-full h-full scale-[1.28] translate-y-1"}>
+      <CharacterAppearance skinId={skinId} mood={mood} animated={false} preview />
     </div>
   </div>
 );
@@ -84,6 +85,7 @@ const getDefaultImageForApi = (apiFormat) => {
  */
 const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [apiProviders, setApiProviders] = useState([]);
+  const [skins, setSkins] = useState([]);
   const [selectedProviderId, setSelectedProviderId] = useState("");
   const [availableModels, setAvailableModels] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -97,6 +99,7 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
   const [formData, setFormData] = useState({
     name: assistant?.name || "",
     appearance: assistant?.appearance || "",
+    skinId: assistant?.skinId || "",
     imageName: assistant?.imageName || "pseudo_live2d",
     hasMood: assistant?.hasMood !== false,
     modelName: assistant?.modelName || "",
@@ -106,6 +109,20 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
     modelConfigId: "", // Clear legacy config ID to ensure local settings take precedence
   });
   
+  useEffect(() => {
+    let active = true;
+    const refresh = () => tauri.getSkinsWithHidden().then(items => {
+      if (active) {
+        setSkins(items.filter(s => !s.isHidden || s.id === assistant?.skinId));
+        setFormData(previous => previous.skinId && !items.some(s => s.id === previous.skinId)
+          ? { ...previous, skinId: '' } : previous);
+      }
+    }).catch(error => console.error('Failed to load skins:', error));
+    refresh();
+    const unsubscribe = tauri.onSkinsUpdated(refresh);
+    return () => { active = false; unsubscribe(); };
+  }, [assistant?.skinId]);
+
   // 加载可用的 API Providers
   useEffect(() => {
     const loadApiProviders = async () => {
@@ -368,9 +385,13 @@ const AssistantForm = ({ assistant, onSave, onCancel }) => {
       <FormGroup>
         <Label>Avatar</Label>
         <div className="flex items-start gap-3">
-          <AvatarPreview />
+          <AvatarPreview skinId={formData.skinId} />
           <div className="flex-1 min-w-0 pt-1">
-            <Badge tone="blue">Layered Avatar</Badge>
+            <Select name="skinId" value={formData.skinId} onChange={handleChange} aria-label="Character skin">
+              <option value="">Default Character</option>
+              {skins.map(skin => <option key={skin.id} value={skin.id}>{skin.name}{skin.isHidden ? ' (hidden)' : ''}</option>)}
+            </Select>
+            <p className="mt-2 text-xs text-slate-500">Import custom characters in Skins, then select one here.</p>
           </div>
         </div>
       </FormGroup>
@@ -571,7 +592,7 @@ const AssistantsPanel = ({ onNavigate }) => {
               key={assistant._id}
               className="bg-white border border-slate-200 shadow-sm rounded-xl p-3 flex items-start gap-3"
             >
-              <AvatarPreview />
+              <AvatarPreview skinId={assistant.skinId} />
               <div className="min-w-0 flex-1">
                 <div className="flex items-start justify-between gap-2">
                   <div className="min-w-0">
@@ -2339,137 +2360,10 @@ const McpServersPanel = () => {
  * }
  * 图片文件与 JSON 同目录，名称在 moods 对象中指定
  */
-const SkinForm = ({ onSave, onCancel }) => {
-  const [jsonPath, setJsonPath] = useState(null);
-  const [config, setConfig] = useState(null);
-  const [error, setError] = useState(null);
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  const handleFileSelect = async () => {
-    try {
-      // 使用 Tauri 的文件对话框选择 JSON 文件
-      const selected = await tauri.selectFile({
-        filters: [{
-          name: 'Skin Config',
-          extensions: ['json']
-        }],
-        multiple: false,
-        directory: false,
-      });
-
-      if (!selected) return;
-
-      setJsonPath(selected);
-      setError(null);
-
-      // 读取并验证 JSON 内容
-      try {
-        const content = await tauri.readFile(selected);
-        const parsed = JSON.parse(content);
-        
-        // 验证必需字段 - moods 现在是对象 { moodName: imageName }
-        if (!parsed.name || !parsed.moods || typeof parsed.moods !== 'object' || Object.keys(parsed.moods).length === 0) {
-          setError("Invalid JSON: must have 'name' and 'moods' object (e.g. { \"happy\": \"smile.png\" })");
-          setJsonPath(null);
-          return;
-        }
-
-        setConfig(parsed);
-      } catch (e) {
-        setError("Failed to read or parse JSON: " + e.message);
-        setJsonPath(null);
-      }
-    } catch (err) {
-      setError("Failed to open file dialog: " + err.message);
-    }
-  };
-
-  const handleSubmit = async (e) => {
-    e.preventDefault();
-    
-    if (!jsonPath) {
-      setError("Please select a JSON file");
-      return;
-    }
-
-    setIsProcessing(true);
-    setError(null);
-
-    try {
-      await onSave(jsonPath);
-    } catch (err) {
-      setError("Import failed: " + (err.message || err));
-    } finally {
-      setIsProcessing(false);
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-4">
-      {error && <Alert type="error">{error}</Alert>}
-
-      {/* File Selection */}
-      <div className="space-y-3">
-        <Label>Skin Configuration</Label>
-        <div className="flex gap-2">
-          <div className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-lg text-sm text-slate-600 truncate">
-            {jsonPath ? jsonPath : "No file selected"}
-          </div>
-          <Button variant="secondary" onClick={handleFileSelect} type="button">
-            <FaFile className="w-4 h-4 mr-2" />
-            Select JSON
-          </Button>
-        </div>
-        <div className="text-xs text-slate-500">
-          Select a JSON file containing skin configuration. Images (0.png, 1.png, etc.) should be in the same directory.
-        </div>
-      </div>
-
-      {/* Config Preview */}
-      {config && (
-        <div className="bg-slate-50 border border-slate-200 rounded-lg p-3 space-y-2">
-          <div className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Preview</div>
-          <div className="space-y-1 text-sm">
-            <div><span className="font-medium text-slate-700">Name:</span> {config.name}</div>
-            {config.author && <div><span className="font-medium text-slate-700">Author:</span> {config.author}</div>}
-            {config.description && <div><span className="font-medium text-slate-700">Description:</span> {config.description}</div>}
-            <div>
-              <span className="font-medium text-slate-700">Moods ({Object.keys(config.moods).length}):</span>
-              <div className="flex flex-wrap gap-1 mt-1">
-                {/* 按标准顺序排序显示 moods */}
-                {(() => {
-                  const MOOD_ORDER = ['normal', 'smile', 'sad', 'shocked', 'thinking', 'idle-1', 'idle-2', 'idle-3'];
-                  const sortedEntries = Object.entries(config.moods).sort((a, b) => {
-                    const indexA = MOOD_ORDER.indexOf(a[0]);
-                    const indexB = MOOD_ORDER.indexOf(b[0]);
-                    // 未知的 mood 放到末尾
-                    return (indexA === -1 ? 999 : indexA) - (indexB === -1 ? 999 : indexB);
-                  });
-                  return sortedEntries.map(([moodName, imageName], i) => (
-                    <Badge key={i} tone="blue">{i}: {moodName} → {imageName}</Badge>
-                  ));
-                })()}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      <div className="flex items-center justify-end gap-3 pt-2">
-        <Button variant="secondary" onClick={onCancel} type="button">Cancel</Button>
-        <Button variant="primary" type="submit" disabled={isProcessing || !jsonPath}>
-          {isProcessing ? <FaSpinner className="animate-spin mr-2" /> : <FaCheck className="mr-2" />}
-          Import Skin
-        </Button>
-      </div>
-    </form>
-  );
-};
-
 /**
  * 皮肤预览图组件 - 先尝试从 assets 加载，失败后从自定义目录加载
  */
-const SkinPreview = () => <AvatarPreview />;
+const SkinPreview = ({ skinId }) => <AvatarPreview skinId={skinId} />;
 
 /**
  * 皮肤状态预览组件 - 动态显示心情状态
@@ -2478,7 +2372,7 @@ const SkinPreview = () => <AvatarPreview />;
  * @param {boolean} isBuiltin - 是否内置皮肤
  * @param {string[]} moods - 动态表情列表 e.g. ["normal", "smile", "sad", "shocked", "thinking"]
  */
-const SkinMoodPreview = ({ moods: propMoods }) => {
+const SkinMoodPreview = ({ skinId, moods: propMoods }) => {
   // 固定表情系统: 情绪表情 + 系统状态
   const DEFAULT_MOODS = ['normal', 'smile', 'sad', 'shocked', 'thinking', 'idle-1', 'idle-2', 'idle-3'];
   
@@ -2493,11 +2387,11 @@ const SkinMoodPreview = ({ moods: propMoods }) => {
     return mood.charAt(0).toUpperCase() + mood.slice(1);
   };
   return (
-    <div className="grid grid-cols-4 gap-3 p-3 bg-slate-50 rounded-lg">
+    <div className="flex flex-wrap justify-center gap-3 p-3 bg-slate-50 rounded-lg">
       {moods.map(mood => (
         <div key={mood} className="flex flex-col items-center gap-1">
-          <div className="w-16 h-16 rounded-lg overflow-hidden bg-white border border-slate-200 shadow-sm">
-            <AvatarPreview />
+          <div className="w-32 h-48 rounded-lg overflow-hidden bg-white border border-slate-200 shadow-sm">
+            <CharacterAppearance skinId={skinId} mood={mood} />
           </div>
           <span className="text-xs text-slate-500">{getMoodLabel(mood)}</span>
         </div>
@@ -2548,24 +2442,16 @@ const SkinsPanel = () => {
     };
   }, [showHidden]);
   
-  const handleSave = async (jsonPath) => {
-    try {
-      console.log("Importing skin from:", jsonPath);
-      
-      // 调用 Rust API 导入皮肤（JSON + 自动发现图片）
-      await tauri.importSkin(jsonPath);
-      
-      // 发送更新事件，通知其他窗口刷新
-      await tauri.sendSkinsUpdate?.({ action: 'create' });
-      
-      setIsCreating(false);
-      fetchSkins();
-    } catch (err) {
-      console.error("Failed to import skin:", err);
-      alert("Failed to import skin: " + (err.message || err));
-    }
+  const handleSave = async ({ path, kind, name }) => {
+    const skin = kind === 'layered'
+      ? await tauri.importLayeredSkin(path, name)
+      : await tauri.importSkin(path);
+    setIsCreating(false);
+    setSelectedSkinId(skin.id);
+    await fetchSkins();
+    await tauri.sendSkinsUpdate();
   };
-  
+
   const handleDelete = async (skin) => {
     // 对于内置皮肤，提示是隐藏而不是删除
     const message = skin.isBuiltin 
@@ -2662,7 +2548,7 @@ const SkinsPanel = () => {
         {isCreating ? (
           <Card
             title="Import New Skin"
-            description="Select a JSON configuration file. Image files (0.png, 1.jpg, etc.) should be in the same directory."
+            description="Import LayerDiff output, a standard layered skin package, or an image skin JSON."
           >
             <SkinForm 
               onSave={handleSave} 
@@ -2678,7 +2564,7 @@ const SkinsPanel = () => {
           <div className="flex flex-col items-center justify-center h-full text-center py-12">
             <FaRobot className="w-12 h-12 text-slate-300 mb-4" />
             <div className="text-slate-600 font-medium">No custom skins yet</div>
-            <div className="text-slate-400 text-sm mb-4">Import a 2x2 sprite sheet to get started</div>
+            <div className="text-slate-400 text-sm mb-4">Import LayerDiff output, a standard layered skin package, or an image skin JSON.</div>
             <Button variant="primary" onClick={() => setIsCreating(true)}>
               <FaPlus className="w-4 h-4" />
               Import Skin
@@ -4632,6 +4518,7 @@ const tabGroups = [
     title: 'MANAGE',
     tabs: [
       { id: 'assistants', label: 'Assistants', icon: FaRobot },
+      { id: 'skins', label: 'Skins', icon: FaPalette },
       { id: 'api', label: 'API', icon: FaKey },
       { id: 'models', label: 'Models', icon: FaList },
       { id: 'mcp', label: 'MCP', icon: FaPlug },
@@ -4902,6 +4789,7 @@ const ManagementPage = () => {
   const getTitle = () => {
     switch (activeTab) {
       case 'assistants': return 'Assistants';
+      case 'skins': return 'Skins';
       case 'api': return 'API Providers';
       case 'models': return 'Models';
       case 'mcp': return 'MCP Servers';
@@ -4941,6 +4829,7 @@ const ManagementPage = () => {
           {/* Panel content */}
           <div className="flex-1 flex flex-col min-h-0">
             {activeTab === 'assistants' && <AssistantsPanel />}
+            {activeTab === 'skins' && <SkinsPanel />}
             {activeTab === 'api' && <ApiProvidersPanel />}
             {activeTab === 'models' && <ModelsPanel />}
             {activeTab === 'mcp' && <McpServersPanel />}

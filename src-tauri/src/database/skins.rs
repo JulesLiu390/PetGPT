@@ -269,7 +269,17 @@ impl Database {
             return self.hide_skin(id);
         }
         
-        let affected = conn.execute("DELETE FROM skins WHERE id = ?", params![id])?;
+        drop(conn);
+        self.purge_skin(id)
+    }
+
+    /// Delete a skin record of any kind; assistants using it fall back to the default character.
+    pub fn purge_skin(&self, id: &str) -> Result<bool> {
+        let conn = self.conn.lock().unwrap();
+        let tx = conn.unchecked_transaction()?;
+        tx.execute("UPDATE pets SET skin_id = NULL WHERE skin_id = ?", params![id])?;
+        let affected = tx.execute("DELETE FROM skins WHERE id = ?", params![id])?;
+        tx.commit()?;
         Ok(affected > 0)
     }
 }

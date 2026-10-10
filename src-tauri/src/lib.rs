@@ -1,4 +1,6 @@
 mod database;
+mod drag_motion;
+mod skin_packages;
 mod mcp;
 mod message_cache;
 mod tab_state;
@@ -470,8 +472,8 @@ fn update_skin(db: State<DbState>, id: String, data: skins::UpdateSkinData) -> R
 }
 
 #[tauri::command]
-fn delete_skin(db: State<DbState>, id: String) -> Result<bool, String> {
-    db.delete_skin(&id).map_err(|e| e.to_string())
+fn delete_skin(app: AppHandle, db: State<DbState>, id: String) -> Result<bool, String> {
+    delete_skin_with_files(app, db, id)
 }
 
 #[tauri::command]
@@ -601,6 +603,10 @@ fn export_skin(
     let skin = db.get_skin_by_id(&skinId)
         .map_err(|e| format!("Failed to get skin: {}", e))?
         .ok_or_else(|| format!("Skin not found: {}", skinId))?;
+
+    if let Some(package_dir) = skin_packages::layered_root(&app, &skin)? {
+        return skin_packages::export_package(&package_dir, Path::new(&exportDir));
+    }
     
     let moods = skin.moods.clone().unwrap_or_else(|| {
         vec!["normal".to_string(), "smile".to_string(), "angry".to_string(), "thinking".to_string()]
@@ -614,69 +620,29 @@ fn export_skin(
     // 3. 构建 moods 映射并复制图片
     let mut moods_map: HashMap<String, String> = HashMap::new();
     
-    if skin.is_builtin {
-        // 内置皮肤：图片在应用资源目录 assets/
-        // 开发模式：src-tauri/assets/
-        // 生产模式：Resources/assets/
-        let resource_path = app.path().resource_dir()
-            .map_err(|e| format!("Failed to get resource dir: {}", e))?;
-        let assets_dir = resource_path.join("assets");
-        
-        // 开发模式下可能在 src-tauri/assets
-        let dev_assets_dir = std::env::current_dir()
-            .unwrap_or_default()
-            .join("assets");
-        
-        for mood_name in moods.iter() {
-            // 内置皮肤的图片命名格式：{SkinName}-{mood}.png
-            let source_filename = format!("{}-{}.png", skin.name, mood_name);
-            
-            // 尝试生产路径
-            let mut source_path = assets_dir.join(&source_filename);
-            
-            // 如果不存在，尝试开发路径
-            if !source_path.exists() {
-                source_path = dev_assets_dir.join(&source_filename);
-            }
-            
-            let image_filename = format!("{}.png", mood_name);
-            let dest_path = export_path.join(&image_filename);
-            
+    // 自定义皮肤：图片在 skins_dir/{skinId}/
+    let skins_dir = get_skins_dir(&app)?;
+    let skin_dir = skins_dir.join(&skinId);
+    let extensions = ["png", "gif", "jpg", "jpeg", "webp"];
+    
+    for (i, mood_name) in moods.iter().enumerate() {
+        // 尝试各种扩展名找到图片文件
+        let mut found = false;
+        for ext in &extensions {
+            let source_path = skin_dir.join(format!("{}.{}", i, ext));
             if source_path.exists() {
+                let image_filename = format!("{}.{}", mood_name, ext);
+                let dest_path = export_path.join(&image_filename);
+                
                 fs::copy(&source_path, &dest_path)
                     .map_err(|e| format!("Failed to copy image {}: {}", mood_name, e))?;
                 moods_map.insert(mood_name.clone(), image_filename);
-            } else {
-                println!("[Rust] Warning: Builtin image not found. Tried: {:?} and {:?}", 
-                    assets_dir.join(&source_filename), 
-                    dev_assets_dir.join(&source_filename));
+                found = true;
+                break;
             }
         }
-    } else {
-        // 自定义皮肤：图片在 skins_dir/{skinId}/
-        let skins_dir = get_skins_dir(&app)?;
-        let skin_dir = skins_dir.join(&skinId);
-        let extensions = ["png", "gif", "jpg", "jpeg", "webp"];
-        
-        for (i, mood_name) in moods.iter().enumerate() {
-            // 尝试各种扩展名找到图片文件
-            let mut found = false;
-            for ext in &extensions {
-                let source_path = skin_dir.join(format!("{}.{}", i, ext));
-                if source_path.exists() {
-                    let image_filename = format!("{}.{}", mood_name, ext);
-                    let dest_path = export_path.join(&image_filename);
-                    
-                    fs::copy(&source_path, &dest_path)
-                        .map_err(|e| format!("Failed to copy image {}: {}", mood_name, e))?;
-                    moods_map.insert(mood_name.clone(), image_filename);
-                    found = true;
-                    break;
-                }
-            }
-            if !found {
-                println!("[Rust] Warning: Custom image not found for mood '{}' at index {}", mood_name, i);
-            }
+        if !found {
+            println!("[Rust] Warning: Custom image not found for mood '{}' at index {}", mood_name, i);
         }
     }
     
@@ -811,6 +777,10 @@ fn read_skin_image(app: AppHandle, db: State<DbState>, skinId: String, mood: Str
 #[tauri::command]
 #[allow(non_snake_case)]
 fn delete_skin_with_files(app: AppHandle, db: State<DbState>, id: String) -> Result<bool, String> {
+    uuid::Uuid::parse_str(&id).map_err(|e| e.to_string())?;
+    if db.get_skin_by_id(&id).map_err(|e| e.to_string())?.is_some_and(|s| s.is_builtin) {
+        return db.hide_skin(&id).map_err(|e| e.to_string());
+    }
     // 1. 删除数据库记录
     let deleted = db.delete_skin(&id).map_err(|e| e.to_string())?;
     
@@ -842,61 +812,32 @@ fn get_skins_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(skins_dir)
 }
 
-/// 内置皮肤定义 - 这些皮肤的图片在前端 src/assets 中，不需要复制到文件系统
-struct BuiltinSkin {
-    name: &'static str,
-    author: &'static str,
-}
-
-/// 初始化内置皮肤数据库记录（图片由前端处理，这里只创建数据库记录）
+/// 初始化内置皮肤：为随应用打包的分层皮肤建数据库记录，并彻底移除已下线的内置皮肤
+/// （旧的单图角色）。引用它们的助手回到默认角色。
 fn initialize_builtin_skins(db: &Database) {
-    let builtin_skins = vec![
-        BuiltinSkin { name: "Glitch", author: "Jules" },
-        BuiltinSkin { name: "Maodie", author: "Jules" },
-        BuiltinSkin { name: "LittlePony", author: "Jules" },
-    ];
-
-    let default_moods = vec![
-        "normal".to_string(), "idle-1".to_string(), "idle-2".to_string(), "idle-3".to_string(),
-        "smile".to_string(), "sad".to_string(), "shocked".to_string(), "thinking".to_string(),
-    ];
-
-    // 获取数据库中所有皮肤（包括隐藏的）
     let existing_skins = db.get_all_skins_with_hidden().unwrap_or_default();
+    let shipped = |name: &str| skin_packages::BUILTIN_SKINS.iter().any(|b| b.name == name);
 
-    // 删除旧的 Jules 内置皮肤（已被 Glitch 替换）
-    for skin in existing_skins.iter().filter(|s| s.name == "Jules" && s.is_builtin) {
-        let _ = db.delete_skin(&skin.id);
-        println!("[Skins] Removed old builtin skin: Jules (id: {})", skin.id);
+    for skin in existing_skins.iter().filter(|s| s.is_builtin && !shipped(&s.name)) {
+        match db.purge_skin(&skin.id) {
+            Ok(_) => println!("[Skins] Removed retired builtin skin: {} (id: {})", skin.name, skin.id),
+            Err(e) => eprintln!("[Skins] Failed to remove retired builtin skin {}: {}", skin.name, e),
+        }
     }
 
-    for builtin in &builtin_skins {
-        let existing = existing_skins.iter().find(|s| s.name == builtin.name && s.is_builtin);
-
-        if let Some(skin) = existing {
-            // 更新现有内置皮肤的 moods 列表
-            let _ = db.update_skin(&skin.id, skins::UpdateSkinData {
-                name: None,
-                author: Some(builtin.author.to_string()),
-                description: None,
-                moods: Some(default_moods.clone()),
-            });
-            println!("[Skins] Updated builtin skin: {} (id: {})", builtin.name, skin.id);
-        } else {
-            match db.create_skin(skins::CreateSkinData {
-                name: builtin.name.to_string(),
-                author: Some(builtin.author.to_string()),
-                description: Some(format!("Built-in {} skin", builtin.name)),
-                is_builtin: true,
-                moods: Some(default_moods.clone()),
-            }) {
-                Ok(skin) => {
-                    println!("[Skins] Created builtin skin: {} (id: {})", builtin.name, skin.id);
-                }
-                Err(e) => {
-                    eprintln!("[Skins] Failed to create builtin skin {}: {}", builtin.name, e);
-                }
-            }
+    for builtin in skin_packages::BUILTIN_SKINS {
+        if existing_skins.iter().any(|s| s.is_builtin && s.name == builtin.name) {
+            continue;
+        }
+        match db.create_skin(skins::CreateSkinData {
+            name: builtin.name.to_string(),
+            author: None,
+            description: Some("Built-in layered character".to_string()),
+            is_builtin: true,
+            moods: Some(vec!["normal".to_string()]),
+        }) {
+            Ok(skin) => println!("[Skins] Created builtin skin: {} (id: {})", builtin.name, skin.id),
+            Err(e) => eprintln!("[Skins] Failed to create builtin skin {}: {}", builtin.name, e),
         }
     }
 }
@@ -2649,6 +2590,16 @@ fn get_window_position(app: AppHandle, label: String) -> Result<(i32, i32), Stri
     }
 }
 
+/// Desktop cursor relative to the calling webview, in CSS pixels, so the avatar can look at it.
+/// Async keeps the window getters off the main thread they dispatch to.
+#[tauri::command]
+async fn get_cursor_in_window(window: tauri::WebviewWindow) -> Result<(f64, f64), String> {
+    let cursor = window.cursor_position().map_err(|e| e.to_string())?;
+    let origin = window.inner_position().map_err(|e| e.to_string())?;
+    let sf = window.scale_factor().map_err(|e| e.to_string())?;
+    Ok(((cursor.x - f64::from(origin.x)) / sf, (cursor.y - f64::from(origin.y)) / sf))
+}
+
 #[tauri::command]
 fn set_window_position(app: AppHandle, label: String, x: f64, y: f64) -> Result<(), String> {
     if let Some(window) = app.get_webview_window(&label) {
@@ -4135,6 +4086,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            skin_packages::import_layered_skin,
+            skin_packages::get_skin_appearance,
             // Pet commands
             get_pets,
             get_pet,
@@ -4248,6 +4201,9 @@ pub fn run() {
             close_window,
             set_window_always_on_top,
             get_window_position,
+            get_cursor_in_window,
+            drag_motion::start_drag_motion,
+            drag_motion::stop_drag_motion,
             set_window_position,
             get_window_size,
             set_window_size,

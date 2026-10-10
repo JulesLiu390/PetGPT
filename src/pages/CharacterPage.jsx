@@ -5,7 +5,9 @@ import { FaPlug, FaUserGroup } from "react-icons/fa6";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
 import { getRandomIdleState } from '../utils/moodDetector';
-import PseudoLive2DCharacter from '../components/Avatar/PseudoLive2DCharacter';
+import CharacterAppearance from '../components/Avatar/CharacterAppearance';
+import { beginDragSwing } from '../components/Avatar/dragSwing';
+import { swingLever } from '../components/Avatar/swingPhysics';
 import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
 import { scopeSocialStatus, shouldApplySocialCommand } from '../utils/socialControlScope';
 
@@ -64,6 +66,9 @@ export const Character = () => {
   // 控制 Chat 窗口是否打开
   const [isChatVisible, setIsChatVisible] = useState(false);
   const [currentPetId, setCurrentPetId] = useState(null);
+  const [currentSkinId, setCurrentSkinId] = useState(null);
+  const [hasMood, setHasMood] = useState(true);
+  const characterLoadRevision = useRef(0);
   
   // 社交代理激活状态
   const [, setSocialActive] = useState(false);
@@ -223,6 +228,7 @@ export const Character = () => {
   }, []); // 只在组件挂载时运行一次
 
   const loadCharacter = useCallback(async (targetId = null) => {
+    const revision = ++characterLoadRevision.current;
     try {
       const settings = await tauri.getSettings();
       
@@ -275,10 +281,10 @@ export const Character = () => {
         }
       }
       
-      // 设置当前角色 ID。人物渲染已切到新的分层皮肤。
-      if (foundPet) {
-        setCurrentPetId(foundPet.id || foundPet._id);
-      }
+      if (revision !== characterLoadRevision.current) return;
+      setCurrentPetId(foundPet?.id || foundPet?._id || null);
+      setCurrentSkinId(foundPet?.skinId || null);
+      setHasMood(foundPet?.hasMood !== false);
     } catch (error) {
       console.error("Error loading character:", error);
     }
@@ -288,6 +294,8 @@ export const Character = () => {
   useEffect(() => {
     loadCharacter();
   }, [loadCharacter]);
+
+  useEffect(() => tauri.onSkinsUpdated(() => loadCharacter(currentPetId)), [currentPetId, loadCharacter]);
 
   // 监听宠物/助手更新事件
   useEffect(() => {
@@ -749,6 +757,8 @@ export const Character = () => {
       dragState.current.isDragging = true;
       dragState.current.isMouseDown = false;
       clearCharacterGestureListeners();
+      const { startX, startY, areaTop, areaHeight } = dragState.current;
+      beginDragSwing({ x: startX, y: startY }, swingLever(startY, areaTop, areaHeight));
       void tauri.startDragging().catch(error => {
         console.error('[Character] Failed to start window drag:', error);
       });
@@ -784,10 +794,13 @@ export const Character = () => {
   const handleCharacterMouseDown = useCallback((e) => {
     if (e.button !== 0) return;
 
+    const area = e.currentTarget.getBoundingClientRect();
     dragState.current = {
       isMouseDown: true,
       startX: e.clientX,
       startY: e.clientY,
+      areaTop: area.top,
+      areaHeight: area.height,
       isDragging: false,
     };
 
@@ -824,7 +837,7 @@ export const Character = () => {
       className="select-none h-full w-full flex flex-col justify-center items-center rounded-xl overflow-hidden"
     >
       {/* 顶部按钮区 */}
-      <div className="h-[50px] w-full">
+      <div className="h-[50px] w-full shrink-0">
         {showToolbar && (
           <motion.div
             className="flex justify-evenly items-center gap-2 py-2 bg-black/30 rounded-lg p-2"
@@ -869,10 +882,10 @@ export const Character = () => {
 
       {/* 角色图片 - 可拖动区域 */}
       <div
-        className="flex-1 w-full flex items-center justify-center cursor-default"
+        className="flex-1 min-h-0 min-w-0 w-full flex items-center justify-center cursor-default"
         onMouseDown={handleCharacterMouseDown}
       >
-        <PseudoLive2DCharacter mood={characterMood} />
+        <CharacterAppearance skinId={currentSkinId} mood={hasMood ? characterMood : "normal"} />
       </div>
     </div>
   );

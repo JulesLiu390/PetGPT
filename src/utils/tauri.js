@@ -539,6 +539,12 @@ export const deleteSkin = (id) => invoke('delete_skin', { id });
 export const hideSkin = (id) => invoke('hide_skin', { id });
 export const restoreSkin = (id) => invoke('restore_skin', { id });
 export const importSkin = (jsonPath) => invoke('import_skin', { jsonPath });
+export const importLayeredSkin = (sourcePath, name = null) => invoke('import_layered_skin', { sourcePath, name });
+export const getSkinAppearance = (skinId, mood = 'normal') => invoke('get_skin_appearance', { skinId, mood });
+export const getCursorInWindow = () => invoke('get_cursor_in_window');
+export const startDragMotion = () => invoke('start_drag_motion');
+export const stopDragMotion = () => invoke('stop_drag_motion');
+export const onDragMotion = (callback) => subscribeToTauriEvent('drag-motion', event => callback(event.payload));
 export const validateSkinFolder = (folderPath) => invoke('validate_skin_folder', { folderPath });
 export const importSkinFromFolder = (folderPath, skinName, author = null, description = null) => 
   invoke('import_skin_from_folder', { folderPath, skinName, author, description });
@@ -1241,12 +1247,7 @@ export const onNewChatCreated = (callback) => {
 export const sendSkinsUpdate = () => 
   invoke('emit_to_all', { event: 'skins-updated', payload: {} });
 
-export const onSkinsUpdated = (callback) => {
-  let unlisten = null;
-  listen('skins-updated', () => callback())
-    .then(fn => { unlisten = fn; });
-  return () => { if (unlisten) unlisten(); };
-};
+export const onSkinsUpdated = (callback) => subscribeToTauriEvent('skins-updated', callback);
 
 // Pet Image reading
 export const readPetImage = async (petId, imageType = 'normal') => {

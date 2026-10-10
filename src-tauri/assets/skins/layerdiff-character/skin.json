@@ -1,0 +1,238 @@
+{
+  "format": "petgpt-layered-skin",
+  "version": 1,
+  "name": "LayerDiff Character",
+  "author": null,
+  "description": "Imported from LayerDiff",
+  "canvas": [
+    1024,
+    1024
+  ],
+  "layers": [
+    {
+      "name": "back hair",
+      "file": "layers/000.png",
+      "origin": [
+        288,
+        91
+      ],
+      "size": [
+        394,
+        440
+      ],
+      "z": 0
+    },
+    {
+      "name": "tail",
+      "file": "layers/001.png",
+      "origin": [
+        594,
+        515
+      ],
+      "size": [
+        118,
+        228
+      ],
+      "z": 1
+    },
+    {
+      "name": "legwear",
+      "file": "layers/002.png",
+      "origin": [
+        428,
+        583
+      ],
+      "size": [
+        158,
+        349
+      ],
+      "z": 2
+    },
+    {
+      "name": "footwear",
+      "file": "layers/003.png",
+      "origin": [
+        430,
+        867
+      ],
+      "size": [
+        97,
+        144
+      ],
+      "z": 3
+    },
+    {
+      "name": "topwear",
+      "file": "layers/004.png",
+      "origin": [
+        363,
+        228
+      ],
+      "size": [
+        283,
+        393
+      ],
+      "z": 4
+    },
+    {
+      "name": "bottomwear",
+      "file": "layers/005.png",
+      "origin": [
+        297,
+        401
+      ],
+      "size": [
+        384,
+        286
+      ],
+      "z": 5
+    },
+    {
+      "name": "neck",
+      "file": "layers/006.png",
+      "origin": [
+        492,
+        185
+      ],
+      "size": [
+        43,
+        64
+      ],
+      "z": 6
+    },
+    {
+      "name": "eyebrow",
+      "file": "layers/007.png",
+      "origin": [
+        449,
+        152
+      ],
+      "size": [
+        77,
+        31
+      ],
+      "z": 7
+    },
+    {
+      "name": "face",
+      "file": "layers/008.png",
+      "origin": [
+        440,
+        117
+      ],
+      "size": [
+        104,
+        118
+      ],
+      "z": 8
+    },
+    {
+      "name": "handwear",
+      "file": "layers/009.png",
+      "origin": [
+        421,
+        242
+      ],
+      "size": [
+        183,
+        344
+      ],
+      "z": 9
+    },
+    {
+      "name": "nose",
+      "file": "layers/010.png",
+      "origin": [
+        490,
+        199
+      ],
+      "size": [
+        8,
+        9
+      ],
+      "z": 10
+    },
+    {
+      "name": "mouth",
+      "file": "layers/011.png",
+      "origin": [
+        497,
+        212
+      ],
+      "size": [
+        12,
+        9
+      ],
+      "z": 11
+    },
+    {
+      "name": "headwear",
+      "file": "layers/012.png",
+      "origin": [
+        385,
+        90
+      ],
+      "size": [
+        235,
+        146
+      ],
+      "z": 12
+    },
+    {
+      "name": "eyelash",
+      "file": "layers/013.png",
+      "origin": [
+        456,
+        165
+      ],
+      "size": [
+        81,
+        44
+      ],
+      "z": 13
+    },
+    {
+      "name": "eyewhite",
+      "file": "layers/014.png",
+      "origin": [
+        462,
+        170
+      ],
+      "size": [
+        70,
+        37
+      ],
+      "z": 14
+    },
+    {
+      "name": "irides",
+      "file": "layers/015.png",
+      "origin": [
+        465,
+        169
+      ],
+      "size": [
+        63,
+        37
+      ],
+      "z": 15
+    },
+    {
+      "name": "front hair",
+      "file": "layers/016.png",
+      "origin": [
+        409,
+        61
+      ],
+      "size": [
+        152,
+        215
+      ],
+      "z": 16
+    }
+  ],
+  "animation": {
+    "breathing": true
+  },
+  "preview": "preview.png"
+}
