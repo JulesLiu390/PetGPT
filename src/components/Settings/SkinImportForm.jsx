@@ -14,9 +14,12 @@ export default function SkinImportForm({ onSave, onCancel }) {
       if (!path) return;
       setSource(null);
       setError('');
-      const descriptor = directory
-        ? { kind: 'layered', name: '', detail: 'LayerDiff output or standard skin directory' }
-        : describeSkinImport(JSON.parse(await tauri.readFile(path)));
+      let descriptor = directory ? null : describeSkinImport(JSON.parse(await tauri.readFile(path)));
+      if (descriptor?.kind !== 'image') {
+        // Resolve layer images the way import will, so missing files are reported before importing.
+        const found = await tauri.inspectLayeredSkin(path);
+        descriptor = { kind: 'layered', name: found.name, detail: `${found.layers} layers${found.layerDiff ? ' · LayerDiff' : ''}` };
+      }
       setSource({ path, ...descriptor });
       setName(descriptor.name || '');
     } catch (err) { setError(String(err.message || err)); }
@@ -37,7 +40,7 @@ export default function SkinImportForm({ onSave, onCancel }) {
       <Button type="button" variant="secondary" disabled={busy} onClick={() => select(false)}>Select JSON</Button>
       <Button type="button" variant="secondary" disabled={busy} onClick={() => select(true)}>Select Folder</Button>
     </div>
-    <p className="text-xs text-slate-500">For LayerDiff, keep the *.psd.json file next to its matching image folder. PSD files are optional.</p>
+    <p className="text-xs text-slate-500">For LayerDiff, keep the *.psd.json file next to its matching image folder or layer PNGs. PSD files are optional.</p>
     {source && <>
       <div className="text-sm bg-slate-50 rounded-lg p-3 break-all">{source.path}<div className="text-slate-500 mt-1">{source.detail}</div></div>
       <FormGroup><Label>Skin Name</Label><Input value={name} onChange={e => setName(e.target.value)} maxLength={100} disabled={busy || source.kind === 'image'} placeholder="Use package name" /></FormGroup>

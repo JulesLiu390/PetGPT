@@ -76,11 +76,13 @@ fn asset(root: &Path, file: &str) -> Result<PathBuf, String> {
     {
         return Err(format!("Invalid skin asset path: {file}"));
     }
-    let root = root.canonicalize().map_err(|e| e.to_string())?;
-    let path = root
-        .join(file)
+    let root = root
         .canonicalize()
-        .map_err(|e| format!("Missing asset {file}: {e}"))?;
+        .map_err(|e| format!("Missing skin folder {}: {e}", root.display()))?;
+    let path = root.join(file);
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Missing asset {}: {e}", path.display()))?;
     if !path.starts_with(root) || !path.is_file() {
         return Err(format!("Asset is outside the skin directory: {file}"));
     }
@@ -173,8 +175,15 @@ fn find_metadata(source: &Path) -> Result<PathBuf, String> {
     }
 }
 
-/// Writes a self-contained package into an empty staging directory. Does not modify the source.
-fn normalize(source: &Path, destination: &Path, name: Option<&str>) -> Result<Manifest, String> {
+/// A source package resolved for import: the manifest to write and the image behind each layer.
+struct Plan {
+    manifest: Manifest,
+    sources: Vec<PathBuf>,
+    full_canvas: bool,
+}
+
+/// Reads and checks a source package without decoding images or writing anything.
+fn plan(source: &Path, name: Option<&str>) -> Result<Plan, String> {
     let metadata = find_metadata(source)?;
     let root = metadata.parent().ok_or("Missing source directory")?;
     let json = read_json(&metadata)?;
@@ -193,6 +202,7 @@ fn normalize(source: &Path, destination: &Path, name: Option<&str>) -> Result<Ma
         let stem = filename
             .strip_suffix(".psd.json")
             .ok_or("Select LayerDiff's *.psd.json metadata")?;
+        let folder = root.join(stem);
         let mut parts: Vec<_> = data.parts.into_iter().collect();
         if parts.iter().any(|(_, p)| !p.depth_median.is_finite()) {
             return Err("Invalid layer depth".into());
@@ -226,7 +236,13 @@ fn normalize(source: &Path, destination: &Path, name: Option<&str>) -> Result<Ma
                 animation: Animation { breathing: true },
                 preview: "preview.png".into(),
             },
-            root.join(stem),
+            // LayerDiff writes part images to a folder named after the metadata; some copies keep
+            // them beside it instead.
+            if folder.is_dir() {
+                folder
+            } else {
+                root.to_path_buf()
+            },
             true,
         )
     };
@@ -235,12 +251,30 @@ fn normalize(source: &Path, destination: &Path, name: Option<&str>) -> Result<Ma
     }
     validate(&manifest)?;
     manifest.layers.sort_by_key(|l| l.z);
+    let sources = manifest
+        .layers
+        .iter()
+        .map(|layer| asset(&image_root, &layer.file))
+        .collect::<Result<_, _>>()?;
+    Ok(Plan {
+        manifest,
+        sources,
+        full_canvas,
+    })
+}
+
+/// Writes a self-contained package into an empty staging directory. Does not modify the source.
+fn normalize(source: &Path, destination: &Path, name: Option<&str>) -> Result<Manifest, String> {
+    let Plan {
+        mut manifest,
+        sources,
+        full_canvas,
+    } = plan(source, name)?;
     fs::create_dir_all(destination.join("layers")).map_err(|e| e.to_string())?;
     let mut preview = RgbaImage::new(manifest.canvas[0], manifest.canvas[1]);
-    for (index, layer) in manifest.layers.iter_mut().enumerate() {
-        let path = asset(&image_root, &layer.file)?;
+    for (index, (layer, path)) in manifest.layers.iter_mut().zip(&sources).enumerate() {
         let img = read_png(
-            &path,
+            path,
             if full_canvas {
                 manifest.canvas
             } else {
@@ -326,6 +360,20 @@ pub async fn import_layered_skin(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+/// Checks a source the way import will, so missing layer images show up before importing.
+#[tauri::command]
+pub async fn inspect_layered_skin(source_path: String) -> Result<serde_json::Value, String> {
+    let checked = tauri::async_runtime::spawn_blocking(move || plan(Path::new(&source_path), None))
+        .await
+        .map_err(|e| e.to_string())??;
+    // Only LayerDiff layers are full-canvas images.
+    Ok(serde_json::json!({
+        "name": checked.manifest.name,
+        "layers": checked.manifest.layers.len(),
+        "layerDiff": checked.full_canvas,
+    }))
 }
 
 pub fn export_package(source: &Path, export_dir: &Path) -> Result<String, String> {
@@ -586,6 +634,31 @@ mod tests {
         assert!(install(&db, &skins, &source, None).is_err());
         assert!(db.get_all_skins().unwrap().is_empty());
         assert_eq!(fs::read_dir(&skins).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn layered_skin_imports_layerdiff_images_kept_beside_metadata() {
+        let tmp = Temp::new();
+        let source = fixture(&tmp.0);
+        for file in ["back.png", "front.png"] {
+            fs::rename(tmp.0.join("sample").join(file), tmp.0.join(file)).unwrap();
+        }
+        fs::remove_dir(tmp.0.join("sample")).unwrap();
+        // Folder selection resolves the same metadata and images.
+        assert_eq!(plan(&tmp.0, None).unwrap().manifest.layers.len(), 2);
+        let m = normalize(&source, &tmp.0.join("normalized"), None).unwrap();
+        assert_eq!(m.layers[0].name, "back");
+        assert_eq!(m.layers[1].origin, [3, 4]);
+    }
+
+    #[test]
+    fn layered_skin_inspection_names_the_missing_image() {
+        let tmp = Temp::new();
+        let source = fixture(&tmp.0);
+        fs::remove_file(tmp.0.join("sample/front.png")).unwrap();
+        let error = plan(&source, None).err().unwrap();
+        let missing = tmp.0.canonicalize().unwrap().join("sample/front.png");
+        assert!(error.contains(&missing.display().to_string()), "{error}");
     }
 
     #[test]

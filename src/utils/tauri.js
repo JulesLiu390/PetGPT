@@ -540,6 +540,7 @@ export const hideSkin = (id) => invoke('hide_skin', { id });
 export const restoreSkin = (id) => invoke('restore_skin', { id });
 export const importSkin = (jsonPath) => invoke('import_skin', { jsonPath });
 export const importLayeredSkin = (sourcePath, name = null) => invoke('import_layered_skin', { sourcePath, name });
+export const inspectLayeredSkin = (sourcePath) => invoke('inspect_layered_skin', { sourcePath });
 export const getSkinAppearance = (skinId, mood = 'normal') => invoke('get_skin_appearance', { skinId, mood });
 export const getCursorInWindow = () => invoke('get_cursor_in_window');
 export const startDragMotion = () => invoke('start_drag_motion');

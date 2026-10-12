@@ -4087,6 +4087,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             skin_packages::import_layered_skin,
+            skin_packages::inspect_layered_skin,
             skin_packages::get_skin_appearance,
             // Pet commands
             get_pets,
