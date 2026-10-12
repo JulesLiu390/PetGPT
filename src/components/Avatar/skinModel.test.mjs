@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  blinkTransform, describeSkinImport, gazeOffset, hairTransform, layerTransform, layeredRig, orderedSkinLayers,
-  skinViewBox,
+  blinkTransform, breathAt, describeSkinImport, gazeOffset, hairTransform, layerTransform, layeredRig,
+  orderedSkinLayers, skinViewBox, thoughtDots,
 } from './skinModel.js';
 
 test('recognizes LayerDiff, standard skins and legacy image skins', () => {
@@ -99,6 +99,82 @@ test('at rest only blink and sway animate; a swing turns the head about the neck
     > apply(hairTransform(hair, 1), [300, 531])[0]);
   // Eyes keep blinking inside the turned head.
   assert.equal(layerTransform(rig, 'eyelash', { seconds: 1, blink: 0.5, pose }).split('rotate(').length - 1, 3);
+});
+
+const breathing = { ...dressed, animation: { breathing: true }, layers: [
+  ...dressed.layers,
+  { name: 'neck', origin: [462, 215], size: [60, 40], z: 6 },
+  { name: 'handwear', origin: [330, 240], size: [340, 420], z: 6 },
+  { name: 'footwear', origin: [430, 900], size: [150, 60], z: 9 },
+] };
+
+test('a breath swells the chest from its hem and lifts the head and arms while the legs stay planted', () => {
+  const rig = layeredRig(breathing, { center: [498, 188], angle: -22.5 });
+  const inhaled = (name, point) => apply(layerTransform(rig, name, { seconds: 1, breath: 1 }), point);
+  for (const name of ['bottomwear', 'legwear', 'footwear', 'tail']) {
+    assert.equal(layerTransform(rig, name, { seconds: 1, breath: 1 }), '');
+  }
+  assert.equal(layerTransform(rig, 'topwear', { seconds: 1, breath: 0 }), '');
+  // The hem stays on the skirt while the shoulders rise and the chest widens.
+  assert.equal(inhaled('topwear', [400, 621])[1], 621);
+  const rise = 228 - inhaled('topwear', [504.5, 228])[1];
+  assert.ok(rise > 2 && rise < 8, `shoulders rise ${rise}px`);
+  assert.ok(inhaled('topwear', [363, 400])[0] < 363);
+  // The head moves exactly as far as the neck does at the chin, and the face is not stretched.
+  const chin = inhaled('face', [492, 235]);
+  assert.ok(Math.abs(chin[1] - inhaled('neck', [492, 235])[1]) < 1e-9);
+  close([inhaled('face', [492, 117])[1] - chin[1]], [117 - 235]);
+  // The shoulders carry the arms.
+  assert.ok(Math.abs(inhaled('handwear', [350, 600])[1] - (600 - rise)) < 1e-9);
+  // Breathing applies outermost, so a swing still turns the head about its lifted chin.
+  const turned = layerTransform(rig, 'face', { seconds: 1, breath: 1, pose: { head: 3 } });
+  close(apply(turned, [492, 235]), chin);
+});
+
+test('a head tilt rolls the head about the neck and leaves the body alone', () => {
+  const rig = layeredRig(dressed, { center: [498, 188], angle: -22.5 });
+  const tilted = layerTransform(rig, 'face', { seconds: 1, tilt: 4 });
+  close(apply(tilted, [492, 235]), [492, 235]);
+  assert.ok(apply(tilted, [492, 117])[0] > 492, 'a clockwise tilt moves the crown right');
+  assert.equal(layerTransform(rig, 'topwear', { seconds: 1, tilt: 4 }), '');
+  assert.equal(layerTransform(rig, 'face', { seconds: 1, tilt: 0 }), '');
+});
+
+test('thought dots float just above the crown, right of the face, sized to it', () => {
+  const dots = thoughtDots(dressed);
+  assert.equal(dots.length, 3);
+  // The front hair's top at y = 61 is the crown; the face spans x 440–544.
+  assert.ok(dots.every(d => d.cy + d.r < 61 && d.cx > 492 && d.r > 0), JSON.stringify(dots));
+  assert.ok(dots[0].cx < dots[1].cx && dots[1].cx < dots[2].cx);
+  assert.deepEqual(thoughtDots({ layers: [{ name: 'body', origin: [0, 0], size: [1, 1] }] }), []);
+});
+
+test('packages the rig cannot read breathe as one piece', () => {
+  assert.equal(layeredRig(dressed, null).breath, null, 'the manifest must enable breathing');
+  assert.equal(layeredRig({ ...breathing, animation: { breathing: false } }, null).breath, null);
+  const cape = { ...breathing, layers: [...breathing.layers, { name: 'cape', origin: [300, 200], size: [400, 600], z: 0 }] };
+  assert.equal(layeredRig(cape, null).breath, null);
+  assert.ok(!layeredRig(cape, null).parts.has('topwear'));
+});
+
+test('breaths pause between cycles and vary in pace and depth', () => {
+  assert.equal(breathAt(0), 0);
+  const starts = [];
+  const peaks = [];
+  for (let i = 1, previous = 0; i < 180 * 50; i++) {
+    const fill = breathAt(i / 50);
+    assert.ok(fill >= 0 && fill <= 1.4);
+    if (fill && !previous) {
+      starts.push(i / 50);
+      peaks.push(0);
+    }
+    if (fill) peaks[peaks.length - 1] = Math.max(peaks.at(-1), fill);
+    previous = fill;
+  }
+  const gaps = starts.slice(1).map((t, i) => t - starts[i]);
+  assert.ok(Math.min(...gaps) < 4.3 && Math.max(...gaps) > 4.7, `breaths every ${Math.min(...gaps)}–${Math.max(...gaps)} s`);
+  assert.ok(peaks.some(p => p > 1.2), 'an occasional deep breath');
+  assert.ok(new Set(peaks.map(p => p.toFixed(2))).size > 10);
 });
 
 test('blinking keeps the tilted eye line and squeezes across it', () => {

@@ -47,6 +47,7 @@
   background: #fff1f2;
   color: #9f1239;
 }
+/* Whole-body fallback; skins rigged by LayerDiff tags breathe part by part in JS. */
 .skin-character-breathing {
   transform-box: fill-box;
   transform-origin: center bottom;
@@ -56,6 +57,21 @@
   0%, 100% { transform: scale(1, 1); }
   50% { transform: scale(1.003, 1.007); }
 }
+/* "…" beside the head while the assistant is thinking. */
+.skin-thought-dots { animation: skin-thought-in 0.3s ease-out; }
+.skin-thought-dots circle {
+  fill: #fff;
+  stroke: rgba(15, 23, 42, 0.55);
+  animation: skin-thought-dot 1.2s ease-in-out infinite;
+}
+@keyframes skin-thought-in {
+  from { opacity: 0; }
+}
+@keyframes skin-thought-dot {
+  0%, 100% { opacity: 0.3; }
+  40% { opacity: 1; }
+}
 @media (prefers-reduced-motion: reduce) {
   .skin-character-breathing { animation: none; }
+  .skin-thought-dots, .skin-thought-dots circle { animation: none; }
 }
