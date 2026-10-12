@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
 import { motion } from 'motion/react';
-import { FaRocketchat, FaKey, FaRobot } from "react-icons/fa";
-import { FaPlug, FaUserGroup } from "react-icons/fa6";
+import { FaRocketchat } from "react-icons/fa";
+import { FaUserGroup } from "react-icons/fa6";
 import { IoIosSettings } from "react-icons/io";
 import * as tauri from '../utils/tauri';
 import { getRandomIdleState } from '../utils/moodDetector';
@@ -484,23 +484,10 @@ export const Character = () => {
     resetIdleTimer();
     tauri.toggleChatWindow('chat');
   }, [resetIdleTimer]);
-  const handleClickApi = () => {
-    resetIdleTimer();
-    tauri.changeManageWindow('api');
-  };
-  const handleClickSelectCharacter = () => {
-    resetIdleTimer();
-    tauri.changeManageWindow('assistants');
-  };
   const handleClickSettings = () => {
     resetIdleTimer();
     tauri.changeSettingsWindow();
   };
-  const handleClickMcp = () => {
-    resetIdleTimer();
-    tauri.changeManageWindow('mcp');
-  };
-
   const handleToggleSocial = async () => {
     resetIdleTimer();
     tauri.openSocialWindow(); // toggle show/hide
@@ -849,21 +836,6 @@ export const Character = () => {
             <FaRocketchat
               title="Chat Window"
               onClick={handleClick}
-              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
-            />
-            <FaKey
-              title="API Management"
-              onClick={handleClickApi}
-              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
-            />
-            <FaRobot
-              title="Assistants"
-              onClick={handleClickSelectCharacter}
-              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
-            />
-            <FaPlug
-              title="MCP Servers"
-              onClick={handleClickMcp}
               className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
             />
             <FaUserGroup
