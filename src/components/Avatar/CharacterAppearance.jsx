@@ -13,8 +13,6 @@ import './CharacterAppearance.css';
 
 // Iris easing rate per second: quick enough to read as a glance, smooth enough to hide polling.
 const GAZE_RATE = 12;
-// Idle glances wait until the cursor has rested this long, so they never pull away from a moving one.
-const IDLE_AFTER = 2.5;
 // Thinking slows breathing to this share of its usual pace.
 const THINKING_BREATH = 0.7;
 
@@ -35,7 +33,6 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
     let startedAt = null;
     let lastFrame = null;
     let lastPoint = null;
-    let rested = null;
     let breathClock = 0;
     let breathPace = 1;
     let aim = [0, 0];
@@ -54,14 +51,9 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
       const seconds = (now - startedAt) / 1000;
       const elapsed = lastFrame === null ? 0 : Math.min(0.1, (now - lastFrame) / 1000);
       lastFrame = now;
-      const point = cursor?.current() ?? null;
-      if (point && (!rested || Math.hypot(point.x - rested.x, point.y - rested.y) > 2)) rested = { ...point, since: seconds };
       const pose = currentSwingPose();
       const isThinking = thinkingRef.current;
-      const head = headMotion.update(seconds, {
-        thinking: isThinking,
-        idle: !pose && seconds - (rested?.since ?? -Infinity) > IDLE_AFTER,
-      });
+      const head = headMotion.update(seconds, { thinking: isThinking, dragging: Boolean(pose) });
       // Integrating the pace keeps the breath curve continuous while thinking slows it.
       breathPace += ((isThinking ? THINKING_BREATH : 1) - breathPace) * (1 - Math.exp(-2 * elapsed));
       breathClock += elapsed * breathPace;
@@ -80,6 +72,7 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
         }
       }
       if (iris) {
+        const point = cursor.current();
         if (point !== lastPoint) {
           aim = aimAt(point);
           lastPoint = point;
