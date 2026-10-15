@@ -34,19 +34,21 @@ fn position(window: &WebviewWindow) -> Option<(f64, f64)> {
     Some((x / sf, y / sf))
 }
 
+/// Whether the primary mouse button is down anywhere on the desktop, where the OS can say so
+/// without an event to read it from.
 #[cfg(target_os = "macos")]
-fn primary_button_released() -> bool {
+pub(crate) fn primary_button_down() -> Option<bool> {
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGEventSourceButtonState(state_id: i32, button: u32) -> bool;
     }
     // kCGEventSourceStateCombinedSessionState, kCGMouseButtonLeft
-    !unsafe { CGEventSourceButtonState(0, 0) }
+    Some(unsafe { CGEventSourceButtonState(0, 0) })
 }
 
 #[cfg(not(target_os = "macos"))]
-fn primary_button_released() -> bool {
-    false
+pub(crate) fn primary_button_down() -> Option<bool> {
+    None
 }
 
 #[tauri::command]
@@ -68,7 +70,7 @@ pub fn start_drag_motion(window: WebviewWindow) {
                     emit(point, false);
                 }
             }
-            if primary_button_released() || moved_at.elapsed() > IDLE_LIMIT {
+            if primary_button_down() == Some(false) || moved_at.elapsed() > IDLE_LIMIT {
                 // Announce only this session's own end; a superseded session stays silent.
                 if SESSION
                     .compare_exchange(session, session + 1, Ordering::SeqCst, Ordering::SeqCst)

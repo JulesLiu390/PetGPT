@@ -543,6 +543,8 @@ export const importLayeredSkin = (sourcePath, name = null) => invoke('import_lay
 export const inspectLayeredSkin = (sourcePath) => invoke('inspect_layered_skin', { sourcePath });
 export const getSkinAppearance = (skinId, mood = 'normal') => invoke('get_skin_appearance', { skinId, mood });
 export const getCursorInWindow = () => invoke('get_cursor_in_window');
+// Parts of the character window that catch the mouse, in CSS pixels; elsewhere clicks reach the apps behind. Null makes the whole window catch it.
+export const setCharacterHitRegion = (rects) => invoke('set_character_hit_region', { rects });
 export const startDragMotion = () => invoke('start_drag_motion');
 export const stopDragMotion = () => invoke('stop_drag_motion');
 export const onDragMotion = (callback) => subscribeToTauriEvent('drag-motion', event => callback(event.payload));

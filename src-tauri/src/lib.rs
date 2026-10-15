@@ -1,3 +1,4 @@
+mod click_through;
 mod database;
 mod drag_motion;
 mod skin_packages;
@@ -3751,52 +3752,47 @@ pub fn run() {
             }
 
             // Setup mouse hover detection (polls cursor position)
+            // The character window also switches click-through here, so clicks on its transparent
+            // parts reach the apps behind; the page reports where the pet is drawn.
+            app.manage(click_through::HitRegion::default());
             {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
+                    const CHAT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
                     let mut last_mouse_over_chat = false;
-                    let mut last_mouse_over_character = false;
+                    let mut chat_checked_at = std::time::Instant::now();
+                    let mut character_pointer = click_through::CharacterPointer::new();
+                    let mut wait = CHAT_INTERVAL;
                     loop {
-                        std::thread::sleep(std::time::Duration::from_millis(100));
+                        std::thread::sleep(wait);
                         
                         // Check chat window
-                        if let Some(chat) = app_handle.get_webview_window("chat") {
-                            if !chat.is_visible().unwrap_or(false) {
-                                if last_mouse_over_chat {
-                                    last_mouse_over_chat = false;
-                                    let _ = chat.emit("mouse-over-chat", false);
-                                }
-                            } else if let Ok(cursor_pos) = chat.cursor_position() {
-                                if let (Ok(window_pos), Ok(window_size)) = (chat.outer_position(), chat.outer_size()) {
-                                    let is_mouse_over = window_layout::is_cursor_in_window(
-                                        cursor_pos.x, cursor_pos.y,
-                                        window_pos.x as f64, window_pos.y as f64,
-                                        window_size.width as f64, window_size.height as f64,
-                                    );
-                                    if is_mouse_over != last_mouse_over_chat {
-                                        last_mouse_over_chat = is_mouse_over;
-                                        let _ = chat.emit("mouse-over-chat", is_mouse_over);
+                        if chat_checked_at.elapsed() >= CHAT_INTERVAL {
+                            chat_checked_at = std::time::Instant::now();
+                            if let Some(chat) = app_handle.get_webview_window("chat") {
+                                if !chat.is_visible().unwrap_or(false) {
+                                    if last_mouse_over_chat {
+                                        last_mouse_over_chat = false;
+                                        let _ = chat.emit("mouse-over-chat", false);
+                                    }
+                                } else if let Ok(cursor_pos) = chat.cursor_position() {
+                                    if let (Ok(window_pos), Ok(window_size)) = (chat.outer_position(), chat.outer_size()) {
+                                        let is_mouse_over = window_layout::is_cursor_in_window(
+                                            cursor_pos.x, cursor_pos.y,
+                                            window_pos.x as f64, window_pos.y as f64,
+                                            window_size.width as f64, window_size.height as f64,
+                                        );
+                                        if is_mouse_over != last_mouse_over_chat {
+                                            last_mouse_over_chat = is_mouse_over;
+                                            let _ = chat.emit("mouse-over-chat", is_mouse_over);
+                                        }
                                     }
                                 }
                             }
                         }
                         
-                        // Check character window
-                        if let Some(character) = app_handle.get_webview_window("character") {
-                            if let Ok(cursor_pos) = character.cursor_position() {
-                                if let (Ok(window_pos), Ok(window_size)) = (character.outer_position(), character.outer_size()) {
-                                    let is_mouse_over = window_layout::is_cursor_in_window(
-                                        cursor_pos.x, cursor_pos.y,
-                                        window_pos.x as f64, window_pos.y as f64,
-                                        window_size.width as f64, window_size.height as f64,
-                                    );
-                                    if is_mouse_over != last_mouse_over_character {
-                                        last_mouse_over_character = is_mouse_over;
-                                        let _ = character.emit("mouse-over-character", is_mouse_over);
-                                    }
-                                }
-                            }
-                        }
+                        // Check character window; it samples faster while the cursor is near the pet
+                        wait = character_pointer.poll(&app_handle);
                     }
                 });
             }
@@ -4203,6 +4199,7 @@ pub fn run() {
             set_window_always_on_top,
             get_window_position,
             get_cursor_in_window,
+            click_through::set_character_hit_region,
             drag_motion::start_drag_motion,
             drag_motion::stop_drag_motion,
             set_window_position,

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef, useCallback } from 'react';
-import { motion } from 'motion/react';
+import { AnimatePresence, motion } from 'motion/react';
 import { FaRocketchat } from "react-icons/fa";
 import { FaUserGroup } from "react-icons/fa6";
 import { IoIosSettings } from "react-icons/io";
@@ -7,12 +7,48 @@ import * as tauri from '../utils/tauri';
 import { getRandomIdleState } from '../utils/moodDetector';
 import CharacterAppearance from '../components/Avatar/CharacterAppearance';
 import { beginDragSwing } from '../components/Avatar/dragSwing';
+import { measureHitRegion, regionContains, restingRect } from '../components/Avatar/hitRegion';
+import { requestHop } from '../components/Avatar/petReactions';
 import { swingLever } from '../components/Avatar/swingPhysics';
 import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
 import { scopeSocialStatus, shouldApplySocialCommand } from '../utils/socialControlScope';
 
 // 拖动检测配置
 const DRAG_THRESHOLD = 8; // 留出轻微手抖空间，移动超过 8px 才视为拖动
+const TOOLBAR_HIT_PADDING = 4; // 工具栏四周多算 4px 进可点区域，贴着边点也点得到
+
+/**
+ * 人物图案在窗口里接鼠标的区域（静止姿势，单位是窗口的 CSS 像素）。
+ * 换皮肤、换表情图、改窗口大小时重新量；还没量出来或量失败时返回 null，整个窗口照常接鼠标。
+ */
+function useArtworkRegion(areaRef, shape) {
+  const [measured, setMeasured] = useState({ shape: null, rects: null });
+  useEffect(() => {
+    const area = areaRef.current;
+    if (!area || !shape) return undefined;
+    let run = 0;
+    const measure = () => {
+      const current = ++run;
+      const { left, top, width, height } = area.getBoundingClientRect();
+      measureHitRegion(shape, { left, top, width, height }, window.innerWidth, window.innerHeight)
+        .then(rects => {
+          if (current === run) setMeasured({ shape, rects });
+        })
+        .catch(error => {
+          console.warn('[Character] Could not measure the character outline; the whole window stays clickable:', error);
+          if (current === run) setMeasured({ shape, rects: null });
+        });
+    };
+    // observe 时会先回调一次；窗口大小一变，人物区域跟着变，再量一次
+    const observer = new ResizeObserver(measure);
+    observer.observe(area);
+    return () => {
+      run += 1;
+      observer.disconnect();
+    };
+  }, [areaRef, shape]);
+  return measured.shape === shape ? measured.rects : null;
+}
 
 // ============ 状态系统常量 ============
 
@@ -701,6 +737,14 @@ export const Character = () => {
   }, []);
 
   // ========== 人物单击与窗口拖动 ==========
+  // 只有人物本身和工具栏接鼠标，透明空白处的点击交给后面的窗口：
+  // Rust 按光标位置切换整个窗口的鼠标穿透，这里量出哪些地方算人物告诉它
+  const characterAreaRef = useRef(null);
+  const toolbarRef = useRef(null);
+  const hitRegionRef = useRef(null);
+  const [hitShape, setHitShape] = useState(null);
+  const artworkRegion = useArtworkRegion(characterAreaRef, hitShape);
+
   const dragState = useRef({
     isMouseDown: false,
     startX: 0,
@@ -761,6 +805,7 @@ export const Character = () => {
 
     clearCharacterGestureListeners();
     if (!dragState.current.isDragging && distance <= DRAG_THRESHOLD) {
+      requestHop();
       handleClick();
     }
 
@@ -780,6 +825,8 @@ export const Character = () => {
 
   const handleCharacterMouseDown = useCallback((e) => {
     if (e.button !== 0) return;
+    // 穿透还没切过来的一瞬间点到空白处，也不算点人物
+    if (!regionContains(hitRegionRef.current, e.clientX, e.clientY)) return;
 
     const area = e.currentTarget.getBoundingClientRect();
     dragState.current = {
@@ -819,45 +866,64 @@ export const Character = () => {
   // 工具栏显示逻辑：如果有其他窗口打开则一直显示，否则使用鼠标悬停逻辑
   const showToolbar = hasOtherWindowOpen || isMouseOver;
 
+  useEffect(() => {
+    const toolbar = showToolbar ? toolbarRef.current : null;
+    const region = artworkRegion && (toolbar ? [...artworkRegion, restingRect(toolbar, TOOLBAR_HIT_PADDING)] : artworkRegion);
+    hitRegionRef.current = region;
+    tauri.setCharacterHitRegion(region).catch(error => {
+      console.warn('[Character] Failed to update the hit region:', error);
+    });
+  }, [artworkRegion, showToolbar]);
+
   return (
     <div
-      className="select-none h-full w-full flex flex-col justify-center items-center rounded-xl overflow-hidden"
+      className="relative select-none h-full w-full flex flex-col justify-center items-center rounded-xl overflow-hidden"
     >
-      {/* 顶部按钮区 */}
-      <div className="h-[50px] w-full shrink-0">
-        {showToolbar && (
-          <motion.div
-            className="flex justify-evenly items-center gap-2 py-2 bg-black/30 rounded-lg p-2"
-            initial={{ opacity: 0, y: -10 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -10 }}
-            transition={{ duration: 0.3 }}
-          >
-            <FaRocketchat
-              title="Chat Window"
-              onClick={handleClick}
-              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
-            />
-            <FaUserGroup
-              title="Social"
-              onClick={handleToggleSocial}
-              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
-            />
-            <IoIosSettings
-              title="Settings"
-              onClick={handleClickSettings}
-              className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
-            />
-          </motion.div>
-        )}
-      </div>
+      {/* 顶部留白：拎起时身体拉长、小跳都会用到上面这块空间 */}
+      <div className="h-[50px] w-full shrink-0" />
 
-      {/* 角色图片 - 可拖动区域 */}
+      {/* 角色图片：只有人物本身能点、能拖，透明处的点击穿到后面的窗口 */}
       <div
+        ref={characterAreaRef}
         className="flex-1 min-h-0 min-w-0 w-full flex items-center justify-center cursor-default"
         onMouseDown={handleCharacterMouseDown}
       >
-        <CharacterAppearance skinId={currentSkinId} mood={hasMood ? characterMood : "normal"} />
+        <CharacterAppearance skinId={currentSkinId} mood={hasMood ? characterMood : "normal"} onHitShape={setHitShape} />
+      </div>
+
+      {/* 左侧竖排工具栏：浮在人物左边的空白里，在人物区域里上下居中，对着人物的中间。
+          和拖动区域并列而不是放在里面，点图标不会算成点人物；
+          离左边缘 20px，聊天窗口压住人物窗口左边时也不会被挡住。
+          外层只管定位、不接鼠标；工具栏显示时它所在的那块也算可点区域 */}
+      <div className="absolute left-5 top-[50px] bottom-0 flex items-center pointer-events-none">
+        <AnimatePresence>
+          {showToolbar && (
+            <motion.div
+              ref={toolbarRef}
+              className="pointer-events-auto flex flex-col items-center gap-3 px-2 py-3 bg-black/30 rounded-full"
+              initial={{ opacity: 0, x: -10 }}
+              animate={{ opacity: 1, x: 0 }}
+              exit={{ opacity: 0, x: -10 }}
+              transition={{ duration: 0.3 }}
+            >
+              <FaRocketchat
+                title="Chat Window"
+                onClick={handleClick}
+                className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
+              />
+              <FaUserGroup
+                title="Social"
+                onClick={handleToggleSocial}
+                className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
+              />
+              <IoIosSettings
+                title="Settings"
+                onClick={handleClickSettings}
+                className="text-gray-100 hover:text-gray-400 hover:scale-110 transition-all duration-300 ease-in-out cursor-pointer"
+              />
+            </motion.div>
+          )}
+        </AnimatePresence>
       </div>
     </div>
   );

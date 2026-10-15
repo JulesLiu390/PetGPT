@@ -6,6 +6,9 @@ import { blinkScaleAt } from './avatarRendering';
 import { watchCursor } from './cursorTracker';
 import { currentSwingPose, subscribeSwing } from './dragSwing';
 import { createHeadMotion } from './headMotion';
+import { fitBottomCenter } from './hitRegion';
+import { hopCount, hopPose } from './petReactions';
+import { createWind } from './wind';
 import {
   breathAt, gazeOffset, layerTransform, layeredRig, orderedSkinLayers, skinViewBox, thoughtDots,
 } from './skinModel';
@@ -16,25 +19,31 @@ const GAZE_RATE = 12;
 // Thinking slows breathing to this share of its usual pace.
 const THINKING_BREATH = 0.7;
 
-/** Breathing, blink, gaze, head tilts, hair sway and the drag swing's secondary motion on one clock, written straight to the SVG. */
-function useLayeredMotion(svgRef, rig, animated, thinking) {
+/** Breathing, blink, gaze, head tilts, hops, gusts, hair sway and the drag swing's secondary motion on one clock, written straight to the DOM. */
+function useLayeredMotion(svgRef, viewportRef, rig, animated, thinking) {
   // Read every frame rather than restarting the effect, so a mood change never resets the clock.
   const thinkingRef = useRef(thinking);
   useEffect(() => { thinkingRef.current = thinking; }, [thinking]);
   useEffect(() => {
     const svg = svgRef.current;
-    if (!svg || !animated || !rig.parts.size) return undefined;
+    const viewport = viewportRef.current;
+    if (!svg || !viewport || !animated || !rig.parts.size) return undefined;
     const parts = [...svg.querySelectorAll('[data-part]')].map(element => ({ element, name: element.dataset.part, last: '' }));
     const iris = svg.querySelector('[data-gaze]');
     const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
     const cursor = iris ? watchCursor() : null;
     const headMotion = createHeadMotion();
+    const wind = createWind();
     let rafId = null;
     let startedAt = null;
     let lastFrame = null;
     let lastPoint = null;
     let breathClock = 0;
     let breathPace = 1;
+    // Clicks from before this character appeared are not replayed.
+    let hopsSeen = hopCount();
+    let hopStart = null;
+    let lastHop = '';
     let aim = [0, 0];
     let gaze = [0, 0];
 
@@ -57,12 +66,14 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
       // Integrating the pace keeps the breath curve continuous while thinking slows it.
       breathPace += ((isThinking ? THINKING_BREATH : 1) - breathPace) * (1 - Math.exp(-2 * elapsed));
       breathClock += elapsed * breathPace;
+      wind.advance(seconds);
       const frame = {
         seconds,
         blink: rig.eyes ? blinkScaleAt(seconds) : 1,
         pose,
         breath: rig.breath ? breathAt(breathClock) : 0,
         tilt: head.tilt,
+        wind: lag => wind.at(seconds - lag),
       };
       for (const part of parts) {
         const transform = layerTransform(rig, part.name, frame);
@@ -70,6 +81,21 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
           part.element.setAttribute('transform', transform);
           part.last = transform;
         }
+      }
+      // A click mid-hop is absorbed rather than restarting it.
+      if (hopCount() !== hopsSeen) {
+        hopsSeen = hopCount();
+        hopStart ??= seconds;
+      }
+      const hop = hopStart === null ? null : hopPose(seconds - hopStart);
+      if (!hop) hopStart = null;
+      // The whole viewport hops, so the jump is not clipped by its box; it is about as tall as the character.
+      const hopTransform = hop
+        ? `translateY(${(-hop.rise * 100).toFixed(3)}%) scale(${1 - (hop.stretch - 1) / 2}, ${hop.stretch})`
+        : '';
+      if (hopTransform !== lastHop) {
+        viewport.style.transform = hopTransform;
+        lastHop = hopTransform;
       }
       if (iris) {
         const point = cursor.current();
@@ -91,6 +117,9 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
       }
       iris?.removeAttribute('transform');
       gaze = [0, 0];
+      viewport.style.transform = '';
+      lastHop = '';
+      hopStart = null;
     };
     const resume = () => {
       cancelAnimationFrame(rafId);
@@ -109,24 +138,34 @@ function useLayeredMotion(svgRef, rig, animated, thinking) {
       cursor?.release();
       rest();
     };
-  }, [svgRef, rig, animated]);
+  }, [svgRef, viewportRef, rig, animated]);
 }
 
-function LayeredCharacter({ appearance, mood, preview, animated, onError }) {
+const placed = layer => ({ x: layer.origin[0], y: layer.origin[1], width: layer.size[0], height: layer.size[1] });
+
+function LayeredCharacter({ appearance, mood, preview, animated, onError, onHitShape }) {
   const { manifest, basePath, previewPath, eyeLine } = appearance;
+  const viewportRef = useRef(null);
   const svgRef = useRef(null);
   const maskId = `skin-iris-${useId().replace(/[^\w-]/g, '')}`;
   const rig = useMemo(() => layeredRig(manifest, eyeLine), [manifest, eyeLine]);
   const dots = useMemo(() => thoughtDots(manifest), [manifest]);
   const moving = animated && !preview;
   const thinking = moving && mood === 'thinking';
-  useLayeredMotion(svgRef, rig, moving, thinking);
+  useLayeredMotion(svgRef, viewportRef, rig, moving, thinking);
   const eyes = moving ? rig.eyes : null;
   // Previews and packages the rig cannot read breathe as one piece.
   const breatheWhole = animated && manifest.animation.breathing && !(moving && rig.breath);
   const href = layer => convertFileSrc(`${basePath}/${layer.file}`);
-  const placed = layer => ({ x: layer.origin[0], y: layer.origin[1], width: layer.size[0], height: layer.size[1] });
-  return (
+  useEffect(() => {
+    if (!onHitShape || preview) return undefined;
+    onHitShape({
+      images: orderedSkinLayers(manifest).map(layer => ({ src: convertFileSrc(`${basePath}/${layer.file}`), ...placed(layer) })),
+      place: fitBottomCenter(skinViewBox(manifest).split(' ').map(Number)),
+    });
+    return () => onHitShape(null);
+  }, [onHitShape, preview, manifest, basePath]);
+  return <div ref={viewportRef} className="skin-character-viewport">
     <svg ref={svgRef} className="skin-character" viewBox={skinViewBox(manifest)} preserveAspectRatio="xMidYMax meet" aria-label={manifest.name} role="img">
       {eyes?.irisMask && <defs>
         <mask id={maskId} maskUnits="userSpaceOnUse" x={eyes.irisRegion[0]} y={eyes.irisRegion[1]}
@@ -152,7 +191,7 @@ function LayeredCharacter({ appearance, mood, preview, animated, onError }) {
         {dots.map((dot, index) => <circle key={index} {...dot} strokeWidth={dot.r * 0.3} style={{ animationDelay: `${index * 0.2}s` }} />)}
       </g>}
     </svg>
-  );
+  </div>;
 }
 
 /** Whole-body drag swing about the grab point, for every kind of skin including the default. */
@@ -181,14 +220,32 @@ function SwingFrame({ children }) {
   return <div ref={ref} className="skin-character-swing">{children}</div>;
 }
 
+function ImageCharacter({ path, onError, onHitShape }) {
+  const src = convertFileSrc(path);
+  const [natural, setNatural] = useState(null);
+  // A mood switches the image; its outline is known once the new one has loaded.
+  const loaded = natural?.src === src ? natural : null;
+  useEffect(() => {
+    if (!onHitShape || !loaded) return undefined;
+    const { width, height } = loaded;
+    onHitShape({ images: [{ src, x: 0, y: 0, width, height }], place: fitBottomCenter([0, 0, width, height]) });
+    return () => onHitShape(null);
+  }, [onHitShape, loaded, src]);
+  return <div className="skin-character-viewport">
+    <img className="skin-character skin-character-image" src={src} alt="Character" draggable={false} onError={onError}
+      onLoad={event => setNatural({ src, width: event.currentTarget.naturalWidth, height: event.currentTarget.naturalHeight })} />
+  </div>;
+}
+
 // Remount on identity changes so stale async responses or broken textures cannot leak to another pet.
-export default function CharacterAppearance({ skinId, mood = 'normal', animated = true, preview = false }) {
+// `onHitShape` receives the artwork's resting outline (see hitRegion.js), or null while there is none.
+export default function CharacterAppearance({ skinId, mood = 'normal', animated = true, preview = false, onHitShape }) {
   return <SwingFrame>
-    <SkinAppearance key={skinId || 'default'} skinId={skinId} mood={mood} animated={animated} preview={preview} />
+    <SkinAppearance key={skinId || 'default'} skinId={skinId} mood={mood} animated={animated} preview={preview} onHitShape={onHitShape} />
   </SwingFrame>;
 }
 
-function SkinAppearance({ skinId, mood, animated, preview }) {
+function SkinAppearance({ skinId, mood, animated, preview, onHitShape }) {
   const [loaded, setLoaded] = useState(null);
   const [revision, setRevision] = useState(0);
   const [error, setError] = useState(null);
@@ -215,11 +272,11 @@ function SkinAppearance({ skinId, mood, animated, preview }) {
 
   const appearance = loaded;
   if (!skinId) {
-    return <PseudoLive2DCharacter mood={mood} animated={animated} />;
+    return <PseudoLive2DCharacter mood={mood} animated={animated} onHitShape={onHitShape} />;
   }
   if (error) {
     return <div className="skin-character-status" role="status" title={error}>
-      {!preview && <PseudoLive2DCharacter mood={mood} animated={animated} />}
+      {!preview && <PseudoLive2DCharacter mood={mood} animated={animated} onHitShape={onHitShape} />}
       <span className="skin-character-error">{preview ? 'Skin unavailable' : 'Skin unavailable — showing default'}</span>
     </div>;
   }
@@ -228,11 +285,7 @@ function SkinAppearance({ skinId, mood, animated, preview }) {
   }
   const onImageError = () => setError('Skin image could not be loaded');
   if (appearance.kind === 'layered') {
-    return <div className="skin-character-viewport">
-      <LayeredCharacter appearance={appearance} mood={mood} preview={preview} animated={animated} onError={onImageError} />
-    </div>;
+    return <LayeredCharacter appearance={appearance} mood={mood} preview={preview} animated={animated} onError={onImageError} onHitShape={onHitShape} />;
   }
-  return <div className="skin-character-viewport">
-    <img className="skin-character skin-character-image" src={convertFileSrc(appearance.path)} alt="Character" draggable={false} onError={onImageError} />
-  </div>;
+  return <ImageCharacter path={appearance.path} onError={onImageError} onHitShape={preview ? undefined : onHitShape} />;
 }

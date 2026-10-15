@@ -140,6 +140,27 @@ test('a head tilt rolls the head about the neck and leaves the body alone', () =
   assert.equal(layerTransform(rig, 'face', { seconds: 1, tilt: 0 }), '');
 });
 
+test('a gust to the right blows the hair, skirt and tail that way from their roots', () => {
+  const rig = layeredRig(dressed, null);
+  const blown = (name, point, wind = () => 1) => apply(layerTransform(rig, name, { seconds: 1, wind }), point);
+  const calm = (name, point) => apply(layerTransform(rig, name, { seconds: 1 }), point);
+  // Hair skews from its roots; the stiffer bangs move less.
+  close(blown('back hair', [300, 91]), calm('back hair', [300, 91]));
+  const back = blown('back hair', [300, 191])[0] - calm('back hair', [300, 191])[0];
+  const front = blown('front hair', [450, 161])[0] - calm('front hair', [450, 161])[0];
+  assert.ok(back > front && front > 0, `back ${back}, front ${front}`);
+  // The skirt flares from the waist and the hanging tail swings its tip downwind.
+  close(blown('bottomwear', [400, 401]), [400, 401]);
+  assert.ok(blown('bottomwear', [400, 687])[0] > 400);
+  close(blown('tail', [594, 515]), [594, 515]);
+  assert.ok(blown('tail', [712, 743])[0] > 712);
+  // Just as a gust arrives only the back hair has felt it; the rest trail behind.
+  const arriving = lag => (lag < 0.05 ? 1 : 0);
+  assert.ok(blown('back hair', [300, 191], arriving)[0] > calm('back hair', [300, 191])[0]);
+  close(blown('front hair', [450, 161], arriving), calm('front hair', [450, 161]));
+  assert.equal(layerTransform(rig, 'bottomwear', { seconds: 1, wind: arriving }), '');
+});
+
 test('thought dots float just above the crown, right of the face, sized to it', () => {
   const dots = thoughtDots(dressed);
   assert.equal(dots.length, 3);

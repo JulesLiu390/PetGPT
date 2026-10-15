@@ -35,10 +35,14 @@ const HEAD_LAYERS = [
   'nose', 'mouth', 'eyewear', 'headwear', 'front hair',
 ];
 // Skew in degrees at the hair tips; the bangs trail the back hair slightly and are stiffer.
+// gust is the extra skew in a full gust and how many seconds that part trails the wind.
 const HAIR_SWAY = [
-  { name: 'back hair', amplitude: 0.9, lag: 0, inertia: 1 },
-  { name: 'front hair', amplitude: 0.6, lag: 0.35, inertia: 0.5 },
+  { name: 'back hair', amplitude: 0.9, lag: 0, inertia: 1, gust: [5, 0] },
+  { name: 'front hair', amplitude: 0.6, lag: 0.35, inertia: 0.5, gust: [3, 0.1] },
 ];
+const SKIRT_GUST = [4, 0.18];
+const TAIL_GUST = [7, 0.08];
+const still = () => 0;
 // Every LayerDiff tag by what a breath does to it; packages with other names breathe as one piece.
 const CHEST_LAYERS = ['topwear', 'neckwear', 'neck'];
 const CARRIED_LAYERS = ['handwear', 'objects', 'wings'];
@@ -79,9 +83,14 @@ export function layeredRig(manifest, eyeLine) {
   const torso = ['topwear', 'bottomwear'].map(name => layers.get(name)).filter(Boolean);
   const tailLayer = layers.get('tail');
   // The tail hangs from the corner of its box nearest the body.
+  const tailPivot = tailLayer
+    ? nearestPoint(unionBox([tailLayer]), boxCenter(unionBox(torso.length ? torso : manifest.layers)))
+    : null;
   const tail = tailLayer ? {
     name: 'tail',
-    pivot: nearestPoint(unionBox([tailLayer]), boxCenter(unionBox(torso.length ? torso : manifest.layers))),
+    pivot: tailPivot,
+    // The turn that swings the tip to the right: a hanging tail turns the opposite way to a raised one.
+    rightward: boxCenter(unionBox([tailLayer]))[1] > tailPivot[1] ? -1 : 1,
   } : null;
   // Only a skirt flares; skewing trousers would tear them from the legs.
   const bottom = layers.get('bottomwear');
@@ -192,15 +201,26 @@ function breathTransform({ chest, pivot: [x, y], scale: [sx, sy], lift }, name, 
  * are rotations relative to the body, so skewed parts lean the opposite way to hang straight.
  * breath is the lung fill from breathAt; it carries everything else, so it applies outermost.
  * tilt is the thinking or idle head roll in degrees, about the same neck pivot as the swing.
+ * wind(lag) is a gust's push `lag` seconds ago, positive blowing to the right; the hair, skirt
+ * and tail each trail it by their own lag.
  */
-export function layerTransform(rig, name, { seconds, blink = 1, pose = null, breath = 0, tilt = 0 }) {
+export function layerTransform(rig, name, { seconds, blink = 1, pose = null, breath = 0, tilt = 0, wind = still }) {
   const transforms = [rig.breath ? breathTransform(rig.breath, name, breath) : ''];
   if (tilt && rig.head?.layers.includes(name)) transforms.push(rotateAbout(tilt, rig.head.pivot));
   if (pose && rig.head?.layers.includes(name)) transforms.push(rotateAbout(pose.head, rig.head.pivot));
-  if (pose && rig.tail?.name === name) transforms.push(rotateAbout(pose.tail, rig.tail.pivot));
-  if (pose && rig.skirt?.name === name) transforms.push(skewFromTop(-pose.skirt, rig.skirt.pivotY));
+  if (rig.tail?.name === name) {
+    const angle = (pose ? pose.tail : 0) + rig.tail.rightward * TAIL_GUST[0] * wind(TAIL_GUST[1]);
+    if (angle) transforms.push(rotateAbout(angle, rig.tail.pivot));
+  }
+  if (rig.skirt?.name === name) {
+    const skew = (pose ? -pose.skirt : 0) + SKIRT_GUST[0] * wind(SKIRT_GUST[1]);
+    if (skew) transforms.push(skewFromTop(skew, rig.skirt.pivotY));
+  }
   const hair = rig.hair.find(h => h.name === name);
-  if (hair) transforms.push(hairTransform(hair, seconds, pose ? -pose.hair * hair.inertia : 0));
+  if (hair) {
+    const extra = (pose ? -pose.hair * hair.inertia : 0) + hair.gust[0] * wind(hair.gust[1]);
+    transforms.push(hairTransform(hair, seconds, extra));
+  }
   if (rig.eyes?.layers.includes(name)) transforms.push(blinkTransform(rig.eyes, blink));
   return transforms.filter(Boolean).join(' ');
 }

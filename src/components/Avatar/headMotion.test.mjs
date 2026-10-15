@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { GLANCE_INTERVAL, TILT_INTERVAL, createHeadMotion } from './headMotion.js';
+import { GLANCE_INTERVAL, MAX_TILT, TILT_INTERVAL, createHeadMotion } from './headMotion.js';
 
 // mulberry32: a repeatable random source.
 const seeded = (seed) => () => {
@@ -49,13 +49,41 @@ test('glances start at random, never sooner or later than their interval allows'
   }
 });
 
-test('tilts keep their own schedule and stack with a glance', () => {
+test('a look around goes in many directions and the head rolls toward each', () => {
+  const frames = run(createHeadMotion(seeded(3)), 0, 1200);
+  const looks = frames.filter(f => f.gaze);
+  const targets = new Set(looks.map(f => f.gaze));
+  assert.ok(targets.size >= 60, `${targets.size} places looked at`);
+  const has = (test) => [...targets].some(test);
+  assert.ok(has(([x]) => x < -0.6) && has(([x]) => x > 0.6), 'both sides');
+  assert.ok(has(([, y]) => y < -0.6) && has(([, y]) => y > 0.4) && has(([, y]) => Math.abs(y) < 0.2), 'up, down and level');
+  assert.ok(has(([x, y]) => Math.abs(x) < 0.3 && y < -0.7), 'nearly straight up');
+  // Once the head has caught up with a sideways look, it leans the same way, unless a separate tilt
+  // happens to overlap the look and lean it the other way.
+  const settled = looks.filter((f, i) => Math.abs(f.gaze[0]) >= 0.6 && i >= 20 && looks[i - 20].gaze === f.gaze);
+  const toward = settled.filter(f => Math.sign(f.tilt) === Math.sign(f.gaze[0]));
+  assert.ok(settled.length > 100 && toward.length / settled.length > 0.85, `${toward.length} of ${settled.length}`);
+  assert.ok(frames.every(f => Math.abs(f.tilt) <= MAX_TILT));
+});
+
+test('tilts keep their own schedule', () => {
   const [low, high] = TILT_INTERVAL;
-  const frames = run(createHeadMotion(seeded(7)), 0, 600);
-  // Only a tilt leans further than a glance's 1.2 degrees.
-  const starts = frames.filter((f, i) => i && Math.abs(f.tilt) > 2 && Math.abs(frames[i - 1].tilt) <= 2);
-  assert.ok(starts.length >= Math.floor(600 / (high + 3)) && starts.length <= Math.ceil(600 / low), `${starts.length} tilts`);
-  assert.ok(frames.every(f => Math.abs(f.tilt) <= 3.5 + 1.2 + 1e-9));
+  for (const seed of [7, 8, 9]) {
+    const frames = run(createHeadMotion(seeded(seed)), 0, 600);
+    // A tilt holds past 2 degrees for well over half a second without a glance; a glance's roll
+    // fades below that within a fraction of a second once the eyes return.
+    let runs = 0;
+    let since = null;
+    for (const f of frames) {
+      const leaning = !f.gaze && Math.abs(f.tilt) > 2;
+      if (leaning) since ??= f.t;
+      else {
+        if (since !== null && f.t - since > 0.6) runs++;
+        since = null;
+      }
+    }
+    assert.ok(runs >= Math.floor(600 / (high + 3)) && runs <= Math.ceil(600 / low), `seed ${seed}: ${runs} tilts`);
+  }
 });
 
 test('a drag holds back new actions, and an overdue one starts once it ends', () => {

@@ -188,6 +188,16 @@ function layerBounds(layers) {
   };
 }
 
+/** Scale and offset that fit the layers' bounds into a `width` × `height` box. */
+function fitPlacement(bounds, width, height) {
+  const scale = Math.min(width / bounds.width, height / bounds.height) * FIT_SCALE;
+  return {
+    scale,
+    x: (width - bounds.width * scale) / 2 - bounds.minX * scale,
+    y: (height - bounds.height * scale) / 2 - bounds.minY * scale + height * VERTICAL_NUDGE,
+  };
+}
+
 function LayerSprite({ layer }) {
   const [x, y] = layer.origin;
   const [w, h] = layer.size;
@@ -254,7 +264,7 @@ function MouthSequence({ layer, shapes }) {
   );
 }
 
-export default function PseudoLive2DCharacter({ mood = 'normal', animated = true }) {
+export default function PseudoLive2DCharacter({ mood = 'normal', animated = true, onHitShape }) {
   const [containerRef, size] = useElementSize();
   const safeMood = sanitizeMood(mood);
   useDetailAnimation(containerRef, safeMood, animated);
@@ -271,17 +281,26 @@ export default function PseudoLive2DCharacter({ mood = 'normal', animated = true
 
   const placement = useMemo(() => {
     const canvasSize = manifestData.canvas_size?.[0] ?? 1280;
-    const bounds = layerBounds(layers);
     if (!size.width || !size.height) {
       return { canvasSize, scale: 0.5, offsetX: 0, offsetY: 0 };
     }
 
-    const scale = Math.min(size.width / bounds.width, size.height / bounds.height) * FIT_SCALE;
-    const offsetX = (size.width - bounds.width * scale) / 2 - bounds.minX * scale;
-    const offsetY = (size.height - bounds.height * scale) / 2 - bounds.minY * scale + size.height * VERTICAL_NUDGE;
-
-    return { canvasSize, scale, offsetX, offsetY };
+    const { scale, x, y } = fitPlacement(layerBounds(layers), size.width, size.height);
+    return { canvasSize, scale, offsetX: x, offsetY: y };
   }, [layers, size.height, size.width]);
+
+  // The mouth sits inside the face, so the layers alone give the outline.
+  useEffect(() => {
+    if (!onHitShape) return undefined;
+    const bounds = layerBounds(layers);
+    onHitShape({
+      images: layers
+        .map(layer => ({ src: assetUrl(layer.crop_file), x: layer.origin[0], y: layer.origin[1], width: layer.size[0], height: layer.size[1] }))
+        .filter(image => image.src),
+      place: box => fitPlacement(bounds, box.width, box.height),
+    });
+    return () => onHitShape(null);
+  }, [onHitShape, layers]);
 
   return (
     <div
