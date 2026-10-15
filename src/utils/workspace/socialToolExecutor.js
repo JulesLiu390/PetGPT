@@ -18,6 +18,8 @@ import { messagesAfter, isCursorUnset, sortByTime, messageTimeMs } from '../soci
 import { pickSticker } from '../social/stickerPick.js';
 import { backfillStickerSeq, markStickerUsed, initStickerSeq } from '../social/stickerSeq.js';
 import { extractFileId, contentHash, findByFileId, findByHash, backfillFileIds } from '../social/stickerIdentity.js';
+import { resolveTts, cleanDramaScript, spokenText, buildDramaText, VOICE_GUIDE_MARKER } from '../social/voiceScript.js';
+import { DEFAULT_TOOL_DOCS } from '../toolDocs.js';
 
 // ============ 常量 ============
 
@@ -2713,15 +2715,44 @@ async function executeWebshotSend(args, context) {
   }
 }
 
-// ============ voice_send（ElevenLabs TTS → qq mcp send_voice） ============
+// ============ voice_send（TTS → qq mcp send_voice） ============
+//
+// 服务商二选一（ttsConfig.provider）。ElevenLabs 念纯文本；Fish Audio 能演，参数换成
+// direction + script。Fish 的写法说明不进 system prompt：上下文里还没有说明时，第一次
+// 调用不发送，把说明当结果返回，模型照着改好再调一次才发出去。
 
 /** voice_send 建议长度：写进 description 引导模型，不作判定 */
 const VOICE_SEND_MAX_CHARS = 50;
 /** voice_send 硬上限：只拦真正失控的长文（控费 + SILK 时长），略微超出建议不拒绝 */
 const VOICE_SEND_HARD_MAX_CHARS = 200;
+/** Fish 的 direction 只写语气，超过这个长度多半是把内容写进去了 */
+const VOICE_DIRECTION_HARD_MAX_CHARS = 100;
 
-/** 获取 voice_send 工具定义 */
-export function getVoiceSendToolDefinition() {
+/** 获取 voice_send 工具定义，参数随服务商变 */
+export function getVoiceSendToolDefinition(provider = 'elevenlabs') {
+  if (provider === 'fish') {
+    return {
+      type: 'function',
+      function: {
+        name: 'voice_send',
+        description: `用配置的音色把一句话演成语音并发送到当前会话，可以控制语气、叹气、笑、停顿。仅在用户明确要求语音、需要卖萌、或有声音表达更合适的场景使用，普通对话不要用。第一次调用不会发出，而是返回写法说明；照说明改好后再调一次才真正发送。要念的话最多 ${VOICE_SEND_MAX_CHARS} 字。`,
+        parameters: {
+          type: 'object',
+          properties: {
+            direction: {
+              type: 'string',
+              description: '这句话整体怎么说，用中文自然语言描述语气，如"开心，语速轻快"',
+            },
+            script: {
+              type: 'string',
+              description: `要念的话，最多 ${VOICE_SEND_MAX_CHARS} 字，可按写法说明加标签`,
+            },
+          },
+          required: ['script'],
+        },
+      },
+    };
+  }
   return {
     type: 'function',
     function: {
@@ -2754,6 +2785,57 @@ async function _writeVoiceIntent(petId, targetId, targetType, line) {
   } catch { /* 非致命 */ }
 }
 
+/** Fish 的写法说明：用户改过 workspace 里的文件就用他的，否则用内置默认 */
+async function _readFishVoiceGuide(petId) {
+  try {
+    const custom = await tauri.workspaceRead(petId, 'social/tools/voice_send_fish.md');
+    if (custom && custom.trim()) return custom.trim();
+  } catch { /* 用默认 */ }
+  return DEFAULT_TOOL_DOCS.voice_send_fish.trim();
+}
+
+/**
+ * 按服务商把参数整理成「要合成的文本 + 实际念出来的字」。
+ * 返回 { error } / { guide }（Fish 还没给过说明）/ { speech, spoken, synthesize }。
+ */
+async function _prepareVoice(args, context, tts) {
+  if (tts.provider === 'fish') {
+    const direction = String(args?.direction || '').trim();
+    const script = String(args?.script ?? args?.text ?? '').trim();
+    if (!context.voiceGuideVisible?.()) {
+      const guide = await _readFishVoiceGuide(context.petId);
+      return {
+        guide: `${VOICE_GUIDE_MARKER}\n还没有发出。你的草稿：direction="${direction}" script="${script}"\n\n${guide}\n\n照上面的写法改好后再调一次 voice_send，这次会直接发出。`,
+      };
+    }
+    const spoken = spokenText(cleanDramaScript(script));
+    if (!spoken) return { error: 'script 里没有要念的字' };
+    if (direction.length > VOICE_DIRECTION_HARD_MAX_CHARS) {
+      return { error: `direction 超过 ${VOICE_DIRECTION_HARD_MAX_CHARS} 字（实际 ${direction.length}），只写语气，10-30 字就够`, record: true };
+    }
+    return {
+      spoken,
+      synthesize: () => tauri.fishAudioTts({
+        apiKey: tts.apiKey,
+        referenceId: tts.voiceId,
+        text: buildDramaText({ direction, script }),
+        model: tts.model,
+      }),
+    };
+  }
+  const text = String(args?.text || '').trim();
+  if (!text) return { error: 'text 为空' };
+  return {
+    spoken: text,
+    synthesize: () => tauri.elevenlabsTts({
+      apiKey: tts.apiKey,
+      voiceId: tts.voiceId,
+      text,
+      modelId: tts.model || undefined,
+    }),
+  };
+}
+
 /** 执行 voice_send：TTS → 暂存 → 发送 → sentCache + INTENT 回写 */
 async function executeVoiceSend(args, context) {
   const { petId, targetId, targetType, mcpServerName, ttsConfig, sentCache } = context;
@@ -2768,30 +2850,32 @@ async function executeVoiceSend(args, context) {
     await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
     return { error: err };
   }
-  if (!ttsConfig.apiKey || !ttsConfig.voiceId) {
-    const err = 'TTS 缺少 apiKey 或 voiceId';
+  const tts = resolveTts(ttsConfig);
+  if (!tts) {
+    const err = 'TTS 缺少 apiKey 或声音 id';
     await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
     return { error: err };
   }
-  const text = (args?.text || '').trim();
-  if (!text) {
-    return { error: 'text 为空' };
+
+  const prepared = await _prepareVoice(args, context, tts);
+  if (prepared.guide) {
+    return { content: [{ type: 'text', text: prepared.guide }] };
   }
+  if (prepared.error) {
+    if (prepared.record) await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${prepared.error}`);
+    return { error: prepared.error };
+  }
+  const text = prepared.spoken;
   if (text.length > VOICE_SEND_HARD_MAX_CHARS) {
     const err = `text 超过 ${VOICE_SEND_HARD_MAX_CHARS} 字硬上限（实际 ${text.length}），拒绝发送；语音请控制在 ${VOICE_SEND_MAX_CHARS} 字左右`;
     await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err}`);
     return { error: err };
   }
 
-  // 1. 调 ElevenLabs 生成 base64 音频
+  // 1. 生成 base64 音频
   let base64Audio;
   try {
-    base64Audio = await tauri.elevenlabsTts({
-      apiKey: ttsConfig.apiKey,
-      voiceId: ttsConfig.voiceId,
-      text,
-      modelId: ttsConfig.modelId || undefined,
-    });
+    base64Audio = await prepared.synthesize();
   } catch (e) {
     const err = `TTS 生成失败: ${e?.message || e}`;
     await _writeVoiceIntent(petId, targetId, targetType, `发语音失败：${err.slice(0, 80)}`);

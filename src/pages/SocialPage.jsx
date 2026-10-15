@@ -6,11 +6,11 @@ import { Card, FormGroup, Input, Select, Textarea, Button } from "../components/
 import * as tauri from "../utils/tauri";
 import { loadSocialConfig, saveSocialConfig, loadSavedTargetNames, loadSavedPausedTargets, saveTargetPausedDirect } from "../utils/socialAgent";
 import { subagentRegistry, onSubagentChange, getActiveCount } from "../utils/subagentManager";
-import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { normalizeApiProviders } from "../utils/apiProviders";
 import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
 import SocialPreflightBar from "../components/Social/SocialPreflightBar";
 import { normalizeTargetId, normalizeTargetIds } from "../utils/social/targetId";
+import { ttsProvider, FISH_MODELS, FISH_DEFAULT_MODEL } from "../utils/social/voiceScript";
 import { listen, emit } from "@tauri-apps/api/event";
 
 // ==================== SocialPage ====================
@@ -644,7 +644,6 @@ export default function SocialPage() {
     'replyInterval', 'observerInterval',
     'botQQ', 'ownerQQ', 'ownerName',
     'enabledMcpServers',
-    'subagentEnabled', 'subagentMaxConcurrent', 'subagentTimeoutSecs', 'subagentModel',
   ];
 
   // ── Handlers ──
@@ -685,6 +684,28 @@ export default function SocialPage() {
       }));
     } else {
       setConfig(prev => ({ ...prev, [field]: value }));
+    }
+  };
+
+  const setFishTts = (patch) => {
+    setConfig(prev => ({
+      ...prev,
+      ttsConfig: { ...(prev.ttsConfig || {}), fish: { ...(prev.ttsConfig?.fish || {}), ...patch } },
+    }));
+  };
+
+  // 设置页的 Test 按钮：合成一句、直接播放，错误显示在声音 ID 下面
+  const testVoice = async (synthesize) => {
+    setTestingVoice(true);
+    setTestVoiceError('');
+    try {
+      const base64 = await synthesize();
+      if (!base64) throw new Error('Empty response');
+      await new Audio(`data:audio/mpeg;base64,${base64}`).play();
+    } catch (err) {
+      setTestVoiceError(String(err?.message || err).slice(0, 80));
+    } finally {
+      setTestingVoice(false);
     }
   };
 
@@ -991,41 +1012,9 @@ export default function SocialPage() {
                 </FormGroup>
               </Card>
 
-              {/* Prompt Configuration (bot-level, shared across all MCP servers) */}
-              <Card title="Prompts" description="Customize social behavior and reply strategy (shared across all servers)">
+              {/* Reply behavior (bot-level, shared across all MCP servers) */}
+              <Card title="Behavior" description="How the pet responds in chats (shared across all servers)">
                 <div className="space-y-3">
-                  <FormGroup label="Social Persona" hint="Additional persona instructions for social context">
-                    <Textarea
-                      rows={3}
-                      value={config.socialPersonaPrompt}
-                      onChange={(e) => handleConfigChange('socialPersonaPrompt', e.target.value)}
-                      placeholder="e.g. You're an active group member who loves using emoji..."
-                    />
-                  </FormGroup>
-                  <FormGroup label="Reply Strategy" hint="Rules for when to reply vs stay silent (stored in social/REPLY_STRATEGY.md)">
-                    <div className="flex gap-2">
-                      <Button
-                        variant="secondary"
-                        className="flex-1"
-                        onClick={async () => {
-                          if (!selectedPetId) return;
-                          try {
-                            await tauri.workspaceOpenFile(selectedPetId, 'social/REPLY_STRATEGY.md', DEFAULT_REPLY_STRATEGY);
-                          } catch (e) {
-                            console.error('Failed to open reply strategy file:', e);
-                          }
-                        }}
-                      >
-                        Edit Reply Strategy
-                      </Button>
-                    </div>
-                  </FormGroup>
-                  <ToggleRow
-                    label="Agent Can Edit Strategy"
-                    hint="Allow the AI to adjust its own reply rules based on experience"
-                    checked={config.agentCanEditStrategy === true}
-                    onChange={(v) => handleConfigChange('agentCanEditStrategy', v)}
-                  />
                   <ToggleRow
                     label="@Mention Must Reply"
                     hint="Always reply when someone @mentions the bot"
@@ -1525,50 +1514,6 @@ export default function SocialPage() {
                     </div>
                   </Card>
 
-                  {/* CC Subagent */}
-                  <Card>
-                    <div className="flex items-center gap-2 mb-2">
-                      <input
-                        type="checkbox"
-                        checked={config.subagentEnabled !== false}
-                        onChange={(e) => handleConfigChange('subagentEnabled', e.target.checked)}
-                        className="rounded"
-                      />
-                      <span className="text-sm font-medium text-gray-700">CC Subagent</span>
-                      <span className="text-xs text-gray-400">Background research tasks</span>
-                    </div>
-                    {config.subagentEnabled !== false && (
-                      <div className="grid grid-cols-3 gap-3">
-                        <FormGroup label="Max Concurrent" hint="Maximum concurrent tasks">
-                          <Input
-                            type="number"
-                            min={1}
-                            max={20}
-                            value={config.subagentMaxConcurrent ?? 5}
-                            onChange={(e) => handleConfigChange('subagentMaxConcurrent', parseInt(e.target.value) || 5)}
-                          />
-                        </FormGroup>
-                        <FormGroup label="Timeout (seconds)" hint="Fallback timeout">
-                          <Input
-                            type="number"
-                            min={30}
-                            max={600}
-                            value={config.subagentTimeoutSecs ?? 300}
-                            onChange={(e) => handleConfigChange('subagentTimeoutSecs', parseInt(e.target.value) || 300)}
-                          />
-                        </FormGroup>
-                        <FormGroup label="Model" hint="CC model">
-                          <Input
-                            type="text"
-                            value={config.subagentModel || 'sonnet'}
-                            onChange={(e) => handleConfigChange('subagentModel', e.target.value)}
-                            placeholder="sonnet"
-                          />
-                        </FormGroup>
-                      </div>
-                    )}
-                  </Card>
-
                   {/* 状态打标（Jev / TypeSafe）—— "敬酒系统" */}
                   <Card>
                     <div className="flex items-center gap-2 mb-2">
@@ -1607,7 +1552,7 @@ export default function SocialPage() {
                     )}
                   </Card>
 
-                  {/* TTS / 语音 (ElevenLabs) */}
+                  {/* TTS / 语音：Fish Audio 和 ElevenLabs 二选一 */}
                   <Card>
                     <div className="flex items-center gap-2 mb-2">
                       <input
@@ -1616,94 +1561,138 @@ export default function SocialPage() {
                         onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), enabled: e.target.checked })}
                         className="rounded"
                       />
-                      <span className="text-sm font-medium text-gray-700">TTS Voice (ElevenLabs)</span>
+                      <span className="text-sm font-medium text-gray-700">TTS Voice</span>
                       <span className="text-xs text-gray-400">Enable the built-in voice_send tool, up to 50 characters</span>
                     </div>
                     {config.ttsConfig?.enabled && (
-                      <div className="grid grid-cols-2 gap-3">
-                        <FormGroup label="API Key" hint="ElevenLabs xi-api-key">
-                          <Input
-                            type="password"
-                            value={config.ttsConfig?.apiKey || ''}
-                            onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), apiKey: e.target.value })}
-                            placeholder="sk_..."
-                          />
+                      <div className="space-y-3">
+                        <FormGroup label="Provider" hint="Only the selected provider is used">
+                          <select
+                            className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                            value={ttsProvider(config.ttsConfig)}
+                            onChange={(e) => { setTestVoiceError(''); handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), provider: e.target.value }); }}
+                          >
+                            <option value="fish">Fish Audio</option>
+                            <option value="elevenlabs">ElevenLabs</option>
+                          </select>
                         </FormGroup>
-                        <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? 'Generating...' : 'ElevenLabs voice id')}>
-                          <div className="flex gap-2">
-                            <Input
-                              type="text"
-                              value={config.ttsConfig?.voiceId || ''}
-                              onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), voiceId: e.target.value })}
-                              placeholder="21m00Tcm4TlvDq8ikWAM"
-                            />
-                            <button
-                              type="button"
-                              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
-                              disabled={testingVoice || !config.ttsConfig?.apiKey || !config.ttsConfig?.voiceId}
-                              onClick={async () => {
-                                setTestingVoice(true);
-                                setTestVoiceError('');
-                                try {
-                                  const base64 = await tauri.elevenlabsTts({
+                        {ttsProvider(config.ttsConfig) === 'fish' ? (
+                          <div className="grid grid-cols-2 gap-3">
+                            <FormGroup label="API Key" hint="Fish Audio API key">
+                              <Input
+                                type="password"
+                                value={config.ttsConfig?.fish?.apiKey || ''}
+                                onChange={(e) => setFishTts({ apiKey: e.target.value })}
+                                placeholder="sk-fish-..."
+                              />
+                            </FormGroup>
+                            <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? 'Generating...' : 'Fish Audio reference_id')}>
+                              <div className="flex gap-2">
+                                <Input
+                                  type="text"
+                                  value={config.ttsConfig?.fish?.referenceId || ''}
+                                  onChange={(e) => setFishTts({ referenceId: e.target.value })}
+                                  placeholder="0c50b7d240734976be2addc927639f6c"
+                                />
+                                <button
+                                  type="button"
+                                  className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
+                                  disabled={testingVoice || !config.ttsConfig?.fish?.apiKey || !config.ttsConfig?.fish?.referenceId}
+                                  onClick={() => testVoice(() => tauri.fishAudioTts({
+                                    apiKey: config.ttsConfig.fish.apiKey,
+                                    referenceId: config.ttsConfig.fish.referenceId,
+                                    text: '[开心，语速轻快] 你好呀，我是你的桌面宠物！[laugh]',
+                                    model: config.ttsConfig.fish.model || FISH_DEFAULT_MODEL,
+                                  }))}
+                                >
+                                  {testingVoice ? 'Testing...' : 'Test'}
+                                </button>
+                              </div>
+                            </FormGroup>
+                            <FormGroup label="Model" hint="drama-3 follows tone directions and sound cues">
+                              <select
+                                className="w-full px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                                value={config.ttsConfig?.fish?.model || FISH_DEFAULT_MODEL}
+                                onChange={(e) => setFishTts({ model: e.target.value })}
+                              >
+                                {FISH_MODELS.map(m => <option key={m} value={m}>{m}</option>)}
+                              </select>
+                            </FormGroup>
+                          </div>
+                        ) : (
+                          <div className="grid grid-cols-2 gap-3">
+                            <FormGroup label="API Key" hint="ElevenLabs xi-api-key">
+                              <Input
+                                type="password"
+                                value={config.ttsConfig?.apiKey || ''}
+                                onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), apiKey: e.target.value })}
+                                placeholder="sk_..."
+                              />
+                            </FormGroup>
+                            <FormGroup label="Voice ID" hint={testVoiceError || (testingVoice ? 'Generating...' : 'ElevenLabs voice id')}>
+                              <div className="flex gap-2">
+                                <Input
+                                  type="text"
+                                  value={config.ttsConfig?.voiceId || ''}
+                                  onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), voiceId: e.target.value })}
+                                  placeholder="21m00Tcm4TlvDq8ikWAM"
+                                />
+                                <button
+                                  type="button"
+                                  className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50 whitespace-nowrap"
+                                  disabled={testingVoice || !config.ttsConfig?.apiKey || !config.ttsConfig?.voiceId}
+                                  onClick={() => testVoice(() => tauri.elevenlabsTts({
                                     apiKey: config.ttsConfig.apiKey,
                                     voiceId: config.ttsConfig.voiceId,
                                     text: 'hello',
                                     modelId: config.ttsConfig.modelId || undefined,
-                                  });
-                                  if (!base64) throw new Error('Empty response');
-                                  const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
-                                  await audio.play();
-                                } catch (err) {
-                                  setTestVoiceError(String(err?.message || err).slice(0, 80));
-                                } finally {
-                                  setTestingVoice(false);
-                                }
-                              }}
-                            >
-                              {testingVoice ? 'Testing...' : 'Test'}
-                            </button>
+                                  }))}
+                                >
+                                  {testingVoice ? 'Testing...' : 'Test'}
+                                </button>
+                              </div>
+                            </FormGroup>
+                            <FormGroup label="Model" hint={ttsModelsError ? `Refresh failed: ${ttsModelsError} (fallback list remains available)` : `${ttsModels.length} models available`}>
+                              <div className="flex gap-2">
+                                <select
+                                  className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
+                                  value={config.ttsConfig?.modelId || ''}
+                                  onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), modelId: e.target.value })}
+                                >
+                                  <option value="">Default (eleven_multilingual_v2)</option>
+                                  {ttsModels.map(m => (
+                                    <option key={m.model_id} value={m.model_id}>{m.name} ({m.model_id})</option>
+                                  ))}
+                                </select>
+                                <button
+                                  type="button"
+                                  className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
+                                  disabled={loadingTtsModels || !config.ttsConfig?.apiKey}
+                                  title="Fetch the latest model list (the API key needs models_read permission)"
+                                  onClick={async () => {
+                                    setLoadingTtsModels(true);
+                                    setTtsModelsError('');
+                                    try {
+                                      const list = await tauri.elevenlabsListModels(config.ttsConfig.apiKey);
+                                      if (Array.isArray(list) && list.length > 0) {
+                                        setTtsModels(list);
+                                      } else {
+                                        setTtsModelsError('Empty response');
+                                      }
+                                    } catch (err) {
+                                      // 失败保留原有列表（兜底或上次成功的）
+                                      setTtsModelsError(String(err?.message || err).slice(0, 80));
+                                    } finally {
+                                      setLoadingTtsModels(false);
+                                    }
+                                  }}
+                                >
+                                  {loadingTtsModels ? 'Loading...' : 'Refresh'}
+                                </button>
+                              </div>
+                            </FormGroup>
                           </div>
-                        </FormGroup>
-                        <FormGroup label="Model" hint={ttsModelsError ? `Refresh failed: ${ttsModelsError} (fallback list remains available)` : `${ttsModels.length} models available`}>
-                          <div className="flex gap-2">
-                            <select
-                              className="flex-1 px-2 py-1.5 text-sm border border-slate-200 rounded bg-white"
-                              value={config.ttsConfig?.modelId || ''}
-                              onChange={(e) => handleConfigChange('ttsConfig', { ...(config.ttsConfig || {}), modelId: e.target.value })}
-                            >
-                              <option value="">Default (eleven_multilingual_v2)</option>
-                              {ttsModels.map(m => (
-                                <option key={m.model_id} value={m.model_id}>{m.name} ({m.model_id})</option>
-                              ))}
-                            </select>
-                            <button
-                              type="button"
-                              className="px-2 py-1 text-xs border border-slate-200 rounded hover:bg-slate-50 disabled:opacity-50"
-                              disabled={loadingTtsModels || !config.ttsConfig?.apiKey}
-                              title="Fetch the latest model list (the API key needs models_read permission)"
-                              onClick={async () => {
-                                setLoadingTtsModels(true);
-                                setTtsModelsError('');
-                                try {
-                                  const list = await tauri.elevenlabsListModels(config.ttsConfig.apiKey);
-                                  if (Array.isArray(list) && list.length > 0) {
-                                    setTtsModels(list);
-                                  } else {
-                                    setTtsModelsError('Empty response');
-                                  }
-                                } catch (err) {
-                                  // 失败保留原有列表（兜底或上次成功的）
-                                  setTtsModelsError(String(err?.message || err).slice(0, 80));
-                                } finally {
-                                  setLoadingTtsModels(false);
-                                }
-                              }}
-                            >
-                              {loadingTtsModels ? 'Loading...' : 'Refresh'}
-                            </button>
-                          </div>
-                        </FormGroup>
+                        )}
                       </div>
                     )}
                   </Card>

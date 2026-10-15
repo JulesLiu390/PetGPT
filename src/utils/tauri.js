@@ -686,6 +686,18 @@ export const elevenlabsTts = ({ apiKey, voiceId, text, modelId }) =>
  */
 export const elevenlabsListModels = (apiKey) => invoke('elevenlabs_list_models', { apiKey });
 
+/**
+ * 调 Fish Audio TTS，返回 base64 编码的 MP3 音频
+ * @param {Object} params
+ * @param {string} params.apiKey - Fish Audio API key
+ * @param {string} params.referenceId - 声音 id（Voice Library 或克隆出来的）
+ * @param {string} params.text - 要朗读的文字，可带 [导演提示] 和 <soft>…</soft> 之类标签
+ * @param {string} [params.model] - 模型（默认 drama-3）
+ * @returns {Promise<string>} base64 字符串（不带 data: 前缀）
+ */
+export const fishAudioTts = ({ apiKey, referenceId, text, model }) =>
+  invoke('fish_audio_tts', { apiKey, referenceId, text, model });
+
 // ==================== Screenshot ====================
 
 /**
@@ -1540,6 +1552,7 @@ const tauri = {
   // TTS
   elevenlabsTts,
   elevenlabsListModels,
+  fishAudioTts,
   
   // Chat History (QQ 群聊存档)
   chatHistoryInsert,

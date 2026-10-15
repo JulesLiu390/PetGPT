@@ -1774,6 +1774,70 @@ async fn elevenlabs_tts(
     Ok(BASE64.encode(&bytes))
 }
 
+/// 调 Fish Audio TTS，返回 base64 编码的 MP3 音频。
+/// 由 voice_send 内置工具使用；text 里的 [导演提示] 和 <soft> 之类标签由模型自己解读。
+#[tauri::command]
+async fn fish_audio_tts(
+    api_key: String,
+    reference_id: String,
+    text: String,
+    model: Option<String>,
+) -> Result<String, String> {
+    if api_key.trim().is_empty() {
+        return Err("api_key is empty".to_string());
+    }
+    if reference_id.trim().is_empty() {
+        return Err("reference_id is empty".to_string());
+    }
+    if text.trim().is_empty() {
+        return Err("text is empty".to_string());
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("Failed to create HTTP client: {}", e))?;
+
+    let model = model
+        .filter(|m| !m.trim().is_empty())
+        .unwrap_or_else(|| "drama-3".to_string());
+    let body = serde_json::json!({
+        "text": text,
+        "reference_id": reference_id.trim(),
+        "format": "mp3",
+        "mp3_bitrate": 64,
+        "latency": "balanced",
+    });
+
+    let resp = client
+        .post("https://api.fish.audio/v1/tts")
+        .bearer_auth(api_key.trim())
+        .header("model", model.trim())
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Fish Audio request failed: {}", e))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let err_body = resp.text().await.unwrap_or_default();
+        // 错误体是 {status, message, reason}；有 message 就只给 message，402 余额不足之类一眼能看懂
+        let message = serde_json::from_str::<JsonValue>(&err_body)
+            .ok()
+            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+            .unwrap_or(err_body);
+        return Err(format!("Fish Audio HTTP {}: {}", status, message));
+    }
+
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read Fish Audio response: {}", e))?;
+
+    Ok(BASE64.encode(&bytes))
+}
+
 /// 列出 ElevenLabs 上所有可用 TTS 模型。
 /// 用于前端 TTS 设置面板的下拉框。返回简化结构 [{model_id, name}]。
 #[tauri::command]
@@ -4184,6 +4248,7 @@ pub fn run() {
             read_local_image_as_base64,
             elevenlabs_tts,
             elevenlabs_list_models,
+            fish_audio_tts,
             // Screenshot commands
             take_screenshot,
             capture_region,

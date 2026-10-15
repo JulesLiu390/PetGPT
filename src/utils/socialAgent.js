@@ -30,11 +30,15 @@ import { subagentRegistry, initSubagentListeners, destroySubagentListeners, kill
 import { startKeepAwake, stopKeepAwake } from './keepAwake.js';
 import { normalizeTargetIds } from './social/targetId.js';
 import { normalizeSplitTags, stripSplitTagsForSpeech } from './social/outgoingText.js';
+import { resolveTts, hasVisibleVoiceGuide, isVoiceGuideResult } from './social/voiceScript.js';
 import { applyIncomingEdit } from './social/messageEdits.js';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
 
 // ============ 状态 ============
+
+// 社交里的 CC 子 Agent（dispatch_subagent、cc_history/cc_read、md 整理）已下线，配置里的开关不再生效。
+const SUBAGENTS_ENABLED = false;
 
 /** 当前活跃的社交循环（同一时间只有一个） */
 let activeLoop = null;
@@ -2257,9 +2261,10 @@ export async function startSocialLoop(config, onStatusChange) {
   addLog('info', `Watching ${targets.length} targets, reply: ${config.replyInterval ?? 0}s, observer: ${config.observerInterval || 180}s`);
   
   const promptConfig = {
-    socialPersonaPrompt: config.socialPersonaPrompt || '',
+    // 社交补充人设和可编辑的回复策略已下线：只用人格文件和内置默认策略。
+    socialPersonaPrompt: '',
     atMustReply: config.atMustReply !== false,
-    agentCanEditStrategy: config.agentCanEditStrategy === true,
+    agentCanEditStrategy: false,
     botQQ: config.botQQ || '',
     ownerQQ: config.ownerQQ || '',
     ownerName: config.ownerName || '',
@@ -3514,7 +3519,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   scheduleDailyCompressTimer();
 
   // Setup subagent event listeners
-  if (config.subagentEnabled !== false) {
+  if (SUBAGENTS_ENABLED) {
     await initSubagentListeners({
       petId: config.petId,
       addLog,
@@ -3663,12 +3668,11 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       getWebshotToolDefinition(),
       getChatSearchToolDefinition(),
       getChatContextToolDefinition(),
-      getCcHistoryToolDefinition(),
-      getCcReadToolDefinition(),
       getCheckNewMessagesToolDefinition(),
       getTurnNoteToolDefinition(),
     ];
-    if (config.subagentEnabled !== false) {
+    if (SUBAGENTS_ENABLED) {
+      defs.push(getCcHistoryToolDefinition(), getCcReadToolDefinition());
       defs.push(getSubagentToolDefinition());
       defs.push(getMdOrganizeToolDefinition());
     }
@@ -3677,9 +3681,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       defs.push(getImageSendToolDefinition());
       defs.push(getWebshotSendToolDefinition());
       defs.push(...getStickerToolDefinitions().filter(t => ['sticker_send', 'sticker_list'].includes(t.function.name)));
-      if (config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId) {
-        defs.push(getVoiceSendToolDefinition());
-      }
+      const tts = resolveTts(config.ttsConfig);
+      if (tts) defs.push(getVoiceSendToolDefinition(tts.provider));
       if (imageGenLLMConfig) defs.push(getGenerateImageSendToolDefinition());
     }
 
@@ -3802,7 +3805,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         role: 'session',
         customGroupRules: customGroupRulesMap.get(target) || '',
         subagentRegistry,
-        voiceEnabled: !!(config.ttsConfig?.enabled && config.ttsConfig?.apiKey && config.ttsConfig?.voiceId),
+        voiceEnabled: !!resolveTts(config.ttsConfig),
         imageGenEnabled: !!imageGenLLMConfig,
         backlogRemindAt: BACKLOG_REMINDER_AT,
         moodTagEnabled: moodConfig.enabled,
@@ -4110,7 +4113,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             bufferMessages: dataBuffer.get(target)?.messages,
             dataBuffer,
             subagentConfig: {
-              enabled: config.subagentEnabled !== false,
+              enabled: SUBAGENTS_ENABLED,
               model: config.subagentModel || 'sonnet',
               timeoutSecs: config.subagentTimeoutSecs || 300,
             },
@@ -4122,6 +4125,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             addLog,
             customGroupRules: customGroupRulesMap.get(target) || '',
             ttsConfig: config.ttsConfig,
+            // Fish 的 voice_send 写法说明只在模型还看不见时才给
+            voiceGuideVisible: () => hasVisibleVoiceGuide(session),
             imageModel: imageGenLLMConfig,
             lurkMode,
             runtimeGuard: () => canTargetDispatch(target),
@@ -4175,9 +4180,16 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
           toolArgTransform: (name, args) => {
             // 语音：分隔符和分段标记都得去掉，不然 TTS 会把它们念出来
             if (name === 'voice_send') {
-              let text = args?.text || '';
-              for (const sec of Object.values(ep)) text = text.replaceAll(sec, '');
-              return { ...args, text: stripSplitTagsForSpeech(text) };
+              const speech = (value) => {
+                let text = value || '';
+                for (const sec of Object.values(ep)) text = text.replaceAll(sec, '');
+                return stripSplitTagsForSpeech(text);
+              };
+              const out = { ...args };
+              for (const key of ['text', 'script', 'direction']) {
+                if (typeof args?.[key] === 'string') out[key] = speech(args[key]);
+              }
+              return out;
             }
             if (!name.includes('send_message')) return args;
             let content = args?.content || '';
@@ -4227,9 +4239,12 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
             if (name === 'check_new_messages' && checkIngest?.added > 0 && !isError) {
               text = `新到的 ${checkIngest.added} 条消息已经按原样放进上面的对话里了。`;
             }
+            // 写法说明要一直留在上下文里，窗口被压缩前都不再重复给
+            const voiceGuide = name === 'voice_send' && !isError && isVoiceGuideResult(text);
             appendHistory(session, {
               role: 'tool', kind: 'tool_result', toolName: name,
               content: text, isError: !!isError,
+              ...(voiceGuide ? { voiceGuide: true, keepFull: true } : {}),
             });
             if (pollTools.length && pollTools[pollTools.length - 1].name === name) {
               pollTools[pollTools.length - 1].result = String(text).slice(0, 100);

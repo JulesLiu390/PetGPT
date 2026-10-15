@@ -15,7 +15,6 @@ import { useSettings } from "../utils/useSettings";
 import SettingsHotkeyInput from "../components/Settings/SettingsHotkeyInput";
 import { useDispatch } from "../context/StateProvider";
 import { actionType } from "../context/reducer";
-import { DEFAULT_REPLY_STRATEGY } from "../utils/socialPromptBuilder";
 import { loadSocialConfig, saveSocialConfig } from "../utils/socialAgent";
 import { createDefaultSocialConfig, withSocialTrainingConfig } from "../utils/socialControlScope";
 import { emit, listen } from '@tauri-apps/api/event';
@@ -4428,52 +4427,9 @@ const SocialPanel = ({ assistants, apiProviders }) => {
             </div>
           </Card>
 
-          {/* Prompt Configuration */}
-          <Card title="Prompts" description="Customize social behavior and reply strategy">
+          {/* Reply behavior */}
+          <Card title="Behavior" description="How the pet responds in chats">
             <div className="space-y-3">
-              <FormGroup label="Social Persona" hint="Additional persona instructions for social context">
-                <Textarea
-                  rows={3}
-                  value={config.socialPersonaPrompt}
-                  onChange={(e) => handleConfigChange('socialPersonaPrompt', e.target.value)}
-                  placeholder="e.g. You're an active group member who loves using emoji..."
-                />
-              </FormGroup>
-              <FormGroup label="Reply Strategy" hint="Rules for when to reply vs stay silent (stored in social/REPLY_STRATEGY.md)">
-                <div className="flex gap-2">
-                  <Button
-                    variant="secondary"
-                    className="flex-1"
-                    onClick={async () => {
-                      if (!selectedPetId) return;
-                      try {
-                        await tauri.workspaceOpenFile(selectedPetId, 'social/REPLY_STRATEGY.md', DEFAULT_REPLY_STRATEGY);
-                      } catch (e) {
-                        console.error('Failed to open reply strategy file:', e);
-                      }
-                    }}
-                  >
-                    Edit Reply Strategy
-                  </Button>
-                </div>
-              </FormGroup>
-              <div className="flex items-center justify-between">
-                <div className="flex-1">
-                  <div className="text-sm font-medium text-slate-700">Agent Can Edit Strategy</div>
-                  <div className="text-xs text-slate-500 mt-0.5">
-                    Allow the AI to adjust its own reply rules based on experience
-                  </div>
-                </div>
-                <label className="relative inline-flex items-center cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={config.agentCanEditStrategy === true}
-                    onChange={(e) => handleConfigChange('agentCanEditStrategy', e.target.checked)}
-                    className="sr-only peer"
-                  />
-                  <div className="relative w-11 h-6 bg-gray-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-blue-300 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-gray-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-blue-500"></div>
-                </label>
-              </div>
               <div className="flex items-center justify-between">
                 <div className="flex-1">
                   <div className="text-sm font-medium text-slate-700">@Mention Must Reply</div>

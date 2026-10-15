@@ -68,8 +68,8 @@ export function trimToolOutputs(items, { budgetChars, alwaysKeepNewest = ALWAYS_
       used += len;
       continue;
     }
-    // 太短，裁了不划算。
-    if (len < minTrimmable) {
+    // 太短，裁了不划算；带 keepFull 的（比如 voice_send 的写法说明）要一直留在上下文里。
+    if (len < minTrimmable || item.keepFull) {
       decisions.set(i, 'keep');
       used += len;
       continue;

@@ -265,18 +265,6 @@ export async function readStickerIndexForPrompt(petId) {
 }
 
 /**
- * 安全读取回复策略文件
- */
-export async function readReplyStrategyFile(petId) {
-  try {
-    const content = await tauri.workspaceRead(petId, 'social/REPLY_STRATEGY.md');
-    return content || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
  * 群规则三档引导指令
  */
 function groupRuleGuidance(content, targetName, targetId) {
@@ -350,7 +338,7 @@ export async function buildSocialPrompt({
   // Parallel file reads
   const [
     soulContent, userContent, memoryContent, groupRuleContent,
-    contactsContent, socialMemoryContent, replyStrategyContent, peopleCacheContent
+    contactsContent, socialMemoryContent, peopleCacheContent
   ] = await Promise.all([
     readSoulFile(petId),
     readUserFile(petId),
@@ -358,7 +346,6 @@ export async function buildSocialPrompt({
     readGroupRuleFile(petId, targetId),
     readContactsFile(petId),
     readSocialMemoryFile(petId),
-    readReplyStrategyFile(petId),
     isSession ? readPeopleCacheFile(petId, targetId, targetType) : Promise.resolve(null),
   ]);
 
@@ -496,7 +483,7 @@ export async function buildSocialPrompt({
   // === 回复策略（Intent / Reply 共用；Observer 仅在配置允许时可维护） ===
   if (role === 'reply' || role === 'observer' || isSession) {
     sections.push(buildReplyStrategySection(
-      replyStrategyContent || DEFAULT_REPLY_STRATEGY,
+      DEFAULT_REPLY_STRATEGY,
       { role, agentCanEditStrategy },
     ));
   }
@@ -667,7 +654,6 @@ social/
 ├── notes/                    — 自由笔记区（你可以随意创建、修改、删除文件）
 ├── CONTACTS.md               — 联系人索引（每人一行：QQ号、昵称、来源群、一句话印象）
 ├── SOCIAL_MEMORY.md          — 跨群社交态势（跨群事件、社交策略反思，不记人物信息）
-├── REPLY_STRATEGY.md         — 回复策略
 ├── stickers/                  — 表情包收藏夹
 │   ├── index.yaml             — 表情包索引（序号 + 含义，系统维护，只读）
 │   └── stk_NNN.{ext}         — 表情包图片文件
@@ -702,7 +688,7 @@ social/
 }
 
 /**
- * 默认回复策略（用户未自定义时使用）
+ * 回复策略（内置固定，不再读取用户的 REPLY_STRATEGY.md）
  */
 export const DEFAULT_REPLY_STRATEGY = `你不需要回复每一条消息，但也不是一直潜水。真有内容想说、想纠错、想抛新话题时，果断开口。
 
@@ -710,7 +696,7 @@ export const DEFAULT_REPLY_STRATEGY = `你不需要回复每一条消息，但�
 - 被 @提到 或点名叫到
 - 有人直接向你提问或请求帮助
 - 话题与你的专长/兴趣相关，你能补充信息或给出观点
-- 对话中出现事实错误 → **先 tavily 核实**（自己不确定就 dispatch CC 深查），确认后直接指出，不要自我审查"会不会太好为人师"
+- 对话中出现事实错误 → **先 tavily 核实**，确认后直接指出，不要自我审查"会不会太好为人师"
 - 别人观点有逻辑漏洞或概念误解，你能点破
 - 群里冷场但你刚好有新信息想抛（主动 tavily 搜到的热点也算）
 - 有人分享了值得真诚回应的个人经历或情感
@@ -749,14 +735,14 @@ export const DEFAULT_REPLY_STRATEGY = `你不需要回复每一条消息，但�
 5. **参与而非主导**：你是群里的一员，不是主角。跟随话题节奏，不要试图控场。
 6. **像人一样**：回复长度、频率、语气都像真人群友。不要列清单、不要用小标题、不要结构化输出。
 7. **事实问题双向处理**：
-   - **你被反驳时**：先判断对方说的有没有道理。对方对 → 直接承认"确实是我搞错了"；对方用事实论据 → 先 tavily 核实（不确定就 CC 深查），确认后再决定是坚持还是修正。死不认错是愚蠢，不是自信。
+   - **你被反驳时**：先判断对方说的有没有道理。对方对 → 直接承认"确实是我搞错了"；对方用事实论据 → 先 tavily 核实，确认后再决定是坚持还是修正。死不认错是愚蠢，不是自信。
    - **你发现别人错时**：先 tavily 核实自己的记忆是否正确（别错杀），确认后直接指出。语气坚定但不攻击人——"那个好像是 X 不是 Y 吧，刚查了下 <URL>"。
-   - **不确定对方是否错时**：别急着反驳，先问清 / tavily 查 / dispatch CC 深挖，**不要装懂**。`;
+   - **不确定对方是否错时**：别急着反驳，先问清 / tavily 查，**不要装懂**。`;
 
 function buildReplyStrategySection(strategy, { role, agentCanEditStrategy }) {
   const sections = ['# 回复策略', truncateContent(strategy, SOCIAL_FILE_TRUNCATE)];
   if (!agentCanEditStrategy) {
-    sections.push('⚠️ REPLY_STRATEGY.md 是用户控制的只读策略。你不得修改、覆盖、规避或暗示自己可以编辑它。');
+    sections.push('⚠️ 这是固定的回复策略。你不得修改、覆盖、规避或暗示自己可以编辑它。');
   } else if (role === 'observer') {
     sections.push('配置允许 Observer 根据明确、反复出现的实际反馈维护 REPLY_STRATEGY.md。修改前先读取原文，只做有证据支撑的最小改动；不要为了迎合单条消息改写长期策略。');
   } else {
@@ -778,7 +764,7 @@ function buildTurnInstruction({ backlogRemindAt = 20 } = {}) {
 你现在处在一段持续的对话里，不是每次从头开始。上面的历史就是你这次开机以来在这个群的全部经历——你说过的话、调过的工具、上一轮给自己记的小结，都在里面。
 
 **一轮（turn）的边界**：从收到新消息开始，到你不再想做任何事为止。一轮之内你可以：
-- 调任意多次工具（查资料、翻历史、看图、派活给 CC）
+- 调任意多次工具（查资料、翻历史、看图）
 - 发消息、发表情、发图（正常情况下一两条就够，别凑数）
 - 想清楚之后选择什么都不做
 
@@ -848,7 +834,6 @@ function buildSessionToolInstruction(targetName, targetId, { voiceEnabled = fals
   lines.push('- 群聊历史：history_read / daily_read / daily_list / group_log_read（跨群）/ chat_search / chat_context。');
   lines.push('- 人物档案：social_read 读 social/people/{QQ号}.md、social/CONTACTS.md。');
   lines.push('- 外部资料：tavily 搜索、fetch 抓网页、webshot 截图。**不确定的事实先查再说**，别装懂。');
-  lines.push('- 派活：dispatch_subagent 把需要深挖的问题丢给 CC，结果用 cc_history / cc_read 取。它是异步的——派完这一轮可以先沉默，下一轮再看结果。');
   lines.push('- 看图：screenshot / image_list。');
 
   if (lurkMode === 'semi-lurk') {
@@ -1008,7 +993,7 @@ export async function buildIntentSystemPrompt({
     soulContent, userContent, memoryContent, groupRuleContent,
     contactsContent, peopleCacheContent, socialMemoryContent,
     intentStateContent, scratchNotes, lessonsContent, principlesContent,
-    intentHistory, replyStrategyContent,
+    intentHistory,
   ] = await Promise.all([
     readSoulFile(petId),
     readUserFile(petId),
@@ -1039,7 +1024,6 @@ export async function buildIntentSystemPrompt({
       try { return await tauri.workspaceRead(petId, `social/${dir}/scratch_${targetId}/principles.md`); } catch { return null; }
     })(),
     readIntentHistoryFile(petId, targetId, targetType),
-    readReplyStrategyFile(petId),
   ]);
 
   // === 人格（SOUL.md） ===
@@ -1142,7 +1126,7 @@ export async function buildIntentSystemPrompt({
   }
 
   sections.push(buildReplyStrategySection(
-    replyStrategyContent || DEFAULT_REPLY_STRATEGY,
+    DEFAULT_REPLY_STRATEGY,
     { role: 'intent', agentCanEditStrategy },
   ));
   if (agentCanEditStrategy) {

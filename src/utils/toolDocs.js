@@ -203,6 +203,30 @@ voice_send 是即时调用，不要写进 write_intent_plan.actions。
 - ❌ voice 里放 URL / 代码 / 英文长词（TTS 朗读会很奇怪）
 - ❌ 把 voice 当成 reply 的替代品，不发 reply 只发 voice → 错过信息传递
 `,
+  // Fish Audio 的写法：不进 system prompt，模型第一次调 voice_send 时作为工具结果返回
+  voice_send_fish: `# voice_send 写法（Fish Audio drama-3）
+
+voice_send(direction, script)
+
+- direction：这句话整体怎么说，用中文自然语言写，10-30 字。
+  例："开心，语速轻快"、"撒娇但有点不服气"、"小声，带点困意"。系统会把它加上方括号放在最前面，你不用自己写括号。
+- script：真正要念的话，最多 50 字（标签不算字数）。里面可以加两种标记，都不会被念出来：
+  - 声音和停顿：方括号放在它发生的位置，如 [sigh] [laugh] [breath] [gasp] [pause]
+  - 局部语气：成对标签包住几个字，只能用这几种：<whisper>…</whisper> <soft>…</soft> <emphasis>…</emphasis> <stress>…</stress> <forceful>…</forceful> <fast>…</fast> <slow>…</slow>
+
+## 例子
+- direction="开心，语速轻快"  script="哇你终于回来啦！[laugh] 我等你好久了～"
+- direction="温柔又有点害羞"  script="那个……谢谢你一直陪着我。[pause] <soft>真的很开心。</soft>"
+- direction="生气但其实在撒娇"  script="哼，<emphasis>不理你了</emphasis>！[sigh] 好吧，<fast>就原谅你这一次</fast>。"
+- direction="小声说悄悄话"  script="<whisper>偷偷告诉你，我其实会唱歌哦。</whisper>"
+
+## 要点
+- drama-3 默认念得偏慢、停顿多。日常说话在 direction 里写上"语速自然"或"轻快"。
+- 一句里标签一两个就够，别每个词都包，也别用 <fast> 包住整句。
+- 成对标签必须闭合；列表外的尖括号标签会被删掉。
+- direction 写语气，不要写成长段描述；script 里不要写 Markdown、网址、@QQ号。
+- 语音只用来表达情绪，信息照常用 send_message 发文字。每轮最多发一次语音。
+`,
   dispatch_subagent: `# dispatch_subagent 完整指南
 
 ## 签名
