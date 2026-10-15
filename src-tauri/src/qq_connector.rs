@@ -1033,6 +1033,8 @@ impl QqConnectorManager {
             )
             .await?;
             patch_isolated_hot_updates(&isolated_home, &runtime_entry).await?;
+            // 补签失败只会让语音继续发不出去，不该连桥接都起不来
+            let _ = repair_napcat_native_signatures(&isolated_app).await;
 
             let package_path = qq_package_path(&isolated_app);
             let log_path = logs_dir.join("qq-bridge.log");
@@ -2315,6 +2317,57 @@ async fn configure_isolated_macos_bundle(app: &Path) -> Result<(), String> {
     // Tencent's signing identity. Re-signing only the private copy ad-hoc removes
     // that sandbox coupling; CFFIXED_USER_HOME and --user-data-dir provide the
     // dedicated filesystem boundary when the bridge is launched.
+    sign_napcat_native_modules(app, false).await?;
+    adhoc_sign_bundle(app).await
+}
+
+/// NapCat 的原生模块（如 ffmpegAddon.darwin.arm64.node）散放在 Resources 里，
+/// `codesign --deep` 不会签它们。Apple 芯片拒绝加载完全没签名的代码，ffmpeg 模块
+/// 加载失败后 NapCat 只剩命令行适配器，而它没实现转 SILK，语音消息就全发不出去。
+/// 返回签了几个；`only_unsigned` 时跳过已有有效签名的。
+async fn sign_napcat_native_modules(app: &Path, only_unsigned: bool) -> Result<usize, String> {
+    let mut signed = 0;
+    for module in find_mach_o_files(&app.join("Contents/Resources/petgpt-napcat")) {
+        if only_unsigned {
+            let verified = Command::new("/usr/bin/codesign")
+                .arg("--verify")
+                .arg(&module)
+                .output()
+                .await
+                .map(|output| output.status.success())
+                .unwrap_or(false);
+            if verified {
+                continue;
+            }
+        }
+        let output = Command::new("/usr/bin/codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&module)
+            .output()
+            .await
+            .map_err(|e| format!("签名 NapCat 原生模块失败: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "签名 NapCat 原生模块 {} 失败: {}",
+                module.display(),
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        signed += 1;
+    }
+    Ok(signed)
+}
+
+/// 已经装好的隔离副本里原生模块没签名时补签，再重签整个副本让资源封印对得上。
+/// 只在启动桥接前调用，那时副本没有在运行。
+async fn repair_napcat_native_signatures(app: &Path) -> Result<(), String> {
+    if sign_napcat_native_modules(app, true).await? > 0 {
+        adhoc_sign_bundle(app).await?;
+    }
+    Ok(())
+}
+
+async fn adhoc_sign_bundle(app: &Path) -> Result<(), String> {
     let sign_output = Command::new("/usr/bin/codesign")
         .args(["--deep", "--force", "--sign", "-"])
         .arg(app)
@@ -2643,6 +2696,56 @@ fn find_file_named(root: &Path, name: &str) -> Option<PathBuf> {
     None
 }
 
+/// root 下所有 Mach-O 文件（看文件头，不看扩展名：同目录还有 Linux / Windows 版的 .node）。
+fn find_mach_o_files(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return found;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            found.extend(find_mach_o_files(&path));
+        } else if path.is_file() && is_mach_o(&path) {
+            found.push(path);
+        }
+    }
+    found
+}
+
+fn is_mach_o(path: &Path) -> bool {
+    use std::io::Read;
+    let mut header = [0u8; 8];
+    let Ok(mut file) = StdFile::open(path) else {
+        return false;
+    };
+    let mut len = 0;
+    while len < header.len() {
+        match file.read(&mut header[len..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => len += n,
+        }
+    }
+    is_mach_o_header(&header[..len])
+}
+
+fn is_mach_o_header(header: &[u8]) -> bool {
+    let Some(magic) = header.get(..4) else {
+        return false;
+    };
+    match u32::from_be_bytes([magic[0], magic[1], magic[2], magic[3]]) {
+        // 64 / 32 位，大小端
+        0xfeedfacf | 0xcffaedfe | 0xfeedface | 0xcefaedfe => true,
+        // universal（fat）和 Java class 文件同一个魔数；fat 后面跟架构数，class 跟的是版本号（≥ 45）
+        0xcafebabe => header
+            .get(4..8)
+            .map(|n| u32::from_be_bytes([n[0], n[1], n[2], n[3]]) < 20)
+            .unwrap_or(false),
+        0xbebafeca => true,
+        _ => false,
+    }
+}
+
 fn find_directory_named(root: &Path, name: &str) -> Option<PathBuf> {
     let entries = std::fs::read_dir(root).ok()?;
     for entry in entries.flatten() {
@@ -2744,6 +2847,42 @@ fn value_as_string(value: Option<&Value>) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mach_o_is_recognised_by_header_not_extension() {
+        assert!(is_mach_o_header(&[0xcf, 0xfa, 0xed, 0xfe, 0x0c, 0, 0, 0x01]));
+        assert!(is_mach_o_header(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 2]), "universal, 2 arches");
+        assert!(!is_mach_o_header(&[0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52]), "Java class file");
+        assert!(!is_mach_o_header(b"\x7fELF\x02\x01\x01\x00"), "the Linux build of the addon");
+        assert!(!is_mach_o_header(b"MZ\x90\x00\x03\x00\x00\x00"), "the Windows build");
+        assert!(!is_mach_o_header(&[0xcf, 0xfa]));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn unsigned_native_modules_are_signed_and_others_left_alone() {
+        let app = std::env::temp_dir().join(format!("petgpt-sign-test-{}.app", Uuid::new_v4()));
+        let native = app.join("Contents/Resources/petgpt-napcat/native/ffmpeg");
+        std::fs::create_dir_all(&native).unwrap();
+        let module = native.join("ffmpegAddon.darwin.arm64.node");
+        std::fs::copy("/usr/bin/true", &module).unwrap();
+        let removed = Command::new("/usr/bin/codesign")
+            .arg("--remove-signature")
+            .arg(&module)
+            .status()
+            .await
+            .unwrap();
+        assert!(removed.success());
+        let linux = native.join("ffmpegAddon.linux.x64.node");
+        std::fs::write(&linux, b"\x7fELF\x02\x01\x01\x00 not mach-o").unwrap();
+
+        assert_eq!(sign_napcat_native_modules(&app, true).await.unwrap(), 1);
+        let verified = Command::new("/usr/bin/codesign").arg("--verify").arg(&module).status().await.unwrap();
+        assert!(verified.success());
+        assert_eq!(sign_napcat_native_modules(&app, true).await.unwrap(), 0, "already signed");
+        assert_eq!(std::fs::read(&linux).unwrap(), b"\x7fELF\x02\x01\x01\x00 not mach-o");
+        std::fs::remove_dir_all(&app).unwrap();
+    }
 
     async fn mock_qr_webui(
         responses: Vec<(&'static str, Value)>,
