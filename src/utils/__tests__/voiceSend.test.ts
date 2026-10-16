@@ -1,6 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createServer } from 'vite';
+import { createServer, type ViteDevServer } from 'vite';
 
 /**
  * voice_send 的两次调用：Fish 的写法说明不进 system prompt，模型还看不见说明时
@@ -8,9 +8,12 @@ import { createServer } from 'vite';
  * 合成必然失败，所以「走到了合成」体现为「TTS 生成失败」。
  */
 
-let vite;
-let socialTools;
-let voiceScript;
+type LoadedModule = Awaited<ReturnType<ViteDevServer['ssrLoadModule']>>;
+
+let vite: ViteDevServer | undefined;
+// 经 Vite 加载的模块没有类型
+let socialTools: LoadedModule;
+let voiceScript: LoadedModule;
 
 before(async () => {
   vite = await createServer({
@@ -19,7 +22,7 @@ before(async () => {
     logLevel: 'silent',
   });
   socialTools = await vite.ssrLoadModule('/src/utils/workspace/socialToolExecutor.js');
-  voiceScript = await vite.ssrLoadModule('/src/utils/social/voiceScript.js');
+  voiceScript = await vite.ssrLoadModule('/src/utils/social/voiceScript.ts');
 });
 
 after(async () => {
@@ -27,11 +30,11 @@ after(async () => {
 });
 
 const fishConfig = { enabled: true, provider: 'fish', fish: { apiKey: 'sk-fish', referenceId: 'ref' } };
-const context = (extra) => ({
+const context = (extra: Record<string, unknown>) => ({
   petId: 'pet', targetId: 'g1', targetType: 'group', mcpServerName: 'qq',
   ttsConfig: fishConfig, ...extra,
 });
-const resultText = (result) => result?.content?.[0]?.text || '';
+const resultText = (result: { content?: Array<{ text?: string }> } | undefined) => result?.content?.[0]?.text || '';
 
 test('Fish：还没看过说明时只返回说明，不发送', async () => {
   const result = await socialTools.executeSubagentTool('voice_send',

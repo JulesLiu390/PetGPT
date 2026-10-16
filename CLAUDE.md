@@ -12,6 +12,8 @@ npm run tauri:dev        # dev mode (macOS/Linux)
 npm run tauri:build      # production build
 npm run dev              # frontend only (Vite)
 npm run lint             # ESLint
+npm run typecheck        # tsc over the TypeScript files
+npm test                 # node --test src/**/*.test.{mjs,ts}
 ```
 
 ## Architecture
@@ -57,7 +59,8 @@ Stored under `~/Library/Application Support/com.petgpt.app/workspace/{petId}/`:
 - `social/CONTACTS.md` — contacts index
 
 ## Conventions
-- No TypeScript — plain JS/JSX throughout
+- New features are written in TypeScript (`.ts`/`.tsx`, strict); existing JS/JSX stays JS unless it is being rewritten. `npm run typecheck` checks only the TS files; the JS they import is used for type inference and is not checked.
+- In TS files, imports carry the real extension (`./voiceCall.ts`, `./outgoingText.js`), types come in through `import type`, and there are no enums or namespaces: `node --test` runs `.ts` files directly with Node's type stripping, without a bundler.
 - Tailwind CSS for styling
 - Log levels: `info`, `warn`, `error`, `intent`, `send`, `memory`, `poll`
 - `addLog(level, message, details, target)` for all agent logging

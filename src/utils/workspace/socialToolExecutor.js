@@ -18,7 +18,7 @@ import { messagesAfter, isCursorUnset, sortByTime, messageTimeMs } from '../soci
 import { pickSticker } from '../social/stickerPick.js';
 import { backfillStickerSeq, markStickerUsed, initStickerSeq } from '../social/stickerSeq.js';
 import { extractFileId, contentHash, findByFileId, findByHash, backfillFileIds } from '../social/stickerIdentity.js';
-import { resolveTts, cleanDramaScript, spokenText, buildDramaText, VOICE_GUIDE_MARKER } from '../social/voiceScript.js';
+import { resolveTts, cleanDramaScript, spokenText, buildDramaText, VOICE_GUIDE_MARKER } from '../social/voiceScript.ts';
 import { DEFAULT_TOOL_DOCS } from '../toolDocs.js';
 
 // ============ 常量 ============

@@ -1,0 +1,25 @@
+{
+  // 新代码写 TS，老的 JS/JSX 不动。只检查 .ts/.tsx；被它们 import 的 JS 只用来推断类型、不报错。
+  // TS 之间的 import 写 .ts 后缀、类型用 import type：node --test 直接跑 .ts（Node 自带去类型），
+  // 不经过打包器，所以只能用 Node 能原样执行的写法（erasableSyntaxOnly）。
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "strict": true,
+    "noEmit": true,
+    "allowJs": true,
+    "checkJs": false,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "resolveJsonModule": true,
+    "noFallthroughCasesInSwitch": true,
+    "skipLibCheck": true
+  },
+  "include": ["src/**/*.ts", "src/**/*.tsx"]
+}

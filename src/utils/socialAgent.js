@@ -30,7 +30,7 @@ import { subagentRegistry, initSubagentListeners, destroySubagentListeners, kill
 import { startKeepAwake, stopKeepAwake } from './keepAwake.js';
 import { normalizeTargetIds } from './social/targetId.js';
 import { normalizeSplitTags, stripSplitTagsForSpeech } from './social/outgoingText.js';
-import { resolveTts, hasVisibleVoiceGuide, isVoiceGuideResult } from './social/voiceScript.js';
+import { resolveTts, hasVisibleVoiceGuide, isVoiceGuideResult } from './social/voiceScript.ts';
 import { applyIncomingEdit } from './social/messageEdits.js';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
