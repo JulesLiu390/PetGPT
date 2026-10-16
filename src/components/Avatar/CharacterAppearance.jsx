@@ -8,6 +8,7 @@ import { currentSwingPose, subscribeSwing } from './dragSwing';
 import { createHeadMotion } from './headMotion';
 import { fitBottomCenter } from './hitRegion';
 import { hopCount, hopPose } from './petReactions';
+import { easeMouth, speechLevelAt } from './speechLevel';
 import { createWind } from './wind';
 import {
   breathAt, gazeOffset, layerTransform, layeredRig, orderedSkinLayers, skinViewBox, thoughtDots,
@@ -19,7 +20,7 @@ const GAZE_RATE = 12;
 // Thinking slows breathing to this share of its usual pace.
 const THINKING_BREATH = 0.7;
 
-/** Breathing, blink, gaze, head tilts, hops, gusts, hair sway and the drag swing's secondary motion on one clock, written straight to the DOM. */
+/** Breathing, blink, gaze, head tilts, hops, gusts, hair sway, speech and the drag swing's secondary motion on one clock, written straight to the DOM. */
 function useLayeredMotion(svgRef, viewportRef, rig, animated, thinking) {
   // Read every frame rather than restarting the effect, so a mood change never resets the clock.
   const thinkingRef = useRef(thinking);
@@ -46,6 +47,7 @@ function useLayeredMotion(svgRef, viewportRef, rig, animated, thinking) {
     let lastHop = '';
     let aim = [0, 0];
     let gaze = [0, 0];
+    let mouth = 0;
 
     const aimAt = (point) => {
       if (!point) return [0, 0];
@@ -67,6 +69,7 @@ function useLayeredMotion(svgRef, viewportRef, rig, animated, thinking) {
       breathPace += ((isThinking ? THINKING_BREATH : 1) - breathPace) * (1 - Math.exp(-2 * elapsed));
       breathClock += elapsed * breathPace;
       wind.advance(seconds);
+      mouth = rig.mouth ? easeMouth(mouth, speechLevelAt(now), elapsed) : 0;
       const frame = {
         seconds,
         blink: rig.eyes ? blinkScaleAt(seconds) : 1,
@@ -74,6 +77,7 @@ function useLayeredMotion(svgRef, viewportRef, rig, animated, thinking) {
         breath: rig.breath ? breathAt(breathClock) : 0,
         tilt: head.tilt,
         wind: lag => wind.at(seconds - lag),
+        speech: mouth,
       };
       for (const part of parts) {
         const transform = layerTransform(rig, part.name, frame);
@@ -117,6 +121,7 @@ function useLayeredMotion(svgRef, viewportRef, rig, animated, thinking) {
       }
       iris?.removeAttribute('transform');
       gaze = [0, 0];
+      mouth = 0;
       viewport.style.transform = '';
       lastHop = '';
       hopStart = null;
@@ -239,6 +244,7 @@ function ImageCharacter({ path, onError, onHitShape }) {
 
 // Remount on identity changes so stale async responses or broken textures cannot leak to another pet.
 // `onHitShape` receives the artwork's resting outline (see hitRegion.js), or null while there is none.
+/** @param {{ skinId?: string, mood?: string, animated?: boolean, preview?: boolean, onHitShape?: (shape: object | null) => void }} props */
 export default function CharacterAppearance({ skinId, mood = 'normal', animated = true, preview = false, onHitShape }) {
   return <SwingFrame>
     <SkinAppearance key={skinId || 'default'} skinId={skinId} mood={mood} animated={animated} preview={preview} onHitShape={onHitShape} />

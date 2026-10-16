@@ -21,6 +21,8 @@ pub struct LlmProxy {
     http_client: Client,
     /// 并发信号量：限制同时发出的 LLM HTTP 请求数
     semaphore: Semaphore,
+    /// 视频通话专用额度：有人在等宠物开口，不能排在 Observer、压缩这些后台请求后面
+    realtime_semaphore: Semaphore,
     /// 图像生成专用 client（更长超时）
     image_gen_client: Client,
     /// 图像生成专用 semaphore（独立并发额度，不挤占 LLM）
@@ -80,6 +82,8 @@ pub struct ProxyStreamChunk {
 const REQUEST_TIMEOUT_SECS: u64 = 180;
 /// 最大并发 LLM 请求数（Observer + Intent + Compress 共享）
 const MAX_CONCURRENT_REQUESTS: usize = 2;
+/// 视频通话的请求另走这份额度；同一时间只有一个通话，2 个足够
+const MAX_CONCURRENT_REALTIME_REQUESTS: usize = 2;
 
 /// 图像生成单次请求超时（gpt-image-2 等慢 provider 可能 5+ 分钟）
 const IMAGE_GEN_TIMEOUT_SECS: u64 = 600;
@@ -101,6 +105,7 @@ impl LlmProxy {
                 .build()
                 .expect("Failed to build reqwest client"),
             semaphore: Semaphore::new(MAX_CONCURRENT_REQUESTS),
+            realtime_semaphore: Semaphore::new(MAX_CONCURRENT_REALTIME_REQUESTS),
             image_gen_client: Client::builder()
                 .timeout(Duration::from_secs(IMAGE_GEN_TIMEOUT_SECS))
                 .build()
@@ -312,6 +317,7 @@ pub async fn llm_proxy_get(
 /// 前端仍使用各 adapter 原有的 SSE 解析逻辑；Rust 侧只负责发送 HTTP 请求，
 /// 并把原始响应字节按文本块通过 Tauri event 转发回来，避免 WKWebView fetch
 /// 在局域网/反代/CORS 场景下抛 "Load failed"。
+/// `realtime` 的请求（视频通话）用独立的并发额度。
 #[tauri::command]
 pub async fn llm_proxy_stream(
     app: AppHandle,
@@ -320,6 +326,7 @@ pub async fn llm_proxy_stream(
     endpoint: String,
     headers: HashMap<String, String>,
     body_b64: String,
+    realtime: Option<bool>,
 ) -> Result<(), String> {
     let cancellation = proxy.register_stream(&request_id);
     let result = llm_proxy_stream_inner(
@@ -330,6 +337,7 @@ pub async fn llm_proxy_stream(
         headers,
         body_b64,
         cancellation,
+        realtime.unwrap_or(false),
     )
     .await;
     proxy.unregister_stream(&request_id);
@@ -344,6 +352,7 @@ async fn llm_proxy_stream_inner(
     headers: HashMap<String, String>,
     body_b64: String,
     cancellation: Arc<ProxyStreamCancellation>,
+    realtime: bool,
 ) -> Result<(), String> {
     let body_bytes = BASE64
         .decode(&body_b64)
@@ -353,8 +362,9 @@ async fn llm_proxy_stream_inner(
     let body_value: serde_json::Value =
         serde_json::from_str(&body_str).map_err(|e| format!("Body JSON parse error: {}", e))?;
 
+    let semaphore = if realtime { &proxy.realtime_semaphore } else { &proxy.semaphore };
     let _permit = tokio::select! {
-        permit = proxy.semaphore.acquire() => {
+        permit = semaphore.acquire() => {
             permit.map_err(|e| format!("Semaphore closed: {}", e))?
         }
         _ = cancellation.cancelled() => {

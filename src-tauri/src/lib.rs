@@ -12,6 +12,7 @@ mod subagent;
 mod platform;
 mod window_layout;
 mod qq_connector;
+mod voice_call;
 mod updater;
 mod projects;
 mod agent_sessions;
@@ -3819,6 +3820,7 @@ pub fn run() {
             // The character window also switches click-through here, so clicks on its transparent
             // parts reach the apps behind; the page reports where the pet is drawn.
             app.manage(click_through::HitRegion::default());
+            app.manage(voice_call::VoiceCallState::default());
             {
                 let app_handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -4265,6 +4267,10 @@ pub fn run() {
             get_window_position,
             get_cursor_in_window,
             click_through::set_character_hit_region,
+            voice_call::voice_call_start,
+            voice_call::voice_call_stop,
+            voice_call::voice_call_status,
+            voice_call::voice_call_speak,
             drag_motion::start_drag_motion,
             drag_motion::stop_drag_motion,
             set_window_position,

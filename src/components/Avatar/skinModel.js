@@ -98,12 +98,16 @@ export function layeredRig(manifest, eyeLine) {
   const skirt = bottom && (!legs || bottom.size[0] > legs.size[0] * 1.3)
     ? { name: 'bottomwear', pivotY: bottom.origin[1] } : null;
   const breath = manifest.animation?.breathing ? breathRig(manifest, layers, face) : null;
+  // The mouth opens downward from its top edge, the way a jaw drops.
+  const mouthLayer = layers.get('mouth');
+  const mouth = mouthLayer ? { name: 'mouth', pivot: [mouthLayer.origin[0] + mouthLayer.size[0] / 2, mouthLayer.origin[1]] } : null;
   const parts = new Set([
     ...(eyes?.layers ?? []), ...hair.map(h => h.name), ...(head?.layers ?? []),
     ...(tail ? [tail.name] : []), ...(skirt ? [skirt.name] : []),
     ...(breath ? [...breath.chest, ...breath.lift.keys()] : []),
+    ...(mouth ? [mouth.name] : []),
   ]);
-  return { eyes, hair, head, tail, skirt, breath, parts };
+  return { eyes, hair, head, tail, skirt, breath, mouth, parts };
 }
 
 /**
@@ -139,6 +143,18 @@ function unionBox(layers) {
 }
 
 // Squeeze perpendicular to the (possibly tilted) eye line, closing slightly downward.
+// How far the mouth stretches at full volume: taller, and a little narrower as it rounds.
+const MOUTH_OPEN = [0.08, 0.9];
+
+/** The mouth layer opened by `level` (0 shut … 1 wide), stretched down from its top edge. */
+export function mouthTransform({ pivot: [x, y] }, level) {
+  if (!(level > 0.01)) return '';
+  const open = Math.min(1, level);
+  const sx = (1 - MOUTH_OPEN[0] * open).toFixed(4);
+  const sy = (1 + MOUTH_OPEN[1] * open).toFixed(4);
+  return `translate(${x} ${y}) scale(${sx} ${sy}) translate(${-x} ${-y})`;
+}
+
 export function blinkTransform({ pivot: [x, y], angle, shift }, scale) {
   if (scale >= 1) return '';
   return `translate(${x} ${y}) rotate(${angle}) translate(0 ${(1 - scale) * shift}) scale(1 ${scale}) rotate(${-angle}) translate(${-x} ${-y})`;
@@ -204,7 +220,7 @@ function breathTransform({ chest, pivot: [x, y], scale: [sx, sy], lift }, name, 
  * wind(lag) is a gust's push `lag` seconds ago, positive blowing to the right; the hair, skirt
  * and tail each trail it by their own lag.
  */
-export function layerTransform(rig, name, { seconds, blink = 1, pose = null, breath = 0, tilt = 0, wind = still }) {
+export function layerTransform(rig, name, { seconds, blink = 1, pose = null, breath = 0, tilt = 0, wind = still, speech = 0 }) {
   const transforms = [rig.breath ? breathTransform(rig.breath, name, breath) : ''];
   if (tilt && rig.head?.layers.includes(name)) transforms.push(rotateAbout(tilt, rig.head.pivot));
   if (pose && rig.head?.layers.includes(name)) transforms.push(rotateAbout(pose.head, rig.head.pivot));
@@ -222,6 +238,7 @@ export function layerTransform(rig, name, { seconds, blink = 1, pose = null, bre
     transforms.push(hairTransform(hair, seconds, extra));
   }
   if (rig.eyes?.layers.includes(name)) transforms.push(blinkTransform(rig.eyes, blink));
+  if (rig.mouth?.name === name) transforms.push(mouthTransform(rig.mouth, speech));
   return transforms.filter(Boolean).join(' ');
 }
 

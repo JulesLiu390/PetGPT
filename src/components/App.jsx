@@ -20,6 +20,7 @@ const CharacterPage = lazy(() => import('../pages/CharacterPage'));
 const ManagementPage = lazy(() => import('../pages/ManagementPage'));
 const SocialPage = lazy(() => import('../pages/SocialPage'));
 const ScreenshotOverlay = lazy(() => import('../pages/ScreenshotOverlay'));
+const CallPage = lazy(() => import('../pages/CallPage'));
 
 /**
  * 路由切换时的占位。
@@ -63,6 +64,7 @@ function App() {
             <Route path="/manage" element={<ManagementPage />} />
             <Route path="/social" element={<SocialPage />} />
             <Route path="/screenshot-prompt" element={<ScreenshotOverlay />} />
+            <Route path="/call" element={<CallPage />} />
           </Routes>
         </Suspense>
   )

@@ -416,7 +416,7 @@ const encodeJsonBody = (body) => {
   return btoa(binary);
 };
 
-export const llmProxyStream = async (endpoint, headers, body, onChunk, abortSignal) => {
+export const llmProxyStream = async (endpoint, headers, body, onChunk, abortSignal, { realtime = false } = {}) => {
   throwIfAborted(abortSignal);
   const requestId = crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
   const eventName = `llm-proxy-chunk:${requestId}`;
@@ -451,7 +451,8 @@ export const llmProxyStream = async (endpoint, headers, body, onChunk, abortSign
       requestId,
       endpoint,
       headers,
-      bodyB64: encodeJsonBody(body)
+      bodyB64: encodeJsonBody(body),
+      realtime,
     });
     throwIfAborted(abortSignal);
     if (callbackError) {

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>PetGPT listens to you during a video call with your pet.</string>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>PetGPT listens to what your computer is playing during a video call, such as other people in a group voice chat.</string>
+</dict>
+</plist>

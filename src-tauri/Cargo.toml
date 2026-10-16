@@ -39,7 +39,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 tokio = { version = "1", features = ["full"] }
 
 # HTTP client for MCP HTTP transport
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", features = ["json", "stream", "multipart"] }
 futures = "0.3"
 sha2 = "0.10"
 zip = { version = "2.2", default-features = false, features = ["deflate"] }
@@ -57,6 +57,12 @@ image = "0.25"
 qrcode = { version = "0.14.1", default-features = false }
 url = "2.5"
 
+# Voice call: microphone capture, playback, voice activity detection, WAV encoding
+rodio = { version = "0.23", default-features = false, features = ["playback", "symphonia-mp3"] }
+cpal = "0.18"
+webrtc-vad = "0.4"
+hound = "3.5"
+
 # Window effects
 window-vibrancy = "0.5"
 portable-pty = "0.9"
@@ -67,6 +73,8 @@ cocoa = "0.26"
 objc = "0.2"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSWindow"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSGeometry"] }
+# Voice call: the computer's own audio
+screencapturekit = "1.5"
 
 # Linux specific
 [target.'cfg(target_os = "linux")'.dependencies]

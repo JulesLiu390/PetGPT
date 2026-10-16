@@ -595,6 +595,142 @@ export const executeToolCalls = async (toolCalls) => {
  * @param {Function} config.toolArgTransform - (name, args) => args — transform tool args before execution
  * @returns {Promise<{content: string, toolCallHistory: Array}>}
  */
+/** 流式块里的用量：OpenAI 在最后一块带 usage，Gemini 带 usageMetadata；大多数块都没有。 */
+const peekStreamUsage = (jsonStr) => {
+  if (!jsonStr.includes('"usage')) return null;
+  try {
+    const data = JSON.parse(jsonStr);
+    return data?.usage || data?.usageMetadata || data?.message?.usage || null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * 读完一次流式响应。文字边到边交给 onText(delta, textSoFar)，收完返回和 adapter.parseResponse
+ * 同形的 { content, toolCalls, usage, finishReason }，工具循环后面的处理不必区分流式与否。
+ */
+export const readLLMStream = async ({ adapter, req, abortSignal, streamTransport = llmProxyStream, onText }) => {
+  let buffer = '';
+  let content = '';
+  let usage = null;
+  let finishReason = null;
+  const streamToolCalls = new Map(); // index -> {id, name, arguments}
+
+  const processStreamText = (chunkText) => {
+    if (abortSignal?.aborted) return;
+    buffer += chunkText;
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+
+    for (const line of lines) {
+      // 跳过空行
+      if (!line.trim()) continue;
+
+      // 处理 SSE 格式
+      let jsonStr = line;
+      if (line.startsWith('data: ')) {
+        jsonStr = line.slice(6).trim();
+      } else if (line.startsWith(':')) {
+        // SSE 注释行，跳过
+        continue;
+      }
+
+      if (jsonStr === '[DONE]' || jsonStr === '') continue;
+
+      const { deltaText, deltaToolCalls, error, finishReason: chunkFinishReason } = adapter.parseStreamChunk(jsonStr);
+
+      // 如果有错误，记录但继续处理
+      if (error) {
+        console.warn('[toolExecutor] Stream chunk error:', error);
+      }
+      if (chunkFinishReason) finishReason = chunkFinishReason;
+      const chunkUsage = peekStreamUsage(jsonStr);
+      if (chunkUsage) usage = chunkUsage;
+
+      if (deltaText) {
+        content += deltaText;
+        onText?.(deltaText, content);
+      }
+
+      // 收集工具调用片段
+      if (deltaToolCalls) {
+        for (const tc of deltaToolCalls) {
+          if (!streamToolCalls.has(tc.index)) {
+            streamToolCalls.set(tc.index, {
+              id: tc.id || `call_${tc.index}`,
+              name: tc.name || '',
+              arguments: null,  // 初始为 null，区分未设置和空字符串
+              _rawPart: null    // 保留原始 part 用于 thought_signature
+            });
+          }
+          const existing = streamToolCalls.get(tc.index);
+          if (tc.id) existing.id = tc.id;
+          if (tc.name) existing.name = tc.name;
+          // 保留原始 part（包含 thought_signature）
+          // 只在当前没有 _rawPart，或新的 part 包含 thought_signature 时更新
+          // 避免被后续不含签名的 chunk 覆盖（Gemini 流式模式可能在后续 chunk 中省略签名）
+          if (tc._rawPart) {
+            if (!existing._rawPart || tc._rawPart.thought_signature) {
+              existing._rawPart = tc._rawPart;
+            }
+          }
+          if (tc.arguments !== undefined && tc.arguments !== null) {
+            // Gemini 返回的是对象，OpenAI 流式返回的是字符串片段
+            if (typeof tc.arguments === 'object') {
+              // Gemini: 直接存储对象（通常是完整的）
+              existing.arguments = tc.arguments;
+            } else if (typeof tc.arguments === 'string') {
+              // OpenAI: 累积字符串
+              if (typeof existing.arguments === 'string') {
+                existing.arguments += tc.arguments;
+              } else {
+                existing.arguments = tc.arguments;
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+
+  await streamTransport(req.endpoint, req.headers, req.body, processStreamText, abortSignal);
+  throwIfAborted(abortSignal);
+  if (buffer.trim()) {
+    processStreamText('\n');
+  }
+
+  // 处理收集到的工具调用
+  const toolCalls = Array.from(streamToolCalls.values())
+    .filter(tc => tc.name)
+    .map(tc => {
+      let parsedArgs = {};
+
+      if (typeof tc.arguments === 'object' && tc.arguments !== null) {
+        // 已经是对象（Gemini 格式）
+        parsedArgs = tc.arguments;
+      } else if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
+        // 字符串需要解析（OpenAI 格式）
+        try {
+          parsedArgs = JSON.parse(tc.arguments);
+        } catch (e) {
+          console.error('[MCP] Failed to parse tool arguments:', tc.arguments, e);
+          parsedArgs = { _raw: tc.arguments, _parseError: e.message };
+        }
+      }
+
+      return {
+        id: tc.id,
+        name: tc.name,
+        arguments: parsedArgs,
+        // 保留原始 part（包含 thought_signature）用于 Gemini
+        _rawPart: tc._rawPart
+      };
+    });
+
+  return { content, toolCalls, usage, finishReason };
+};
+
 export const callLLMWithTools = async ({
   messages,
   apiFormat,
@@ -610,6 +746,10 @@ export const callLLMWithTools = async ({
   onLLMText,        // (text, iterationIndex) => void — called with LLM text each iteration (including intermediate rounds with tool calls)
   toolCallFilter,  // (name, args) => string|null — return error string to reject, null to allow
   toolArgTransform, // (name, args) => args — transform tool args before execution
+  toolOverride,     // optional async (name, args) => result|null — a non-null result replaces the real call
+  onTextDelta,      // optional (delta, { iteration, text }) => void — streams each response; text as it arrives
+  abortSignal,      // optional AbortSignal — cancels between iterations and mid-stream
+  streamTransport = llmProxyStream, // used when onTextDelta is set; injectable for tests
   builtinToolContext,  // { petId, memoryEnabled } — for builtin tool execution
   stopAfterTool,    // optional string — stop the tool loop after this tool name is called (no further LLM turns)
   usageLabel,       // optional string label for usage logging (e.g. "Observer", "Intent:idle")
@@ -693,7 +833,9 @@ export const callLLMWithTools = async ({
   };
 
   try {
+    const streaming = typeof onTextDelta === 'function';
     while (totalIterations < MAX_TOTAL_ITERATIONS) {
+      throwIfAborted(abortSignal);
       totalIterations++;
       console.log(`[MCP] Tool loop iteration ${totalIterations}`);
 
@@ -706,7 +848,7 @@ export const callLLMWithTools = async ({
         baseUrl,
         options: {
           ...options,
-          stream: false,
+          stream: streaming,
           tools: llmTools.length > 0 ? llmTools : undefined
         }
       });
@@ -714,29 +856,39 @@ export const callLLMWithTools = async ({
         requestImages = { given: countMessageImages(currentMessages), sent: countBodyImages(req.body) };
       }
 
-      // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
-      let data;
-      try {
-        data = await llmTransport(req.endpoint, req.headers, req.body);
-      } catch (proxyErr) {
-        // Tauri invoke 抛的是 string，无法挂属性 → 包装成 Error 对象
-        const err = typeof proxyErr === 'string' ? new Error(proxyErr) : (proxyErr instanceof Error ? proxyErr : new Error(String(proxyErr)));
+      // 流式：边收边交出文字，收完拼成和非流式一样的结果，后面的处理照旧
+      let result;
+      if (streaming) {
+        const iteration = totalIterations;
+        result = await readLLMStream({
+          adapter, req, abortSignal, streamTransport,
+          onText: (delta, text) => onTextDelta(delta, { iteration, text }),
+        });
+      } else {
+        // 发送请求（通过 Rust 代理：90s 超时 + 并发控制）
+        let data;
         try {
-          const bodyStr = JSON.stringify(req.body);
-          // 从错误信息中提取 column 号，截取报错位置前后 200 字符
-          const colMatch = (err.message || '').match(/column\s+(\d+)/);
-          if (colMatch) {
-            const col = parseInt(colMatch[1], 10);
-            const start = Math.max(0, col - 200);
-            const end = Math.min(bodyStr.length, col + 200);
-            err._debugBody = `…col ${col}, context [${start}..${end}]:\n${bodyStr.substring(start, end)}`;
-          } else {
-            err._debugBody = bodyStr.substring(0, 2000) + (bodyStr.length > 2000 ? '…' : '');
-          }
-        } catch (_) { /* ignore */ }
-        throw err;
+          data = await llmTransport(req.endpoint, req.headers, req.body);
+        } catch (proxyErr) {
+          // Tauri invoke 抛的是 string，无法挂属性 → 包装成 Error 对象
+          const err = typeof proxyErr === 'string' ? new Error(proxyErr) : (proxyErr instanceof Error ? proxyErr : new Error(String(proxyErr)));
+          try {
+            const bodyStr = JSON.stringify(req.body);
+            // 从错误信息中提取 column 号，截取报错位置前后 200 字符
+            const colMatch = (err.message || '').match(/column\s+(\d+)/);
+            if (colMatch) {
+              const col = parseInt(colMatch[1], 10);
+              const start = Math.max(0, col - 200);
+              const end = Math.min(bodyStr.length, col + 200);
+              err._debugBody = `…col ${col}, context [${start}..${end}]:\n${bodyStr.substring(start, end)}`;
+            } else {
+              err._debugBody = bodyStr.substring(0, 2000) + (bodyStr.length > 2000 ? '…' : '');
+            }
+          } catch (_) { /* ignore */ }
+          throw err;
+        }
+        result = adapter.parseResponse(data);
       }
-      const result = adapter.parseResponse(data);
       if (Array.isArray(result.toolCalls)) {
         result.toolCalls.forEach((call, index) => {
           if (!call.id) {
@@ -918,6 +1070,10 @@ export const callLLMWithTools = async ({
               isError = true;
               toolResult = { error: filterError };
             }
+          }
+
+          if (!toolResult && toolOverride) {
+            toolResult = (await toolOverride(call.name, call.arguments)) || null;
           }
 
           if (!toolResult) {
@@ -1214,124 +1370,16 @@ export const callLLMStreamWithTools = async ({
     });
     
     // 处理流式响应。HTTP 请求走 Rust 代理，避免 WKWebView 在局域网/反代下抛 Load failed。
-    let buffer = '';
-    let iterationContent = '';
-    
-    // 收集流式工具调用
-    const streamToolCalls = new Map(); // index -> {id, name, arguments}
+    const { toolCalls: collectedToolCalls } = await readLLMStream({
+      adapter, req, abortSignal, streamTransport,
+      onText: (deltaText) => {
+        fullContent += deltaText;
+        if (onChunk) {
+          onChunk(deltaText, fullContent);
+        }
+      },
+    });
 
-    const processStreamText = (chunkText) => {
-      if (abortSignal?.aborted) return;
-      buffer += chunkText;
-      const lines = buffer.split('\n');
-      buffer = lines.pop() || '';
-      
-      for (const line of lines) {
-        // 跳过空行
-        if (!line.trim()) continue;
-        
-        // 处理 SSE 格式
-        let jsonStr = line;
-        if (line.startsWith('data: ')) {
-          jsonStr = line.slice(6).trim();
-        } else if (line.startsWith(':')) {
-          // SSE 注释行，跳过
-          continue;
-        }
-        
-        if (jsonStr === '[DONE]' || jsonStr === '') continue;
-        
-        const parseResult = adapter.parseStreamChunk(jsonStr);
-        const { deltaText, deltaToolCalls, rawFunctionCallParts, error } = parseResult;
-        
-        // 如果有错误，记录但继续处理
-        if (error) {
-          console.warn('[toolExecutor] Stream chunk error:', error);
-        }
-        
-        if (deltaText) {
-          iterationContent += deltaText;
-          fullContent += deltaText;
-          if (onChunk) {
-            onChunk(deltaText, fullContent);
-          }
-        }
-        
-        // 收集工具调用片段
-        if (deltaToolCalls) {
-          for (const tc of deltaToolCalls) {
-            if (!streamToolCalls.has(tc.index)) {
-              streamToolCalls.set(tc.index, {
-                id: tc.id || `call_${tc.index}`,
-                name: tc.name || '',
-                arguments: null,  // 初始为 null，区分未设置和空字符串
-                _rawPart: null    // 保留原始 part 用于 thought_signature
-              });
-            }
-            const existing = streamToolCalls.get(tc.index);
-            if (tc.id) existing.id = tc.id;
-            if (tc.name) existing.name = tc.name;
-            // 保留原始 part（包含 thought_signature）
-            // 只在当前没有 _rawPart，或新的 part 包含 thought_signature 时更新
-            // 避免被后续不含签名的 chunk 覆盖（Gemini 流式模式可能在后续 chunk 中省略签名）
-            if (tc._rawPart) {
-              if (!existing._rawPart || tc._rawPart.thought_signature) {
-                existing._rawPart = tc._rawPart;
-              }
-            }
-            if (tc.arguments !== undefined && tc.arguments !== null) {
-              // Gemini 返回的是对象，OpenAI 流式返回的是字符串片段
-              if (typeof tc.arguments === 'object') {
-                // Gemini: 直接存储对象（通常是完整的）
-                existing.arguments = tc.arguments;
-              } else if (typeof tc.arguments === 'string') {
-                // OpenAI: 累积字符串
-                if (typeof existing.arguments === 'string') {
-                  existing.arguments += tc.arguments;
-                } else {
-                  existing.arguments = tc.arguments;
-                }
-              }
-            }
-          }
-        }
-      }
-    };
-
-    await streamTransport(req.endpoint, req.headers, req.body, processStreamText, abortSignal);
-    throwIfAborted(abortSignal);
-    if (buffer.trim()) {
-      processStreamText('\n');
-    }
-    
-    // 处理收集到的工具调用
-    const collectedToolCalls = Array.from(streamToolCalls.values())
-      .filter(tc => tc.name)
-      .map(tc => {
-        let parsedArgs = {};
-        
-        if (typeof tc.arguments === 'object' && tc.arguments !== null) {
-          // 已经是对象（Gemini 格式）
-          parsedArgs = tc.arguments;
-        } else if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
-          // 字符串需要解析（OpenAI 格式）
-          try {
-            parsedArgs = JSON.parse(tc.arguments);
-          } catch (e) {
-            console.error('[MCP] Failed to parse tool arguments:', tc.arguments, e);
-            parsedArgs = { _raw: tc.arguments, _parseError: e.message };
-          }
-        }
-        
-        return {
-          id: tc.id,
-          name: tc.name,
-          arguments: parsedArgs,
-          // 保留原始 part（包含 thought_signature）用于 Gemini
-          _rawPart: tc._rawPart
-        };
-      });
-    
     // 如果没有工具调用，返回结果
     if (collectedToolCalls.length === 0) {
       return {

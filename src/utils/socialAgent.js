@@ -30,7 +30,15 @@ import { subagentRegistry, initSubagentListeners, destroySubagentListeners, kill
 import { startKeepAwake, stopKeepAwake } from './keepAwake.js';
 import { normalizeTargetIds } from './social/targetId.js';
 import { normalizeSplitTags, stripSplitTagsForSpeech } from './social/outgoingText.js';
-import { resolveTts, hasVisibleVoiceGuide, isVoiceGuideResult } from './social/voiceScript.ts';
+import { resolveTts, hasVisibleVoiceGuide, isVoiceGuideResult, spokenText } from './social/voiceScript.ts';
+import {
+  callSendAction, callSpeech, callStartedNote, callEndedNote, callAsrKey,
+  callInjectionText, formatSpokenMessage, speechForProvider, callTurnNote,
+} from './social/voiceCall.ts';
+import { cleanSpeech } from './social/speechStream.ts';
+import { createCallSession, retryCallRequest } from './social/callSession.ts';
+import { createVoiceCallController } from './social/voiceCallController.ts';
+import { listenCallEvent, voiceCallSpeak, voiceCallStart, voiceCallStop } from './social/voiceCallApi.ts';
 import { applyIncomingEdit } from './social/messageEdits.js';
 import { callLLM } from './llm/index.js';
 import * as tauri from './tauri';
@@ -42,6 +50,13 @@ const SUBAGENTS_ENABLED = false;
 
 /** 当前活跃的社交循环（同一时间只有一个） */
 let activeLoop = null;
+
+/** 视频通话的开关（同一时间只有一通），见 voiceCallController */
+const voiceCalls = createVoiceCallController({
+  start: voiceCallStart,
+  stop: voiceCallStop,
+  listen: listenCallEvent,
+});
 
 /**
  * 单调递增的 runtime generation。start/stop 都会推进它，因此即使 stop 发生在
@@ -3640,6 +3655,87 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     return s;
   };
 
+  // ── 视频通话 ──
+  // 整个通话是这个 target 会话里的一个 turn（见 runSessionTurn）。session.call 是这一通的
+  // 会话状态（见 callSession）：识别出的话不走缓冲区和时间游标，排在它那里等这一轮来取；
+  // 宠物的话边生成边切句合成，在通话窗口里播。
+  /** 没人说话时，通话那一轮多久醒来看一次（有输入会立刻被唤醒，这只是兜底和心跳） */
+  const CALL_IDLE_RECHECK_MS = 20 * 1000;
+  const callTargetType = (target) => targets.find(t => t.target === target)?.targetType || 'group';
+  const wakeTarget = (target) => {
+    const iState = getIntentState(target);
+    if (iState._wake) { iState._wake(); iState._wake = null; }
+  };
+  /** 会话上挂着的那一通还是当前这通电话（挂断后 session.call 就清掉了，这里再核一次） */
+  const callIsLive = (session) => !!session?.call && voiceCalls.current()?.callId === session.call.info.callId;
+  /** 合成一句话，按当前选的 TTS 服务商。 */
+  const synthesizeSpeech = async (sentence) => {
+    const tts = resolveTts(config.ttsConfig);
+    if (!tts) throw new Error('视频通话需要先在社交设置里配置 TTS 语音');
+    const text = speechForProvider(sentence, tts.provider);
+    if (!text) return null;
+    return tts.provider === 'fish'
+      ? tauri.fishAudioTts({ apiKey: tts.apiKey, referenceId: tts.voiceId, text, model: tts.model })
+      : tauri.elevenlabsTts({ apiKey: tts.apiKey, voiceId: tts.voiceId, text, modelId: tts.model || undefined });
+  };
+  if (activeLoop?._generation === loopGeneration) {
+    // 三个都可以重复调：同一通开始两次、结束两次都只生效一次，别的通话的输入认不出就丢掉
+    activeLoop.beginVoiceCall = (call) => {
+      const target = call.targetId;
+      const session = getSession(target, callTargetType(target));
+      if (session.call?.info.callId === call.callId) return;
+      session.call?.close();
+      const tName = () => targetNamesCache.get(target) || target;
+      session.call = createCallSession(call, {
+        owner: { ownerQQ: config.ownerQQ, ownerName: config.ownerName },
+        synthesize: synthesizeSpeech,
+        deliver: (audio, sentence) => voiceCallSpeak(call.callId, audio, spokenText(sentence)),
+        onSpeechError: (e, sentence) => addLog('warn', `📞 [${tName()}] 这句没念出来：${e?.message || e}`, sentence, target),
+        // 第一句真正交给播放端时：说完 → 断句 → 识别 → 排队 → 模型首字 → 首句合成
+        onTiming: (timing) => addLog('info', `⏱️ [${tName()}] ${timing}`, null, target),
+      });
+      const soundCues = resolveTts(config.ttsConfig)?.provider === 'fish';
+      appendHistory(session, { role: 'user', kind: 'injection', content: callStartedNote(call.targetName, { soundCues }) });
+      wakeTarget(target);
+    };
+    activeLoop.endVoiceCall = (call) => {
+      const session = sessionMap.get(call.targetId);
+      if (session?.call?.info.callId !== call.callId) return;
+      session.call.close();
+      session.call = null;
+      appendHistory(session, { role: 'user', kind: 'injection', content: callEndedNote() });
+      wakeTarget(call.targetId);
+    };
+    activeLoop.injectVoiceMessage = (call, transcript) => {
+      const target = call.targetId;
+      const msg = sessionMap.get(target)?.call?.hear(transcript);
+      if (!msg) return;
+      addLog('info', `🎙️ [${targetNamesCache.get(target) || target}] ${msg.sender_name}：${msg.content.slice(0, 60)}`, null, target);
+      wakeTarget(target);
+    };
+  }
+  /**
+   * 通话期间的发送工具：说话类改成在通话里念（onSpoken 记进会话），其余发送拒绝。
+   * null = 不在通话里，照常执行。
+   */
+  const speakInCall = async (target, name, args, request, onSpoken) => {
+    const session = sessionMap.get(target);
+    const call = session?.call;
+    if (!call || !callIsLive(session)) return null;
+    const action = callSendAction(name);
+    if (!action) return null;
+    if (action === 'block') return { error: `视频通话中不能用 ${name}：通话里只能说话。` };
+    const tts = resolveTts(config.ttsConfig);
+    if (!tts) return { error: '视频通话需要先在社交设置里配置 TTS 语音' };
+    const { text, spoken } = callSpeech(name, args, tts.provider);
+    if (!spoken) return { error: '没有要说的话' };
+    const splitter = call.splitter(request);
+    splitter.push(text);
+    splitter.end();
+    onSpoken(spoken);
+    return { content: [{ type: 'text', text: JSON.stringify({ success: true, in_call: true, note: '已在视频通话里念出来，没有发到群里' }) }] };
+  };
+
   /**
    * 游标之后的新消息。游标是**时间**语义而不是数组下标语义——见 messageCursor.js。
    * 游标还没起步（session 刚建）时取最近一个窗口当起点。
@@ -3781,6 +3877,10 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     const lurkMode = lurkModes.get(target) || 'normal';
     const turn = beginTurn(session, { trigger });
     const ep = session.ephemeral;
+    // 视频通话期间这一轮不收尾，一直等下一句话（见注入循环末尾）
+    const inCall = () => callIsLive(session);
+    /** 这一轮里接过通话：挂断后补小结、不采训练数据 */
+    let hostedCall = null;
 
     // ── system prompt：整个 session 固定，只有材料被外部改动时才重建 ──
     if (!session.systemPrompt || session.materialsDirty) {
@@ -3947,7 +4047,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         for (const m of fresh) m._images = [];
       }
 
-      await tagFreshMessages(fresh);
+      // 通话里有人在等回答，打标那一两秒省掉
+      if (!inCall()) await tagFreshMessages(fresh);
 
       const provider = buildTurnsFromMessages(fresh, {
         sanitizeAtMe: false,
@@ -3974,6 +4075,28 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       return fresh.length;
     };
 
+    // ── 通话里识别出的话进 history ──
+    // 直接写进会话、不推进时间游标：游标是群消息的时钟，语音的时间戳是本机的、
+    // 而且到得比说出口晚好几秒，混进去会让群消息或这句话被当成「已经看过」跳掉。
+    // 返回本批条数和最后一句的计时（回答针对的是它）。
+    const appendCallInputs = () => {
+      const items = session.call?.takeInputs() || [];
+      if (!items.length) return { count: 0, timing: null };
+      const turns = buildTurnsFromMessages(items.map(item => item.msg), {
+        sanitizeAtMe: false,
+        ownerQQ: promptConfig.ownerQQ, ownerName: promptConfig.ownerName,
+        ownerSecret: ep.ownerSecret,
+        nameL: ep.nameL, nameR: ep.nameR, msgL: ep.msgL, msgR: ep.msgR,
+      });
+      for (const t of turns) appendHistory(session, { role: t.role, content: t.content, kind: 'message' });
+      for (const { msg } of items) {
+        pollChat.push({ sender: msg.sender_name, content: msg.content.substring(0, 200), isAtMe: msg.is_at_me });
+      }
+      const last = items[items.length - 1];
+      const { endedAt, detectedAt, asrMs } = last.transcript;
+      return { count: items.length, timing: { endedAt, detectedAt, asrMs, receivedAt: last.receivedAt } };
+    };
+
     if (moodConfig.enabled) {
       try { await session.moodStore.load(); } catch { /* 标签丢了不该拖垮 turn */ }
     }
@@ -3986,14 +4109,18 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     touchIntent(state);
 
     const initialCount = await appendNewMessages(messagesSince(target, session.cursor), 'message');
-    if (initialCount === 0 && turn.seq > 1) {
+    const initialCall = appendCallInputs();
+    /** 下一次通话请求要回答的那句话的计时 */
+    let pendingTiming = initialCall.timing;
+    // 通话刚接通时什么输入都没有也要跑：先打个招呼
+    if (initialCount === 0 && initialCall.count === 0 && turn.seq > 1 && !inCall()) {
       // 水位线推进与 detectChange 之间有竞态窗口，偶尔会开出一个没有新输入的
       // turn。没有新东西就没什么可想的，直接收掉，不烧一次 LLM。
       endTurn(session, turn, { note: { register: REGISTER_SILENT, summary: '无新消息，空转', inferred: true } });
       syncWatermark();
       return turn;
     }
-    addLog('intent', `🧵 [${tName()}] turn #${turn.seq} 开始（${trigger}，+${initialCount} 条）`, null, target);
+    addLog('intent', `🧵 [${tName()}] turn #${turn.seq} 开始（${trigger}，+${initialCount + initialCall.count} 条）`, null, target);
     // turn-state 专供右侧面板做实时显示，不进日志流（前端见到这个 level 直接吃掉）
     const emitTurnState = (extra = {}) => addLog('turn-state', '', JSON.stringify({
       seq: turn.seq, trigger, ended: false,
@@ -4003,7 +4130,7 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       register: turn.note?.register ?? null, summary: turn.note?.summary ?? null,
       ...extra,
     }), target);
-    emitTurnState({ newMessages: initialCount });
+    emitTurnState({ newMessages: initialCount + initialCall.count });
 
     // ── 群气压计 ──
     // 和消息打标是两回事：那个冻结、进 history、每条一次；这个实时、**不进
@@ -4061,10 +4188,40 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       && state.epoch === epoch
       && !pausedTargets.get(target);
 
+    // 前端的 💬 Chat / 🧠 LLM / 🔧 Tools 靠这条日志渲染（PollEntry）。
+    // action 沿用 pollTarget 的取值，这样 actionIcons/actionColors 直接复用。
+    // 平时一轮记一条；通话里每回答一次记一条，记完清空。
+    const flushPollLog = (replied = pollSent.length > 0) => {
+      addLog('poll', `Poll: ${replied ? 'replied' : 'silent'}`, {
+        chatMessages: [...pollChat],
+        inputPrompt: lastRequestMessages,
+        llmIters: [...pollIters],
+        sentMessages: [...pollSent],
+        toolCalls: [...pollTools],
+        action: replied ? 'replied' : 'silent',
+        role: 'reply',
+      }, target);
+      pollChat.length = 0;
+      pollIters.length = 0;
+      pollSent.length = 0;
+      pollTools.length = 0;
+    };
+
     // ── 注入循环 ──
     for (;;) {
       if (!guard()) { addLog('info', `${targetType}:${target} session turn 取消`, null, target); break; }
       touchIntent(state);
+
+      // 通话里：这次请求流式跑，边生成边切句念。在整理上下文之前就登记——压缩可能要好几秒，
+      // 这期间主人又开口，这次请求就该作废重来
+      const call = inCall() ? session.call : null;
+      const callRequest = call ? call.beginRequest(pendingTiming) : null;
+      let splitter = null;
+      let speechIteration = 0;
+      if (callRequest) {
+        pendingTiming = null;
+        hostedCall ??= { startedAt: call.startedAt, spoken: 0 };
+      }
 
       const prepared = await prepareRequestItems(session, {
         thresholdTokens: COMPACT_THRESHOLD_TOKENS,
@@ -4079,10 +4236,24 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         },
       });
 
+      /** 通话里说出口的一段话记进会话：assistant 角色，标明是在通话里说的 */
+      const recordSpoken = (spoken) => {
+        appendHistory(session, {
+          role: 'assistant', kind: 'message',
+          content: formatSpokenMessage({ text: spoken, time: new Date().toLocaleTimeString('zh-CN', { hour12: false }) }),
+        });
+        recordSend(session, turn);
+        pollSent.push(spoken);
+        if (hostedCall) hostedCall.spoken += 1;
+        addLog('send', `📞 [${tName()}] ${spoken.slice(0, 60)}`, null, target);
+        emitTurnState();
+      };
+
       // 气压计每轮重读。它**不经过 appendHistory**，用完即弃，history 里不留痕迹。
       // 并进最后一条 user 消息的开头，不能单独挂在最后——那样模型最后读到的是
       // 场面读数而不是群友的话，短的 @ 容易被当成不用回，见 prependToLastUser。
-      const baro = await readGroupBarometer();
+      // 通话里不读：每次请求都等它一两秒太慢了。
+      const baro = callRequest ? null : await readGroupBarometer();
       const baroBlock = baro ? renderBarometer(baro.reading, baro.stats) : '';
 
       const messages = [
@@ -4093,204 +4264,265 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
 
       let result;
       try {
-        result = await retryLLM(() => callLLMWithTools({
-          messages,
-          apiFormat: replyLLMConfig.apiFormat,
-          apiKey: replyLLMConfig.apiKey,
-          model: replyLLMConfig.modelName,
-          baseUrl: replyLLMConfig.baseUrl,
-          mcpTools,
-          options: {
-            temperature: 0.7,
-            explicitCache: shouldUseExplicitCache(config, replyLLMConfig.apiFormat),
-            cacheKey: buildCacheKey(config.petId, target, 'Session'),
-          },
-          maxIterations: SESSION_MAX_ITERATIONS,
-          builtinToolContext: {
-            petId: config.petId, targetId: target, targetType,
-            mcpServerName: config.mcpServerName, memoryEnabled: true,
-            imageUrlMap, sentCache: sentMessagesCache, subagentRegistry,
-            bufferMessages: dataBuffer.get(target)?.messages,
-            dataBuffer,
-            subagentConfig: {
-              enabled: SUBAGENTS_ENABLED,
-              model: config.subagentModel || 'sonnet',
-              timeoutSecs: config.subagentTimeoutSecs || 300,
+        const runRequest = () => {
+          // 每次尝试一个新的切句器：失败那次没说完的半句不能拼到重试的话前面
+          if (callRequest) {
+            splitter = call.splitter(callRequest);
+            speechIteration = 0;
+          }
+          return callLLMWithTools({
+            messages,
+            apiFormat: replyLLMConfig.apiFormat,
+            apiKey: replyLLMConfig.apiKey,
+            model: replyLLMConfig.modelName,
+            baseUrl: replyLLMConfig.baseUrl,
+            mcpTools,
+            options: {
+              temperature: 0.7,
+              explicitCache: shouldUseExplicitCache(config, replyLLMConfig.apiFormat),
+              cacheKey: buildCacheKey(config.petId, target, 'Session'),
             },
-            dispatchMdOrganizer,
-            botQQ: promptConfig.botQQ,
-            ownerQQ: promptConfig.ownerQQ,
-            ownerName: promptConfig.ownerName,
-            ownerSecret: ep.ownerSecret,
-            addLog,
-            customGroupRules: customGroupRulesMap.get(target) || '',
-            ttsConfig: config.ttsConfig,
-            // Fish 的 voice_send 写法说明只在模型还看不见时才给
-            voiceGuideVisible: () => hasVisibleVoiceGuide(session),
-            imageModel: imageGenLLMConfig,
-            lurkMode,
-            runtimeGuard: () => canTargetDispatch(target),
-            onTurnNote: (note) => { capturedNote = note; },
-            // 模型主动拉过的消息，turn 边界不该再当"新消息"注入一遍
-            sessionCursor: {
-              get: () => session.cursor,
-              advance: (msgs) => advanceCursor(session.cursor, msgs),
+            maxIterations: SESSION_MAX_ITERATIONS,
+            builtinToolContext: {
+              petId: config.petId, targetId: target, targetType,
+              mcpServerName: config.mcpServerName, memoryEnabled: true,
+              imageUrlMap, sentCache: sentMessagesCache, subagentRegistry,
+              bufferMessages: dataBuffer.get(target)?.messages,
+              dataBuffer,
+              subagentConfig: {
+                enabled: SUBAGENTS_ENABLED,
+                model: config.subagentModel || 'sonnet',
+                timeoutSecs: config.subagentTimeoutSecs || 300,
+              },
+              dispatchMdOrganizer,
+              botQQ: promptConfig.botQQ,
+              ownerQQ: promptConfig.ownerQQ,
+              ownerName: promptConfig.ownerName,
+              ownerSecret: ep.ownerSecret,
+              addLog,
+              customGroupRules: customGroupRulesMap.get(target) || '',
+              ttsConfig: config.ttsConfig,
+              // Fish 的 voice_send 写法说明只在模型还看不见时才给
+              voiceGuideVisible: () => hasVisibleVoiceGuide(session),
+              imageModel: imageGenLLMConfig,
+              lurkMode,
+              runtimeGuard: () => canTargetDispatch(target),
+              onTurnNote: (note) => { capturedNote = note; },
+              // 模型主动拉过的消息，turn 边界不该再当"新消息"注入一遍
+              sessionCursor: {
+                get: () => session.cursor,
+                advance: (msgs) => advanceCursor(session.cursor, msgs),
+              },
+              wasJustInjected: () => justInjected,
+              // 表情挑选也走 Jev：主模型只决定"该不该发"，"发哪个"交给它
+              moodApiKey: moodConfig.apiKey,
+              moodModel: moodConfig.model,
+              // turn 中途主动查到的消息也要走 appendNewMessages：那是唯一下载图片、
+              // 拼多模态的路径。只回文字的话图就永久丢了，见 check_new_messages 注释
+              ingestNewMessages: async (msgs) => {
+                const stats = {};
+                const added = await appendNewMessages(msgs, 'message', stats);
+                checkIngest = { added, images: stats.images || 0 };
+                return checkIngest;
+              },
+              onNewMessagesChecked: (count) => {
+                justInjected = false;   // 只影响紧跟注入的那一次查询
+                if (count > 0) {
+                  addLog('intent', `👀 [${tName()}] 模型主动查到 ${count} 条新消息`, null, target);
+                }
+              },
             },
-            wasJustInjected: () => justInjected,
-            // 表情挑选也走 Jev：主模型只决定"该不该发"，"发哪个"交给它
-            moodApiKey: moodConfig.apiKey,
-            moodModel: moodConfig.model,
-            // turn 中途主动查到的消息也要走 appendNewMessages：那是唯一下载图片、
-            // 拼多模态的路径。只回文字的话图就永久丢了，见 check_new_messages 注释
-            ingestNewMessages: async (msgs) => {
-              const stats = {};
-              const added = await appendNewMessages(msgs, 'message', stats);
-              checkIngest = { added, images: stats.images || 0 };
-              return checkIngest;
+            // 查到带图的新消息就收住这次请求，下一次请求从 history 重建、带上图。
+            // 通话里说完一句（或收了尾）就结束这次请求，不再多跑一轮。
+            stopAfterTool: (name) => (name === 'check_new_messages' && checkIngest?.images > 0)
+              || (!!callRequest && (callSendAction(name) === 'speak' || name === 'turn_note')),
+            ...(callRequest ? {
+              onTextDelta: (delta, { iteration }) => {
+                if (!guard()) return;
+                callRequest.firstTextAt ??= Date.now();
+                // 调过工具后的新一段话：先把上一段剩下的念掉
+                if (iteration !== speechIteration) {
+                  splitter.end();
+                  speechIteration = iteration;
+                }
+                splitter.push(delta);
+              },
+              abortSignal: callRequest.controller.signal,
+              // 通话请求走独立额度，不排在 Observer、压缩这些后台请求后面
+              streamTransport: (endpoint, headers, body, onChunk, signal) =>
+                tauri.llmProxyStream(endpoint, headers, body, onChunk, signal, { realtime: true }),
+            } : {}),
+            usageLabel: 'Session',
+            usageTarget: target,
+            usagePetId: config.petId,
+            onTrace: collectTraining ? (t) => { latestTrace = t; } : undefined,
+            onUsageLogged: (record) => { if (guard()) logUsageRecord(record); },
+            toolCallFilter: (name, args) => {
+              if (!guard()) return 'Session 已取消：Social Agent 已停止或目标已暂停。';
+              // 通话里说话不进群，纯观察模式也照常说
+              if (lurkMode === 'full-lurk' && SEND_TOOL_RE.test(name) && !(callRequest && callSendAction(name) === 'speak')) {
+                return `当前是纯观察模式，禁止调用发送工具 ${name}。`;
+              }
+              // 发送类工具没有任何运行时限制：限流窗口、开口前强制 check、
+              // 表情冷却三道闸都已移除。节奏完全交给模型自己把握。
+              if (promptConfig.agentCanEditStrategy !== true) {
+                const mutation = new Set(['social_write', 'social_edit', 'social_delete', 'social_rename']);
+                const touchesStrategy = [args?.path, args?.from, args?.to].some(p =>
+                  p != null && (canonicalSocialPath(p) == null || canonicalSocialPath(p) === 'social/reply_strategy.md'));
+                if (mutation.has(name) && touchesStrategy) return '当前配置禁止 Agent 修改 social/REPLY_STRATEGY.md。';
+              }
+              return null;
             },
-            onNewMessagesChecked: (count) => {
-              justInjected = false;   // 只影响紧跟注入的那一次查询
-              if (count > 0) {
-                addLog('intent', `👀 [${tName()}] 模型主动查到 ${count} 条新消息`, null, target);
+            toolOverride: (name, args) => speakInCall(target, name, args, callRequest, recordSpoken),
+            toolArgTransform: (name, args) => {
+              // 语音：分隔符和分段标记都得去掉，不然 TTS 会把它们念出来
+              if (name === 'voice_send') {
+                const speech = (value) => {
+                  let text = value || '';
+                  for (const sec of Object.values(ep)) text = text.replaceAll(sec, '');
+                  return stripSplitTagsForSpeech(text);
+                };
+                const out = { ...args };
+                for (const key of ['text', 'script', 'direction']) {
+                  if (typeof args?.[key] === 'string') out[key] = speech(args[key]);
+                }
+                return out;
+              }
+              if (!name.includes('send_message')) return args;
+              let content = args?.content || '';
+              for (const sec of Object.values(ep)) content = content.replaceAll(sec, '');
+              // 先剥分隔符再归一分段标记：模型会照着 ‹…› 分隔符的样子写成 ‹/分段›
+              content = normalizeSplitTags(content)
+                .replace(/\[图片\]/g, '').replace(/\[视频\]/g, '')
+                .replace(/\[语音\]/g, '').replace(/\[文件\]/g, '').trim();
+              const extra = {};
+              if (args?.reply_to) extra.reply_to = String(args.reply_to);
+              return { ...args, content, ...extra, target, target_type: targetType };
+            },
+            onLLMText: (iter) => {
+              if (!guard()) return;
+              pollIters.push(iter);
+              // 模型的文字**只从这里**进 history：每次迭代都会回调，包括最后那次不调工具的。
+              // 轮次结束后别再拿 result.content 补一遍——之前补过，被吞掉的回复存了两份；
+              // 被截断时还会把系统提示「[Maximum tool call iterations reached]」当成 bot
+              // 自己说的话写进去。
+              const text = (iter?.content || '').trim();
+              // 通话里写出来的字就是说出口的话（已经边生成边念了），按说过的记
+              if (callRequest) {
+                const spoken = spokenText(cleanSpeech(text));
+                if (spoken) recordSpoken(spoken);
+                return;
+              }
+              // 不记成 assistant 的 message：这段话没经过发送工具，群里看不见。记成
+              // assistant 会让模型以为自己说过，下一轮照着「直接写文字」的样子继续，
+              // 见 sessionTurn 的 SYSTEM_RECORD。
+              if (text) appendHistory(session, { role: 'assistant', content: text, kind: 'unsent' });
+            },
+            onToolCall: (name, args) => {
+              if (!guard()) return;
+              turn.toolCalls += 1;
+              // 每次查询各算各的：同一次请求里第二次查到空，不能沿用上一次的并入结果
+              if (name === 'check_new_messages') checkIngest = null;
+              pollTools.push({ name, args: JSON.stringify(args ?? {}).substring(0, 300) });
+              appendHistory(session, {
+                role: 'assistant', kind: 'tool_call', toolName: name,
+                content: JSON.stringify(args ?? {}),
+              });
+              addLog('info', `LLM called tool: ${name}`, JSON.stringify(args, null, 2), target);
+              if (name.includes('send_message')) {
+                pendingSendContent = args?.content || '';
+                pendingReplyTo = args?.reply_to ? String(args.reply_to) : null;
               }
             },
-          },
-          // 查到带图的新消息就收住这次请求，下一次请求从 history 重建、带上图
-          stopAfterTool: (name) => name === 'check_new_messages' && checkIngest?.images > 0,
-          usageLabel: 'Session',
-          usageTarget: target,
-          usagePetId: config.petId,
-          onTrace: collectTraining ? (t) => { latestTrace = t; } : undefined,
-          onUsageLogged: (record) => { if (guard()) logUsageRecord(record); },
-          toolCallFilter: (name, args) => {
-            if (!guard()) return 'Session 已取消：Social Agent 已停止或目标已暂停。';
-            if (lurkMode === 'full-lurk' && SEND_TOOL_RE.test(name)) {
-              return `当前是纯观察模式，禁止调用发送工具 ${name}。`;
-            }
-            // 发送类工具没有任何运行时限制：限流窗口、开口前强制 check、
-            // 表情冷却三道闸都已移除。节奏完全交给模型自己把握。
-            if (promptConfig.agentCanEditStrategy !== true) {
-              const mutation = new Set(['social_write', 'social_edit', 'social_delete', 'social_rename']);
-              const touchesStrategy = [args?.path, args?.from, args?.to].some(p =>
-                p != null && (canonicalSocialPath(p) == null || canonicalSocialPath(p) === 'social/reply_strategy.md'));
-              if (mutation.has(name) && touchesStrategy) return '当前配置禁止 Agent 修改 social/REPLY_STRATEGY.md。';
-            }
-            return null;
-          },
-          toolArgTransform: (name, args) => {
-            // 语音：分隔符和分段标记都得去掉，不然 TTS 会把它们念出来
-            if (name === 'voice_send') {
-              const speech = (value) => {
-                let text = value || '';
-                for (const sec of Object.values(ep)) text = text.replaceAll(sec, '');
-                return stripSplitTagsForSpeech(text);
-              };
-              const out = { ...args };
-              for (const key of ['text', 'script', 'direction']) {
-                if (typeof args?.[key] === 'string') out[key] = speech(args[key]);
+            onToolResult: (name, toolRes, _id, isError) => {
+              if (!guard()) return;
+              let text = typeof toolRes === 'string' ? toolRes : JSON.stringify(toolRes);
+              // 这批消息已经按原样进了 history（就在这条结果前面），之后的请求里
+              // 不用再把渲染过的全文存一份
+              if (name === 'check_new_messages' && checkIngest?.added > 0 && !isError) {
+                text = `新到的 ${checkIngest.added} 条消息已经按原样放进上面的对话里了。`;
               }
-              return out;
-            }
-            if (!name.includes('send_message')) return args;
-            let content = args?.content || '';
-            for (const sec of Object.values(ep)) content = content.replaceAll(sec, '');
-            // 先剥分隔符再归一分段标记：模型会照着 ‹…› 分隔符的样子写成 ‹/分段›
-            content = normalizeSplitTags(content)
-              .replace(/\[图片\]/g, '').replace(/\[视频\]/g, '')
-              .replace(/\[语音\]/g, '').replace(/\[文件\]/g, '').trim();
-            const extra = {};
-            if (args?.reply_to) extra.reply_to = String(args.reply_to);
-            return { ...args, content, ...extra, target, target_type: targetType };
-          },
-          onLLMText: (iter) => {
-            if (!guard()) return;
-            pollIters.push(iter);
-            // 模型的文字**只从这里**进 history：每次迭代都会回调，包括最后那次不调工具的。
-            // 轮次结束后别再拿 result.content 补一遍——之前补过，被吞掉的回复存了两份；
-            // 被截断时还会把系统提示「[Maximum tool call iterations reached]」当成 bot
-            // 自己说的话写进去。
-            const text = (iter?.content || '').trim();
-            // 不记成 assistant 的 message：这段话没经过发送工具，群里看不见。记成
-            // assistant 会让模型以为自己说过，下一轮照着「直接写文字」的样子继续，
-            // 见 sessionTurn 的 SYSTEM_RECORD。
-            if (text) appendHistory(session, { role: 'assistant', content: text, kind: 'unsent' });
-          },
-          onToolCall: (name, args) => {
-            if (!guard()) return;
-            turn.toolCalls += 1;
-            // 每次查询各算各的：同一次请求里第二次查到空，不能沿用上一次的并入结果
-            if (name === 'check_new_messages') checkIngest = null;
-            pollTools.push({ name, args: JSON.stringify(args ?? {}).substring(0, 300) });
-            appendHistory(session, {
-              role: 'assistant', kind: 'tool_call', toolName: name,
-              content: JSON.stringify(args ?? {}),
-            });
-            addLog('info', `LLM called tool: ${name}`, JSON.stringify(args, null, 2), target);
-            if (name.includes('send_message')) {
-              pendingSendContent = args?.content || '';
-              pendingReplyTo = args?.reply_to ? String(args.reply_to) : null;
-            }
-          },
-          onToolResult: (name, toolRes, _id, isError) => {
-            if (!guard()) return;
-            let text = typeof toolRes === 'string' ? toolRes : JSON.stringify(toolRes);
-            // 这批消息已经按原样进了 history（就在这条结果前面），之后的请求里
-            // 不用再把渲染过的全文存一份
-            if (name === 'check_new_messages' && checkIngest?.added > 0 && !isError) {
-              text = `新到的 ${checkIngest.added} 条消息已经按原样放进上面的对话里了。`;
-            }
-            // 写法说明要一直留在上下文里，窗口被压缩前都不再重复给
-            const voiceGuide = name === 'voice_send' && !isError && isVoiceGuideResult(text);
-            appendHistory(session, {
-              role: 'tool', kind: 'tool_result', toolName: name,
-              content: text, isError: !!isError,
-              ...(voiceGuide ? { voiceGuide: true, keepFull: true } : {}),
-            });
-            if (pollTools.length && pollTools[pollTools.length - 1].name === name) {
-              pollTools[pollTools.length - 1].result = String(text).slice(0, 100);
-              pollTools[pollTools.length - 1].isError = !!isError;
-            }
-            addLog(isError ? 'error' : 'info', `Tool result: ${name}`, String(text).slice(0, 100), target);
-            if (name.includes('send_message') && !isToolResultFailure(toolRes, isError)) {
-              recordSend(session, turn);
-              lastReplyTime.set(target, Date.now());
-              if (pendingSendContent) {
-                let msgId = null;
-                let msgTs = new Date().toISOString();
-                try {
-                  const parsed = typeof toolRes === 'string' ? JSON.parse(toolRes) : toolRes;
-                  msgId = parsed?.message_ids?.[0]?.toString() || parsed?.message_id || null;
-                  if (parsed?.timestamp) msgTs = parsed.timestamp;
-                } catch { /* 结果不是 JSON 也无妨 */ }
-                // 和 buildTurnsFromMessages 的 is_self 分支同形，并额外带上引用标记。
-                // 之前这里塞的是裸内容：prompt 说自发消息带 [我的回复] 前缀、实际没有，
-                // 而且连发两条合并后分不清发了几次、哪条带引用——模型于是在正文里
-                // 手写「回 yesname：」补偿。
-                appendHistory(session, {
-                  role: 'assistant', kind: 'message',
-                  content: formatSelfMessage({
-                    text: pendingSendContent,
-                    time: (() => { try { return new Date(msgTs).toLocaleTimeString('zh-CN', { hour12: false }); } catch { return ''; } })(),
-                    replyTo: pendingReplyTo,
-                  }),
-                });
-                // 去重比对的是原始正文——buffer 回灌的那条不带前缀
-                pollSent.push(pendingSendContent);
-                session.selfSentTexts.add(pendingSendContent.trim());
-                const arr = sentMessagesCache.get(target) || [];
-                arr.push({ content: pendingSendContent, timestamp: msgTs, message_id: msgId });
-                sentMessagesCache.set(target, arr);
-                addLog('send', `💬 [${tName()}] ${pendingSendContent.slice(0, 60)}`, null, target);
-                emitTurnState();
+              // 写法说明要一直留在上下文里，窗口被压缩前都不再重复给
+              const voiceGuide = name === 'voice_send' && !isError && isVoiceGuideResult(text);
+              appendHistory(session, {
+                role: 'tool', kind: 'tool_result', toolName: name,
+                content: text, isError: !!isError,
+                ...(voiceGuide ? { voiceGuide: true, keepFull: true } : {}),
+              });
+              if (pollTools.length && pollTools[pollTools.length - 1].name === name) {
+                pollTools[pollTools.length - 1].result = String(text).slice(0, 100);
+                pollTools[pollTools.length - 1].isError = !!isError;
               }
-              pendingSendContent = null;
-              pendingReplyTo = null;
-            }
-          },
-        }), { label: `Session ${target}`, target });
+              addLog(isError ? 'error' : 'info', `Tool result: ${name}`, String(text).slice(0, 100), target);
+              // 通话里的 send_message 是念出来的，speakInCall 已经按说过的记了
+              if (callRequest && name.includes('send_message')) {
+                pendingSendContent = null;
+                pendingReplyTo = null;
+              } else if (name.includes('send_message') && !isToolResultFailure(toolRes, isError)) {
+                recordSend(session, turn);
+                lastReplyTime.set(target, Date.now());
+                if (pendingSendContent) {
+                  let msgId = null;
+                  let msgTs = new Date().toISOString();
+                  try {
+                    const parsed = typeof toolRes === 'string' ? JSON.parse(toolRes) : toolRes;
+                    msgId = parsed?.message_ids?.[0]?.toString() || parsed?.message_id || null;
+                    if (parsed?.timestamp) msgTs = parsed.timestamp;
+                  } catch { /* 结果不是 JSON 也无妨 */ }
+                  // 和 buildTurnsFromMessages 的 is_self 分支同形，并额外带上引用标记。
+                  // 之前这里塞的是裸内容：prompt 说自发消息带 [我的回复] 前缀、实际没有，
+                  // 而且连发两条合并后分不清发了几次、哪条带引用——模型于是在正文里
+                  // 手写「回 yesname：」补偿。
+                  appendHistory(session, {
+                    role: 'assistant', kind: 'message',
+                    content: formatSelfMessage({
+                      text: pendingSendContent,
+                      time: (() => { try { return new Date(msgTs).toLocaleTimeString('zh-CN', { hour12: false }); } catch { return ''; } })(),
+                      replyTo: pendingReplyTo,
+                    }),
+                  });
+                  // 去重比对的是原始正文——buffer 回灌的那条不带前缀
+                  pollSent.push(pendingSendContent);
+                  session.selfSentTexts.add(pendingSendContent.trim());
+                  const arr = sentMessagesCache.get(target) || [];
+                  arr.push({ content: pendingSendContent, timestamp: msgTs, message_id: msgId });
+                  sentMessagesCache.set(target, arr);
+                  addLog('send', `💬 [${tName()}] ${pendingSendContent.slice(0, 60)}`, null, target);
+                  emitTurnState();
+                }
+                pendingSendContent = null;
+                pendingReplyTo = null;
+              }
+            },
+          });
+        };
+        result = callRequest
+          ? await retryCallRequest(runRequest, callRequest, {
+            onRetry: (e) => addLog('warn', `📞 通话请求失败，1.5 秒后重试一次：${String(e?.message || e).slice(0, 120)}`, null, target),
+          })
+          : await retryLLM(runRequest, { label: `Session ${target}`, target });
       } catch (e) {
-        addLog('error', `❌ [${tName()}] turn #${turn.seq} LLM 失败：${e.message || e}`, null, target);
-        break;
+        if (!callRequest) {
+          addLog('error', `❌ [${tName()}] turn #${turn.seq} LLM 失败：${e.message || e}`, null, target);
+          break;
+        }
+        // 通话里：被新的一句话打断或挂断就当这次没发生；真失败也不结束通话，等下一句
+        if (callRequest.controller.signal.aborted || e?.name === 'AbortError') {
+          if (callRequest.stale) addLog('intent', `🔁 [${tName()}] 主人又说了一句，重新回答`, null, target);
+        } else {
+          const message = `通话里这次回答失败：${e.message || e}`;
+          addLog('error', `❌ [${tName()}] ${message}`, null, target);
+          tauri.emitToLabels([call.info.window], 'voice-call-error', {
+            callId: call.info.callId, targetId: target, source: 'llm', message: message.slice(0, 200),
+          }).catch(() => {});
+        }
+        result = null;
+      } finally {
+        if (callRequest) {
+          // 取消了就别把半句话念出来
+          if (!callRequest.controller.signal.aborted) splitter?.end();
+          call.finishRequest(callRequest);
+        }
       }
 
       // 这一轮的话有没有送进群里。只有发送类工具能出声，直接输出的文字只进
@@ -4311,17 +4543,20 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         // 那是「想说但没说出来」，和模型自己选择不说是两回事
         const fr = result?.finishReason;
         const frTag = fr && !/^(stop|end_turn)$/i.test(fr) ? `（finishReason=${fr}）` : '';
-        if (outcome === 'text_only') {
+        if (outcome === 'text_only' && !callRequest) {
           const snippet = roundText.replace(/\s+/g, ' ');
           addLog('warn',
             `🕳️ [${tName()}] turn #${turn.seq} 模型只出了文字、没调发送工具，这段话群里看不见${frTag}：「${snippet.slice(0, 100)}${snippet.length > 100 ? '…' : ''}」`,
             roundText, target);
-        } else if (outcome === 'empty' && !capturedNote) {
+        } else if (outcome === 'empty' && !capturedNote && result) {
           // 之前已经 turn_note 收过尾的话，注入轮空着回来是正常的，不记。
           // 非正常结束说明它想做事但没做成，升成 warn
           addLog(frTag ? 'warn' : 'info', `🕳️ [${tName()}] turn #${turn.seq} 模型空响应：没调工具、没出文字，也还没收尾${frTag}`, null, target);
         }
       }
+
+      // 通话里每回答一次就单独记一条，不等整个通话结束
+      if (callRequest) flushPollLog();
 
       // ── turn 边界：有新消息就注入继续，否则收尾 ──
       if (!guard()) break;
@@ -4342,42 +4577,48 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
         continue;
       }
       checkIngest = null;
+      // 通话中：整个通话是一轮，没人说话就一直等。群消息只当背景，跟着下一句话一起送进去，
+      // 不单独触发回答——群里热闹的时候不至于每条消息都跑一次模型
+      while (inCall() && guard() && !session.call?.pendingInputs()) {
+        touchIntent(state);
+        await sleepInterruptible(state, CALL_IDLE_RECHECK_MS);
+      }
+      if (!guard()) break;
       const fresh = messagesSince(target, session.cursor).filter(m => !m.is_self);
-      if (!canInject(turn, fresh.length)) break;
+      const callWaiting = session.call?.pendingInputs() || 0;
+      if (!canInject(turn, fresh.length + callWaiting)) break;
 
-      const added = await appendNewMessages(messagesSince(target, session.cursor), 'message');
-      recordInjection(turn, added || fresh.length);
+      const added = fresh.length ? await appendNewMessages(messagesSince(target, session.cursor), 'message') : 0;
+      const callAdded = appendCallInputs();
+      if (callAdded.timing) pendingTiming = callAdded.timing;
+      recordInjection(turn, (added || fresh.length) + callAdded.count);
       // 注入之后紧跟的那次 check_new_messages 必然返回空（注入已经推进了游标），
       // 这个标记让它的措辞说对话：「你刚收到的那批就是最新的」而不是「群里没动静」。
       justInjected = true;
-      let injectionText = `（以上 ${added} 条是你思考期间新到的消息，**已经是群里最新的了**。`
-        + `把它们纳入判断：可能让你从不打算说变成该说了，也可能让你原本想说的话过时了。）`;
+      let injectionText = inCall()
+        ? callInjectionText({ voice: callAdded.count, group: added })
+        : `（以上 ${added} 条是你思考期间新到的消息，**已经是群里最新的了**。`
+          + `把它们纳入判断：可能让你从不打算说变成该说了，也可能让你原本想说的话过时了。）`;
       // 积压过多时提醒，而不是切断——和 Codex 的 reminder_threshold 一个路子。
-      if (shouldRemindBacklog(turn)) {
+      // 通话里不提醒：群消息只是背景，本来就不用逐条回应。
+      if (!inCall() && shouldRemindBacklog(turn)) {
         markBacklogReminded(turn);
         injectionText += `\n\n⚠️ 你上次开口之后，群里已经堆了 ${turn.backlog} 条你还没回应的消息。`
           + `要么说点什么，要么调 turn_note 明确收尾——别就这么挂着。`;
         addLog('intent', `📬 [${tName()}] turn #${turn.seq} 积压 ${turn.backlog} 条未回应，已提醒`, null, target);
       }
       appendHistory(session, { role: 'user', kind: 'injection', content: injectionText });
-      addLog('intent', `🛑 [${tName()}] turn #${turn.seq} 注入 ${added} 条（积压 ${turn.backlog}，本轮累计 ${turn.injectedMessages}）`, null, target);
-      emitTurnState({ newMessages: added });
+      addLog('intent', `🛑 [${tName()}] turn #${turn.seq} 注入 ${added + callAdded.count} 条（积压 ${turn.backlog}，本轮累计 ${turn.injectedMessages}）`, null, target);
+      emitTurnState({ newMessages: added + callAdded.count });
     }
 
     // ── 收尾 ──
-    endTurn(session, turn, { note: capturedNote });
+    // 接过通话的这一轮由系统补小结：通话里说好了不用 turn_note
+    endTurn(session, turn, { note: hostedCall ? callTurnNote(hostedCall) : capturedNote });
 
-    // 前端的 💬 Chat / 🧠 LLM / 🔧 Tools 靠这条日志渲染（PollEntry）。
-    // action 沿用 pollTarget 的取值，这样 actionIcons/actionColors 直接复用。
-    addLog('poll', `Poll: ${turn.sends > 0 ? 'replied' : 'silent'}`, {
-      chatMessages: pollChat,
-      inputPrompt: lastRequestMessages,
-      llmIters: pollIters,
-      sentMessages: pollSent,
-      toolCalls: pollTools,
-      action: turn.sends > 0 ? 'replied' : 'silent',
-      role: 'reply',
-    }, target);
+    // 通话里每次回答已经各记过一条，只补没记的尾巴
+    if (!hostedCall) flushPollLog(turn.sends > 0);
+    else if (pollChat.length || pollIters.length) flushPollLog();
 
     appendHistory(session, {
       role: 'assistant', kind: 'note',
@@ -4400,7 +4641,8 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
     addLog('intent', `🧵 [${tName()}] turn #${turn.seq} 结束 [${turn.note?.register || '—'}] ${turn.note?.summary || ''}（${turn.toolCalls} 次工具，${turn.sends} 条发送，${turn.injections} 次注入）`, JSON.stringify(sessionStats(session)), target);
     emitTurnState({ ended: true, stats: sessionStats(session) });
 
-    if (collectTraining && latestTrace) {
+    // 通话那一轮动辄几十分钟，不适合当一条训练轨迹
+    if (collectTraining && latestTrace && !hostedCall) {
       writeIntentTrace(config.petId, {
         target_id: target, target_type: targetType, pet_id: config.petId,
         provider: replyLLMConfig.apiFormat, model: replyLLMConfig.modelName, label: 'Session',
@@ -4422,6 +4664,13 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
       try {
         touchIntent(state);
         if (pausedTargets.get(target)) { await sleepInterruptible(state, 2000); continue; }
+
+        // 视频通话：不等冷静期、不看潜水冷却和回复间隔，直接进通话那一轮
+        if (callIsLive(session)) {
+          session.lastTurnAt = Date.now();
+          await runSessionTurn(session, target, targetType, { trigger: 'call', epoch: myEpoch });
+          continue;
+        }
 
         const now = Date.now();
         const lurkMode = lurkModes.get(target) || 'normal';
@@ -4518,6 +4767,54 @@ ${fileContext ? `\n文件说明：${fileContext}\n` : ''}
   return true;
 }
 
+/** 通话状态变化（开始 / 结束）时回调 target 或 null。返回取消订阅。 */
+export function onVoiceCallChange(callback) {
+  return voiceCalls.onChange((call) => callback(call?.targetId || null));
+}
+
+export function getVoiceCallTarget() {
+  return voiceCalls.current()?.targetId || null;
+}
+
+/**
+ * 在某个 target 上开视频通话。同一时间只有一通：已经在这个 target 上通着就什么都不做，
+ * 别的 target 在通话会先挂断那一通。
+ * 需要社交 Agent 在运行，并且 TTS 已配置、填了 Fish Audio key（识别用）。
+ */
+export async function startVoiceCall(target, targetName = '') {
+  if (!activeLoop) throw new Error('先启动社交 Agent 再开视频通话');
+  if (pausedTargets.get(target)) throw new Error('这个群已暂停，先恢复再开视频通话');
+  const loop = activeLoop;
+  const { config } = loop;
+  if (!resolveTts(config.ttsConfig)) throw new Error('先在社交设置里配置 TTS 语音');
+  const asrApiKey = callAsrKey(config.ttsConfig);
+  if (!asrApiKey) throw new Error('视频通话用 Fish Audio 识别语音：先在 TTS 设置里填 Fish Audio 的 API Key');
+  // 这通电话绑在开它的这个循环上：接通前循环已经重启的话，不往新循环的会话里写；
+  // 挂断照样交给原来的循环，它手上那次回答要停下
+  const live = () => activeLoop === loop;
+  await voiceCalls.start({ petId: config.petId, targetId: target, targetName, asrApiKey }, {
+    begin: (call) => {
+      if (!live()) return;
+      loop.beginVoiceCall?.(call);
+      addLog('info', `📞 视频通话开始`, null, target);
+    },
+    end: (call) => {
+      loop.endVoiceCall?.(call);
+      addLog('info', `📞 视频通话结束`, null, target);
+    },
+    hear: (call, transcript) => { if (live()) loop.injectVoiceMessage?.(call, transcript); },
+    error: (_call, { source, message }) => {
+      // llm 是这边自己发给通话窗口的，日志里已经记过了
+      if (source !== 'llm') addLog('warn', `📞 通话（${source}）：${message}`, null, target);
+    },
+  });
+}
+
+/** 挂断。给了 target 只挂这个 target 上的那通；不给就一通都不留。可以重复调。 */
+export function stopVoiceCall(target) {
+  return voiceCalls.stop(target);
+}
+
 /**
  * 停止社交循环
  */
@@ -4528,6 +4825,8 @@ export function stopSocialLoop() {
   // 保活只为 agent 服务，agent 一停就放掉——它会阻止系统 idle 休眠。
   // 放在最前面：startSocialLoop 开头就会调本函数，重启时由它末尾重新打开。
   stopKeepAwake();
+  // 通话挂在社交会话上，会话停了通话也挂断（页面刷新前留下的也一起挂）
+  stopVoiceCall().catch(() => {});
 
   if (activeLoop) {
     // 持久化 lurk modes 在清空之前

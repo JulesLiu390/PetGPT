@@ -10,7 +10,7 @@ import { beginDragSwing } from '../components/Avatar/dragSwing';
 import { measureHitRegion, regionContains, restingRect } from '../components/Avatar/hitRegion';
 import { requestHop } from '../components/Avatar/petReactions';
 import { swingLever } from '../components/Avatar/swingPhysics';
-import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule } from '../utils/socialAgent';
+import { startSocialLoop, stopSocialLoop, isSocialActiveForPet, getSocialStatus, getSocialLogs, clearSocialLogs, setLurkMode, getLurkModes, setTargetPaused, getPausedTargets, getTargetNames, setCustomGroupRule, startVoiceCall, stopVoiceCall, getVoiceCallTarget, onVoiceCallChange } from '../utils/socialAgent';
 import { scopeSocialStatus, shouldApplySocialCommand } from '../utils/socialControlScope';
 
 // 拖动检测配置
@@ -531,7 +531,7 @@ export const Character = () => {
 
   // 监听来自其他窗口的社交控制事件（ManagementPage SocialPanel）
   useEffect(() => {
-    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenSetCustomRule, unlistenSetTargetPaused, unlistenQueryTargetNames;
+    let unlistenStart, unlistenStop, unlistenQuery, unlistenQueryLogs, unlistenClearLogs, unlistenConfigUpdated, unlistenSetLurkMode, unlistenSetCustomRule, unlistenSetTargetPaused, unlistenQueryTargetNames, unlistenSetVoiceCall, unlistenQueryVoiceCall, unsubscribeVoiceCall;
     let configRestartRunning = false;
     let configRestartPetId = null;
     let configRestartCancelled = false;
@@ -648,6 +648,27 @@ export const Character = () => {
         emitEvent('social-target-paused-changed', { petId, target, pausedTargets: getPausedTargets() });
       });
 
+      // 视频通话（per-target，同一时间只有一个）
+      unsubscribeVoiceCall = onVoiceCallChange((target) => {
+        emitEvent('social-voice-call-changed', { petId: getSocialStatus().petId, target });
+      });
+      unlistenSetVoiceCall = await safeListen('social-set-voice-call', (event) => {
+        const { petId, target, targetName, active } = event.payload || {};
+        if (!shouldApplySocialCommand(getSocialStatus().petId, petId)) return;
+        // 按状态设置而不是切换：同一个请求来两次，结果一样
+        const action = active ? startVoiceCall(target, targetName) : stopVoiceCall(target);
+        action.catch((error) => {
+          emitEvent('social-voice-call-changed', {
+            petId, target: getVoiceCallTarget(), error: String(error?.message || error),
+          });
+        });
+      });
+      unlistenQueryVoiceCall = await safeListen('social-query-voice-call', (event) => {
+        const requestedPetId = event.payload?.petId;
+        if (!shouldApplySocialCommand(getSocialStatus().petId, requestedPetId)) return;
+        emitEvent('social-voice-call-changed', { petId: requestedPetId, target: getVoiceCallTarget() });
+      });
+
       // target 名称查询
       unlistenQueryTargetNames = await safeListen('social-query-target-names', (event) => {
         const requestedPetId = event.payload?.petId;
@@ -733,6 +754,9 @@ export const Character = () => {
       unlistenSetCustomRule?.();
       unlistenSetTargetPaused?.();
       unlistenQueryTargetNames?.();
+      unlistenSetVoiceCall?.();
+      unlistenQueryVoiceCall?.();
+      unsubscribeVoiceCall?.();
     };
   }, []);
 

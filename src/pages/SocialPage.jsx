@@ -49,6 +49,9 @@ export default function SocialPage() {
   const [exportRunning, setExportRunning] = useState(false);
   const [targetNames, setTargetNames] = useState({}); // { [targetId]: displayName }
   const [pausedTargets, setPausedTargets] = useState({}); // { [target]: true }
+  // 正在视频通话的 target（同一时间只有一个），以及上次开通话失败的原因
+  const [voiceCallTarget, setVoiceCallTarget] = useState(null);
+  const [voiceCallError, setVoiceCallError] = useState('');
   const [turnStates, setTurnStates] = useState({});
   const [moodFeed, setMoodFeed] = useState({}); // { [target]: [{id, sender, text, tag, render}] } 最近若干条
   const [barometers, setBarometers] = useState({}); // { [target]: { current, stats, history[] } } 群级实时读数
@@ -323,6 +326,31 @@ export default function SocialPage() {
       });
       if (disposed) off();
       else unlisten = off;
+    };
+    setup();
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [selectedPetId]);
+
+  // ── Listen for voice call changes ──
+  useEffect(() => {
+    let unlisten;
+    let disposed = false;
+    const setup = async () => {
+      const off = await listen('social-voice-call-changed', (event) => {
+        if (disposed) return;
+        const { petId, target, error } = event.payload || {};
+        if (!selectedPetId || petId !== selectedPetId) return;
+        setVoiceCallTarget(target || null);
+        setVoiceCallError(error || '');
+      });
+      if (disposed) off();
+      else {
+        unlisten = off;
+        if (selectedPetId) emit('social-query-voice-call', { petId: selectedPetId });
+      }
     };
     setup();
     return () => {
@@ -928,6 +956,12 @@ export default function SocialPage() {
       return next;
     });
   };
+  const toggleVoiceCall = (target, targetName) => {
+    if (!selectedPetId) return;
+    setVoiceCallError('');
+    emit('social-set-voice-call', { petId: selectedPetId, target, targetName, active: voiceCallTarget !== target });
+  };
+
   const toggleTargetPaused = (target) => {
     const isPaused = pausedTargets[target] || false;
     const newPaused = !isPaused;
@@ -1832,10 +1866,15 @@ export default function SocialPage() {
                         onPauseClick={() => toggleTargetPaused(t.id)}
                         trainingEnabled={trainingCollectionEnabled ? isTrainingEnabled : undefined}
                         onTrainingClick={trainingCollectionEnabled ? () => setTargetTrainingEnabled(t.id, !isTrainingEnabled) : null}
+                        inCall={voiceCallTarget === t.id}
+                        onCallClick={socialActive ? () => toggleVoiceCall(t.id, displayName) : null}
                       />
                     );
                   })}
                 </div>
+                {voiceCallError && (
+                  <div className="mx-2 my-1 text-[10px] text-rose-600 bg-rose-50 rounded px-1.5 py-1 break-words">{voiceCallError}</div>
+                )}
 
                 {/* Clear logs */}
                 <div className="border-t border-slate-200/60 p-1.5">
@@ -2970,7 +3009,7 @@ function ToggleRow({ label, hint, checked, onChange }) {
   );
 }
 
-function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick, trainingEnabled, onTrainingClick }) {
+function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, paused, onPauseClick, trainingEnabled, onTrainingClick, inCall, onCallClick }) {
   return (
     <div
       onClick={onClick}
@@ -3009,6 +3048,15 @@ function SidebarItem({ active, onClick, label, count, lurkIcon, onLurkClick, pau
         </button>
       )}
       <span className="truncate flex-1 font-medium">{label}</span>
+      {onCallClick && (
+        <button
+          onClick={(e) => { e.stopPropagation(); onCallClick(); }}
+          className={`shrink-0 hover:scale-125 transition-transform text-sm leading-none ${inCall ? '' : 'opacity-40 hover:opacity-100'}`}
+          title={inCall ? 'Hang up video call' : 'Start video call'}
+        >
+          {inCall ? '📵' : '📞'}
+        </button>
+      )}
       {count > 0 && (
         <span className={`shrink-0 tabular-nums text-[10px] ${active ? 'text-cyan-500' : 'text-slate-400'}`}>
           {count}

@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   blinkTransform, breathAt, describeSkinImport, gazeOffset, hairTransform, layerTransform, layeredRig,
-  orderedSkinLayers, skinViewBox, thoughtDots,
+  mouthTransform, orderedSkinLayers, skinViewBox, thoughtDots,
 } from './skinModel.js';
 
 test('recognizes LayerDiff, standard skins and legacy image skins', () => {
@@ -221,4 +221,22 @@ test('hair sways from its roots and the iris stays within its range', () => {
   assert.ok(far[0] < 4 && far[0] > 3.99 && far[1] === 0);
   const diagonal = gazeOffset(-300, 400, range);
   assert.ok(diagonal[0] < 0 && diagonal[1] > 0 && Math.hypot(diagonal[0] / 4, diagonal[1] / 2) < 1);
+});
+
+test('the mouth drops open from its top edge while speaking and is untouched in silence', () => {
+  const withMouth = { layers: [
+    { name: 'face', origin: [400, 100], size: [200, 200], z: 1 },
+    { name: 'mouth', origin: [480, 240], size: [40, 10], z: 2 },
+  ] };
+  const rig = layeredRig(withMouth, null);
+  assert.deepEqual(rig.mouth.pivot, [500, 240]);
+  assert.ok(rig.parts.has('mouth'));
+  assert.equal(mouthTransform(rig.mouth, 0), '');
+  assert.equal(layerTransform(rig, 'mouth', { seconds: 1 }), '', 'silent by default');
+  const open = mouthTransform(rig.mouth, 1);
+  assert.match(open, /^translate\(500 240\) scale\(0\.9200 1\.9000\) translate\(-500 -240\)$/);
+  assert.equal(mouthTransform(rig.mouth, 3), open, 'clamped');
+  assert.ok(layerTransform(rig, 'mouth', { seconds: 1, speech: 0.5 }).includes('scale(0.9600 1.4500)'));
+  assert.equal(layerTransform(rig, 'face', { seconds: 1, speech: 1 }), '', 'only the mouth moves');
+  assert.equal(layeredRig({ layers: [withMouth.layers[0]] }, null).mouth, null);
 });
